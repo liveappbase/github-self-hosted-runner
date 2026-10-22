@@ -1,0 +1,437 @@
+#!/bin/zsh -f
+# release-check — the release gate of mac-github-self-hosted-runner. ONE script, not a test framework.
+#
+#   tools/release-check [--rev REV] [--private-list FILE] [--softnet-tarball FILE]
+#   tools/release-check --build TAG --private-list FILE [--out DIR] [--softnet-tarball FILE]
+#
+# Run it inside the repository. It checks REV (default HEAD; with --build, TAG): the files of that commit, and every
+# commit reachable from it (each version of each file, and each commit message with its author and committer). With
+# --build, and only after a GREEN check, it builds the four release assets from TAG into DIR (default: a new temporary
+# folder): the tarball (`git archive --prefix=<VERSION>/`), install-line.txt, root-line.txt and SHA256SUMS. It NEVER
+# executes a file of setup/ or a rendered line (`zsh -n` only parses).
+#
+# Output: one "RED <rule>: <what>" line per finding, then "release-check: GREEN" (exit 0) or "release-check: RED, N
+# finding(s)" (exit 1). A usage error: "release-check: usage: …" on stderr, exit 2. A check that could not run is
+# RED, never green. A home-data finding names the file, the line and the category, never the matched text (a CI log
+# is public).
+#
+# Rules (the reasons: docs/design.md, "The release gate"):
+#   syntax         a zsh script fails `zsh -n` (a #!/bin/sh script: `sh -n`)
+#   plist          a .plist fails `plutil -lint`
+#   shim-frozen    bin/tart-shim is not the frozen file (FROZEN_SHIM_SHA)
+#   license        LICENSE is absent, not a regular file, or not the Apache-2.0 text byte for byte (LICENSE_SHA)
+#   live-record    a literal of setup/02-wall.sh differs from the live record of the root files (LIVE_*). v0.x declares
+#                  no root step, so the four literals stay what the hosts of this release line have installed.
+#   source         a literal differs from its source: SHIM_SHA vs bin/tart-shim; CONF_SHA vs the shim.conf text in
+#                  02-wall.sh; SOFTNET_TARBALL_SHA vs the manifest; SOFTNET_SHA vs the softnet binary EXTRACTED from
+#                  the manifest's tarball (downloaded, or --softnet-tarball FILE; its digest is checked first)
+#   stage-softnet  02-wall.sh's STAGE_SOFTNET is not the manifest's softnet DEST
+#   stage-shim     02-wall.sh's STAGE_SHIM is not /Users/ci/mac-runner/<VERSION>/bin/tart-shim
+#   tag            (--build) TAG is not an annotated tag named v<VERSION> or v<VERSION>-rc.<N>
+#   constants      a name in CONSTANT_NAMES has two values across the scripts
+#   hash-literal   a literal hash (a NAME_SHA= line, an @sha256: digest, the manifest's digest) is not 64 lowercase hex
+#   home-generic   an RFC 1918 address, a MAC address, a GitHub token, a /Users/<name> path — in any file version or
+#                  commit message reachable from REV, and (--build) in the tag object: its tagger line and message.
+#                  Exempt from THESE rules only: /Users/ci and /Users/admin (the guest's user), a line that holds the
+#                  marker "# release-check: allow", and the frozen shim (by hash).
+#   home-private   a value of the --private-list file, anywhere (the tag object too), with NO exemption (not the
+#                  marker, not the shim).
+#                  --build requires the list; there is no default path. Without it: "private list absent — generic
+#                  rules only".
+set -u
+export LC_ALL=C
+umask 077
+
+FROZEN_SHIM_SHA=2289161838f8aae4d2e2c765031323270cc8abf462eaf2e21f13276c57bd580f
+LIVE_SHIM_SHA=2289161838f8aae4d2e2c765031323270cc8abf462eaf2e21f13276c57bd580f
+LIVE_CONF_SHA=dbe64c3daa692d33b3a1998749ed2e038a25cfaeb8ffe9f69b32024a05c5fdaa
+LIVE_SOFTNET_SHA=e5e35d61a6dd7e35a3134732e766c897b7cb6f097080ff00e1e75adeab0471c7
+LIVE_SOFTNET_TARBALL_SHA=8ff8ff099c2b5ac1b1128e7999c4a730ac85f486c8a4cb0239eb98432859a0f7
+LICENSE_SHA=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30   # apache.org/licenses/LICENSE-2.0.txt, fetched 2026-10-22
+REPO_SLUG=liveappbase/mac-github-self-hosted-runner
+CONSTANT_NAMES=(REAL SHIM FLAG STAMP LOCK RUNNER SOFTNET CONFIG LOGDIR)
+ALLOW='# release-check: allow'
+RE_RFC1918='(^|[^0-9.])(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})([^0-9]|$)'
+RE_MAC='(^|[^0-9A-Fa-f:-])([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}([^0-9A-Fa-f:-]|$)'
+RE_TOKEN='(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})'
+RE_USERS='/Users/[A-Za-z0-9._-]+'
+
+usage() { print -u2 -r -- "release-check: usage: $*"; exit 2 }
+nred=0
+RED() { print -r -- "RED $1: $2"; nred=$(( nred + 1 )) }
+sha() { # FILE -> REPLY = its sha256; return 1 when it cannot be computed
+  local o
+  o=$(/usr/bin/shasum -a 256 < $1 2>/dev/null) || return 1
+  [[ $o =~ '^[0-9a-f]{64}  -$' ]] || return 1
+  REPLY=${o[1,64]}
+}
+
+# ---- arguments
+rev=HEAD rev_set=0 tag= plist= out= tarball=
+while (( $# )); do
+  case $1 in
+    (--rev)             (( $# >= 2 )) || usage "--rev needs a value"; rev=$2; rev_set=1; shift 2 ;;
+    (--build)           (( $# >= 2 )) || usage "--build needs a TAG"; tag=$2; shift 2 ;;
+    (--private-list)    (( $# >= 2 )) || usage "--private-list needs a FILE"; plist=$2; shift 2 ;;
+    (--out)             (( $# >= 2 )) || usage "--out needs a DIR"; out=$2; shift 2 ;;
+    (--softnet-tarball) (( $# >= 2 )) || usage "--softnet-tarball needs a FILE"; tarball=$2; shift 2 ;;
+    (*)                 usage "unknown argument '$1' (see the header of tools/release-check)" ;;
+  esac
+done
+if [[ -n $tag ]]; then
+  (( ! rev_set )) || usage "--build TAG and --rev exclude each other"
+  [[ -n $plist ]] || usage "--build needs --private-list FILE (there is no default path)"
+  rev=$tag
+else
+  [[ -z $out ]] || usage "--out is only for --build"
+fi
+top=$(git rev-parse --show-toplevel 2>/dev/null) || usage "run it inside the repository"
+cd $top || usage "cannot enter $top"
+commit=$(git rev-parse --verify --quiet "$rev^{commit}") || usage "'$rev' is not a commit of this repository"
+work=$(/usr/bin/mktemp -d -t release-check) || usage "mktemp failed"
+trap '/bin/rm -rf -- "${work:?}"' EXIT
+/bin/mkdir $work/tree || usage "mkdir failed"
+git archive --format=tar $commit | /usr/bin/tar -x -C $work/tree || usage "git archive of $rev failed"
+files=(${(f)"$(git ls-tree -r --name-only $commit)"})
+commits=(${(f)"$(git rev-list $commit)"})
+print -r -- "release-check: checking $rev (${commit[1,12]}): ${#files} files, ${#commits} commit(s)"
+
+# ---- the private list (values are written only into the temporary folder, never printed)
+if [[ -n $plist ]]; then
+  [[ -f $plist && -r $plist ]] || usage "private list unreadable: $plist"
+  pvals=()
+  while IFS= read -r l || [[ -n $l ]]; do
+    while [[ $l == *[[:space:]] ]]; do l=${l%?}; done
+    [[ -z $l || $l == '#'* ]] && continue
+    (( ${#l} >= 3 )) || usage "private list: a value shorter than 3 characters would match everywhere"
+    pvals+=("$l")
+  done < $plist
+  (( ${#pvals} )) || usage "private list has no value: $plist"
+  print -rl -- $pvals > $work/private.txt
+  print -r -- "release-check: private list: ${#pvals} values"
+else
+  print -r -- "release-check: private list absent — generic rules only"
+fi
+
+T=$work/tree
+
+# ---- syntax, plist
+errl() { local -a e; e=("${(@f)$(<$work/err)}"); REPLY=${e[1]#$T/} }   # the first line zsh/sh wrote, without the temp path
+scripts=()
+for f in $files; do
+  p=$T/$f
+  [[ -f $p && ! -L $p ]] || continue
+  first=
+  IFS= read -r first < $p
+  case $first in
+    ('#!'*zsh*) scripts+=($f)
+                /bin/zsh -f -n $p 2> $work/err || { errl; RED syntax "$f: zsh -n fails: $REPLY" } ;;
+    ('#!'*)     scripts+=($f)
+                /bin/sh -n $p 2> $work/err || { errl; RED syntax "$f: sh -n fails: $REPLY" } ;;
+  esac
+done
+for f in ${(M)files:#*.plist}; do
+  /usr/bin/plutil -lint -s $T/$f > /dev/null 2>&1 || RED plist "$f: plutil -lint fails"
+done
+
+# ---- the frozen shim
+shim_sha=
+if [[ -f $T/bin/tart-shim && ! -L $T/bin/tart-shim ]] && sha $T/bin/tart-shim; then
+  shim_sha=$REPLY
+  [[ $shim_sha == $FROZEN_SHIM_SHA ]] || RED shim-frozen "bin/tart-shim sha256 ${shim_sha[1,12]}… is not the frozen ${FROZEN_SHIM_SHA[1,12]}…"
+else
+  RED shim-frozen "bin/tart-shim is absent, not a regular file, or cannot be hashed"
+fi
+
+# ---- the licence: the canonical Apache-2.0 text, byte for byte
+if [[ -f $T/LICENSE && ! -L $T/LICENSE ]] && sha $T/LICENSE; then
+  [[ $REPLY == $LICENSE_SHA ]] || RED license "LICENSE sha256 ${REPLY[1,12]}… is not the Apache-2.0 text ${LICENSE_SHA[1,12]}…"
+else
+  RED license "LICENSE is absent, not a regular file, or cannot be hashed"
+fi
+
+# ---- 02-wall.sh: its literals against the live record and against their sources
+wall=$T/setup/02-wall.sh
+lit() { # NAME -> REPLY = the value of the ONE line `NAME=…` (column 0) of 02-wall.sh; return 1 unless exactly one
+  local -a l
+  [[ -f $wall ]] || return 1
+  l=(${(M)${(f)"$(<$wall)"}:#$1=*})
+  (( ${#l} == 1 )) || return 1
+  REPLY=${l[1]#$1=}
+}
+typeset -A v live field
+live=(SHIM_SHA $LIVE_SHIM_SHA CONF_SHA $LIVE_CONF_SHA SOFTNET_SHA $LIVE_SOFTNET_SHA SOFTNET_TARBALL_SHA $LIVE_SOFTNET_TARBALL_SHA)
+field=(SHIM_SHA shim CONF_SHA shim.conf SOFTNET_SHA softnet SOFTNET_TARBALL_SHA softnet-tarball)
+for n in SHIM_SHA CONF_SHA SOFTNET_SHA SOFTNET_TARBALL_SHA; do
+  if lit $n; then
+    v[$n]=$REPLY
+    [[ $REPLY == $live[$n] ]] || RED live-record "setup/02-wall.sh $n (${REPLY[1,12]}…) is not the live record's $field[$n] (${live[$n][1,12]}…)"
+  else
+    RED live-record "setup/02-wall.sh has no single $n= line"
+  fi
+done
+
+# SHIM_SHA vs the shim
+if (( ${+v[SHIM_SHA]} )) && [[ -n $shim_sha && $v[SHIM_SHA] != $shim_sha ]]; then
+  RED source "SHIM_SHA (${v[SHIM_SHA][1,12]}…) is not the sha256 of bin/tart-shim (${shim_sha[1,12]}…)"
+fi
+
+# CONF_SHA vs the shim.conf text in 02-wall.sh, read from its source text: the `print -rl -- "…" … > $work/shim.conf`
+# statement must hold nothing but plain double-quoted strings (no $, `, \ inside them); each becomes one line
+conf_text() { # -> parts (array); return 1 when the statement is not of that shape
+  local -a ls
+  local l stmt= in=0 rest
+  [[ -f $wall ]] || return 1
+  ls=("${(@f)$(<$wall)}")
+  for l in $ls; do
+    if (( ! in )) && [[ $l == 'print -rl -- "'* ]]; then in=1; stmt=; fi
+    if (( in )); then
+      stmt+=" ${l%\\}"
+      if [[ $l == *'> $work/shim.conf' ]]; then break; fi
+      [[ $l == *\\ ]] || in=0
+    fi
+  done
+  [[ $stmt == *'> $work/shim.conf' ]] || return 1
+  rest=${${stmt# }#print -rl -- }
+  rest=${rest%> \$work/shim.conf}
+  [[ $rest =~ '^("[^"$`\\]*"[[:space:]]+)+$' ]] || return 1
+  parts=()
+  while [[ $rest =~ '^[[:space:]]*"([^"$`\\]*)"' ]]; do
+    parts+=("$match[1]")
+    rest=${rest[MEND+1,-1]}
+  done
+  [[ -z ${rest//[[:space:]]/} ]] || return 1
+}
+parts=()
+if conf_text; then
+  print -rl -- "${parts[@]}" > $work/shim.conf
+  sha $work/shim.conf
+  if (( ${+v[CONF_SHA]} )) && [[ $v[CONF_SHA] != $REPLY ]]; then
+    RED source "CONF_SHA (${v[CONF_SHA][1,12]}…) is not the sha256 of the shim.conf text in 02-wall.sh (${REPLY[1,12]}…)"
+  fi
+else
+  RED source "the shim.conf statement of setup/02-wall.sh is absent or not plain quoted text: CONF_SHA not checked"
+fi
+
+# the manifest: KIND URL SHA256 MEMBER DEST; the softnet line is the one whose MEMBER is softnet
+man=$T/setup/downloads.manifest
+s_url= s_sha= s_member= s_dest=
+if [[ -f $man ]]; then
+  sl=()
+  for l in ${(f)"$(<$man)"}; do
+    [[ -z ${l//[[:space:]]/} || $l == '#'* ]] && continue
+    w=(${=l})
+    (( ${#w} == 5 )) || { RED source "setup/downloads.manifest: a line has ${#w} fields, want 5"; continue }
+    [[ $w[4] == softnet ]] && sl+=("$l")
+  done
+  if (( ${#sl} == 1 )); then
+    w=(${=sl[1]}); s_url=$w[2] s_sha=$w[3] s_member=$w[4] s_dest=$w[5]
+  else
+    RED source "setup/downloads.manifest has ${#sl} softnet lines, want 1"
+  fi
+else
+  RED source "setup/downloads.manifest is absent"
+fi
+if [[ -n $s_sha ]] && (( ${+v[SOFTNET_TARBALL_SHA]} )) && [[ $v[SOFTNET_TARBALL_SHA] != $s_sha ]]; then
+  RED source "SOFTNET_TARBALL_SHA (${v[SOFTNET_TARBALL_SHA][1,12]}…) is not the manifest's softnet digest (${s_sha[1,12]}…)"
+fi
+
+# SOFTNET_SHA vs the binary extracted from the digest-checked tarball
+if [[ -n $s_sha ]] && (( ${+v[SOFTNET_SHA]} )); then
+  got=0
+  if [[ -n $tarball ]]; then
+    /bin/cp $tarball $work/softnet.tgz 2>/dev/null && got=1 || RED source "cannot read --softnet-tarball $tarball: SOFTNET_SHA not checked"
+  else
+    /usr/bin/curl -fsSL --max-time 300 -o $work/softnet.tgz $s_url 2>/dev/null && got=1 \
+      || RED source "cannot download the softnet tarball (or pass --softnet-tarball FILE): SOFTNET_SHA not checked"
+  fi
+  if (( got )); then
+    if ! sha $work/softnet.tgz || [[ $REPLY != $s_sha ]]; then
+      RED source "the softnet tarball is not the manifest's (sha256 ${REPLY[1,12]}…): SOFTNET_SHA not checked"
+    elif [[ ! $s_member =~ '^[A-Za-z0-9_][A-Za-z0-9._-]*$' ]] || ! /bin/mkdir $work/sx \
+         || ! /usr/bin/tar -xzf $work/softnet.tgz -C $work/sx $s_member 2>/dev/null || [[ ! -f $work/sx/$s_member ]]; then
+      RED source "the softnet tarball holds no member '$s_member': SOFTNET_SHA not checked"
+    else
+      sha $work/sx/$s_member
+      [[ $REPLY == $v[SOFTNET_SHA] ]] \
+        || RED source "SOFTNET_SHA (${v[SOFTNET_SHA][1,12]}…) is not the sha256 of the softnet binary in the tarball (${REPLY[1,12]}…)"
+    fi
+  fi
+fi
+
+# ---- the staged paths
+if lit STAGE_SOFTNET; then
+  [[ -z $s_dest || $REPLY == $s_dest ]] || RED stage-softnet "STAGE_SOFTNET ($REPLY) is not the manifest's softnet DEST ($s_dest)"
+else
+  RED stage-softnet "setup/02-wall.sh has no single STAGE_SOFTNET= line"
+fi
+version=
+if [[ -f $T/VERSION ]]; then
+  vl=("${(@f)$(<$T/VERSION)}")
+  (( ${#vl} == 1 )) && [[ $vl[1] =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] && version=$vl[1]
+fi
+if [[ -z $version ]]; then
+  RED stage-shim "VERSION is absent or not one line N.N.N"
+elif lit STAGE_SHIM; then
+  [[ $REPLY == /Users/ci/mac-runner/$version/bin/tart-shim ]] \
+    || RED stage-shim "STAGE_SHIM ($REPLY) is not /Users/ci/mac-runner/$version/bin/tart-shim (VERSION $version)"
+else
+  RED stage-shim "setup/02-wall.sh has no single STAGE_SHIM= line"
+fi
+
+# ---- the tag (--build)
+if [[ -n $tag ]]; then
+  [[ $(git cat-file -t $tag 2>/dev/null) == tag ]] || RED tag "$tag is not an annotated tag"
+  if [[ -n $version ]]; then
+    [[ $tag == v$version || ( $tag == v$version-rc.* && ${tag#v$version-rc.} =~ '^[1-9][0-9]*$' ) ]] \
+      || RED tag "$tag is not v$version or v$version-rc.<N> (VERSION $version)"
+  else
+    RED tag "VERSION is absent or not N.N.N: the tag cannot be checked"
+  fi
+fi
+
+# ---- one value per constant name across the scripts (a `NAME=value` line at column 0)
+typeset -A cval
+for n in $CONSTANT_NAMES; do cval[$n]=; done
+for f in $scripts; do
+  for l in ${(M)${(f)"$(<$T/$f)"}:#[A-Z]*=*}; do
+    n=${l%%=*}
+    (( ${+cval[$n]} )) || continue
+    val=${${l#*=}%%[[:space:]]*}
+    cval[$n]+="$val	$f"$'\n'
+  done
+done
+for n in $CONSTANT_NAMES; do
+  vals=(${(u)${${(f)cval[$n]}%%	*}})
+  if (( ${#vals} > 1 )); then
+    RED constants "$n has ${#vals} values: ${(j:; :)${(f)cval[$n]//	/ in }}"
+  fi
+done
+
+# ---- literal hashes: 64 lowercase hex
+for f in $files; do
+  p=$T/$f
+  [[ -f $p && ! -L $p ]] || continue
+  n=0
+  for l in "${(@f)$(<$p)}"; do
+    n=$(( n + 1 ))
+    if [[ $l =~ '^([A-Z0-9_]*_SHA(256)?)=([^[:space:]]*)' ]]; then
+      [[ $match[3] =~ '^[0-9a-f]{64}$' ]] || RED hash-literal "$f line $n: $match[1] is not 64 lowercase hex"
+    fi
+    rest=$l
+    while [[ $rest =~ '@sha256:([0-9A-Za-z]+)' ]]; do
+      [[ $match[1] =~ '^[0-9a-f]{64}$' ]] || RED hash-literal "$f line $n: an @sha256 digest is not 64 lowercase hex"
+      rest=${rest[MEND+1,-1]}
+    done
+  done
+done
+if [[ -f $man ]]; then
+  n=0
+  for l in "${(@f)$(<$man)}"; do
+    n=$(( n + 1 ))
+    [[ -z ${l//[[:space:]]/} || $l == '#'* ]] && continue
+    w=(${=l})
+    [[ ${w[3]-} =~ '^[0-9a-f]{64}$' ]] || RED hash-literal "setup/downloads.manifest line $n: the digest is not 64 lowercase hex"
+  done
+fi
+
+# ---- home data: every file version and every commit message reachable from the commit
+scan() { # FILE LABEL — the generic rules (unless the frozen shim) and the private list
+  local f=$1 label=$2 cat re l ln
+  local -a hits names
+  if ! sha $f || [[ $REPLY != $FROZEN_SHIM_SHA ]]; then
+    for cat re in rfc1918-address $RE_RFC1918 mac-address $RE_MAC github-token $RE_TOKEN; do
+      hits=(${(f)"$(/usr/bin/grep -anE -- $re $f | /usr/bin/grep -avF -- $ALLOW | /usr/bin/cut -d: -f1)"})
+      for ln in $hits; do [[ -n $ln ]] && RED home-generic "$label line $ln: $cat"; done
+    done
+    for l in ${(f)"$(/usr/bin/grep -anE -- $RE_USERS $f | /usr/bin/grep -avF -- $ALLOW)"}; do
+      [[ -n $l ]] || continue
+      names=(${(f)"$(print -r -- ${l#*:} | /usr/bin/grep -aoE -- $RE_USERS)"})
+      names=(${names:#/Users/(ci|admin)})
+      (( ${#names} )) && RED home-generic "$label line ${l%%:*}: a /Users/<name> path other than /Users/ci or /Users/admin"
+    done
+  fi
+  if [[ -n $plist ]]; then
+    hits=(${(f)"$(/usr/bin/grep -anFi -f $work/private.txt -- $f | /usr/bin/cut -d: -f1)"})
+    for ln in $hits; do [[ -n $ln ]] && RED home-private "$label line $ln: a value of the private list"; done
+  fi
+}
+typeset -A bpath
+for l in ${(f)"$(git rev-list --objects $commit)"}; do
+  o=${l%% *}
+  [[ $l == *' '* ]] && p=${l#* } || p=
+  (( ${+bpath[$o]} )) || bpath[$o]=$p
+done
+for l in ${(f)"$(print -rl -- ${(k)bpath} | git cat-file --batch-check='%(objectname) %(objecttype)')"}; do
+  [[ ${l#* } == blob ]] || continue
+  o=${l%% *}
+  git cat-file blob $o > $work/blob || { RED home-generic "${bpath[$o]}@${o[1,8]}: cannot read the file version"; continue }
+  scan $work/blob "${bpath[$o]}@${o[1,8]}"
+done
+for c in $commits; do
+  git log -1 --format='%an <%ae>%n%cn <%ce>%n%B' $c > $work/msg || { RED home-generic "commit ${c[1,12]}: cannot read"; continue }
+  scan $work/msg "commit ${c[1,12]} (message, author, committer)"
+done
+# --build: the annotated tag object itself (its tagger line and message), before anything is built
+if [[ -n $tag && $(git cat-file -t $tag 2>/dev/null) == tag ]]; then
+  if git cat-file tag $tag > $work/tagobj; then scan $work/tagobj "tag $tag (tagger, message)"
+  else RED home-generic "tag $tag: cannot read the tag object"; fi
+fi
+
+# ---- verdict, then (--build) the assets
+if (( nred )); then
+  print -r -- "release-check: RED, $nred finding(s)${tag:+ — nothing built}"
+  exit 1
+fi
+print -r -- "release-check: GREEN"
+[[ -n $tag ]] || exit 0
+
+bfail() { print -r -- "release-check: BUILD FAILED: $*"; exit 1 }
+if [[ -z $out ]]; then
+  out=$(/usr/bin/mktemp -d -t mac-runner-release) || bfail "mktemp failed"
+else
+  [[ $out == /* ]] || out=$PWD/$out
+  /bin/mkdir -p $out || bfail "cannot create $out"
+  [[ -z $(/bin/ls -A $out) ]] || bfail "$out is not empty"
+fi
+name=mac-github-self-hosted-runner-$tag.tar.gz
+git archive --format=tar.gz --prefix=$version/ -o $out/$name $commit || bfail "git archive failed"
+sha $out/$name || bfail "cannot hash the tarball"
+tsha=$REPLY
+/bin/mkdir $work/u && /usr/bin/tar -xzf $out/$name -C $work/u || bfail "the tarball does not unpack"
+[[ -f $work/u/$version/setup/02-wall.sh && -f $work/u/$version/setup/02-wall.run-line && -x $work/u/$version/install ]] \
+  || bfail "the tarball lacks $version/setup/02-wall.sh, $version/setup/02-wall.run-line or an executable $version/install"
+sha $work/u/$version/setup/02-wall.sh || bfail "cannot hash 02-wall.sh"
+wsha=$REPLY
+
+# root-line.txt: the template with the root command, the staged path and the hash of 02-wall.sh AS UNPACKED
+tpl=$(<$work/u/$version/setup/02-wall.run-line)
+[[ $tpl == "@ROOT@ /bin/zsh -f -c '"* && $tpl == *@SCRIPT@* && $tpl == *@SHA@* ]] \
+  || bfail "setup/02-wall.run-line is not of the shape @ROOT@ /bin/zsh -f -c '…@SCRIPT@…@SHA@…'"
+rline=${tpl/#@ROOT@ //usr/bin/sudo }
+rline=${rline//@SCRIPT@//Users/ci/mac-runner/$version/setup/02-wall.sh}
+rline=${rline//@SHA@/$wsha}
+[[ $rline != *@* && $rline != *[[:cntrl:]]* ]] || bfail "root-line: an @ is left, or it is not ONE printable line"
+
+# install-line.txt (run as ci): download, check the tarball's sha256, unpack into a fresh folder, run its install
+read -r -d '' itpl <<'EOF'
+/bin/zsh -f -c 'u=@URL@; h=@SHA@; [[ $(/usr/bin/id -un) == ci ]] || { print -u2 -r -- "REFUSE: run this line as ci"; exit 1; }; /bin/mkdir -p /Users/ci/mac-runner && f=$(/usr/bin/mktemp /Users/ci/mac-runner/.dl.XXXXXX) || exit 1; /usr/bin/curl -fsSL --max-time 600 -o "$f" "$u" && [[ "$(/usr/bin/shasum -a 256 < "$f")" == "$h  -" ]] || { /bin/rm -f -- "$f"; print -u2 -r -- "REFUSE: the download failed or is not this release (sha256 $h): nothing unpacked"; exit 1; }; d=$(/usr/bin/mktemp -d /Users/ci/mac-runner/.unpack.XXXXXX) && /usr/bin/tar -xzf "$f" -C "$d" && /bin/rm -f -- "$f" && exec "$d/@VERSION@/install"'
+EOF
+iline=${itpl%$'\n'}
+iline=${iline//@URL@/https://github.com/$REPO_SLUG/releases/download/$tag/$name}
+iline=${iline//@SHA@/$tsha}
+iline=${iline//@VERSION@/$version}
+[[ $iline != *@* && $iline != *[[:cntrl:]]* ]] || bfail "install-line: an @ is left, or it is not ONE printable line"
+
+print -r -- $iline > $out/install-line.txt || bfail "cannot write install-line.txt"
+print -r -- $rline > $out/root-line.txt || bfail "cannot write root-line.txt"
+sha $out/install-line.txt && isha=$REPLY || bfail "cannot hash install-line.txt"
+sha $out/root-line.txt && rsha=$REPLY || bfail "cannot hash root-line.txt"
+print -rl -- "$tsha  $name" "$isha  install-line.txt" "$rsha  root-line.txt" "$wsha  $version/setup/02-wall.sh" \
+  > $out/SHA256SUMS || bfail "cannot write SHA256SUMS"
+print -r -- "release-check: built $tag in $out"
+print -r -- "  upload exactly these four files as the release's assets:"
+print -rl -- "    $out/$name" "    $out/install-line.txt" "    $out/root-line.txt" "    $out/SHA256SUMS"
+print -r -- "  SHA256SUMS:"
+/usr/bin/sed 's/^/    /' $out/SHA256SUMS
+print -r -- "  after publishing: download all four and check them before the release is announced (docs/operations.md)"

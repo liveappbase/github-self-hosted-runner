@@ -1,0 +1,26 @@
+#!/bin/zsh -f
+# runner-disable — turn the agent off: remove FLAG (launchd will not restart runscaler), SIGTERM each of ci's processes
+# that runs RUNNER's executable (device + inode via lsof — not "the holder of /tmp/runner.lock": the tmp cleaner can
+# unlink that file), then wait until runner-lock-free says free. runscaler drains first: a running job may take up to
+# its drain-timeout (60 min) — and a drain KILLS running VMs at the end (SECURITY.md, runscaler's named limits).
+FLAG=/Users/ci/.config/runner/enabled
+RUNNER=/Users/ci/bin/runner
+LOCKFREE=/Users/ci/bin/runner-lock-free
+WAIT_S=3700
+export LC_ALL=C
+/bin/rm -f $FLAG
+id=($(/usr/bin/stat -f '%d %i' $RUNNER)) || { print -r -- "runner-disable: no $RUNNER"; exit 1 }
+dev=$(printf '0x%x' $id[1])
+pids=() p= d=
+for l in ${(f)"$(/usr/sbin/lsof -n -P -a -u $(id -u) -d txt -F pDi 2>/dev/null)"}; do
+  case $l in (p*) p=${l#p} ;; (D*) d=${l#D} ;; (i*) [[ $d == $dev && ${l#i} == $id[2] ]] && pids+=($p) ;; esac
+done
+pids=(${(u)pids})
+for p in $pids; do kill -TERM $p && print -r -- "runner-disable: SIGTERM runscaler pid $p"; done
+n=0
+until [[ $($LOCKFREE) == free ]]; do
+  (( n++ < WAIT_S / 10 )) || { print -r -- "runner-disable: still held after ${WAIT_S}s"; exit 1 }
+  (( n % 6 == 0 )) && print -r -- "runner-disable: waiting for runscaler to drain ($((n * 10))s)"
+  sleep 10
+done
+print -r -- "runner-disable: disabled; the lock is free"

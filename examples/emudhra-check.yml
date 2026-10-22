@@ -1,0 +1,276 @@
+# emudhra-check — the job-level eMudhra check: does a job on this host's image refuse the chains that end at the
+# eMudhra-incident roots, and does the image hold the deny? (docs/design.md, "The eMudhra stage").
+# Copy this file to .github/workflows/ of a repository a scale set serves, put your label in runs-on, add the C bundle
+# (below) to the repository, commit both to the default branch (GitHub runs a hand-started workflow only from there),
+# and run it by hand:
+#   gh workflow run emudhra-check.yml -R <owner>/<repo>
+# It runs only by hand (workflow_dispatch). For a one-off proof on a temporary branch you may add `push:`, then delete
+# the branch.
+# THE C BUNDLE: an UNFILTERED set of roots that still holds the excluded roots, carried in the checkout at
+# .github/emudhra/c-bundle.pem. It is the control of each JS row: the same Node with that bundle must reach the test
+# hosts, else a refusal proves nothing. Make it once, on any Mac (Apple's root keychain is on the sealed system
+# volume, which no fix changes), and commit it:
+#   mkdir -p .github/emudhra && security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain > .github/emudhra/c-bundle.pem
+# What it does, in this order:
+#   1. Apple's anchor set in this VM (three sources), the anchors with an excluded key, and K per host: does the host's
+#      served chain end at an excluded root AND fail against Apple's roots minus the excluded ones?
+#   2. Three JS rows, each printing its node's version and path: a local action with `using: node24`, one with
+#      `using: node20` (GitHub may run it on node24: the row prints which), and a `run:` step with the job's `node`.
+#      Each row: F = the row as a job sees it; C = the same node with the C bundle; the verdict table of the stage.
+#      A row FAILs when it trusts a test host whose chain ends at an excluded root, or gets a certificate error on a
+#      control (github.com, gitlab.com: any HTTP answer is success).
+#   3. nscurl (Apple's URLSession): REPORTED only, never a gate (it has no C here).
+#   4. THE GATE: in this job's own VM, the admin trust settings hold a deny (result 3) for each anchor with an excluded
+#      key, `security verify-cert` exits non-zero for each of them and 0 for the three control roots.
+# On an image built without the eMudhra stage the gate FAILs: see it red there once before you trust a green.
+# The test hosts are a third party's (their leaves expire 2027-05-03); a gone host reads "not measured", never a pass.
+# The runner's version is in the job log, section "Set up job": "Current runner version".
+name: emudhra-check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: [liveapp-mac]   # the labels of your [[scaleset]] in config.toml
+    timeout-minutes: 20
+    env:
+      EMUDHRA_C_BUNDLE: .github/emudhra/c-bundle.pem
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Apple's anchors, the excluded ones, the C bundle and K
+        shell: /bin/zsh -f {0}
+        run: |
+          set -u
+          export LC_ALL=C
+          O=/opt/homebrew/opt/openssl@3/bin/openssl T=/opt/homebrew/bin/gtimeout TAB=$'\t'
+          D=$RUNNER_TEMP/emudhra
+          /bin/rm -rf -- ${D:?}; /bin/mkdir -p $D
+          : > $D/state.txt; : > $D/gate-problems.txt
+          st() { print -r -- "$1 $2" >> $D/state.txt; print -r -- "$1 $2" }
+          prob() { print -r -- "$*" >> $D/gate-problems.txt; print -r -- "problem: $*" }
+          [[ -x $O && -x $T ]] || { prob "Homebrew openssl@3 or gtimeout is missing in this image"; exit 0 }
+          # homebrew-core a2ee7ae08c6, ca-certificates.rb, EXCLUDED_SPKI_HASHES: "Exclude AAA Certificate Services and
+          # the emSign G3 roots by their public keys."
+          EXCLUDED_SPKI=(bd153ed7b0434f6886b17bce8bbe84ed340c7132d702a8f4fa318f756ecbd6f3
+                         c619e4780ed8e0abeda24ad732567de4383a7ea941338f6d1a7d1b49ac792fe9
+                         8d417db2dd8bf5e3084d1e3f196d583849d81bdd4c00c70b9d39369e96b8c782)
+          # USERTrust RSA, USERTrust ECC, ISRG Root X1: the SHA-256 of the certificate in SystemRootCertificates.keychain
+          CONTROL_ROOTS=(e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2
+                         4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a
+                         96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6)
+          certinfo() { # FILE FORM -> REPLY "SPKI<TAB>SHA256<TAB>SUBJECT"; 1 when it cannot be read or its key hashed
+            local out l sub= fp=
+            out=$($O x509 -inform $2 -in $1 -noout -subject -fingerprint -sha256 2>/dev/null) || return 1
+            for l in ${(f)out}; do case $l in (subject=*) sub=${${l#subject=}# } ;; (*Fingerprint=*) fp=${(L)${${l#*=}//:/}} ;; esac; done
+            [[ $fp =~ '^[0-9a-f]{64}$' ]] || return 1
+            $O x509 -inform $2 -in $1 -noout -pubkey > $D/pub 2>/dev/null && $O pkey -pubin -in $D/pub -outform der -out $D/der 2>/dev/null \
+              && [[ -s $D/der ]] || return 1
+            out=$($O dgst -sha256 -r $D/der) && REPLY=${out[1,64]}$TAB$fp$TAB$sub
+          }
+          split() { # FILE DIR -> DIR/c0001.pem …
+            /bin/mkdir -p $2
+            /usr/bin/awk -v d=$2 '/-----BEGIN CERTIFICATE-----/ {n++; f=sprintf("%s/c%04d.pem", d, n); p=1} p {print > f}
+              /-----END CERTIFICATE-----/ {if (p) close(f); p=0}' $1
+          }
+          table() { # LABEL FORM FILE… -> $D/LABEL.tsv "SPKI<TAB>SHA256<TAB>SUBJECT<TAB>FILE"; prints the counts
+            local label=$1 form=$2 f r=0 h=0; shift 2
+            : > $D/$label.tsv
+            for f in "$@"; do r=$(( r + 1 )); certinfo $f $form && { print -r -- "$REPLY$TAB$f" >> $D/$label.tsv; h=$(( h + 1 )) }; done
+            print -r -- "$label: $r read, $h hashed, $(( r - h )) cannot hash"; REPLY=$h
+          }
+          kc=/System/Library/Keychains/SystemRootCertificates.keychain
+          /usr/bin/security find-certificate -a -p $kc > $D/kc.pem && split $D/kc.pem $D/kc
+          table kc pem $D/kc/c*.pem(N); (( REPLY >= 100 )) || prob "$kc: $REPLY hashed, below the floor 100"
+          table anchors der /System/Library/Security/Certificates.bundle/Contents/Resources/Anchors/*.cer(N)
+          (( REPLY >= 200 )) || prob "Certificates.bundle Anchors: $REPLY hashed, below the floor 200"
+          labels=(kc anchors) n=0
+          for a in ${(f)"$(for r in /System/Library/AssetsV2/com_apple_MobileAsset_PKITrustStore /private/var/run/com.apple.security.cryptexd/mnt /System/Volumes/Preboot/Cryptexes; do [[ -d $r ]] && /usr/bin/find $r -name SystemRootCertificates.keychain -type f 2>/dev/null; done)"}; do
+            n=$(( n + 1 )); /usr/bin/security find-certificate -a -p $a > $D/asset$n.pem && split $D/asset$n.pem $D/asset$n
+            table asset$n pem $D/asset$n/c*.pem(N); (( REPLY > 0 )) || prob "the trust-store asset $a holds no readable certificate"
+            labels+=(asset$n)
+          done
+          (( n )) || print -r -- "PKITrustStore asset: none"
+          typeset -A src file sub
+          for s in $labels; do
+            for l in ${(f)"$(<$D/$s.tsv)"}; do
+              q=("${(@ps:\t:)l}")
+              (( ${EXCLUDED_SPKI[(Ie)$q[1]]} )) || continue
+              if (( ${+src[$q[2]]} )); then src[$q[2]]+=" $s"; else src[$q[2]]=$s; file[$q[2]]=$q[4]; sub[$q[2]]=$q[3]; fi
+            done
+          done
+          : > $D/excluded.tsv; : > $D/excluded.pem
+          for h in ${(ko)src}; do
+            form=pem; [[ $src[$h] == anchors* ]] && form=der
+            $O x509 -inform $form -in $file[$h] -outform pem -out $D/x-$h.pem
+            o=$($O x509 -in $D/x-$h.pem -noout -fingerprint -sha1); sha1=${(U)${${o#*=}//:/}}
+            certinfo $D/x-$h.pem pem; spki=${REPLY%%$TAB*}
+            print -r -- "$sha1$TAB$h$TAB$sub[$h]$TAB$D/x-$h.pem$TAB$spki" >> $D/excluded.tsv; /bin/cat $D/x-$h.pem >> $D/excluded.pem
+            print -r -- "excluded anchor: $sub[$h] (SHA-1 $sha1, SHA-256 $h; in: $src[$h])"
+          done
+          (( ${#src} )) || print -r -- "no anchor has an excluded key in this VM (did Apple remove them?)"
+          : > $D/controls.tsv
+          for l in ${(f)"$(<$D/kc.tsv)"}; do
+            q=("${(@ps:\t:)l}"); (( ${CONTROL_ROOTS[(Ie)$q[2]]} )) && print -r -- "$q[2]$TAB$q[3]$TAB$q[4]" >> $D/controls.tsv
+          done
+          # K's filtered copy: Apple's roots in this VM minus every certificate with an excluded key
+          for l in ${(f)"$(<$D/kc.tsv)"}; do q=("${(@ps:\t:)l}"); (( ${EXCLUDED_SPKI[(Ie)$q[1]]} )) || /bin/cat $q[4] >> $D/kfiltered.pem; done
+          # the C bundle: in the checkout, and it must hold every excluded anchor's key
+          cb=$GITHUB_WORKSPACE/$EMUDHRA_C_BUNDLE
+          if [[ ! -f $cb ]]; then st c "NA C not available: $EMUDHRA_C_BUNDLE is not in the checkout (see this workflow's header)"
+          else
+            split $cb $D/cb; table cb pem $D/cb/c*.pem(N) > /dev/null
+            have=(${(f)"$(/usr/bin/cut -f1 $D/cb.tsv)"}) ok=1
+            for s in ${(f)"$(/usr/bin/cut -f5 $D/excluded.tsv)"}; do (( ${have[(Ie)$s]} )) || ok=0; done
+            (( ${#src} && ok )) && st c $cb || st c "NA C not available: $EMUDHRA_C_BUNDLE lacks an excluded anchor's key"
+          fi
+          # K per host, the host pinned to one resolved address
+          for t u in emsign dv-g3b-emudhra.we-have-a-problem.com aaa dv-g3b-aaa-emudhra.we-have-a-problem.com github github.com gitlab gitlab.com; do
+            [[ -s $D/excluded.pem ]] || { st k.$t "NA no anchor with an excluded key"; continue }
+            ip=$($T -k 5 20 /usr/bin/dscacheutil -q host -a name $u | /usr/bin/awk '/^ip_address:/ {print $2; exit}')
+            [[ $ip =~ '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' ]] || { st k.$t "NA $u has no IPv4 address"; continue }
+            $T -k 5 30 $O s_client -connect $ip:443 -servername $u -showcerts < /dev/null > $D/sc-$t.txt 2> /dev/null
+            split $D/sc-$t.txt $D/chain-$t; chain=($D/chain-$t/c*.pem(N))
+            (( ${#chain} )) || { st k.$t "NA no chain served by $u ($ip)"; continue }
+            ut=(); (( ${#chain} > 1 )) && { /bin/cat ${chain[2,-1]} > $D/inter-$t.pem; ut=(-untrusted $D/inter-$t.pem) }
+            $O verify -no-CAfile -no-CApath -no-CAstore -CAfile $D/excluded.pem $ut $chain[1] > /dev/null 2>&1; k1=$?
+            $O verify -no-CAfile -no-CApath -no-CAstore -CAfile $D/kfiltered.pem $ut $chain[1] > /dev/null 2>&1; k2=$?
+            why="edge $ip; to the excluded roots: ${${k1:#0}:+fails}${${k1:#[^0]*}:+OK}; to Apple's roots without them: ${${k2:#0}:+fails}${${k2:#[^0]*}:+OK}"
+            (( k1 == 0 && k2 != 0 )) && st k.$t "TRUE ($why)" || st k.$t "FALSE ($why)"
+          done
+      - name: The JS rows, as local actions (node24, node20)
+        run: |
+          mkdir -p .emudhra-probe/node24 .emudhra-probe/node20
+          cat > .emudhra-probe/probe.cjs <<'EOF'
+          'use strict';
+          // One row of the eMudhra verdict table (docs/design.md, "The eMudhra stage" of mac-github-self-hosted-runner).
+          const fs = require('fs'), path = require('path'), { spawnSync } = require('child_process');
+          const label = process.env.PROBE_LABEL || 'node';
+          const state = {};
+          try {
+            for (const l of fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'emudhra', 'state.txt'), 'utf8').split('\n')) {
+              const i = l.indexOf(' '); if (i > 0) state[l.slice(0, i)] = l.slice(i + 1);
+            }
+          } catch (e) { console.log(`::error title=eMudhra probe (${label})::no state from the anchors step: ${e.message}`); process.exit(1); }
+          const URLS = { emsign: 'https://dv-g3b-emudhra.we-have-a-problem.com/', aaa: 'https://dv-g3b-aaa-emudhra.we-have-a-problem.com/',
+            github: 'https://github.com/', gitlab: 'https://gitlab.com/' };
+          const NAME = { emsign: 'emSign path', aaa: 'AAA path', github: 'github.com', gitlab: 'gitlab.com' };
+          const CERT = ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_REVOKED'];
+          const code = (e) => (e && e.cause && e.cause.code) || (e && e.code) || (e && e.name) || 'error';
+          const ONE = `const C=${JSON.stringify(CERT)};fetch(process.argv[process.argv.length-1],{signal:AbortSignal.timeout(20000)})` +
+            `.then(r=>console.log("OK HTTP "+r.status),e=>{const c=(e&&e.cause&&e.cause.code)||(e&&e.code)||(e&&e.name)||"error";` +
+            `console.log((C.includes(c)?"CERT ":"OTHER ")+c)})`;
+          async function observe(url) { // F: this process, started by the runner with the job's env
+            try { const r = await fetch(url, { signal: AbortSignal.timeout(20000) }); return 'OK HTTP ' + r.status; }
+            catch (e) { const c = code(e); return (CERT.includes(c) ? 'CERT ' : 'OTHER ') + c; }
+          }
+          function control(url, bundle) { // C: the same node binary, --use-openssl-ca with the C bundle
+            const env = { ...process.env, NODE_OPTIONS: '--use-openssl-ca', SSL_CERT_FILE: bundle };
+            const r = spawnSync(process.execPath, ['-e', ONE, url], { env, encoding: 'utf8', timeout: 40000 });
+            const out = (r.stdout || '').trim().split('\n').pop() || '';
+            return /^(OK|CERT|OTHER) /.test(out) ? out : `OTHER child exit ${r.status} ${((r.stderr || '').trim().split('\n')[0] || '')}`;
+          }
+          (async () => {
+            console.log(`row ${label}: node ${process.version} (${process.execPath}); NODE_OPTIONS=${process.env.NODE_OPTIONS || '(unset)'}; ` +
+              `SSL_CERT_FILE=${process.env.SSL_CERT_FILE || '(unset)'}`);
+            const F = {}; for (const t of Object.keys(URLS)) F[t] = await observe(URLS[t]);
+            const fails = []; let ctlok = true;
+            for (const t of ['github', 'gitlab']) {
+              let v = 'reached';
+              if (F[t].startsWith('CERT')) { v = 'FAIL: a certificate error on a control'; fails.push(`${NAME[t]} (a control): ${F[t]}`); }
+              else if (!F[t].startsWith('OK')) v = 'not measured';
+              if (!F[t].startsWith('OK')) ctlok = false;
+              console.log(`  ${NAME[t]} (control): ${F[t]} -> ${v}`);
+            }
+            const cb = state.c && !state.c.startsWith('NA') ? state.c : null;
+            for (const t of ['emsign', 'aaa']) {
+              const k = state['k.' + t] || 'NA not observed';
+              const C = cb ? control(URLS[t], cb) : (state.c || 'NA C not available');
+              let v;
+              if (!k.startsWith('TRUE')) v = k.startsWith('FALSE') ? 'not measured: the host no longer serves an excluded chain' : 'not measured: K ' + k;
+              else if (F[t].startsWith('OK')) { v = 'FAIL: it trusts a chain that anchors at an excluded root'; fails.push(`${NAME[t]}: ${v}`); }
+              else if (!ctlok) v = 'not measured: a control was not reached';
+              else if (C.startsWith('OK') && F[t].startsWith('CERT')) v = 'rejects';
+              else v = `not measured: F ${F[t]}; C ${C}`;
+              console.log(`  ${NAME[t]}: K ${k} | F ${F[t]} | C ${C}`);
+              console.log(`  ${NAME[t]}: -> ${v}`);
+            }
+            for (const x of fails) console.log(`::error title=eMudhra probe (${label})::${x}`);
+            process.exitCode = fails.length ? 1 : 0;
+          })();
+          EOF
+          for v in node24 node20; do
+            cp .emudhra-probe/probe.cjs .emudhra-probe/$v/probe.cjs
+            printf 'name: emudhra-probe-%s\ndescription: one row of the eMudhra verdict table\nruns:\n  using: %s\n  main: probe.cjs\n' $v $v > .emudhra-probe/$v/action.yml
+          done
+      - uses: ./.emudhra-probe/node24
+        if: ${{ !cancelled() }}
+        env:
+          PROBE_LABEL: "a JS action, using: node24"
+      - uses: ./.emudhra-probe/node20
+        if: ${{ !cancelled() }}
+        env:
+          PROBE_LABEL: "a JS action, using: node20"
+      - name: The job's node (a run step)
+        if: ${{ !cancelled() }}
+        env:
+          PROBE_LABEL: "a run step: the job's node"
+        run: node .emudhra-probe/probe.cjs
+      - name: nscurl (Apple's URLSession) — reported, not a gate
+        if: ${{ !cancelled() }}
+        shell: /bin/zsh -f {0}
+        run: |
+          for t u in emSign-path https://dv-g3b-emudhra.we-have-a-problem.com/ AAA-path https://dv-g3b-aaa-emudhra.we-have-a-problem.com/ \
+                     github.com https://github.com/ gitlab.com https://gitlab.com/; do
+            out=$(/opt/homebrew/bin/gtimeout -k 5 40 /usr/bin/nscurl -o /dev/null $u 2>&1)
+            if [[ $out == *'Load failed'* ]]; then
+              print -r -- "nscurl $t: load failed: $(print -r -- $out | /usr/bin/grep -oE 'Code=-?[0-9]+|-98[0-9][0-9]' | /usr/bin/sort -u | /usr/bin/tr '\n' ' ')"
+            else
+              print -r -- "nscurl $t: loaded"
+            fi
+          done
+          print -r -- "(reported only: nscurl exits 0 on every failure, and the deny it depends on is gated by the next step)"
+      - name: THE GATE — the deny in this job's VM
+        if: ${{ !cancelled() }}
+        shell: /bin/zsh -f {0}
+        run: |
+          set -u
+          export LC_ALL=C
+          D=$RUNNER_TEMP/emudhra TAB=$'\t' PL=/usr/bin/plutil fails=()
+          [[ -f $D/gate-problems.txt ]] && for l in ${(f)"$(<$D/gate-problems.txt)"}; do fails+=("$l"); done
+          [[ -f $D/excluded.tsv && -f $D/controls.tsv ]] || fails+=("the anchors step did not complete")
+          /bin/rm -f $D/ts.plist
+          out=$(/usr/bin/security trust-settings-export -d $D/ts.plist 2>&1) || { /bin/rm -f $D/ts.plist; [[ $out == *'No Trust Settings'* ]] || fails+=("the admin trust settings cannot be read: $out") }
+          keys=(); [[ -f $D/ts.plist ]] && keys=(${(f)"$($PL -p $D/ts.plist | /usr/bin/grep -oE '"[0-9A-Fa-f]{40}" =>' | /usr/bin/tr -d '" =>')"})
+          denied() { # SHA1 -> 0 when every admin entry of that certificate is result 3 and one applies to every policy or SSL
+            local k key= i r pn n=0 ok=0
+            for k in $keys; do [[ ${(U)k} == $1 ]] && key=$k; done
+            [[ -n $key ]] || return 1
+            for (( i = 0; i < 64; i++ )); do
+              $PL -extract trustList.$key.trustSettings.$i xml1 -o - $D/ts.plist > /dev/null 2>&1 || break
+              n=$(( n + 1 ))
+              r=$($PL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsResult raw -o - $D/ts.plist 2>/dev/null) || r=1
+              [[ $r == 3 ]] || return 1
+              if $PL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsPolicy xml1 -o - $D/ts.plist > /dev/null 2>&1; then
+                pn=$($PL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsPolicyName raw -o - $D/ts.plist 2>/dev/null)
+                [[ ${(L)pn} == *ssl* ]] && ok=1
+              else ok=1; fi
+            done
+            (( n && ok ))
+          }
+          vc() { local out rc; local -a ls; out=$(/usr/bin/security verify-cert -c $1 -p basic -L 2>&1); rc=$?; ls=(${(f)out}); REPLY=${ls[-1]-}; return $rc }
+          [[ -f $D/excluded.tsv ]] && for l in ${(f)"$(<$D/excluded.tsv)"}; do
+            q=("${(@ps:\t:)l}")   # SHA1 SHA256 SUBJECT PEM SPKI
+            if denied $q[1]; then print -r -- "deny present: $q[3] (SHA-1 $q[1])"; else fails+=("no deny (result 3) in the admin trust settings: $q[3] (SHA-1 $q[1])"); fi
+            if vc $q[4]; then fails+=("verify-cert exits 0: Apple still trusts $q[3]"); else print -r -- "verify-cert exits non-zero: $q[3]"; fi
+          done
+          for h in e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2 4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a 96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6; do
+            l=$(/usr/bin/awk -F'\t' -v h=$h '$1 == h {print; exit}' $D/controls.tsv 2>/dev/null)
+            [[ -n $l ]] || { fails+=("control root $h is not in this VM's SystemRootCertificates.keychain"); continue }
+            q=("${(@ps:\t:)l}")
+            if vc $q[3]; then print -r -- "control trusted: $q[2]"; else fails+=("control root not trusted: $q[2]: $REPLY"); fi
+          done
+          for f in $fails; do print -r -- "::error title=eMudhra gate::$f"; done
+          (( ${#fails} == 0 ))

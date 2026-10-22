@@ -1,0 +1,46 @@
+# runner-check — prove that a Mac runner takes a job and that the job cannot reach your network.
+# Copy this file to .github/workflows/ of a repository a scale set serves, put your label in runs-on, commit it to the
+# default branch (GitHub runs a hand-started workflow only from there), and run it by hand:
+#   gh workflow run runner-check.yml -R <owner>/<repo> -f host=<the Mac's LAN address> -f router=<your router's address>
+# (/Users/ci/bin/wall-check --derive prints both.) The two inputs appear in the job log: in a PUBLIC repository they are
+# public. It runs only by hand (workflow_dispatch), never on a push or a pull request.
+name: runner-check
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "The Mac's LAN address"
+        required: true
+      router:
+        description: "Your router's LAN address"
+        required: true
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: [liveapp-mac]   # the labels of your [[scaleset]] in config.toml
+    timeout-minutes: 15
+    steps:
+      - name: Where the job runs
+        run: |
+          sw_vers
+          uname -m
+          df -h /
+          gtimeout --version | head -1
+      - name: The wall holds from inside the job
+        env:
+          HOST: ${{ inputs.host }}
+          ROUTER: ${{ inputs.router }}
+        run: |
+          for a in "$HOST" "$ROUTER"; do
+            [[ $a =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not an IPv4 address: $a"; exit 1; }
+          done
+          # control first: a probe that must succeed, so that "blocked" below means something
+          nc -z -G 3 -w 3 github.com 443 || { echo "control failed: github.com:443 not reached"; exit 1; }
+          gw=$(/sbin/route -n get default 2>&1 | awk '/gateway/ {print $2}')
+          [[ -n $gw ]] || { echo "no default gateway in this VM: $(/sbin/route -n get default 2>&1)"; exit 1; }
+          for target in "$HOST:22" "$HOST:5900" "$ROUTER:80" "$gw:22" "$gw:5900"; do
+            if nc -z -G 3 -w 3 "${target%:*}" "${target#*:}"; then echo "REACHED $target: the wall does not hold"; exit 1; fi
+            echo "blocked $target"
+          done
+          curl -fsS -o /dev/null -w 'github.com http %{http_code}\n' https://github.com

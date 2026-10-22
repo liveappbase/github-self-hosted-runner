@@ -1,0 +1,27 @@
+#!/bin/zsh -f
+# render-run-line TEMPLATE LOCAL_SCRIPT STAGED_PATH — print the ONE line the operator runs: TEMPLATE (02-wall.run-line)
+# with @ROOT@ = the root command, by absolute path (the template itself names none, so nothing can run it as root by
+# mistake; this file names it once, in the replacement below),
+# @SCRIPT@ = STAGED_PATH (where the script sits on the host) and @SHA@ = the sha256 of LOCAL_SCRIPT, the reviewed
+# copy on THIS machine — never the host's copy, which ci can write. Runs on the maintainer's machine; prints nothing and
+# exits 1 on a template not of the shape `@ROOT@ /bin/zsh -f -c '…@SCRIPT@…@SHA@…'`, a relative or odd STAGED_PATH, an
+# unreadable input, any @ left unrendered, or output that is not exactly one printable line.
+# A RELEASE never uses this file: tools/release-check --build renders root-line.txt itself with the same three
+# substitutions and the same refusals, because the release gate never runs a file of setup/. This tool is for a tree
+# you staged on a host yourself (a development host), never for a line you publish. It only prints; it runs nothing.
+set -u
+export LC_ALL=C
+refuse() { print -u2 -r -- "render-run-line: REFUSE $*"; exit 1 }
+(( $# == 3 )) || refuse "usage: render-run-line TEMPLATE LOCAL_SCRIPT STAGED_PATH"
+[[ -f $1 && -r $1 ]] || refuse "template unreadable: $1"
+[[ -f $2 && -r $2 ]] || refuse "local script unreadable: $2"
+[[ $3 =~ '^/[A-Za-z0-9/._-]+$' ]] || refuse "staged path must be absolute, letters/digits/._-/ only: '$3'"
+sha=$(/usr/bin/shasum -a 256 < $2) || refuse "shasum failed"
+sha=${sha[1,64]}
+[[ $sha =~ '^[0-9a-f]{64}$' ]] || refuse "shasum output not understood"
+line=$(<$1)
+[[ $line == "@ROOT@ /bin/zsh -f -c '"* && $line == *@SCRIPT@* && $line == *@SHA@* ]] || refuse "template is not of the expected shape: $1"
+line=${line/#@ROOT@ //usr/bin/sudo }; line=${line//@SCRIPT@/$3}; line=${line//@SHA@/$sha}
+[[ $line != *@* ]] || refuse "an @ is left unrendered"
+[[ $line != *[[:cntrl:]]* ]] || refuse "the line is not ONE printable line (the operator pastes one line)"
+print -r -- $line

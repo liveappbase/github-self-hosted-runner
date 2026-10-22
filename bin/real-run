@@ -1,0 +1,51 @@
+#!/bin/zsh -f
+# real-run — boot a Tart VM OUTSIDE runscaler (golden-build, wall-check) behind the same wall the shim gives
+# runscaler's VMs. Installed as /Users/ci/bin/real-run -> /Users/ci/mac-runner/current/bin/real-run.
+# Design: docs/design.md ("The shim and real-run").
+#   real-run VM                   REAL run VM --no-graphics + the shim's FLAGS
+#   real-run --flags VM [FLAG...] REAL run VM --no-graphics FLAG... (an explicit set: wall-check's plain-NAT control VM,
+#                                 an n1-* VM — so --flags refuses any other name)
+# VM must be gold-*, n1-* or s1-*: a runner-* VM belongs to runscaler and boots only through the shim.
+# FLAGS and PATH come from the SHIM's TEXT (exactly one `FLAGS=(…)` line and one `PATH=…` line; the shim is never
+# executed), so a direct boot cannot drift from the wall runscaler's boots get. Tart is exec'd under `env -i` with
+# HOME, that PATH (it finds /usr/local/bin/softnet, never a softnet on the caller's PATH) and TART_HOME when set.
+# The caller holds the runner lock for its whole run. Refusal: "real-run: REFUSE <reason>" on stderr, exit 1.
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+SHIM=/usr/local/libexec/liveapp-ci/tart
+
+set -u
+export LC_ALL=C   # the name and shim-line patterns in the C locale, whatever the caller's
+refuse() { print -u2 -r -- "real-run: REFUSE $*"; exit 1 }
+
+read_shim() { # -> flags (array) and tpath, from SHIM's text: every FLAGS/PATH assignment is counted (indented, `+=`)
+  # before any is parsed, so a second one can never be skipped; FLAGS must hold at least one flag; every PATH part
+  # is an absolute path
+  local line
+  local -a fl pl
+  [[ -f $SHIM && -r $SHIM ]] || refuse "shim absent or unreadable: $SHIM"
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ '^[[:space:]]*FLAGS[+]?=' ]]; then fl+=("$line"); fi
+    if [[ $line =~ '^[[:space:]]*PATH[+]?=' ]]; then pl+=("$line"); fi
+  done < $SHIM
+  (( ${#fl} == 1 )) || refuse "shim has ${#fl} FLAGS lines, want 1"
+  (( ${#pl} == 1 )) || refuse "shim has ${#pl} PATH lines, want 1"
+  [[ $fl[1] =~ '^FLAGS=\(([-A-Za-z0-9@,./=:_ ]+)\)$' ]] || refuse "shim FLAGS line not understood: $fl[1]"
+  flags=(${=match[1]})
+  (( ${#flags} >= 1 )) || refuse "shim FLAGS empty"
+  [[ $pl[1] =~ '^PATH=(/[-A-Za-z0-9_.]+(/[-A-Za-z0-9_.]+)*(:/[-A-Za-z0-9_.]+(/[-A-Za-z0-9_.]+)*)*)$' ]] \
+    || refuse "shim PATH line not understood: $pl[1]"
+  tpath=$match[1]
+}
+
+mode=wall
+if [[ ${1-} == --flags ]]; then mode=explicit; shift; fi
+(( $# >= 1 )) || refuse "usage: real-run VM | real-run --flags VM [FLAG...]"
+vm=$1; shift
+[[ $vm =~ '^(gold|n1|s1)-[0-9A-Za-z][-0-9A-Za-z]{0,40}$' ]] || refuse "VM name must be gold-*, n1-* or s1-*: '$vm'"
+[[ $mode == explicit ]] || (( $# == 0 )) || refuse "extra arguments need --flags"
+[[ $mode == wall || $vm == n1-* ]] || refuse "--flags is only for n1-* VMs: '$vm'"
+read_shim
+if [[ $mode == wall ]]; then set -- "${flags[@]}"; fi
+tenv=(/usr/bin/env -i HOME=/Users/ci PATH=$tpath)
+if [[ -n ${TART_HOME-} ]]; then tenv+=(TART_HOME=$TART_HOME); fi
+exec "${tenv[@]}" $REAL run $vm --no-graphics "$@"

@@ -1,0 +1,131 @@
+#!/bin/zsh -f
+# golden-build — build the golden runner image liveapp-mac-golden-<yyyymmdd> from the pinned Cirrus base.
+# Design: docs/operations.md ("Rebuilding the image"). Run as ci on the host: /Users/ci/bin/golden-build
+# It holds the runner lock for its whole run (so runscaler cannot start), refuses while the agent is enabled (before
+# the lock and again under it), and boots the build VM only through real-run (the wall's flags). The configured image
+# name never exists half-built: the work happens in gold-<date>, which is cloned to the final name only after a clean
+# stop, then deleted. Any gold-* left by an earlier run is stopped and deleted at the start and at the end. Its output
+# (the stage's verdict table and census among it) is also appended to LOGDIR/golden-<yyyymmdd>.log. INT, TERM and HUP
+# end the build through `exit`, so that cleanup runs; tee -i lets a Ctrl-C's cleanup lines into the log too. The build
+# VM's console log is LOGDIR/golden-<yyyymmdd>-vm.log. It stops BEFORE `tart pull` when the host's macOS major is
+# below BASE_MACOS_MAJOR (the base image's; a guest newer than the host does not boot).
+# Its last step before `tart stop` is the eMudhra stage, bin/golden-emudhra of the same tree (docs/design.md, "The
+# eMudhra stage"): the build STOPS when the stage exits non-zero, so no image is made. The runner tarball stays in the
+# guest until that stage (it compares bin/ and externals/ with it) and is removed right after it. Then `sync` in the
+# guest (a failure STOPS): `tart stop` forces the VM off after 30 s, and the image is cloned from what is on disk.
+set -u
+export LC_ALL=C
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+REALRUN=/Users/ci/bin/real-run
+BASE=ghcr.io/cirruslabs/macos-golden-gate-base@sha256:5302a9ea6cd68c059d00fa253fe75c8ebdf4e0dc8c45d4e136ecc6e7a4c02b70
+BASE_MACOS_MAJOR=27   # the macOS major of BASE (a new BASE moves both lines, in one release)
+RUNNER_URL=https://github.com/actions/runner/releases/download/v2.338.0/actions-runner-osx-arm64-2.338.0.tar.gz
+RUNNER_SHA=df4cebda25c86a886ed204e49fee63f5c2e7cec5f447b5c98440a826bbdf9df2
+RUNNER_VERSION=2.338.0
+LOCK=/tmp/runner.lock
+FLAG=/Users/ci/.config/runner/enabled
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+FLOOR_GIB=200     # base + golden image ~50 GiB, one rebuild generation ~50, two jobs' growth ~40, and the shim's 100
+DISK_GB=90        # the base image has ~7 GiB free; jobs need room (plan: >= 25 GB free after provisioning)
+
+die() { print -r -- "golden-build: STOP $*"; exit 1 }
+say() { print -r -- "golden-build: $(date '+%H:%M:%S') $*" }
+if [[ ${1-} != --locked ]]; then
+  [[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): run runner-disable first"
+  [[ -d $LOGDIR ]] || die "no log folder $LOGDIR: run the install line again"
+  log=$LOGDIR/golden-$(date +%Y%m%d).log
+  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked 2>&1 | /usr/bin/tee -i -a $log
+  rc=$pipestatus[1]
+  (( rc != 75 )) || die "the runner lock is held: runscaler, an install, wall-check or another golden-build is running"
+  print -r -- "golden-build: this output is also in $log"
+  exit $rc
+fi
+# under the lock: the agent may have been enabled between the first check and the lock
+[[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): run runner-disable first"
+
+DATE=$(date +%Y%m%d) GOLD=gold-$(date +%Y%m%d) OUT=liveapp-mac-golden-$(date +%Y%m%d)
+tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }   # tart set --disk-size runs diskutil
+gexec() { tart exec $GOLD "$@" }   # a command inside the build VM, as its admin user
+clean() { local vm
+  for vm in ${(M)${(f)"$(tart list --source local -q 2>/dev/null)"}:#gold-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]}; do
+    tart stop $vm > /dev/null 2>&1; tart delete $vm && say "deleted leftover $vm"
+  done
+}
+runpid=
+finish() { [[ -n $runpid ]] && kill $runpid 2>/dev/null; clean }
+trap finish EXIT
+# a signal ends the build through `exit`, so finish runs (without these traps zsh dies on INT or TERM and skips it);
+# SIGPIPE is ignored from then on, so a write to a tee that died with the terminal cannot end the cleanup
+trap 'trap "" PIPE; exit 130' INT
+trap 'trap "" PIPE; exit 143' TERM
+trap 'trap "" PIPE; exit 129' HUP
+
+say "start: $OUT from $BASE"
+(( ${${(f)"$(tart list --source local -q)"}[(Ie)$OUT]} == 0 )) || die "$OUT already exists: delete it or wait a day"
+host_major=$(sw_vers -productVersion | cut -d. -f1)
+[[ $host_major =~ '^[0-9]+$' ]] || die "cannot read this Mac's macOS version"
+(( host_major >= BASE_MACOS_MAJOR )) || die "the base image is macOS $BASE_MACOS_MAJOR; this Mac runs macOS $host_major: update macOS first"
+vol=/Users/ci/.tart; [[ -d $vol ]] || vol=/Users/ci   # before Tart's first run, its folder does not exist yet
+free=$(/bin/df -Pk $vol | /usr/bin/awk 'NR==2 {print int($4/1048576)}')
+[[ $free =~ '^[0-9]+$' ]] || die "cannot read the free disk of $vol"
+(( free >= FLOOR_GIB )) || die "free disk ${free} GiB < ${FLOOR_GIB} GiB"
+clean
+tart pull $BASE > /dev/null || die "tart pull failed"
+tart clone $BASE $GOLD || die "tart clone failed"
+tart set $GOLD --disk-size $DISK_GB || die "tart set --disk-size $DISK_GB failed"
+say "cloned $GOLD; booting it behind the wall (real-run)"
+$REALRUN $GOLD > $LOGDIR/golden-$DATE-vm.log 2>&1 &
+runpid=$!
+n=0; until gexec true > /dev/null 2>&1; do
+  kill -0 $runpid 2>/dev/null || die "real-run ended before the VM answered tart exec: read $LOGDIR/golden-$DATE-vm.log"
+  (( n++ < 60 )) || die "the VM did not answer tart exec within 180 s (its console log: $LOGDIR/golden-$DATE-vm.log)"
+  sleep 3
+done
+say "the VM answers tart exec"
+say "guest disk: $(gexec diskutil list disk0 | /usr/bin/awk '/Apple_APFS Container/ && !/ISC|Recovery/ {print $(NF-2), $(NF-1)}') main container (macOS grew it at boot)"
+
+guest=$(gexec sw_vers -productVersion) || die "sw_vers in the guest failed"
+(( ${guest%%.*} <= host_major )) || die "guest macOS $guest is newer than the host's ($host_major)"
+say "guest macOS $guest (host major $host_major)"
+
+svc=$(gexec networksetup -listallnetworkservices | /usr/bin/sed -n '2p')
+[[ -n $svc ]] || die "no network service in the guest"
+gexec sudo networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 || die "setting DNS failed"
+say "DNS on '$svc': $(gexec networksetup -getdnsservers "$svc" | tr '\n' ' ')"
+
+gexec sh -c "curl -fsSL --max-time 600 -o /tmp/runner.tgz $RUNNER_URL && echo '$RUNNER_SHA  /tmp/runner.tgz' | shasum -a 256 -c - && rm -rf /Users/admin/actions-runner && mkdir -p /Users/admin/actions-runner && tar -xzf /tmp/runner.tgz -C /Users/admin/actions-runner" \
+  || die "runner $RUNNER_VERSION download/check/unpack failed"
+v=$(gexec /Users/admin/actions-runner/config.sh --version) || die "runner --version failed"
+[[ $v == $RUNNER_VERSION ]] || die "runner version $v, want $RUNNER_VERSION"
+say "runner $v"
+
+gexec sh -c 'HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install coreutils' > /dev/null || die "brew install coreutils failed"
+say "gtimeout: $(gexec /opt/homebrew/bin/gtimeout --version | head -1)"
+
+for job in com.openssh.sshd com.apple.screensharing; do
+  gexec sudo launchctl disable system/$job || die "launchctl disable $job failed"
+  gexec sudo launchctl bootout system/$job > /dev/null 2>&1   # not loaded is fine
+done
+for job in com.openssh.sshd com.apple.screensharing; do
+  gexec sudo launchctl print-disabled system | /usr/bin/grep -q "\"$job\" => disabled" || die "$job is not disabled"
+done
+say "guest SSH and screen sharing disabled"
+
+say "record: $(gexec sw_vers | tr '\n' ' ')"
+say "record: brew $(gexec /opt/homebrew/bin/brew list --versions | tr '\n' ' ')"
+say "record: disk $(gexec df -h / | sed -n 2p)"
+gfree=$(gexec df -k / | awk 'NR==2 {print int($4/1048576)}')
+(( gfree >= 25 )) || die "guest free disk ${gfree} GB < 25"
+say "guest free ${gfree} GiB"
+
+/bin/zsh -f ${0:A:h}/golden-emudhra $GOLD /tmp/runner.tgz $RUNNER_SHA || die "the eMudhra stage failed (above): no image was made"
+gexec rm -f /tmp/runner.tgz || die "removing the runner tarball from the guest failed"
+say "removed the runner tarball from the guest"
+gexec /bin/sync || die "sync in the guest failed: no image was made"
+say "the guest's writes are flushed to its disk (sync)"
+
+tart stop $GOLD || die "tart stop failed"
+n=0; while kill -0 $runpid 2>/dev/null; do (( n++ < 60 )) || die "the VM did not stop"; sleep 2; done
+runpid=
+tart clone $GOLD $OUT || die "clone to $OUT failed"
+say "DONE: $OUT"

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>sh.liveapp.mac-runner</string>
+  <key>ProgramArguments</key><array><string>/Users/ci/bin/runner-start</string><string>run</string></array>
+  <key>RunAtLoad</key><false/>
+  <key>KeepAlive</key><dict><key>PathState</key><dict><key>/Users/ci/.config/runner/enabled</key><true/></dict></dict>
+  <key>ThrottleInterval</key><integer>300</integer>
+  <key>ExitTimeOut</key><integer>3660</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>/Users/ci/Library/Logs/mac-runner/runscaler.log</string>
+  <key>StandardErrorPath</key><string>/Users/ci/Library/Logs/mac-runner/runner-start.err</string>
+</dict>
+</plist>

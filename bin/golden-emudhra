@@ -1,0 +1,845 @@
+#!/bin/zsh -f
+# golden-emudhra VM RUNNER_TARBALL RUNNER_SHA256 — the eMudhra stage: golden-build's last step before `tart stop`.
+# Design: docs/design.md ("The eMudhra stage"). golden-build runs it as ci while it holds the runner lock.
+# The incident: eMudhra's intermediate keys were compromised. homebrew-core a2ee7ae08c6 excludes three root keys by the
+# SHA-256 of their public key (SPKI); EXCLUDED_SPKI in the guest part copies them with that commit's source line.
+# VM is a RUNNING gold-* build VM that answers `tart exec`. The stage drives the guest ONLY through `tart exec`, as the
+# guest's admin user (as golden-build's gexec). RUNNER_TARBALL is the GitHub runner tarball INSIDE the guest that the
+# image's runner was unpacked from (golden-build keeps it until this stage); RUNNER_SHA256 is its sha256.
+# In this order (each step prints what it saw; no FAIL ends the stage early):
+#   1. save: resolve each bundle path to its real file and save a copy of each, still unfiltered; read Apple's anchor
+#      set from its three sources and pick every anchor whose key is excluded; make K's own filtered copy.
+#   2. the PRE-FIX probe pass: every client row against the two eMudhra test paths and the two controls.
+#   3. the fix (the lines between the FIX markers): each distinct real bundle file filtered once, in place; a deny in
+#      the admin trust settings for each excluded anchor; <runner-dir>/.env with NODE_OPTIONS and SSL_CERT_FILE.
+#   4. the POST-FIX probe pass.
+#   5. the census: the GATE, offline.
+#   6. the verdicts: print everything, then exit 1 on any FAIL (census, fix or probe), else 0.
+# The RED run is this stage with step 3 left out. Make that copy with
+#   sed '/^# >>> FIX$/,/^# <<< FIX$/d' golden-emudhra > <another folder>/golden-emudhra
+# A copy without the fix reads itself as a red run, and then also requires K's control to hold. This file has no
+# flag that skips the fix. Every probe runs by absolute path under gtimeout; each deny under `sudo gtimeout -k 5 30`
+# (a timeout or a non-zero exit is a FAIL: the build stops, it never hangs). The guest work folder holds the unfiltered
+# copies; it is removed on every exit. Every line is prefixed "golden-emudhra: "; the last one says GREEN or RED.
+# The named Node difference list is setup/emudhra.node-diff of the same tree (NODEDIFF). Exit: 0 GREEN; 1 RED or STOP.
+set -u
+export LC_ALL=C
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+NODEDIFF=${0:A:h:h}/setup/emudhra.node-diff
+
+die() { print -r -- "golden-emudhra: STOP $*"; exit 1 }
+say() { print -r -- "golden-emudhra: $*" }
+(( $# == 3 )) || die "usage: golden-emudhra VM RUNNER_TARBALL RUNNER_SHA256 (see the header of this file)"
+vm=$1 tgz=$2 tsha=$3
+[[ $vm =~ '^gold-[0-9A-Za-z][-0-9A-Za-z]{0,40}$' ]] || die "VM must be a gold-* build VM: '$vm'"
+[[ $tgz =~ '^/[A-Za-z0-9/._-]+$' ]] || die "RUNNER_TARBALL must be an absolute path in the guest: '$tgz'"
+[[ $tsha =~ '^[0-9a-f]{64}$' ]] || die "RUNNER_SHA256 must be 64 lowercase hex: '$tsha'"
+tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
+gexec() { tart exec $vm "$@" }
+
+# ---- the guest part: ONE zsh script, run once per step as
+#      tart exec VM /bin/zsh -f -c "$GUEST" golden-emudhra-guest STEP WORKDIR [ARGS…]
+GUEST=$(cat <<'EOS'
+set -u
+export LC_ALL=C
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+umask 077
+T=/opt/homebrew/bin/gtimeout
+O=/opt/homebrew/opt/openssl@3/bin/openssl
+NODE=/opt/homebrew/bin/node
+SEC=/usr/bin/security
+PLUTIL=/usr/bin/plutil
+SUDO=/usr/bin/sudo
+RUNNER_DIR=/Users/admin/actions-runner
+APPLE_BUNDLE=/etc/ssl/cert.pem
+BREW_BUNDLE=/opt/homebrew/etc/ca-certificates/cert.pem
+BUNDLES=($APPLE_BUNDLE $BREW_BUNDLE /opt/homebrew/etc/openssl@3/cert.pem)
+CAPATHS=(/private/etc/ssl/certs /opt/homebrew/etc/openssl@3/certs)
+KC=/System/Library/Keychains/SystemRootCertificates.keychain
+ANCHORS=/System/Library/Security/Certificates.bundle/Contents/Resources/Anchors
+ASSET_ROOTS=(/System/Library/AssetsV2/com_apple_MobileAsset_PKITrustStore /private/var/run/com.apple.security.cryptexd/mnt /System/Volumes/Preboot/Cryptexes)
+KC_FLOOR=100
+ANCHORS_FLOOR=200
+BUNDLE_FLOOR=100
+# homebrew-core a2ee7ae08c6, ca-certificates.rb, EXCLUDED_SPKI_HASHES. Its source line:
+# "Exclude AAA Certificate Services and the emSign G3 roots by their public keys."
+EXCLUDED_SPKI=(
+  bd153ed7b0434f6886b17bce8bbe84ed340c7132d702a8f4fa318f756ecbd6f3  # AAA Certificate Services
+  c619e4780ed8e0abeda24ad732567de4383a7ea941338f6d1a7d1b49ac792fe9  # emSign Root TLS CA - G3
+  8d417db2dd8bf5e3084d1e3f196d583849d81bdd4c00c70b9d39369e96b8c782  # emSign ECC Root CA - G3
+)
+# The control roots (never denied; verify-cert must stay 0), by the SHA-256 of the certificate in KC
+CONTROL_ROOTS=(
+  e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2  # USERTrust RSA Certification Authority
+  4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a  # USERTrust ECC Certification Authority
+  96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6  # ISRG Root X1
+)
+TARGETS=(emsign aaa github gitlab)
+typeset -A URL TNAME RDESC RCT RBIN
+URL=(emsign https://dv-g3b-emudhra.we-have-a-problem.com/ aaa https://dv-g3b-aaa-emudhra.we-have-a-problem.com/
+     github https://github.com/ gitlab https://gitlab.com/)
+TNAME=(emsign 'emSign path' aaa 'AAA path' github 'github.com' gitlab 'gitlab.com')
+BASEENV=(HOME=/Users/admin PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8)
+TAB=$'\t'
+JS='const u=process.argv[process.argv.length-1];const C=["UNABLE_TO_GET_ISSUER_CERT_LOCALLY","CERT_REVOKED"];
+fetch(u,{signal:AbortSignal.timeout(20000)}).then(r=>console.log("OK HTTP "+r.status+" (node "+process.version+")"),
+e=>{const c=(e&&e.cause&&e.cause.code)||(e&&e.code)||(e&&e.name)||"error";const m=(e&&e.cause&&e.cause.message)||(e&&e.message)||"";
+console.log((C.includes(c)?"CERT ":"OTHER ")+c+" "+m+" (node "+process.version+")")});'
+PY='import sys, ssl, urllib.request, urllib.error
+try:
+    ctx = ssl.create_default_context(cafile=sys.argv[2]) if len(sys.argv) > 2 else None
+    r = urllib.request.urlopen(sys.argv[1], timeout=20, context=ctx)
+    print("OK HTTP", r.status)
+except urllib.error.HTTPError as e:
+    print("OK HTTP", e.code)
+except urllib.error.URLError as e:
+    print(("CERT " if isinstance(e.reason, ssl.SSLCertVerificationError) else "OTHER ") + str(e.reason).replace("\n", " ")[:200])
+except Exception as e:
+    print("OTHER " + repr(e).replace("\n", " ")[:200])'
+NODEDIFF_JS='const fs=require("fs"),tls=require("tls"),{X509Certificate}=require("crypto");
+const f=process.argv[process.argv.length-1],have=new Set();let bad=0;
+for(const m of fs.readFileSync(f,"utf8").matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)){
+try{have.add(new X509Certificate(m[0]).fingerprint256.replace(/:/g,"").toLowerCase())}catch(e){bad++}}
+if(bad){console.log("ERROR "+bad+" certificate(s) of "+f+" cannot be read");process.exit(1)}
+const cn=x=>{const l=x.subject.split("\n");return (l.find(s=>s.startsWith("CN="))||l.find(s=>s.startsWith("O="))||"?").replace(/^(CN|O)=/,"")};
+for(const p of tls.rootCertificates){const x=new X509Certificate(p),fp=x.fingerprint256.replace(/:/g,"").toLowerCase();
+if(!have.has(fp))console.log(fp+" "+cn(x))}'
+
+say() { print -r -- "$*" }
+fail() { print -r -- "$*" >> $W/fail.txt; print -r -- "FAIL $*" }
+one() { local s=${1%%$'\n'*}; s=${s//[[:cntrl:]]/ }; REPLY=${s[1,240]} }   # first line, printable, at most 240 chars
+need() { local x; for x in "$@"; do [[ -x $x ]] || { say "STOP missing in the guest: $x"; exit 2 }; done }
+
+split_pem() { # FILE DIR -> DIR/c0001.pem …; REPLY = the number of certificate blocks; return 1 when FILE holds a PEM
+  # block that is not a certificate (nothing could check it)
+  local all
+  REPLY=0
+  /bin/rm -rf -- ${2:?}; /bin/mkdir -p $2 || return 1
+  /usr/bin/awk -v d=$2 '/-----BEGIN CERTIFICATE-----/ {n++; f=sprintf("%s/c%04d.pem", d, n); p=1} p {print > f}
+    /-----END CERTIFICATE-----/ {if (p) close(f); p=0} END {print n+0}' $1 > $2/count || return 1
+  REPLY=$(<$2/count)
+  all=$(/usr/bin/grep -c -e '-----BEGIN ' $1)
+  [[ $all == $REPLY ]]
+}
+drop_blocks() { # IN "N N …" OUT — IN without the certificate blocks numbered N (split_pem's numbering); all else kept
+  /usr/bin/awk -v drop=" $2 " '/-----BEGIN CERTIFICATE-----/ {n++; inb=1; keep=(index(drop, " " n " ") == 0)}
+    {if (!inb || keep) print} /-----END CERTIFICATE-----/ {inb=0}' $1 > $3
+}
+certinfo() { # FILE FORM -> REPLY = "SPKI<TAB>SHA256<TAB>SUBJECT"; SPKI is "-" when the key cannot be hashed (never the
+  # hash of empty input). The SPKI pipeline is homebrew-core's: x509 -pubkey -noout | pkey -pubin -outform der | dgst
+  # -sha256. Return 1 when the certificate cannot be read at all.
+  local out l sub= fp= spki=-
+  out=$($O x509 -inform $2 -in $1 -noout -subject -fingerprint -sha256 2>/dev/null) || return 1
+  for l in ${(f)out}; do
+    case $l in
+      (subject=*) sub=${${l#subject=}# } ;;
+      (*Fingerprint=*) fp=${(L)${${l#*=}//:/}} ;;
+    esac
+  done
+  [[ $fp =~ '^[0-9a-f]{64}$' ]] || return 1
+  /bin/rm -f $WT/pub $WT/der
+  if $O x509 -inform $2 -in $1 -noout -pubkey > $WT/pub 2>/dev/null \
+     && $O pkey -pubin -in $WT/pub -outform der -out $WT/der 2>/dev/null && [[ -s $WT/der ]]; then
+    out=$($O dgst -sha256 -r $WT/der 2>/dev/null) && [[ ${out[1,64]} =~ '^[0-9a-f]{64}$' ]] && spki=${out[1,64]}
+  fi
+  REPLY=$spki$TAB$fp$TAB$sub
+}
+hash_files() { # FORM OUT FILE… -> OUT: one line per file "SPKI<TAB>SHA256<TAB>SUBJECT<TAB>FILE" ("-": cannot)
+  local form=$1 out=$2 f; shift 2
+  : > $out
+  for f in "$@"; do
+    if certinfo $f $form; then print -r -- "$REPLY$TAB$f" >> $out
+    else print -r -- "-$TAB-$TAB(cannot read)$TAB$f" >> $out; fi
+  done
+}
+counts() { # TSV -> n_read n_hashed n_cannot n_hits
+  local l; local -a p
+  n_read=0 n_hashed=0 n_cannot=0 n_hits=0
+  for l in ${(f)"$(<$1)"}; do
+    p=("${(@ps:\t:)l}")
+    n_read=$(( n_read + 1 ))
+    if [[ $p[1] == - ]]; then n_cannot=$(( n_cannot + 1 )); else n_hashed=$(( n_hashed + 1 )); fi
+    (( ${EXCLUDED_SPKI[(Ie)$p[1]]} )) && n_hits=$(( n_hits + 1 ))
+  done
+}
+get() { # PASS NAME TARGET [KIND] -> REPLY = the recorded observation, empty when none
+  local f=$W/obs/$1/$2.$3${4:+.$4}
+  REPLY=; [[ -f $f ]] && REPLY=$(<$f)
+}
+
+# ---- step 1: save
+src_keychain() { # LABEL NAME KEYCHAIN FLOOR — its certificates (PEM) -> $W/anchors/LABEL.tsv; a line in sources.tsv
+  local d=$W/anchors/$1 v
+  /bin/mkdir -p $d
+  if ! $T -k 5 60 $SEC find-certificate -a -p $3 > $d/all.pem 2> $d/err; then
+    one "$(<$d/err)"; say "anchors: $2 ($3): cannot read it: $REPLY"
+    : > $W/anchors/$1.tsv; print -r -- "$1$TAB$2$TAB$3$TAB$4${TAB}unreadable" >> $W/sources.tsv; return
+  fi
+  split_pem $d/all.pem $d/split
+  hash_files pem $W/anchors/$1.tsv $d/split/c*.pem(N)
+  v=$($PLUTIL -extract VersionNumber raw -o - ${3:h}/AssetVersion.plist 2>/dev/null)
+  print -r -- "$1$TAB$2$TAB$3$TAB$4$TAB${v:--}" >> $W/sources.tsv
+  print_source $1 $2 $3 ${v:--}
+}
+src_der() { # LABEL NAME DIR FLOOR — DIR/*.cer (DER) -> $W/anchors/LABEL.tsv; a line in sources.tsv
+  local v
+  hash_files der $W/anchors/$1.tsv $3/*.cer(N)
+  v=$($PLUTIL -extract VersionNumber raw -o - ${3:h}/AssetVersion.plist 2>/dev/null)
+  print -r -- "$1$TAB$2$TAB$3$TAB$4$TAB${v:--}" >> $W/sources.tsv
+  print_source $1 $2 $3 ${v:--}
+}
+print_source() { # LABEL NAME PATH VERSION
+  local l; local -a p
+  counts $W/anchors/$1.tsv
+  say "anchors: $2 ($3, version $4): $n_read read, $n_hashed hashed, $n_cannot cannot hash, $n_hits with an excluded key"
+  for l in ${(f)"$(<$W/anchors/$1.tsv)"}; do
+    p=("${(@ps:\t:)l}")
+    [[ $p[1] == - ]] && say "anchors:   cannot hash: $p[4] ($p[3])"
+  done
+  return 0
+}
+save() {
+  local p real n=0 l x s pem o sha1 spki label form ok; local -a reals q drop
+  typeset -A xsrc xfile xform xsub
+  need $T $O $NODE $SEC $PLUTIL /usr/bin/nscurl /usr/bin/curl /usr/bin/git /usr/bin/python3 /usr/bin/awk
+  /bin/mkdir -p $W/saved $W/anchors $W/obs/pre $W/obs/post $W/excl $W/ctl $W/k || exit 2
+  : > $W/fail.txt; : > $W/bundles.tsv; : > $W/saved.tsv; : > $W/sources.tsv; : > $W/cbundles.tsv
+  say "1. save (guest macOS $(/usr/bin/sw_vers -productVersion) $(/usr/bin/sw_vers -buildVersion))"
+  for p in $BUNDLES; do
+    if [[ -e $p ]]; then
+      real=${p:A}
+      [[ -f $real ]] || { say "STOP bundle $p resolves to $real, which is not a regular file"; exit 2 }
+      print -r -- "$p$TAB$real" >> $W/bundles.tsv
+      if (( ! ${reals[(Ie)$real]} )); then
+        reals+=($real); n=$(( n + 1 ))
+        /bin/cp -X $real $W/saved/$n.pem || { say "STOP cannot save a copy of $real"; exit 2 }
+        print -r -- "$real$TAB$W/saved/$n.pem" >> $W/saved.tsv
+      fi
+      say "bundle: $p -> $real"
+    else
+      say "bundle: $p: absent"
+    fi
+  done
+  [[ -f ${APPLE_BUNDLE:A} && -f ${BREW_BUNDLE:A} ]] || { say "STOP $APPLE_BUNDLE or $BREW_BUNDLE is absent"; exit 2 }
+
+  src_keychain kc SystemRootCertificates.keychain $KC $KC_FLOOR
+  src_der anchors Certificates.bundle/Anchors $ANCHORS $ANCHORS_FLOOR
+  n=0
+  for x in ${(f)"$(for p in $ASSET_ROOTS; do [[ -d $p ]] && $T -k 5 60 /usr/bin/find $p -name SystemRootCertificates.keychain -type f 2>/dev/null; done)"}; do
+    n=$(( n + 1 ))
+    src_keychain asset$n PKITrustStore-asset-$n $x 0
+  done
+  (( n )) || say "anchors: PKITrustStore asset: none"
+
+  # the excluded anchors: the UNION of the sources, one per certificate
+  for l in ${(f)"$(<$W/sources.tsv)"}; do
+    q=("${(@ps:\t:)l}"); label=$q[1]; form=pem; [[ $label == anchors ]] && form=der
+    for x in ${(f)"$(<$W/anchors/$label.tsv)"}; do
+      q=("${(@ps:\t:)x}")
+      (( ${EXCLUDED_SPKI[(Ie)$q[1]]} )) || continue
+      if (( ${+xsrc[$q[2]]} )); then xsrc[$q[2]]+=" $label"
+      else xsrc[$q[2]]=$label; xfile[$q[2]]=$q[4]; xform[$q[2]]=$form; xsub[$q[2]]=$q[3]; fi
+    done
+  done
+  : > $W/excluded.tsv; : > $W/excluded.pem
+  for s in ${(ko)xsrc}; do
+    pem=$W/excl/$s.pem
+    $O x509 -inform $xform[$s] -in $xfile[$s] -outform pem -out $pem 2>/dev/null || { say "STOP cannot convert $xfile[$s]"; exit 2 }
+    o=$($O x509 -in $pem -noout -fingerprint -sha1 2>/dev/null) || { say "STOP cannot read the SHA-1 of $pem"; exit 2 }
+    sha1=${(U)${${o#*=}//:/}}
+    certinfo $pem pem; spki=${REPLY%%$TAB*}
+    print -r -- "$sha1$TAB$s$TAB$spki$TAB$xsub[$s]$TAB$xsrc[$s]$TAB$pem" >> $W/excluded.tsv
+    /bin/cat $pem >> $W/excluded.pem
+    say "anchors: excluded: $xsub[$s] — SPKI $spki, SHA-1 $sha1, SHA-256 $s; in: $xsrc[$s]"
+    for l in ${(f)"$(/usr/bin/cut -f1 $W/sources.tsv)"}; do
+      [[ " $xsrc[$s] " == *" $l "* ]] || say "anchors:   note: not in source $l (the union is used)"
+    done
+  done
+  (( ${#xsrc} )) || say "anchors: no anchor has an excluded key (did Apple remove them?): nothing to deny"
+
+  : > $W/controls.tsv
+  for x in ${(f)"$(<$W/anchors/kc.tsv)"}; do
+    q=("${(@ps:\t:)x}")
+    (( ${CONTROL_ROOTS[(Ie)$q[2]]} )) || continue
+    /bin/cp $q[4] $W/ctl/$q[2].pem && print -r -- "$q[2]$TAB$q[3]$TAB$W/ctl/$q[2].pem" >> $W/controls.tsv
+  done
+
+  # each saved copy: does it hold every excluded anchor's key? (else its C is "not available")
+  local -a want have
+  want=(${(u)${(f)"$(/usr/bin/cut -f3 $W/excluded.tsv)"}})
+  for l in ${(f)"$(<$W/saved.tsv)"}; do
+    q=("${(@ps:\t:)l}")
+    split_pem $q[2] ${q[2]:r}.split || say "saved: $q[1] holds a PEM block that is not a certificate"
+    hash_files pem ${q[2]:r}.tsv ${q[2]:r}.split/c*.pem(N)
+    counts ${q[2]:r}.tsv
+    have=(${(f)"$(/usr/bin/cut -f1 ${q[2]:r}.tsv)"})
+    ok=yes; (( ${#want} )) || ok=no
+    for s in $want; do (( ${have[(Ie)$s]} )) || ok=no; done
+    print -r -- "$q[1]$TAB$q[2]$TAB$ok" >> $W/cbundles.tsv
+    say "saved: $q[1]: $n_read certificates ($n_cannot cannot hash), $n_hits with an excluded key; holds every excluded anchor's key: $ok"
+  done
+
+  # K's own filtered copy: the saved Homebrew copy minus every certificate with an excluded key
+  real=${BREW_BUNDLE:A}
+  l=$(/usr/bin/awk -F'\t' -v r=$real '$1 == r {print $2}' $W/saved.tsv)
+  drop=()
+  for x in ${(f)"$(<${l:r}.tsv)"}; do
+    q=("${(@ps:\t:)x}")
+    (( ${EXCLUDED_SPKI[(Ie)$q[1]]} )) || continue
+    s=${${q[4]:t}#c}; drop+=($(( 10#${s%.pem} )))
+  done
+  drop_blocks $l "${drop[*]}" $W/kfiltered.pem || { say "STOP cannot make K's filtered copy"; exit 2 }
+  say "K's filtered copy: the saved copy of $real minus ${#drop} certificate(s) with an excluded key"
+}
+
+# ---- steps 2 and 4: a probe pass
+jobenv() { # -> jenv (KEY=VALUE lines of <runner-dir>/.env) and sslfile (its SSL_CERT_FILE, else empty)
+  local l; local -a m
+  jenv=() sslfile=
+  if [[ -f $RUNNER_DIR/.env ]]; then
+    for l in ${(f)"$(<$RUNNER_DIR/.env)"}; do [[ $l =~ '^[A-Za-z_][A-Za-z0-9_]*=' ]] && jenv+=("$l"); done
+  fi
+  m=(${(M)jenv:#SSL_CERT_FILE=*})
+  (( ${#m} )) && sslfile=${m[-1]#SSL_CERT_FILE=}
+  return 0
+}
+cbundle() { # PATH -> REPLY = the saved unfiltered copy of PATH's real file, or "NA <why>"
+  local real=${1:A} l; local -a q
+  for l in ${(f)"$(<$W/cbundles.tsv)"}; do
+    q=("${(@ps:\t:)l}")
+    [[ $q[1] == "$real" ]] || continue
+    if [[ $q[3] == yes ]]; then REPLY=$q[2]; else REPLY="NA C not available: the saved copy of $real lacks an excluded anchor's key"; fi
+    return
+  done
+  REPLY="NA C not available: no saved copy of $real"
+}
+c_nscurl() { # URL — Apple's URLSession. nscurl exits 0 on every failure: read its output
+  local out rc codes
+  out=$($T -k 5 40 /usr/bin/nscurl -o /dev/null $1 2>&1); rc=$?
+  if (( rc == 124 || rc == 137 )); then REPLY="OTHER timed out"; return; fi
+  if [[ $out == *'Load failed'* ]]; then
+    codes=(${(u)${(f)"$(print -r -- $out | /usr/bin/grep -oE 'Code=-?[0-9]+|-98[0-9][0-9]')"}})
+    if (( ${codes[(Ie)Code=-1202]} )) && (( ${codes[(Ie)-9807]} || ${codes[(Ie)Code=-9807]} )); then REPLY="CERT nscurl ${(j: :)codes}"
+    else REPLY="OTHER nscurl load failed: ${(j: :)codes}"; fi
+  else
+    REPLY="OK loaded (no 'Load failed' line)"
+  fi
+}
+c_curl() { # TEA_OFF CAFILE URL — /usr/bin/curl; exit 60 is its certificate error
+  local rc out err
+  /usr/bin/env -i $BASEENV "${jenv[@]}" ${1:+OPENSSL_X509_TEA_DISABLE=1} $T -k 5 30 /usr/bin/curl -sS -o /dev/null \
+    --max-time 20 -w '%{http_code}' ${2:+--cacert} ${2:+$2} $3 > $WT/o 2> $WT/e; rc=$?
+  out=$(<$WT/o); one "$(<$WT/e)"; err=$REPLY
+  case $rc in
+    (0) REPLY="OK HTTP $out" ;;
+    (60) REPLY="CERT curl exit 60: $err" ;;
+    (124|137) REPLY="OTHER timed out" ;;
+    (*) REPLY="OTHER curl exit $rc: $err" ;;
+  esac
+}
+c_git() { # TEA_OFF CAFILE URL — /usr/bin/git ls-remote of a repository that does not exist: an HTTP answer = TLS done
+  local rc out
+  /usr/bin/env -i $BASEENV "${jenv[@]}" ${1:+OPENSSL_X509_TEA_DISABLE=1} GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_GLOBAL=/dev/null $T -k 5 30 /usr/bin/git -c credential.helper= ${2:+-c} ${2:+http.sslCAInfo=$2} \
+    ls-remote ${3}x.git > $WT/o 2>&1; rc=$?
+  out=$(<$WT/o)
+  if (( rc == 124 || rc == 137 )); then REPLY="OTHER timed out"
+  elif [[ $out == *'SSL certificate problem'* ]]; then one "${(M)${(f)out}:#*SSL certificate problem*}"; REPLY="CERT $REPLY"
+  elif (( rc == 0 )) || [[ $out == *'remote: '* || $out == *'returned error: '* || $out == *'could not read Username'* \
+       || $out == *'is this a git repository'* || $out == *"' not found"* ]]; then one "$out"; REPLY="OK ${REPLY:-ls-remote exit 0}"
+  else one "$out"; REPLY="OTHER git exit $rc: $REPLY"; fi
+}
+c_py() { # TEA_OFF CAFILE URL — /usr/bin/python3 (it ignores SSL_CERT_FILE: the C bundle goes in as cafile=)
+  local rc out
+  /usr/bin/env -i $BASEENV "${jenv[@]}" ${1:+OPENSSL_X509_TEA_DISABLE=1} $T -k 5 30 /usr/bin/python3 -I -c $PY $3 \
+    ${2:+$2} > $WT/o 2> $WT/e; rc=$?
+  out=$(<$WT/o)
+  if (( rc == 124 || rc == 137 )); then REPLY="OTHER timed out"
+  elif [[ $out == (OK|CERT|OTHER)* ]]; then one "$out"
+  else one "$(<$WT/e)"; REPLY="OTHER python3 exit $rc: $REPLY"; fi
+}
+c_node() { # NODEBIN job|c CAFILE URL — job: the env from .env; c: --use-openssl-ca with SSL_CERT_FILE=CAFILE
+  local rc out; local -a e
+  if [[ $2 == job ]]; then e=("${jenv[@]}"); else e=(NODE_OPTIONS=--use-openssl-ca SSL_CERT_FILE=$3); fi
+  /usr/bin/env -i $BASEENV "${e[@]}" $T -k 5 30 $1 -e $JS $4 > $WT/o 2> $WT/e; rc=$?
+  out=$(<$WT/o)
+  if (( rc == 124 || rc == 137 )); then REPLY="OTHER timed out"
+  elif [[ $out == (OK|CERT|OTHER)* ]]; then one "$out"
+  else one "$(<$WT/e)"; REPLY="OTHER node exit $rc: $REPLY"; fi
+}
+obs_k() { # TARGET -> REPLY = "TRUE …" | "FALSE …" | "NA …": does the served chain anchor at an excluded root AND fail
+  # against K's filtered copy? (openssl@3, the host pinned to one resolved address)
+  local h=${${URL[$1]#https://}%/} d=$W/k/$1 ip k1 k2 why; local -a inter ut
+  [[ -s $W/excluded.pem ]] || { REPLY="NA no anchor with an excluded key in Apple's store"; return }
+  ip=$($T -k 5 20 /usr/bin/dscacheutil -q host -a name $h 2>/dev/null | /usr/bin/awk '/^ip_address:/ {print $2; exit}')
+  [[ $ip =~ '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' ]] || { REPLY="NA $h has no IPv4 address"; return }
+  /bin/rm -rf -- ${d:?}; /bin/mkdir -p $d
+  $T -k 5 30 $O s_client -connect $ip:443 -servername $h -showcerts < /dev/null > $d/sc.txt 2> /dev/null
+  split_pem $d/sc.txt $d/chain
+  (( REPLY >= 1 )) || { REPLY="NA no chain served by $h ($ip)"; return }
+  inter=($d/chain/c*.pem(N)); inter=(${inter[2,-1]})
+  ut=(); (( ${#inter} )) && { /bin/cat $inter > $d/inter.pem; ut=(-untrusted $d/inter.pem) }
+  $O verify -no-CAfile -no-CApath -no-CAstore -CAfile $W/excluded.pem $ut $d/chain/c0001.pem > /dev/null 2>&1; k1=$?
+  $O verify -no-CAfile -no-CApath -no-CAstore -CAfile $W/kfiltered.pem $ut $d/chain/c0001.pem > /dev/null 2>&1; k2=$?
+  why="edge $ip, $(( ${#inter} + 1 )) certificate(s) served; to the excluded roots:"
+  if (( k1 == 0 )); then why+=" OK"; else why+=" fails"; fi
+  why+="; to K's filtered copy:"
+  if (( k2 == 0 )); then why+=" OK"; else why+=" fails"; fi
+  if (( k1 == 0 && k2 != 0 )); then REPLY="TRUE ($why)"; else REPLY="FALSE ($why)"; fi
+}
+ROWS=()
+rows_init() { # -> ROWS, RDESC, RCT (C source: pre = the pre-fix pass; bundle = a saved unfiltered bundle), RBIN
+  local b r
+  ROWS=(nscurl curl-job curl-bundle git-job git-bundle python3-job python3-bundle node-brew)
+  RDESC=(nscurl "/usr/bin/nscurl (Apple's URLSession: the deny)"
+    curl-job "/usr/bin/curl as a job sees it (env from .env; Apple's trust fallback on)"
+    curl-bundle "/usr/bin/curl, its bundle alone (OPENSSL_X509_TEA_DISABLE=1)"
+    git-job "/usr/bin/git as a job sees it (env from .env; Apple's trust fallback on)"
+    git-bundle "/usr/bin/git, its bundle alone (OPENSSL_X509_TEA_DISABLE=1)"
+    python3-job "/usr/bin/python3 as a job sees it (it reads /etc/ssl/cert.pem; Apple's trust fallback on)"
+    python3-bundle "/usr/bin/python3, its bundle alone (OPENSSL_X509_TEA_DISABLE=1)"
+    node-brew "Homebrew node ($NODE; env from .env)")
+  RCT=(nscurl pre curl-job pre curl-bundle bundle git-job pre git-bundle bundle python3-job pre python3-bundle bundle
+    node-brew bundle)
+  RBIN=(node-brew $NODE)
+  for b in $RUNNER_DIR/externals/node*/bin/node(N); do
+    r=${b:h:h:t}; ROWS+=($r); RDESC[$r]="the runner's externals $r ($b; env from .env)"; RCT[$r]=bundle; RBIN[$r]=$b
+  done
+  : > $W/rows.tsv
+  for r in $ROWS; do print -r -- "$r$TAB$RCT[$r]$TAB$RDESC[$r]" >> $W/rows.tsv; done
+}
+run_f() { # ROW TARGET -> REPLY: the row as described
+  local u=$URL[$2]
+  case $1 in
+    (nscurl) c_nscurl $u ;;
+    (curl-job) c_curl '' '' $u ;;
+    (curl-bundle) c_curl 1 '' $u ;;
+    (git-job) c_git '' '' $u ;;
+    (git-bundle) c_git 1 '' $u ;;
+    (python3-job) c_py '' '' $u ;;
+    (python3-bundle) c_py 1 '' $u ;;
+    (*) c_node $RBIN[$1] job '' $u ;;
+  esac
+}
+run_c() { # ROW TARGET -> REPLY: the same client with a saved UNFILTERED bundle (bundle rows only)
+  local u=$URL[$2] cb
+  case $1 in
+    (curl-bundle|git-bundle) cb=$cb_curl ;;
+    (python3-bundle) cb=$cb_apple ;;
+    (*) cb=$cb_brew ;;
+  esac
+  [[ $cb == NA* ]] && { REPLY=$cb; return }
+  case $1 in
+    (curl-bundle) c_curl 1 $cb $u ;;
+    (git-bundle) c_git 1 $cb $u ;;
+    (python3-bundle) c_py 1 $cb $u ;;
+    (*) c_node $RBIN[$1] c $cb $u ;;
+  esac
+}
+probe() { # PASS (pre|post)
+  local pass=$1 d=$W/obs/$1 row t
+  [[ $pass == pre || $pass == post ]] || { say "STOP unknown pass '$pass'"; exit 2 }
+  need $T $O $NODE
+  if [[ $pass == pre ]]; then say "2. the PRE-FIX probe pass"; else say "4. the POST-FIX probe pass"; fi
+  jobenv
+  say "$pass: the job env from $RUNNER_DIR/.env: ${${jenv[*]}:-none}"
+  cbundle ${sslfile:-$APPLE_BUNDLE}; cb_curl=$REPLY
+  cbundle $APPLE_BUNDLE; cb_apple=$REPLY
+  cbundle $BREW_BUNDLE; cb_brew=$REPLY
+  for t in $TARGETS; do obs_k $t; print -r -- $REPLY > $d/K.$t; say "$pass K $TNAME[$t]: $REPLY"; done
+  rows_init
+  for row in $ROWS; do
+    for t in $TARGETS; do
+      run_f $row $t; print -r -- $REPLY > $d/$row.$t.F; say "$pass $row $TNAME[$t] F: $REPLY"
+      if [[ $pass == post && $RCT[$row] == bundle && ( $t == emsign || $t == aaa ) ]]; then
+        run_c $row $t; print -r -- $REPLY > $d/$row.$t.C; say "$pass $row $TNAME[$t] C: $REPLY"
+      fi
+    done
+  done
+}
+
+# ---- step 3: the fix
+ts_export() { # -> $W/ts.plist (absent when the admin domain holds no trust settings); return 1 when it cannot be
+  # read (REPLY = why)
+  local out
+  /bin/rm -f $W/ts.plist
+  out=$($T -k 5 30 $SEC trust-settings-export -d $W/ts.plist 2>&1) && return 0
+  /bin/rm -f $W/ts.plist
+  [[ $out == *'No Trust Settings'* ]] && return 0
+  one "$out"; return 1
+}
+deny_state() { # SHA1 -> REPLY: "deny" (every admin entry of that certificate is result 3, and one applies to every
+  # policy or to SSL) | "none" (no entry) | "other: …"
+  local f=$W/ts.plist k key= i r pn n=0 ssl=0 bad=
+  [[ -f $f ]] || { REPLY=none; return }
+  for k in ${(f)"$($PLUTIL -p $f | /usr/bin/grep -oE '"[0-9A-Fa-f]{40}" =>' | /usr/bin/tr -d '" =>')"}; do
+    [[ ${(U)k} == ${(U)1} ]] && key=$k
+  done
+  [[ -n $key ]] || { REPLY=none; return }
+  for (( i = 0; i < 64; i++ )); do
+    $PLUTIL -extract trustList.$key.trustSettings.$i xml1 -o - $f > /dev/null 2>&1 || break
+    n=$(( n + 1 ))
+    r=$($PLUTIL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsResult raw -o - $f 2>/dev/null) || r=1
+    if $PLUTIL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsPolicy xml1 -o - $f > /dev/null 2>&1; then
+      pn=$($PLUTIL -extract trustList.$key.trustSettings.$i.kSecTrustSettingsPolicyName raw -o - $f 2>/dev/null)
+      [[ $r == 3 && ${(L)pn} == *ssl* ]] && ssl=1
+    else
+      [[ $r == 3 ]] && ssl=1
+    fi
+    [[ $r == 3 ]] || bad+=" entry $i has result $r;"
+  done
+  if (( n == 0 )); then REPLY="other: an entry without a trust setting (that means: trusted as a root)"
+  elif [[ -n $bad ]]; then REPLY="other:$bad"
+  elif (( ! ssl )); then REPLY="other: every deny names a policy that is not SSL"
+  else REPLY=deny; fi
+}
+fix_bundles() {
+  local l real copy x num before after tmp; local -a q f drop names paths
+  for l in ${(f)"$(<$W/saved.tsv)"}; do
+    q=("${(@ps:\t:)l}"); real=$q[1] copy=$q[2]
+    paths=(${(f)"$(/usr/bin/awk -F'\t' -v r=$real '$2 == r {print $1}' $W/bundles.tsv)"})
+    if ! /usr/bin/cmp -s $real $copy; then fail "bundle $real changed after it was saved: not filtered"; continue; fi
+    drop=() names=()
+    for x in ${(f)"$(<${copy:r}.tsv)"}; do
+      f=("${(@ps:\t:)x}")
+      if [[ $f[1] == - ]]; then fail "bundle $real holds a certificate the stage cannot hash ($f[3]): not filtered"; continue 2; fi
+      (( ${EXCLUDED_SPKI[(Ie)$f[1]]} )) || continue
+      num=${${f[4]:t}#c}; drop+=($(( 10#${num%.pem} ))); names+=("$f[3] (SPKI $f[1])")
+    done
+    before=$(<${copy:r}.split/count)
+    if (( ! ${#drop} )); then
+      say "bundle ${(j:, :)paths} -> $real: $before certificates, none with an excluded key: already absent (pass)"; continue
+    fi
+    drop_blocks $real "${drop[*]}" $W/new.pem || { fail "bundle $real: the filter failed: unchanged"; continue }
+    split_pem $W/new.pem $W/new.split; after=$REPLY
+    (( after == before - ${#drop} )) || { fail "bundle $real: after $after is not before $before minus ${#drop}: unchanged"; continue }
+    tmp=$($SUDO -n /usr/bin/mktemp ${real:h}/.${real:t}.emudhra.XXXXXX) || { fail "bundle $real: mktemp beside it failed: unchanged"; continue }
+    if $SUDO -n /bin/cp -p $real $tmp && $SUDO -n /bin/cp -X $W/new.pem $tmp \
+       && [[ $(/usr/bin/stat -f '%Su:%Sg %Lp' $tmp) == $(/usr/bin/stat -f '%Su:%Sg %Lp' $real) ]] \
+       && $SUDO -n /bin/mv -f $tmp $real; then
+      say "bundle ${(j:, :)paths} -> $real: before $before, removed ${#drop}, after $after (owner and mode kept)"
+      for x in $names; do say "bundle   removed: $x"; done
+    else
+      $SUDO -n /bin/rm -f -- $tmp
+      fail "bundle $real: the in-place replace failed: unchanged"
+    fi
+  done
+}
+fix_deny() {
+  local l out rc; local -a q
+  [[ -s $W/excluded.tsv ]] || { say "deny: no anchor with an excluded key: nothing to deny"; return }
+  ts_export || say "deny: the admin trust settings cannot be read before the deny ($REPLY): every deny is written"
+  for l in ${(f)"$(<$W/excluded.tsv)"}; do
+    q=("${(@ps:\t:)l}")   # SHA1 SHA256 SPKI SUBJECT SOURCES PEM
+    deny_state $q[1]
+    if [[ $REPLY == deny ]]; then say "deny: $q[4] (SHA-1 $q[1]): already denied"; continue; fi
+    out=$($SUDO -n $T -k 5 30 $SEC add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain $q[6] 2>&1); rc=$?
+    one "$out"
+    if (( rc == 0 )); then say "deny: $q[4] (SHA-1 $q[1], SPKI $q[3]): denied${REPLY:+ ($REPLY)}"
+    elif (( rc == 124 || rc == 137 )); then fail "deny: $q[4] (SHA-1 $q[1]): timed out after 30 s (macOS may have asked for a dialog that nobody can answer): $REPLY"
+    else fail "deny: $q[4] (SHA-1 $q[1]): security add-trusted-cert exited $rc: $REPLY"; fi
+  done
+}
+fix_env() {
+  local f=$RUNNER_DIR/.env; local -a want
+  want=(NODE_OPTIONS=--use-openssl-ca SSL_CERT_FILE=${BREW_BUNDLE:A})
+  if [[ -e $f || -L $f ]]; then
+    if [[ -f $f && ! -L $f && "$(<$f)" == "${(F)want}" ]]; then say ".env: $f already holds exactly the two lines (pass)"; return; fi
+    if [[ -f $f && ! -L $f ]] && ! /usr/bin/grep -q -E '^[A-Za-z_][A-Za-z0-9_]*=' $f; then
+      say ".env: $f exists with no setting in it ($(/usr/bin/wc -c < $f | /usr/bin/tr -d ' ') bytes, no KEY=VALUE line): replaced"
+    else
+      fail ".env: $f exists with other settings: the stage does not merge it"; return
+    fi
+  fi
+  if print -rl -- $want > $f.new && /bin/mv -f $f.new $f; then say ".env: $f written: ${(j:, :)want}"
+  else /bin/rm -f $f.new; fail ".env: cannot write $f"; fi
+}
+fix() {
+  need $T $O $SEC $SUDO
+  say "3. the fix"
+  fix_bundles
+  fix_deny
+  fix_env
+}
+
+# ---- step 5: the census (offline; it changes nothing)
+vc() { # PEM -> REPLY = verify-cert's "Verify Result" line, else its last line; returns its exit status
+  local out rc; local -a ls m
+  out=$($T -k 5 30 $SEC verify-cert -c $1 -p basic -L 2>&1); rc=$?
+  ls=(${(f)out}); m=(${(M)ls:#*Verify Result*})
+  one "${m[1]:-${ls[-1]-}}"; return $rc
+}
+census_bundles() {
+  local p l real all; local -a q reals
+  for l in ${(f)"$(<$W/bundles.tsv)"}; do
+    q=("${(@ps:\t:)l}")
+    if [[ ${q[1]:A} == "$q[2]" ]]; then say "census: $q[1] -> $q[2] (as saved)"
+    else fail "census: $q[1] now resolves to ${q[1]:A}, not $q[2] as saved"; fi
+  done
+  reals=(${APPLE_BUNDLE:A} ${BREW_BUNDLE:A})
+  for real in ${(u)reals}; do
+    split_pem $real $W/census.split || fail "census: $real holds a PEM block that is not a certificate"
+    hash_files pem $W/census.tsv $W/census.split/c*.pem(N)
+    counts $W/census.tsv
+    say "census: $real: $n_read certificates, $n_hashed hashed, $n_hits with an excluded key"
+    (( n_read >= BUNDLE_FLOOR )) || fail "census: $real: $n_read certificates, below the floor $BUNDLE_FLOOR"
+    (( n_read == n_hashed )) || fail "census: $real: $n_cannot certificate(s) cannot be hashed: nothing proves they are not excluded"
+    for l in ${(f)"$(<$W/census.tsv)"}; do
+      q=("${(@ps:\t:)l}")
+      (( ${EXCLUDED_SPKI[(Ie)$q[1]]} )) && fail "census: $real still holds $q[3] (SPKI $q[1])"
+    done
+  done
+  for p in $CAPATHS; do
+    [[ -d $p ]] || { say "census: CApath $p: absent"; continue }
+    all=0
+    for l in $p/*(N-.); do
+      if certinfo $l pem || certinfo $l der; then
+        all=$(( all + 1 ))
+        (( ${EXCLUDED_SPKI[(Ie)${REPLY%%$TAB*}]} )) && fail "census: CApath $p holds a certificate with an excluded key: $l"
+      fi
+    done
+    say "census: CApath $p: $all certificate(s)"
+  done
+  return 0
+}
+census_anchors() {
+  local l; local -a q assets
+  for l in ${(f)"$(<$W/sources.tsv)"}; do
+    q=("${(@ps:\t:)l}")   # LABEL NAME PATH FLOOR VERSION
+    if [[ $q[5] == unreadable ]]; then fail "census: anchors $q[2] ($q[3]) cannot be read"; continue; fi
+    counts $W/anchors/$q[1].tsv
+    say "census: anchors $q[2] ($q[3], version $q[5]): $n_read read, $n_hashed hashed, $n_cannot cannot hash, $n_hits with an excluded key"
+    if (( q[4] > 0 )); then
+      (( n_hashed >= q[4] )) || fail "census: anchors $q[2]: $n_hashed hashed, below the floor $q[4] (a moved path or a broken hash?)"
+    else
+      (( n_read > 0 )) || fail "census: anchors $q[2] ($q[3]) holds no readable certificate"
+    fi
+  done
+  assets=(${(M)${(f)"$(/usr/bin/cut -f1 $W/sources.tsv)"}:#asset*})
+  (( ${#assets} )) || say "census: anchors PKITrustStore asset: none"
+  return 0
+}
+census_deny() {
+  local l rc s; local -a q
+  ts_export || fail "census: the admin trust settings cannot be read: $REPLY"
+  for l in ${(f)"$(<$W/excluded.tsv)"}; do
+    q=("${(@ps:\t:)l}")   # SHA1 SHA256 SPKI SUBJECT SOURCES PEM
+    deny_state $q[1]
+    if [[ $REPLY == deny ]]; then say "census: $q[4] (SHA-1 $q[1]): the admin trust settings deny it (result 3)"
+    else fail "census: $q[4] (SHA-1 $q[1]): no deny in the admin trust settings ($REPLY)"; fi
+    vc $q[6]; rc=$?
+    if (( rc != 0 )); then say "census: $q[4]: verify-cert exits $rc: $REPLY (pass)"
+    else fail "census: $q[4]: verify-cert exits 0: Apple still trusts it ($REPLY)"; fi
+  done
+  for s in $CONTROL_ROOTS; do
+    l=$(/usr/bin/awk -F'\t' -v s=$s '$1 == s {print; exit}' $W/controls.tsv)
+    [[ -n $l ]] || { fail "census: control root $s is not in $KC: the check has no control"; continue }
+    q=("${(@ps:\t:)l}")
+    vc $q[3]; rc=$?
+    if (( rc == 0 )); then say "census: control $q[2]: verify-cert exits 0 (pass)"
+    else fail "census: control $q[2]: verify-cert exits $rc: $REPLY (a control root must stay trusted)"; fi
+  done
+}
+census_env() {
+  local f=$RUNNER_DIR/.env; local -a want
+  want=(NODE_OPTIONS=--use-openssl-ca SSL_CERT_FILE=${BREW_BUNDLE:A})
+  if [[ ! -f $f || -L $f ]]; then fail "census: $f is absent"
+  elif [[ "$(<$f)" == "${(F)want}" ]]; then say "census: $f holds exactly ${(j:, :)want} (pass)"
+  else fail "census: $f is not exactly ${(j:, :)want}: it holds the keys ${(j:, :)${${(f)"$(<$f)"}%%=*}}"; fi
+}
+census_nodediff() { # NAMED (the file's text, or @ABSENT@)
+  local named=$1 b r l out; local -a computed want have q
+  for b in $RUNNER_DIR/externals/node*/bin/node(N); do
+    r=${b:h:h:t}
+    if ! out=$(/usr/bin/env -i $BASEENV $T -k 5 60 $b -e $NODEDIFF_JS ${BREW_BUNDLE:A} 2>&1); then
+      one "$out"; fail "census: $r: the Node difference cannot be computed: $REPLY"; continue
+    fi
+    for l in ${(f)out}; do computed+=("$r $l"); done
+  done
+  computed=(${(o)computed})
+  say "census: the externals Node difference (bundled roots, tls.rootCertificates, minus ${BREW_BUNDLE:A}): ${#computed} entries"
+  for l in $computed; do say "NODE-DIFF $l"; done
+  if [[ $named == @ABSENT@ ]]; then
+    fail "census: no named list: setup/emudhra.node-diff is absent (the computed difference is printed above, NODE-DIFF lines)"
+    return
+  fi
+  for l in ${(f)named}; do [[ $l == '#'* || -z ${l//[[:space:]]/} ]] && continue; q=(${=l}); want+=("$q[1] ${q[2]-}"); done
+  for l in $computed; do q=(${=l}); have+=("$q[1] $q[2]"); done
+  want=(${(o)want}) have=(${(o)have})
+  if [[ "${(j:,:)want}" == "${(j:,:)have}" ]]; then say "census: it equals the named list setup/emudhra.node-diff (${#have} entries) (pass)"; return; fi
+  fail "census: the externals Node difference is not the named list setup/emudhra.node-diff"
+  for l in ${have:|want}; do say "census:   in the image, not in the named list: $l"; done
+  for l in ${want:|have}; do say "census:   in the named list, not in the image: $l"; done
+}
+treelist() { # DIR OUT — one line per file ("f SHA256  PATH") and per symlink ("l TARGET PATH") of DIR's bin and externals
+  ( cd $1 && { /usr/bin/find bin externals -type f -print0 | /usr/bin/xargs -0 /usr/bin/shasum -a 256 | /usr/bin/sed 's/^/f /'
+               /usr/bin/find bin externals -type l | while IFS= read -r p; do print -r -- "l $(/usr/bin/readlink $p) $p"; done } ) \
+    | /usr/bin/sort > $2
+}
+census_digests() { # TARBALL SHA256
+  local tgz=$1 tsha=$2 s n l
+  [[ -f $tgz ]] || { fail "census: the runner tarball is not in the guest ($tgz): bin/ and externals/ not checked"; return }
+  s=$(/usr/bin/shasum -a 256 < $tgz); s=${s[1,64]}
+  [[ $s == $tsha ]] || { fail "census: the runner tarball's sha256 is $s, not $tsha: bin/ and externals/ not checked"; return }
+  /bin/rm -rf -- ${W:?}/rt; /bin/mkdir -p $W/rt
+  /usr/bin/tar -xzf $tgz -C $W/rt 2>/dev/null || { fail "census: the runner tarball does not unpack"; return }
+  treelist $RUNNER_DIR $W/tree-image.txt
+  treelist $W/rt $W/tree-tarball.txt
+  n=$(/usr/bin/wc -l < $W/tree-tarball.txt); n=${n//[[:space:]]/}
+  s=$(/usr/bin/shasum -a 256 < $W/tree-tarball.txt); s=${s[1,64]}
+  if (( n > 0 )) && /usr/bin/cmp -s $W/tree-image.txt $W/tree-tarball.txt; then
+    say "census: $RUNNER_DIR/bin and externals equal the runner tarball's ($n entries, listing sha256 $s) (pass)"
+  else
+    fail "census: $RUNNER_DIR/bin and externals differ from the runner tarball's ($n entries in the tarball)"
+    for l in ${(f)"$(/usr/bin/diff $W/tree-tarball.txt $W/tree-image.txt | /usr/bin/head -20)"}; do say "census:   $l"; done
+  fi
+  /bin/rm -rf -- ${W:?}/rt
+}
+census() { # NAMED TARBALL SHA256
+  need $T $O $SEC $PLUTIL
+  say "5. the census (offline; it changes nothing)"
+  census_bundles
+  census_anchors
+  census_deny
+  census_env
+  census_nodediff $1
+  census_digests $2 $3
+}
+
+# ---- step 6: the verdicts
+verdict() { # ROW CSOURCE TARGET CTLOK CTLWHY -> VK (FAIL|rejects|nm|exempt) and REPLY; prints the line
+  local row=$1 t=$3 k f c craw
+  get post K $t; k=$REPLY
+  get post $row $t F; f=$REPLY
+  if [[ $2 == pre ]]; then get pre $row $t F; craw=$REPLY; c="$REPLY (the pre-fix pass)"
+  else get post $row $t C; craw=$REPLY; c=$REPLY; fi
+  if [[ $row == nscurl && $t == aaa && $2 == pre && $craw == CERT* ]]; then
+    # Exempt only when Apple already rejected it BEFORE the fix with nscurl's certificate error (-1202 with -9807:
+    # its revocation of EM DV TLS CA - G3B, seen on the host 26A434). Any other pre-fix answer gets the normal
+    # verdict: it trusted (26A428, 2026-10-22), it timed out, or another load failure.
+    VK=exempt; REPLY="rejected before any fix (Apple's revocation of EM DV TLS CA - G3B) — the one exempt row"
+  elif [[ $k != TRUE* ]]; then
+    VK=nm
+    if [[ $k == FALSE* ]]; then REPLY="not measured: the host no longer serves an excluded chain"
+    else REPLY="not measured: K ${k:-was not observed}"; fi
+  elif [[ $f == OK* ]]; then VK=FAIL; REPLY="FAIL: it trusts a chain that anchors at an excluded root"
+  elif (( ! $4 )); then VK=nm; REPLY="not measured: a control was not reached:$5"
+  elif [[ $craw == OK* && $f == CERT* ]]; then VK=rejects; REPLY=rejects
+  else VK=nm; REPLY="not measured: F ${f:-was not observed}; C ${craw:-was not observed}"; fi
+  say "  $TNAME[$t]: K $k | F $f | C $c"
+  say "  $TNAME[$t]: -> $REPLY"
+}
+report() { # FIXED (1: the fix ran; 0: a red-run copy)
+  local fixed=$1 l row t f pre want k ctlok ctlwhy nrej=0 nnm=0 nex=0; local -a q fails pf
+  say "6. the verdicts"
+  (( fixed )) || say "RED RUN: this copy of golden-emudhra has no fix step (step 3 was left out)"
+  [[ -s $W/rows.tsv ]] || fails+=("no probe row was recorded")
+  for l in ${(f)"$(<$W/rows.tsv)"}; do
+    q=("${(@ps:\t:)l}"); row=$q[1]
+    say "row $row: $q[3]"
+    ctlok=1 ctlwhy=
+    for t in github gitlab; do
+      get pre $row $t F; pre=$REPLY
+      get post $row $t F; f=$REPLY
+      case $f in
+        (OK*) say "  $TNAME[$t] (control): $f (pre-fix: $pre) -> reached" ;;
+        (CERT*) ctlok=0; ctlwhy+=" $TNAME[$t];"; fails+=("probe: $row, $TNAME[$t] (a control): a certificate error: ${f#CERT }")
+                say "  $TNAME[$t] (control): $f (pre-fix: $pre) -> FAIL: a certificate error on a control" ;;
+        (*) ctlok=0; ctlwhy+=" $TNAME[$t] (${f:-not observed});"
+            say "  $TNAME[$t] (control): ${f:-not observed} (pre-fix: $pre) -> not measured" ;;
+      esac
+    done
+    for t in emsign aaa; do
+      verdict $row $q[2] $t $ctlok "$ctlwhy"
+      case $VK in
+        (FAIL) fails+=("probe: $row, $TNAME[$t]: ${REPLY#FAIL: }") ;;
+        (rejects) nrej=$(( nrej + 1 )) ;;
+        (exempt) nex=$(( nex + 1 )) ;;
+        (*) nnm=$(( nnm + 1 )) ;;
+      esac
+    done
+  done
+  for t want in emsign TRUE aaa TRUE github FALSE gitlab FALSE; do
+    get post K $t; k=$REPLY
+    if (( fixed )); then say "K $TNAME[$t]: ${k:-not observed}"
+    elif [[ ${k%% *} == $want ]]; then say "K control (red run): $TNAME[$t] K ${k%% *}, want $want: holds"
+    else fails+=("probe: K control (red run): $TNAME[$t]: K is ${k:-not observed}, want $want"); fi
+  done
+  fails=(${(f)"$(<$W/fail.txt)"} $fails)
+  pf=(${(M)fails:#probe:*})
+  say "probe rows: $nrej rejects, $nnm not measured, $nex exempt; probe FAILs: ${#pf}"
+  (( nrej )) || say "NOTE: no probe row reads 'rejects': the live probes proved nothing in this build; only the census speaks"
+  say "covered: /usr/bin/curl, /usr/bin/git and /usr/bin/python3 (their bundle AND Apple's trust check they fall back to: the deny);"
+  say "  Homebrew node and openssl@3 (the Homebrew bundle); the runner's externals node20/node24, which run every JS action"
+  say "  (through .env: NODE_OPTIONS=--use-openssl-ca, SSL_CERT_FILE=the Homebrew bundle); Apple Security-framework"
+  say "  clients: URLSession and Swift, Go on macOS, nscurl (the deny)."
+  say "not covered (they carry their own roots): pip's vendored certifi, bun, Java, Rust webpki-roots, the runtimes of"
+  say "  setup-* actions, Electron (it drops --use-openssl-ca); the runner's .NET TLS: expected covered by the deny, not measured."
+  say "limits: a process started with --use-bundled-ca refuses to start (it cannot be combined with --use-openssl-ca); a"
+  say "  workflow that sets its own NODE_OPTIONS or SSL_CERT_FILE drops that part of the fix silently; a reader of"
+  say "  /etc/ssl/cert.pem with Apple's fallback off (OPENSSL_X509_TEA_DISABLE=1, or a non-Apple OpenSSL pointed at it)"
+  say "  loses chains that need AAA Certificate Services (that file has no other root for them; seen on jsDelivr's"
+  say "  Cloudflare edge, Sectigo R46); the live probes depend on a third party's test hosts (their leaves expire"
+  say "  2027-05-03; then every row reads 'not measured' and only the census speaks)."
+  for l in $fails; do say "FAIL $l"; done
+  (( ${#fails} == 0 ))
+}
+
+# ---- dispatch
+W=${2-}
+[[ $W == /private/tmp/golden-emudhra.* && -d $W ]] || { say "STOP no work folder: '$W'"; exit 2 }
+WT=$W/tmp; /bin/mkdir -p $WT || exit 2
+case ${1-} in
+  (save) save ;;
+  (probe) probe ${3-} ;;
+  (fix) fix ;;
+  (census) census "${3-}" "${4-}" "${5-}" ;;
+  (report) report ${3-0} || exit 1 ;;
+  (*) say "STOP unknown step '${1-}'"; exit 2 ;;
+esac
+exit 0
+EOS
+)
+
+/bin/zsh -f -n -c "$GUEST" || die "the guest part does not parse (above)"
+phase() { # STEP WORKDIR [ARGS…] — one step in the guest; its output prefixed; returns the step's exit status
+  local l
+  tart exec $vm /bin/zsh -f -c "$GUEST" golden-emudhra-guest "$@" 2>&1 | while IFS= read -r l; do say "$l"; done
+  return ${pipestatus[1]}
+}
+W=
+cleanup() { # remove the guest work folder (it holds the unfiltered copies); return 1 when it is still there
+  [[ -n $W ]] || return 0
+  gexec /bin/rm -rf -- ${W:?} > /dev/null 2>&1
+  if gexec /bin/test -e $W > /dev/null 2>&1; then say "could NOT remove the guest work folder $W"; return 1; fi
+  say "removed the guest work folder $W (it held the unfiltered copies)"
+  W=
+}
+trap cleanup EXIT
+
+gexec /usr/bin/true > /dev/null 2>&1 || die "$vm does not answer tart exec"
+W=$(gexec /usr/bin/mktemp -d /private/tmp/golden-emudhra.XXXXXX) || { W=; die "mktemp in the guest failed" }
+[[ $W =~ '^/private/tmp/golden-emudhra\.[A-Za-z0-9]+$' ]] || { W=; die "mktemp in the guest printed an unexpected path" }
+say "start: $vm; the order: save, pre-fix probes, the fix, post-fix probes, census, verdicts"
+problems=()
+phase save $W || die "step 1 (save) did not complete: nothing was changed"
+phase probe $W pre || problems+=("step 2 (the pre-fix probe pass) did not complete")
+fixed=0
+# >>> FIX
+fixed=1
+phase fix $W || problems+=("step 3 (the fix) did not complete")
+# <<< FIX
+phase probe $W post || problems+=("step 4 (the post-fix probe pass) did not complete")
+if [[ -f $NODEDIFF && -r $NODEDIFF ]]; then named=$(<$NODEDIFF); else named=@ABSENT@; fi
+phase census $W "$named" $tgz $tsha || problems+=("step 5 (the census) did not complete")
+phase report $W $fixed; r=$?
+(( r == 0 || r == 1 )) || problems+=("step 6 (the verdicts) did not complete")
+for m in $problems; do say "FAIL $m"; done
+cleanup || problems+=("the guest work folder was not removed")
+trap - EXIT
+if (( r == 0 && ${#problems} == 0 )); then
+  say "GREEN: the census passed and no probe row failed"
+  exit 0
+fi
+say "RED: see each FAIL above; no image may be made from $vm"
+exit 1

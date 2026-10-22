@@ -1,0 +1,362 @@
+#!/bin/zsh -f
+# wall-check — prove the network wall LIVE, then write the wall stamp the shim needs to start runner VMs and the wall
+# proof runner-enable needs. Run as ci on the host (/Users/ci/bin/wall-check):
+#   wall-check                       the full proof. Refuses while the agent is enabled; holds the runner lock.
+#   wall-check --derive              print every derived value and its source, then stop. Boots nothing, takes no lock,
+#                                    checks no FLAG and never touches the stamp: safe while the agent runs.
+#   wall-check --classify ADDR       print "global" or "private" (RFC 1918, CGNAT or link-local) for one IPv4 address.
+#   wall-check --probe-shim [SHIM]   only the shim probes (step 3), against SHIM (default: the installed shim).
+#                                    Refuses while the agent is enabled; holds the runner lock; never touches the stamp.
+# Design: docs/design.md ("wall-check"). The full proof, in this order:
+#   1. FILES green (wall-files-check); a golden image exists; no n1-wall / n1-ctl VM is left over.
+#   2. It DERIVES what it probes from this Mac, never from a constant. Host addresses: every IPv4 of every up interface
+#      but lo0 and the vmnet bridges (a bridge* whose members are all vmenet*); a GLOBAL one stops. LAN interface: the
+#      default route's, which must be a hardware port; only ONE hardware port may hold IPv4. LAN address: its one IPv4.
+#      Router: the default route's gateway. mDNS name: LocalHostName + .local, which dns-sd ON THE HOST must resolve to
+#      a host address. X, the home's public IPv4: checkip.amazonaws.com and OpenDNS must agree, and X must be global.
+#      Ports probed on X: X_PORTS plus `forwards = …` from WALLCONF (absent: the fixed list only).
+#   3. The shim probes: each name used must be absent from `tart list`. Through the INSTALLED shim, every argv
+#      runscaler never sends gets the shim's exact argv refusal — also in a Latin-1 locale that really widens
+#      [0-9a-f] (else STOP: the probe could not fail) — and runscaler's own argv does not. REAL never gets `run`.
+#   4. A CONTROL VM on plain NAT (no wall) must reach the LAN address on 22 or 5900, and the router by ping or by
+#      TCP 53, 80 or 443, so a "not reached" below can be believed.
+#   5. A VM with the production flags (real-run) must not reach: each host address on 22 and 5900; the router, by
+#      every method that reached it in the control; its own gateway on 22 and 5900; any mDNS answer for the host's
+#      name (no answer may be a host address). A PRIVATE target passes only on a TIMEOUT (softnet drops it; "refused"
+#      means a packet got through). X passes on a timeout or a refusal (softnet admits X; the router refuses a closed
+#      port). https://github.com must answer.
+#   6. Only then: the stamp (sha256 of Tart, softnet and the shim, and the macOS build: four lines, as the shim reads
+#      it) and WALLPROOF (sha256 of the wall-check, real-run and wall-files-check that ran this proof).
+# A STOP of the full proof deletes the stamp and the wall proof (fail closed). A STOP of --derive or --probe-shim, and
+# a refusal to start (agent enabled, lock held), deletes nothing. VM logs: LOGDIR/wall-check-<vm>.log.
+set -u
+export LC_ALL=C
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+SHIM=/usr/local/libexec/liveapp-ci/tart
+SOFTNET=/usr/local/bin/softnet
+STAMP=/Users/ci/.config/runner/wall-stamp
+WALLPROOF=/Users/ci/.config/runner/wall-proof
+WALLCONF=/Users/ci/.config/runner/wall.conf
+FLAG=/Users/ci/.config/runner/enabled
+LOCK=/tmp/runner.lock
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+BIN=/Users/ci/bin
+X_PORTS=(22 23 53 80 443 5900 7547 8080 8443)
+ARGV_REASON="liveapp-ci-shim: REFUSE run admits only: run runner-<8 hex> --no-graphics"
+SUB_REASON="liveapp-ci-shim: REFUSE not a Tart subcommand this shim passes: 'create'"
+HOSTILE=(LC_ALL=de_DE.ISO8859-1 LC_COLLATE=de_DE.ISO8859-1)
+
+mode=full locked=0
+refuse() { print -r -- "wall-check: STOP $*"; exit 1 }   # a refusal to start: touches nothing
+stop() {   # a failed check: the full proof deletes the stamp and the wall proof; the other modes touch nothing
+  if [[ $mode == full ]]; then
+    /bin/rm -f $STAMP $WALLPROOF
+    print -r -- "wall-check: STOP $* (stamp and wall proof deleted)"
+  else
+    print -r -- "wall-check: STOP $*"
+  fi
+  exit 1
+}
+say() { print -r -- "wall-check: $(/bin/date '+%H:%M:%S') $*" }
+usage() { print -u2 -r -- "usage: wall-check [--derive | --classify ADDR | --probe-shim [SHIM]]"; exit 2 }
+
+classify() { # ADDR -> REPLY = global | private (RFC 1918, CGNAT, link-local); return 1 when not a dotted-quad IPv4
+  local -a o
+  [[ ${1-} =~ '^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$' ]] || return 1
+  o=($match)
+  (( o[1] <= 255 && o[2] <= 255 && o[3] <= 255 && o[4] <= 255 )) || return 1
+  if (( o[1] == 10 || (o[1] == 172 && o[2] >= 16 && o[2] <= 31) || (o[1] == 192 && o[2] == 168) \
+        || (o[1] == 100 && o[2] >= 64 && o[2] <= 127) || (o[1] == 169 && o[2] == 254) )); then
+    REPLY=private
+  else
+    REPLY=global
+  fi
+}
+
+# ---- arguments; the full proof and --probe-shim re-run themselves under the runner lock
+if [[ ${1-} == --locked ]]; then locked=1; shift; fi
+case ${1-} in
+  (--classify)   (( $# == 2 )) || usage
+                 classify "$2" || { print -r -- "wall-check: '$2' is not an IPv4 address"; exit 2 }
+                 print -r -- $REPLY; exit 0 ;;
+  (--derive)     (( $# == 1 )) || usage; mode=derive ;;
+  (--probe-shim) (( $# <= 2 )) || usage; mode=probe; target=${2:-$SHIM} ;;
+  ('')           mode=full ;;
+  (*)            usage ;;
+esac
+if [[ $mode != derive ]]; then
+  [[ ! -e $FLAG ]] || refuse "the agent is enabled: run $BIN/runner-disable first"
+  if (( ! locked )); then
+    /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked "$@"
+    rc=$?
+    (( rc != 75 )) || refuse "the runner lock is held (runscaler, an install, golden-build or another wall-check is running)"
+    exit $rc
+  fi
+fi
+
+tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
+lines() { # TEXT -> reply = its non-empty lines (an array, also for one line)
+  reply=("${(@f)1}"); reply=(${reply:#})
+}
+rand8() { # -> REPLY = 8 random lowercase hex digits
+  REPLY=$(/usr/bin/od -An -N4 -tx1 /dev/urandom | /usr/bin/tr -d ' \n')
+  [[ $REPLY =~ '^[0-9a-f]{8}$' ]] || stop "cannot read 4 random bytes"
+}
+
+# ---- 2. the derived values
+derive() {
+  local out l a dev p n
+  local -a members nonv hw withip lanips manswers fwd
+  hostips=() haddrs=()
+  out=$(/sbin/ifconfig -l -u) || stop "ifconfig -l -u failed"
+  for dev in ${=out}; do
+    [[ $dev == lo0 ]] && continue
+    l=$(/sbin/ifconfig $dev 2>/dev/null) || stop "ifconfig $dev failed"
+    if [[ $dev == bridge* ]]; then
+      lines "$(print -r -- $l | /usr/bin/awk '$1 == "member:" {print $2}')"; members=($reply)
+      nonv=(${members:#vmenet*})
+      if (( ${#members} && ! ${#nonv} )); then say "derive   skipped $dev: a vmnet bridge (members: ${members[*]})"; continue; fi
+    fi
+    lines "$(print -r -- $l | /usr/bin/awk '$1 == "inet" {print $2}')"
+    for a in $reply; do
+      classify $a || stop "an address on $dev is not IPv4: '$a'"
+      [[ $REPLY == private ]] || stop "the wall does not cover a public address on the host: $a on $dev"
+      hostips+=($a) haddrs+=("$dev $a")
+    done
+  done
+  (( ${#hostips} )) || stop "no IPv4 address on any up interface (ifconfig -l -u)"
+  say "derive   host addresses: ${(j:, :)haddrs}  (ifconfig: every up interface but lo0 and vmnet bridges; all private)"
+
+  out=$(/sbin/route -n get default 2>&1) || stop "no default route (route -n get default: ${out//$'\n'/ })"
+  lanif=$(print -r -- $out | /usr/bin/awk '$1 == "interface:" {print $2}')
+  router=$(print -r -- $out | /usr/bin/awk '$1 == "gateway:" {print $2}')
+  [[ -n $lanif ]] || stop "the default route names no interface"
+  classify "$router" || stop "the default route's gateway is not an IPv4 address: '$router'"
+  lines "$(/usr/sbin/networksetup -listallhardwareports 2>/dev/null | /usr/bin/awk '$1 == "Device:" {print $2}')"; hw=($reply)
+  (( ${#hw} )) || stop "networksetup -listallhardwareports names no device"
+  (( ${hw[(Ie)$lanif]} )) || stop "default route is not a hardware port (a VPN?): $lanif"
+  withip=()
+  for dev in $hw; do
+    l=$(/sbin/ifconfig $dev 2>/dev/null) || continue
+    [[ -n $(print -r -- $l | /usr/bin/awk '$1 == "inet"') ]] && withip+=($dev)
+  done
+  (( ${#withip} <= 1 )) || stop "turn Wi-Fi off (or unplug Ethernet): one network only (IPv4 on ${(j:, :)withip})"
+  lines "$(/sbin/ifconfig $lanif | /usr/bin/awk '$1 == "inet" {print $2}')"; lanips=($reply)
+  (( ${#lanips} == 1 )) || stop "the LAN interface $lanif has ${#lanips} IPv4 addresses, want exactly 1"
+  lanip=$lanips[1]
+  say "derive   LAN interface: $lanif  (route -n get default; a hardware port: networksetup -listallhardwareports)"
+  say "derive   LAN address: $lanip  (ifconfig $lanif)"
+  say "derive   router: $router  (route -n get default: gateway)"
+
+  n=$(/usr/sbin/scutil --get LocalHostName 2>/dev/null)
+  [[ $n =~ '^[A-Za-z0-9-]{1,63}$' ]] || stop "scutil --get LocalHostName gave no usable name: '$n'"
+  mdns=$n.local
+  out=$(/usr/bin/mktemp -t wall-check-mdns) || stop "mktemp failed"
+  /usr/bin/dns-sd -G v4 $mdns > $out 2>&1 &
+  p=$!
+  /bin/sleep 4; kill $p 2>/dev/null; wait $p 2>/dev/null
+  lines "$(/usr/bin/awk -v n="${mdns:l}" 'index(tolower($0), n) {print $6}' $out)"; manswers=($reply)
+  /bin/rm -f -- $out
+  a=; for l in $manswers; do (( ${hostips[(Ie)$l]} )) && a=$l; done
+  [[ -n $a ]] || stop "host-side mDNS control: dns-sd -G v4 $mdns on this Mac gave no host address (answers: ${manswers[*]:-none})"
+  say "derive   mDNS name: $mdns -> $a  (scutil --get LocalHostName; dns-sd on this Mac)"
+
+  X=$(/usr/bin/curl -4s --max-time 10 https://checkip.amazonaws.com 2>/dev/null)
+  out=$(/usr/bin/dig -4 +short +time=5 +tries=2 myip.opendns.com @resolver1.opendns.com 2>/dev/null)
+  [[ -n $X && $X == $out ]] || stop "the home's public IPv4 is not confirmed by two sources: checkip.amazonaws.com said '$X', OpenDNS said '$out'"
+  classify $X || stop "the public IPv4 '$X' is not an IPv4 address"
+  [[ $REPLY == global ]] || stop "the public IPv4 $X is not a global address"
+  say "derive   public IPv4: $X  (checkip.amazonaws.com and OpenDNS agree)"
+
+  fwd=()
+  if [[ -e $WALLCONF || -L $WALLCONF ]]; then
+    [[ -f $WALLCONF && -r $WALLCONF ]] || stop "$WALLCONF is not a readable file"
+    n=0
+    while IFS= read -r l || [[ -n $l ]]; do
+      [[ $l =~ '^[[:space:]]*(#.*)?$' ]] && continue
+      [[ $l =~ '^forwards[[:space:]]*=[[:space:]]*([0-9]+([[:space:]]*,[[:space:]]*[0-9]+|[[:space:]]+[0-9]+)*)[[:space:]]*$' ]] \
+        || stop "$WALLCONF does not parse: want one line 'forwards = PORT, PORT, …'; got: $l"
+      (( n++ == 0 )) || stop "$WALLCONF has more than one forwards line"
+      for p in ${=match[1]//,/ }; do
+        [[ $p =~ '^[1-9][0-9]{0,4}$' ]] && (( p <= 65535 )) || stop "$WALLCONF: '$p' is not a port 1-65535"
+        fwd+=($p)
+      done
+    done < $WALLCONF
+  fi
+  xports=($X_PORTS $fwd); xports=(${(nu)xports})
+  if (( ${#fwd} )); then
+    say "derive   ports on $X: ${xports[*]}  (the fixed list + forwards from $WALLCONF: ${fwd[*]})"
+  else
+    say "derive   ports on $X: ${xports[*]}  (the fixed list only: ${WALLCONF:t} absent or without forwards)"
+  fi
+}
+
+# ---- 3. the shim probes
+probe_shim() { # SHIM — STOP on any wrong answer
+  local s=$1 o r hex ctl n
+  local -a have names
+  [[ $s == /* && -f $s && -x $s ]] || stop "the shim to probe is not an executable file: $s"
+  rand8; hex=$REPLY
+  rand8; ctl=$REPLY
+  [[ $ctl != $hex ]] || { rand8; ctl=$REPLY }
+  names=(x notrunner runner-0000000g runner-$hex runner-ABCD1234 runner-$ctl)
+  o=$(tart list --source local -q 2>&1) || stop "tart list failed: ${o//$'\n'/ }"
+  lines "$o"; have=($reply)
+  for n in $names; do
+    (( ${have[(Ie)$n]} == 0 )) || stop "a VM named '$n' exists: the shim probes need that name absent"
+  done
+  [[ $(/usr/bin/locale -a | /usr/bin/grep -cx 'de_DE.ISO8859-1') == 1 ]] \
+    || stop "locale -a does not list de_DE.ISO8859-1: the locale probe cannot run here"
+  o=$(/usr/bin/env -i $HOSTILE /usr/bin/locale 2>&1)
+  [[ $o == *'LC_COLLATE="de_DE.ISO8859-1"'* ]] || stop "in the Latin-1 env, locale does not report LC_COLLATE=de_DE.ISO8859-1"
+  /usr/bin/env -i $HOSTILE /bin/zsh -f -c '[[ runner-ABCD1234 =~ ^runner-[0-9a-f]{8}$ ]]' \
+    || stop "in the Latin-1 env, ^runner-[0-9a-f]{8}\$ does not match runner-ABCD1234: the locale probe cannot fail here"
+  one() { # WANT DESC [VAR=VALUE ...] -- ARG ... : the shim must exit 1 with exactly WANT
+    local want=$1 desc=$2 oo rr
+    local -a env
+    env=(HOME=/Users/ci PATH=/usr/bin:/bin)
+    shift 2
+    while [[ $1 != -- ]]; do env+=($1); shift; done
+    shift
+    oo=$(/usr/bin/env -i $env $s "$@" 2>&1); rr=$?
+    [[ $rr == 1 && "$oo" == "$want" ]] \
+      || stop "shim probe '$desc' through $s: want exit 1 and \"$want\", got exit $rr and \"${oo//$'\n'/ | }\""
+    say "shim     refused as required: $desc"
+  }
+  one "$SUB_REASON"  'create x' -- create x
+  one "$ARGV_REASON" 'run notrunner --no-graphics' -- run notrunner --no-graphics
+  one "$ARGV_REASON" 'run runner-0000000g --no-graphics' -- run runner-0000000g --no-graphics
+  one "$ARGV_REASON" "run runner-$hex (no --no-graphics)" -- run runner-$hex
+  one "$ARGV_REASON" "run runner-$hex --no-graphics --net-bridged=en0" -- run runner-$hex --no-graphics --net-bridged=en0
+  one "$ARGV_REASON" 'run runner-ABCD1234 --no-graphics in a Latin-1 locale' $HOSTILE -- run runner-ABCD1234 --no-graphics
+  # CONTROL: runscaler's own call must pass the argv gate (the shim then refuses it for another reason: no such VM)
+  o=$(/usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin $s run runner-$ctl --no-graphics 2>&1); r=$?
+  [[ "$o" != *"$ARGV_REASON"* ]] || stop "shim control 'run runner-$ctl --no-graphics' through $s: the argv gate refused runscaler's own call"
+  say "shim     control passed the argv gate: run runner-$ctl --no-graphics (then: exit $r, ${o//$'\n'/ | })"
+}
+
+if [[ $mode == derive ]]; then
+  derive
+  say "derive   OK: nothing booted, no lock taken, the stamp untouched"
+  exit 0
+fi
+if [[ $mode == probe ]]; then
+  probe_shim $target
+  say "PASS: the shim probes ($target)"
+  exit 0
+fi
+
+# ---- the full proof
+[[ ! -e $FLAG ]] || refuse "the agent is enabled: run $BIN/runner-disable first"
+lines "$(tart list --source local -q | /usr/bin/grep -E '^liveapp-mac-golden-[0-9]{8}$' | /usr/bin/sort)"
+IMAGE=${reply[-1]-}
+[[ -n $IMAGE ]] || stop "no golden image (liveapp-mac-golden-<yyyymmdd>): run $BIN/golden-build first"
+[[ -d $LOGDIR ]] || stop "no log folder $LOGDIR: run the install line again"
+pids=()
+finish() { local vm p; for p in $pids; do kill $p 2>/dev/null; done
+  for vm in n1-wall n1-ctl; do tart stop $vm > /dev/null 2>&1; tart delete $vm > /dev/null 2>&1; done }
+trap finish EXIT
+finish
+lines "$($BIN/wall-files-check)"
+[[ ${reply[1]-} == "FILES green" ]] || stop "FILES is not green: ${(j: | :)reply}"
+derive
+probe_shim $SHIM
+say "image $IMAGE"
+
+boot() { # VM [real-run args...] — clone the image, boot it, wait for tart exec
+  local vm=$1 n=0; shift
+  tart clone $IMAGE $vm || stop "clone $vm failed"
+  $BIN/real-run "$@" > $LOGDIR/wall-check-$vm.log 2>&1 &
+  pids+=($!)
+  until tart exec $vm true > /dev/null 2>&1; do (( n++ < 60 )) || stop "$vm did not answer tart exec"; /bin/sleep 3; done
+}
+probe() { # VM HOST PORT -> prints reached | refused | timeout | other:<text>
+  local out
+  out=$(tart exec $1 sh -c "nc -v -n -z -G 3 -w 3 $2 $3 2>&1; echo rc=\$?")
+  case $out in
+    (*succeeded*) print reached ;;
+    (*'Connection refused'*) print refused ;;
+    (*'timed out'*|*'Operation timed out'*) print timeout ;;
+    (*) print -r -- "other:${out//$'\n'/ }" ;;
+  esac
+}
+pingp() { # VM HOST -> prints reached | timeout | other:<text>
+  local out
+  local -a ls
+  out=$(tart exec $1 sh -c "/sbin/ping -n -c 2 -t 4 $2 > /dev/null 2>&1; echo rc=\$?")
+  ls=("${(@f)out}")
+  case ${ls[-1]} in
+    (rc=0) print reached ;;
+    (rc=2) print timeout ;;
+    (*) print -r -- "other:${out//$'\n'/ }" ;;
+  esac
+}
+private_blocked() { # TARGET-DESCRIPTION RESULT — a private target passes only on a timeout
+  [[ $2 == timeout ]] || stop "the walled VM reached the private target $1 ($2): a private target passes only on a timeout"
+  say "blocked  $1 (timeout)"
+}
+
+# ---- 4. the control VM, plain NAT
+boot n1-ctl --flags n1-ctl
+ctlports=()
+for p in 22 5900; do
+  r=$(probe n1-ctl $lanip $p); say "control  plain NAT -> $lanip:$p $r"
+  [[ $r == reached ]] && ctlports+=($p)
+done
+(( ${#ctlports} )) || stop "no control port: turn on Remote Login or Screen Sharing (plain NAT reached $lanip on neither 22 nor 5900)"
+rmethods=()
+r=$(pingp n1-ctl $router); say "control  plain NAT -> ping $router $r"
+[[ $r == reached ]] && rmethods+=(ping)
+for p in 53 80 443; do
+  r=$(probe n1-ctl $router $p); say "control  plain NAT -> $router:$p $r"
+  [[ $r == reached ]] && rmethods+=($p)
+done
+(( ${#rmethods} )) || stop "control: plain NAT reached the router $router by neither ping nor TCP 53, 80 or 443"
+tart stop n1-ctl > /dev/null 2>&1; tart delete n1-ctl > /dev/null 2>&1
+
+# ---- 5. the walled VM, production flags
+boot n1-wall n1-wall
+gw=$(tart exec n1-wall sh -c "/sbin/route -n get default | awk '/gateway/ {print \$2}'")
+classify "$gw" || stop "no default gateway in the walled VM ($gw)"
+say "VM up behind the wall; its gateway $gw"
+for a in $hostips; do
+  for p in 22 5900; do private_blocked "host $a:$p" "$(probe n1-wall $a $p)"; done
+done
+for m in $rmethods; do
+  if [[ $m == ping ]]; then private_blocked "router $router (ping)" "$(pingp n1-wall $router)"
+  else private_blocked "router $router:$m" "$(probe n1-wall $router $m)"; fi
+done
+for p in 22 5900; do private_blocked "the VM's gateway $gw:$p" "$(probe n1-wall $gw $p)"; done
+for p in $xports; do
+  r=$(probe n1-wall $X $p)
+  [[ $r == (timeout|refused) ]] || stop "the walled VM reached the public IPv4 $X:$p ($r)"
+  say "blocked  $X:$p ($r)"
+done
+# mDNS: an answer for the host's name can reach the VM (measured: the host's address on THAT VM's own vmnet bridge,
+# a random private /29 per boot); none may be a host address, and none may be reachable
+lines "$(tart exec n1-wall sh -c "dns-sd -G v4 $mdns > /tmp/mdns.txt 2>&1 & p=\$!; sleep 4; kill \$p 2>/dev/null; awk -v n='${mdns:l}' 'index(tolower(\$0), n) {print \$6}' /tmp/mdns.txt" 2>/dev/null)"
+maddrs=($reply)
+for a in $maddrs; do
+  (( ${hostips[(Ie)$a]} == 0 )) || stop "mDNS gave the walled VM a host address: $a"
+  classify "$a" || stop "mDNS gave the walled VM a non-IPv4 answer: '$a'"
+  for p in 22 5900; do private_blocked "mDNS answer $a:$p" "$(probe n1-wall $a $p)"; done
+done
+say "mDNS     ${#maddrs} answer(s) for $mdns (${maddrs[*]:-none}); none is a host address, none reachable"
+code=$(tart exec n1-wall curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://github.com)
+[[ $code == (200|301|302) ]] || stop "github.com did not answer from the walled VM (http $code)"
+say "allowed  https://github.com (http $code)"
+
+# ---- 6. the stamp and the wall proof
+h() { # FILE -> REPLY = its sha256, or STOP (never in a subshell: a STOP must end the proof)
+  local o; o=$(/usr/bin/shasum -a 256 < $1 2>/dev/null)
+  [[ $o =~ '^[0-9a-f]{64}  -$' ]] || stop "cannot hash $1"
+  REPLY=${o[1,64]}
+}
+build=$(/usr/bin/sw_vers -buildVersion)
+[[ $build =~ '^[0-9A-Za-z.]{1,32}$' ]] || stop "sw_vers -buildVersion gave '$build'"
+h $REAL; st=("real $REPLY"); h $SOFTNET; st+=("softnet $REPLY"); h $SHIM; st+=("shim $REPLY" "macos $build")
+h ${0:A}; pr=("wall-check $REPLY"); h $BIN/real-run; pr+=("real-run $REPLY"); h $BIN/wall-files-check; pr+=("wall-files-check $REPLY")
+print -rl -- $st > $STAMP.new && /bin/mv -f $STAMP.new $STAMP || stop "cannot write $STAMP"
+print -rl -- $pr > $WALLPROOF.new && /bin/mv -f $WALLPROOF.new $WALLPROOF || stop "cannot write $WALLPROOF"
+say "PASS: stamp written ($STAMP); wall proof written ($WALLPROOF)"
+$SHIM --liveapp-check

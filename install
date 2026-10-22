@@ -1,0 +1,259 @@
+#!/bin/zsh -f
+# install — put this release on the host, as ci. The release's install-line.txt downloads the release, checks its
+# sha256, unpacks it into a fresh /Users/ci/mac-runner/.unpack.XXXXXX and runs <that>/<VERSION>/install. You can also
+# re-run the installed copy: /Users/ci/mac-runner/<VERSION>/install. It runs from nowhere else.
+# Design: docs/design.md ("Install and update"). In this order:
+#   1. It refuses unless it runs as ci, the agent is disabled (no FLAG), and runner-lock-free says free; then it holds
+#      the runner lock for its whole run, checks FLAG again under it, and removes the leftovers of earlier failed runs
+#      (.dl.*, .unpack.*, *.prev.<n>).
+#   2. It refuses below 16 GB of RAM. It creates the config and log folders (0700).
+#   3. It moves this release in as /Users/ci/mac-runner/<VERSION>/ (an existing one: moved aside, the new one moved in,
+#      read back, the old one removed — never a folder moved onto a folder). From then on every path it uses is built
+#      from /Users/ci/mac-runner/<VERSION>/, never from $0.
+#   4. It downloads Tart, runscaler and softnet by digest (setup/downloads.manifest, bin/fetch.sh --replace): a
+#      download that differs from what is installed is REPLACED the same way. RUNNER_REC records the sha256 of the
+#      runscaler the last COMPLETE install left (written at the end of step 6; on a host without a record, the
+#      runscaler it has before this run's download). While the installed runscaler differs from that record, NEXT
+#      names the check workflow — also on a re-run after a failed install. A fresh host has no runscaler to re-check.
+#   5. It needs ci's GUI session. It points /Users/ci/mac-runner/current at <VERSION> (one rename, read back), links
+#      each tool /Users/ci/bin/<tool> -> /Users/ci/mac-runner/current/bin/<tool>, removes a link into mac-runner/ whose
+#      target is gone, (re)loads the LaunchAgent when its plist differs or it is not loaded (the old plist is kept as
+#      /Users/ci/mac-runner/plist.prev), and creates config.toml from the example only when there is none.
+#   6. It prints what is still needed — the ROOT LINE, WALL-CHECK, then runner-enable — from facts, never a version.
+#      WALL-CHECK is "needed" when the shim refuses on the stamp, the wall proof does not match the installed tools,
+#      or the stamp's macOS build is not this Mac's (runner-enable refuses on each of them). NEXT names the token and
+#      runner-start validate when config.toml is new or a token file it names is absent.
+# A re-run after a failure at any step ends in the same state as one clean run. Every stop: "install: STOP <reason>".
+set -u
+umask 077
+export LC_ALL=C
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+CI_USER=ci
+CI_HOME=/Users/ci        # a leftover is removed only below it
+APPS=/Users/ci/Applications
+BASE=/Users/ci/mac-runner
+BIN=/Users/ci/bin
+CONFDIR=/Users/ci/.config/runner
+CONFIG=/Users/ci/.config/runner/config.toml
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+FLAG=/Users/ci/.config/runner/enabled
+LOCK=/tmp/runner.lock
+WALLPROOF=/Users/ci/.config/runner/wall-proof
+STAMP=/Users/ci/.config/runner/wall-stamp
+SHIM=/usr/local/libexec/liveapp-ci/tart
+RECORD=/usr/local/libexec/liveapp-ci/install.digests
+RUNNER=/Users/ci/bin/runner
+RUNNER_REC=/Users/ci/mac-runner/runscaler.sha256
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+LABEL=sh.liveapp.mac-runner
+AGENTS=/Users/ci/Library/LaunchAgents
+TOOLS=(golden-build golden-prune real-run runner-disable runner-enable runner-lock-free runner-start wall-check wall-files-check)
+MIN_RAM_GB=16
+
+stop() { print -r -- "install: STOP $*"; exit 1 }
+say() { print -r -- "install: $*" }
+sha() { local o; o=$(/usr/bin/shasum -a 256 < $1 2>/dev/null) || return 1; [[ $o =~ '^[0-9a-f]{64}  -$' ]] || return 1; REPLY=${o[1,64]} }
+token_files() { # -> reply = the token files CONFIG names (env:RUNNER_TOKEN_X -> CONFDIR/token-x), comment lines skipped
+  local n
+  reply=()
+  for n in ${(u)${(f)"$(/usr/bin/grep -vE '^[[:space:]]*#' $CONFIG 2>/dev/null | /usr/bin/grep -oE 'env:RUNNER_TOKEN_[A-Z0-9_]+')"}}; do
+    reply+=($CONFDIR/token-${${n#env:RUNNER_TOKEN_}:l})
+  done
+}
+record_runner() { # RUNNER_REC = the sha256 of the installed runscaler (one rename); return 1 when it cannot
+  sha $RUNNER && print -r -- $REPLY > $RUNNER_REC.new && /bin/mv -f $RUNNER_REC.new $RUNNER_REC
+}
+stamp_macos() { # -> 0 when the wall stamp's macos line is this Mac's build; else REPLY = what differs (as runner-enable)
+  local b p
+  b=$(/usr/bin/sw_vers -buildVersion 2>/dev/null)
+  p=$(/usr/bin/awk '$1 == "macos" {print $2}' $STAMP 2>/dev/null)
+  [[ -n $b && $p == $b ]] && return 0
+  REPLY="the wall was proven on macOS build ${p:-(none in the stamp)}; this Mac runs ${b:-(sw_vers gave nothing)}"
+  return 1
+}
+
+switch_current() { # BASEDIR VERSION — point BASEDIR/current at VERSION (a relative link) by ONE rename; read back
+  local b=$1 v=$2
+  /bin/ln -sfh $v $b/current.new || stop "cannot make $b/current.new"
+  /bin/mv -fh $b/current.new $b/current || stop "cannot rename $b/current.new to $b/current"
+  [[ -L $b/current && $(/usr/bin/readlink $b/current) == $v ]] \
+    || stop "$b/current does not point at $v after the switch (it is: $(/usr/bin/readlink $b/current 2>/dev/null || print 'not a link'))"
+}
+
+# ---- 1. who, where, the agent off, the lock
+[[ $(/usr/bin/id -un) == $CI_USER ]] || stop "run it as $CI_USER"
+here=${0:A:h}
+version=
+[[ -f $here/VERSION ]] && version=$(<$here/VERSION)
+[[ $version =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || stop "no valid VERSION file in $here"
+[[ ${here:t} == $version ]] || stop "this release's folder is ${here:t}, its VERSION is $version"
+if [[ $here == $BASE/$version ]]; then
+  inplace=1
+elif [[ ${here:h:h} == $BASE && ${here:h:t} == .unpack.* ]]; then
+  inplace=0
+else
+  stop "install runs only from the install line's folder ($BASE/.unpack.*/$version) or from $BASE/$version, not from $here"
+fi
+[[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
+if [[ ${1-} != --locked ]]; then
+  lf=$($here/bin/runner-lock-free) || stop "runner-lock-free says '$lf': runscaler, wall-check or golden-build is running"
+  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked
+  rc=$?
+  (( rc != 75 )) || stop "the runner lock is held: runscaler, wall-check, golden-build or another install is running"
+  exit $rc
+fi
+# under the lock: the agent may have been enabled between the first check and the lock
+[[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
+for p in $BASE/.dl.*(N) $BASE/.unpack.*(N) $BASE/*.prev.<->(N) $APPS/tart.app.prev.<->(N) $BIN/runner.prev.<->(N) $BASE/downloads/*/*.prev.<->(N); do
+  [[ $p == ${here:h} ]] && continue                     # this run's own unpack folder
+  [[ $p == $CI_HOME/?*/?* ]] || continue
+  /bin/rm -rf -- "${p:?}" && say "removed the leftover $p"
+done
+
+# ---- 2. RAM, folders
+mem=$(/usr/sbin/sysctl -n hw.memsize)
+ncpu=$(/usr/sbin/sysctl -n hw.ncpu)
+[[ $mem =~ '^[0-9]+$' && $ncpu =~ '^[0-9]+$' ]] || stop "sysctl gave no RAM or CPU count"
+ram_gb=$(( mem / 1073741824 ))
+(( ram_gb >= MIN_RAM_GB )) || stop "this Mac has $ram_gb GB of RAM; at least $MIN_RAM_GB GB is needed"
+for d in $CONFDIR $LOGDIR; do
+  /bin/mkdir -p $d && /bin/chmod 700 $d || stop "cannot create $d (0700)"
+done
+
+# ---- 3. this release in, as $BASE/$version
+R=$BASE/$version
+if (( inplace )); then
+  say "release $version is already in place: $R"
+else
+  aside=
+  if [[ -e $R || -L $R ]]; then
+    aside=$R.prev.$$
+    /bin/mv $R $aside || stop "cannot move the installed $R aside"
+  fi
+  /bin/mv $here $R || stop "cannot move $here to $R${aside:+ (the earlier copy is $aside)}"
+  [[ -f $R/VERSION && $(<$R/VERSION) == $version ]] || stop "$R does not read back as release $version${aside:+ (the earlier copy is $aside)}"
+  if [[ -n $aside && $aside == $BASE/?*.prev.<-> ]]; then /bin/rm -rf -- "${aside:?}"; fi
+  /bin/rmdir ${here:h} 2>/dev/null
+  say "release $version moved in: $R"
+fi
+
+# ---- 4. the downloads, by digest
+/bin/mkdir -p $BIN $BASE/downloads $APPS || stop "cannot create $BIN, $BASE/downloads or $APPS"
+if [[ ! -f $RUNNER_REC && -f $RUNNER ]]; then
+  record_runner || stop "cannot write $RUNNER_REC (the record of the runscaler this host had)"
+fi
+$R/bin/fetch.sh --replace $R/setup/downloads.manifest || stop "a download failed (above); run the same line again"
+runner_changed=0
+if [[ -f $RUNNER_REC ]]; then
+  sha $RUNNER || stop "cannot hash $RUNNER"
+  [[ $(<$RUNNER_REC) == $REPLY ]] || runner_changed=1   # until a complete install records the new one (step 6)
+fi
+
+# ---- 5. GUI session, current, links, LaunchAgent, config
+uid=$(/usr/bin/id -u)
+/bin/launchctl print gui/$uid > /dev/null 2>&1 \
+  || stop "ci has no GUI session: log in as ci at the console, or restart the Mac (auto-login), then run the same line again"
+switch_current $BASE $version
+say "current -> $version"
+for t in $TOOLS; do
+  l=$BIN/$t target=$BASE/current/bin/$t
+  [[ -f $R/bin/$t ]] || stop "the release has no bin/$t"
+  if [[ -L $l ]]; then
+    [[ $(/usr/bin/readlink $l) == $target ]] && continue
+  elif [[ -e $l ]]; then
+    stop "$l is a file, not a link: move it aside first (README: \"Move an existing host onto a release\")"
+  fi
+  /bin/ln -sfh $target $l || stop "cannot link $l"
+  say "linked $l -> $target"
+done
+for l in $BIN/*(N@); do
+  [[ $(/usr/bin/readlink $l) == $BASE/* && ! -e $l ]] || continue
+  /bin/rm -f -- $l && say "removed the dangling link $l"
+done
+src=$R/config/$LABEL.plist dst=$AGENTS/$LABEL.plist
+loaded=0; /bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1 && loaded=1
+if ! /usr/bin/cmp -s $src $dst || (( ! loaded )); then
+  /bin/mkdir -p $AGENTS || stop "cannot create $AGENTS"
+  if [[ -f $dst ]] && ! /usr/bin/cmp -s $src $dst; then
+    if [[ -e $BASE/plist.prev ]]; then
+      say "kept the earlier $BASE/plist.prev (the way back to the plist before the first install)"
+    else
+      /bin/cp -X $dst $BASE/plist.prev || stop "cannot keep the old plist as $BASE/plist.prev"
+      say "kept the old plist as $BASE/plist.prev"
+    fi
+  fi
+  if (( loaded )); then
+    /bin/launchctl bootout gui/$uid/$LABEL || stop "launchctl bootout gui/$uid/$LABEL failed"
+    n=0; while /bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1; do (( n++ < 20 )) || stop "the LaunchAgent did not unload"; /bin/sleep 0.5; done
+  fi
+  /bin/cp -X $src $BASE/.plist.new && /bin/chmod 644 $BASE/.plist.new && /bin/mv -f $BASE/.plist.new $dst || stop "cannot install $dst"
+  /bin/launchctl bootstrap gui/$uid $dst || stop "launchctl bootstrap gui/$uid $dst failed"
+  say "LaunchAgent $LABEL loaded from $dst"
+fi
+/bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1 || stop "the LaunchAgent $LABEL is not loaded after the install"
+config_new=0
+if [[ ! -e $CONFIG ]]; then
+  cpu=$(( (ncpu - 2) / 2 )); (( cpu < 2 )) && cpu=2
+  memory=$(( (ram_gb - 8) / 2 * 1024 )); (( memory < 4096 )) && memory=4096
+  ex=$R/config/config.toml.example
+  [[ $(/usr/bin/grep -c '^cpu = [0-9][0-9]*' $ex) == 1 && $(/usr/bin/grep -c '^memory = [0-9][0-9]*' $ex) == 1 ]] \
+    || stop "the example config has not exactly one 'cpu = N' and one 'memory = N' line"
+  /usr/bin/sed -e "s/^cpu = [0-9][0-9]*.*/cpu = $cpu                           # install: max(2, floor((ncpu - 2) \/ 2)), ncpu $ncpu/" \
+               -e "s/^memory = [0-9][0-9]*.*/memory = $memory                    # install: MB, max(4096, floor((RAM GB - 8) \/ 2) x 1024), RAM $ram_gb GB/" \
+               $ex > $CONFIG.new && /bin/chmod 600 $CONFIG.new && /bin/mv $CONFIG.new $CONFIG || stop "cannot write $CONFIG"
+  config_new=1
+  say "created $CONFIG (0600) from the example: cpu $cpu, memory $memory MB"
+fi
+
+# ---- 6. what is still needed
+lit() { /usr/bin/awk -F= -v k=$1 '$1 == k {print $2}' $R/setup/02-wall.sh }
+typeset -A want
+want=(shim "$(lit SHIM_SHA)" shim.conf "$(lit CONF_SHA)" softnet "$(lit SOFTNET_SHA)" softnet-tarball "$(lit SOFTNET_TARBALL_SHA)")
+root=
+files=$($R/bin/wall-files-check 2>&1)
+if [[ ${files%%$'\n'*} != "FILES green" ]]; then
+  root="NEEDED: ${files%%$'\n'*} — use root-line.txt of the release you chose, in the ADMIN's own session"
+else
+  typeset -A rec
+  for l in ${(f)"$(<$RECORD)"}; do rec[${l%% *}]=${l#* }; done
+  for k in shim shim.conf softnet softnet-tarball; do
+    [[ ${rec[$k]-} == $want[$k] ]] && continue
+    root="NEEDED: $k differs — use root-line.txt of the release you chose, in the ADMIN's own session"
+    break
+  done
+fi
+say "ROOT LINE   ${root:-not needed (FILES green; install.digests = this release's four literals)}"
+wall=
+if [[ ! -x $SHIM ]]; then
+  wall="needed (no shim installed yet)"
+else
+  chk=$(/usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin $SHIM --liveapp-check 2>&1)
+  if (( $? )); then
+    if [[ $chk == *'free disk below the floor'* ]]; then
+      say "DISK        $chk — free disk first; this is not a wall-check problem"
+    else
+      wall="needed — the shim says: $chk"
+    fi
+  fi
+  if [[ -z $wall ]]; then
+    proof=()
+    for t in wall-check real-run wall-files-check; do sha $BIN/$t && proof+=("$t $REPLY"); done
+    [[ -f $WALLPROOF && $(<$WALLPROOF) == ${(F)proof} ]] || wall="needed (the wall proof does not match the installed tools)"
+  fi
+  [[ -z $wall ]] && ! stamp_macos && wall="needed ($REPLY)"
+fi
+say "WALL-CHECK  ${wall:-not needed}"
+next=()
+[[ -n $root ]] && next+=("the root line (root-line.txt of the release you chose, in the ADMIN's own session)")
+imgs=$(/usr/bin/env -i HOME=/Users/ci PATH=$PATH $REAL list --source local -q 2>/dev/null | /usr/bin/grep -cE '^liveapp-mac-golden-[0-9]{8}$')
+[[ $imgs == 0 ]] && next+=("$BIN/golden-build (no golden image yet), then its name as runner-image in $CONFIG")
+(( config_new )) && next+=("fill each [[scaleset]] of $CONFIG (README)")
+[[ -n $wall || -n $root ]] && next+=("$BIN/wall-check")
+need_token=$config_new
+token_files
+for f in $reply; do [[ -s $f ]] || need_token=1; done
+(( need_token )) && next+=("the token file (README: \"The token\"), then $BIN/runner-start validate")
+next+=("$BIN/runner-enable")
+(( runner_changed )) && next+=("the check workflow (runscaler was replaced)")
+record_runner || stop "cannot write $RUNNER_REC (the record of the installed runscaler); run the same line again"
+say "NEXT        ${(j: -> :)next}"

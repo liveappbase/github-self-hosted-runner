@@ -1,0 +1,24 @@
+# release-check — the repository's own check, on a GitHub-hosted Mac. It runs tools/release-check with the GENERIC
+# rules only: the maintainers' private list never leaves their machines (docs/operations.md, "Releasing").
+# No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
+# home-data rules read every reachable commit). Never pull_request_target; the token can only read.
+name: release-check
+on:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  release-check:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch the commit and its history
+        run: |
+          git init -q src
+          git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          git -C src fetch -q --no-tags origin "$GITHUB_SHA"
+          git -C src checkout -q --detach FETCH_HEAD
+      - name: tools/release-check
+        working-directory: src
+        run: /bin/zsh -f tools/release-check

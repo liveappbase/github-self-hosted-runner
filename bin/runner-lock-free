@@ -1,0 +1,40 @@
+#!/bin/zsh -f
+# runner-lock-free — is runscaler's lock free? Prints "free" (exit 0), "held" (exit 75), or "error: …" (exit 1).
+# Installed as /Users/ci/bin/runner-lock-free. Design: docs/design.md ("The runner lock").
+# HELD when one of ci's processes runs RUNNER's executable — the same device and inode, however it was started (by
+# path, ./name, a symlink, another case) — or when lockf(1) cannot take LOCK at once. The process check comes first:
+# macOS's daily tmp cleaner can unlink /tmp/runner.lock under a runscaler that has run for days, and a fresh lock file
+# would then read free. lsof failing is an error, never "free". lockf takes runscaler's flock for a moment and lets it go; -k keeps the file
+# (its inode never changes); -t 0 never waits.
+# ONLY as ci (by NAME: the uid differs from Mac to Mac): a lock file created by any other user (root or the admin) is
+# one runscaler (ci) cannot open.
+LOCK=/tmp/runner.lock
+LOCKF=/usr/bin/lockf
+RUNNER=/Users/ci/bin/runner
+CI_USER=ci
+LSOF=/usr/sbin/lsof
+
+if [[ $(/usr/bin/id -un) != $CI_USER ]]; then print -r -- "error: run only as $CI_USER: another user would make $LOCK unusable to runscaler"; exit 1; fi
+uid=$(/usr/bin/id -u)
+if [[ -e $RUNNER ]]; then
+  id=($(/usr/bin/stat -f '%d %i' $RUNNER)) || { print -r -- "error: stat failed on $RUNNER"; exit 1 }
+  dev=$(printf '0x%x' $id[1])
+  # every txt (executable or mapped image) of ci's processes; this check's own shell is one, so a working lsof is never
+  # empty
+  maps=$(/usr/bin/env -i $LSOF -n -P -a -u $uid -d txt -F Di 2>/dev/null) && [[ -n $maps ]] \
+    || { print -r -- "error: lsof failed: cannot tell whether $RUNNER runs"; exit 1 }
+  d=
+  for l in ${(f)maps}; do
+    case $l in
+      (D*) d=${l#D} ;;
+      (i*) if [[ $d == $dev && ${l#i} == $id[2] ]]; then print -r -- held; exit 75; fi ;;
+    esac
+  done
+fi
+/usr/bin/env -i $LOCKF -k -s -t 0 $LOCK /usr/bin/true
+rc=$?
+case $rc in
+  (0)  print -r -- free; exit 0 ;;
+  (75) print -r -- held; exit 75 ;;
+  (*)  print -r -- "error: lockf exit $rc"; exit 1 ;;
+esac

@@ -1,0 +1,171 @@
+# Design
+
+Why the host is built the way it is. The code headers point at the sections below. Day-to-day work is in [operations.md](operations.md); what the wall does and does not protect is in [../SECURITY.md](../SECURITY.md).
+
+## Decisions, each with its reason
+
+1. **Every job in a fresh VM, behind a mandatory wall.** A persistent runner keeps a credential on the host for jobs to find. Here the token stays on the host and VMs never receive it (`tart exec` forwards no environment; only the runner's one-job configuration enters a VM; the shim starts Tart with an empty environment). That choice holds ONLY with the wall, which is why the wall sits on the VM launch path itself.
+2. **No warm pool** (`pool-size = 0`). With a pool, a scale set takes VMs only from its own pool, and an idle warm VM holds one of the 2 slots. The cost is a cold boot per job (about 25 s).
+3. **Everything pinned by digest.** Tart, runscaler, softnet, the GitHub runner and the base image are fixed versions, each checked against a sha256 written in this repository before anything is extracted. An upgrade is a release of this repository.
+4. **Our own LaunchAgent, a wrapper, and a root-owned `tart` shim** that is the per-VM admission point. The shim has no setting the environment can relax and reads no path from the environment.
+5. **One launchd mechanism: PathState.** The agent runs while a flag file exists; `runner-enable` writes the flag after its checks. Nothing needs `launchctl` from an SSH session after install.
+6. **Two witnesses** (below): one answers "do the installed root files match their record?", the other "does the wall's proof match the installed files?".
+7. **One custom label per host** (liveapp uses `liveapp-mac`), without `self-hosted`: a custom label alone routes a job to a self-hosted runner, and a bare `runs-on: self-hosted` job then cannot land on this host by accident.
+8. **runscaler's known limits are named and worked around, not patched** ([../SECURITY.md](../SECURITY.md)).
+
+## The CI shape
+
+- runscaler runs ONE process with one `[[scaleset]]` per repository (or organization), `concurrent = 2`, `pool-size = 0`. It names each VM `runner-<8 hex>` and starts it with exactly `tart run runner-<8 hex> --no-graphics`.
+- Each VM is an APFS copy-on-write clone of the golden image, deleted after its job.
+- One host user, `ci`, runs Tart and runscaler and holds the token. Jobs never run as a host user.
+- runscaler holds `flock(2)` on `/tmp/runner.lock` while it runs. Every script that boots a VM outside runscaler (golden-build, wall-check) holds the same lock for its whole run, with the agent disabled, so runscaler cannot start under it.
+
+## The wall
+
+softnet is the only network attachment of a VM started with `--net-softnet…`: Tart hands the VM a socket to the softnet process, so every packet passes softnet's code. Each VM gets its own random private /29 network (vmnet shared mode, NAT to the host's network port). Only the VM's DHCP-assigned address may send. For every flow the VM starts, softnet decides by destination only: global addresses plus the VM's gateway, minus the block list. Blocking an address blocks every protocol and port on it. IPv6 and other packet types are dropped. Without root, softnet refuses to start and Tart stops the VM.
+
+The block list is `@host,224.0.0.0/4`: the host (which also is the VM's gateway) and multicast. Private destinations are not admitted at all. A global destination — including the home's own public address — is admitted and NATed to the host's address: the host's reach of its public address is the VM's reach. That hairpin is the router's to close ([../SECURITY.md](../SECURITY.md)).
+
+## The root files
+
+`setup/02-wall.sh` installs three root-owned files and a record:
+
+- `/usr/local/bin/softnet` (root:wheel, setuid, 4755) — the binary extracted from softnet's digest-checked tarball. softnet 0.24.1 is not code-signed, so its hash is its identity.
+- `/usr/local/libexec/liveapp-ci/tart` (root:wheel 755) — the shim, a copy of `bin/tart-shim`.
+- `/usr/local/libexec/liveapp-ci/shim.conf` (root:wheel 644) — the free-disk floor (100 GiB).
+- `/usr/local/libexec/liveapp-ci/install.digests` (root:wheel 644) — the record: the sha256 of the shim, shim.conf, softnet and softnet's tarball. 02-wall.sh is its only writer, and writes it last, so a stopped run fails closed.
+
+02-wall.sh carries those four hashes as literals, copies each staged file into a folder only root can open, compares the COPY's hash (so the file it checks is the file it installs), and changes nothing until every check passed. It installs each file by a rename, strips ACLs from the folders it owns and resets their modes.
+
+**The guard of the root line is the hash of root's own copy.** The operator runs 02-wall.sh only through the release's `root-line.txt`: that line copies the staged script to a root-owned 0600 file in `/private/tmp`, compares its sha256 with the release's, runs the copy with `/bin/zsh -f` (no startup file of the caller runs as root), and removes it, even on Ctrl-C. The staged script lives in ci's home, which ci can write; the hash is what ties the run to the release. `STAGE_SHIM` names the shim in its own version folder (`/Users/ci/mac-runner/<VERSION>/bin/tart-shim`, no link in the path), so 02-wall.sh's `! -L` checks mean what they say; the real guard stays the hashes.
+
+**The root files are frozen in v0.x.** `bin/tart-shim` keeps its exact bytes and shim.conf and softnet stay the same, so a host that has them needs no root step to update, and its stamp stays valid. `tools/release-check` pins all four literals to the record those hosts have installed, until a release declares a root step. The shim's own texts are therefore stale in places; [operations.md](operations.md) maps each of its refusals to the action to take.
+
+## The shim and real-run
+
+The shim REFUSES BY DEFAULT. It admits `run` only for runscaler's exact call `run runner-<8 hex> --no-graphics`, and only after every input was read, parsed and matched: the wall stamp holds the sha256 of Tart (REAL), softnet and the shim itself, and the free disk where Tart keeps its VMs is at least the floor. Then it gives the VM a random MAC (runscaler's fixed first MAC is the one softnet reserves for its DHCP server), appends one admission line to `admissions.log`, and execs Tart with the wall flags under `env -i`. Its other subcommands (`list pull clone set get stop delete exec prune ip`, a bare `--version`) pass through to Tart under `env -i`; anything else is refused (`create --from-ipsw` would boot an installer VM outside the wall). All its patterns run in the C locale, because a Latin-1 collation once made `[0-9a-f]` match `A–E`.
+
+`bin/real-run` boots a VM outside runscaler (golden-build, wall-check) behind the same wall: it reads the flags and the PATH from the shim's TEXT (never runs the shim), so a direct boot cannot drift from the boots runscaler gets. Only `gold-*`, `n1-*` and `s1-*` names are allowed; `--flags` (an explicit flag set, for wall-check's plain-NAT control) only for `n1-*`.
+
+## Two witnesses
+
+- **`tart --liveapp-check`** (the shim's own check, never calls Tart): does the stamp match the installed Tart, softnet and shim, and is there enough disk? runner-enable refuses on it.
+- **`wall-files-check`** (root-free, never runs the shim): FILES — do the installed shim, shim.conf and softnet hash to the record, with exact owners, modes and no ACL on them, their folders and the folders above? A red FILES is a STOP. STAMP — is the stamp current? A stale stamp means wall-check must run again.
+
+## Stamp and wall proof
+
+The stamp (`/Users/ci/.config/runner/wall-stamp`) is exactly four lines — the sha256 of Tart, softnet and the shim, and the macOS build — because the frozen shim parses exactly that. Only a PASS of wall-check writes it; any failed check of a full proof deletes it (fail closed).
+
+The wall proof (`/Users/ci/.config/runner/wall-proof`) names the sha256 of the three tools that ran that PASS: wall-check, real-run and wall-files-check. runner-enable refuses when the installed tools differ, so a changed proof tool needs a new proof before any job runs. runner-enable also refuses when the stamp's macOS build is not this Mac's (`sw_vers -buildVersion`: the frozen shim does not compare it, and a macOS update can change what reaches a VM), when the LaunchAgent is not loaded or when the runner lock is held, and writes the flag while holding the lock, so an install or a proof cannot start in between. install's WALL-CHECK line says "needed" on the same facts.
+
+## wall-check
+
+wall-check derives what it probes from the Mac it runs on, never from a constant, and every derivation that yields nothing, or no IPv4 address, stops with its own message:
+
+- **Host addresses:** every IPv4 address of every up interface except `lo0` and the vmnet bridges (a `bridge*` whose members are all `vmenet*`; the Thunderbolt Bridge is NOT excluded). A global address on the host stops the proof: the wall does not cover it.
+- **LAN interface and router:** the default route's interface and gateway. The interface must be a hardware port (else: a VPN?), and only one hardware port may have an address (Wi-Fi and Ethernet at once stops).
+- **mDNS name:** the LocalHostName plus `.local`, with a control on the host: `dns-sd` there must resolve it to a host address.
+- **The public address:** two sources (checkip.amazonaws.com and OpenDNS) must agree, and it must be global.
+- **Ports on the public address:** 22 23 53 80 443 5900 7547 8080 8443, plus the `forwards` the operator declares in `wall.conf` (a file that does not parse stops).
+
+Then, in this order, holding the runner lock with the agent disabled:
+
+1. **The shim probes.** Every probe name must be absent from `tart list`. Through the INSTALLED shim, each argv runscaler never sends must get the shim's exact argv refusal: `create x`; `run notrunner`, `run runner-0000000g`, `run runner-<hex>` without `--no-graphics`, `run runner-<hex> … --net-bridged=en0`; and `run runner-ABCD1234` in a Latin-1 locale. That last probe counts only if `locale -a` lists de_DE.ISO8859-1, the locale command reports it in that environment, AND in that environment the shim's own regex `^runner-[0-9a-f]{8}$` matches `runner-ABCD1234` without `LC_ALL=C` — so the probe tests a locale that really widens the class; if a later macOS does not, wall-check stops rather than pass. The control, runscaler's own call for an absent name, must NOT get the argv refusal. Tart never receives `run` from a probe. (`wall-check --probe-shim [SHIM]` runs these alone.)
+2. **The control VM**, on plain NAT (no wall), must reach the LAN address on 22 or 5900 (else: turn on Remote Login or Screen Sharing), and the router by ping or by TCP 53, 80 or 443.
+3. **The walled VM**, with the production flags, must not reach any host address on 22 or 5900; the router by every method that reached it in the control; its own gateway on 22 or 5900; or any mDNS answer for the host's name (no answer may be a host address). A PRIVATE target passes only on a TIMEOUT: softnet drops it, so a refusal would mean a packet got through. The public address passes on a timeout or a refusal: softnet admits it, and a refusal is the router's closed port. `https://github.com` must answer.
+4. Only then the stamp and the wall proof.
+
+`wall-check --derive` prints every derived value with its source and stops: it boots nothing, takes no lock, checks no flag and never touches the stamp, so it is safe while the agent runs. `wall-check --classify ADDR` prints `global` or `private` (RFC 1918, CGNAT and link-local are private).
+
+## The runner lock
+
+`runner-lock-free` answers free, held or error. It says held when one of ci's processes runs runscaler's executable (the same device and inode, however it was started) or when `lockf` cannot take `/tmp/runner.lock` at once. The process check comes first: macOS's daily temporary-file cleaner can unlink `/tmp/runner.lock` under a runscaler that has run for days, and a new lock file would then read free. A failing `lsof` is an error, never "free". It runs only as ci (by name): a lock file another user creates is one runscaler cannot open.
+
+## The service
+
+`runner-start` is the only way runscaler starts (the LaunchAgent runs `runner-start run`). It refuses — and never starts runscaler — when a token file the configuration names is missing, empty or not 0600, when `tart` on its PATH is not the shim, when a configured `runner-image` is not on the host, or (for `run`) when the stamp's macOS build is not this Mac's: the frozen shim does not compare it, so a build change while the agent is enabled stops at runscaler's next start, and launchd tries again every 300 s until wall-check has proven the wall on the new build. It bounds the two log files at 10 MB. `runner-enable` is the only way to turn the agent on; `runner-disable` removes the flag, signals runscaler (by device and inode, never by name), and waits until the lock is free.
+
+## Downloads
+
+`bin/fetch.sh` checks each tarball's sha256 before it extracts anything and installs one member of each. A directory member is compared by a tree digest (every file's path and sha256, sorted). A destination that already holds the same content is left as it is. One that differs is refused — unless install calls it with `--replace`, which it does only with the agent disabled and the lock held: the old one is moved aside, the new one moved in and read back, then the old one removed. Tart and runscaler keep fixed paths (`/Users/ci/Applications/tart.app` is the shim's REAL; `/Users/ci/bin/runner` is identified by its inode); softnet is staged in `/Users/ci/mac-runner/downloads/` for 02-wall.sh.
+
+## The eMudhra stage
+
+eMudhra's intermediate keys were compromised (2026-10). homebrew-core a2ee7ae08c6 excludes three root keys by the SHA-256 of their public key (SPKI): AAA Certificate Services, emSign Root TLS CA - G3 and emSign ECC Root CA - G3. The clients a job uses trust different stores, so no single change reaches all of them. `bin/golden-emudhra` is golden-build's last step before `tart stop`: it changes the image and then proves the change, and golden-build stops (no image is made) when it exits non-zero. It drives the build VM only through `tart exec`. Its guest part is one script in the same file; the stage parses it (`zsh -n`) before it starts, because release-check's syntax rule cannot see inside it.
+
+**The fix** touches only the image's system bundles, its admin trust settings and `<runner-dir>/.env`, never the runner's `bin/` or `externals/`:
+
+- **Bundles.** `/etc/ssl/cert.pem` and Homebrew's ca-certificates file (openssl@3's `cert.pem` is a link to it) are each resolved to their real file, and each real file is filtered once, in place: the owner and mode are kept, and the new content goes in by a rename in the same folder. Links stay links. Only the PEM blocks with an excluded key go; the text Apple's file carries beside each block stays (it is inert).
+- **A deny** in the admin trust settings for each of Apple's anchors with an excluded key: `sudo gtimeout -k 5 30 security add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain`. Measured: over `tart exec` this runs with no dialog. A timeout or a non-zero exit is a FAIL, never a hang. `-k` also adds a copy of the certificate to System.keychain; without a trust setting that copy is inert.
+- **`.env`** holds exactly `NODE_OPTIONS=--use-openssl-ca` and `SSL_CERT_FILE=<the Homebrew file>`. The runner loads it into every job, so its own Node (which runs every JS action) and Homebrew's Node read the filtered bundle.
+
+**The order.** (1) Save a copy of each bundle, still unfiltered, and read Apple's anchor set. (2) The pre-fix probe pass. (3) The fix. (4) The post-fix probe pass. (5) The census. (6) Print everything, then exit 1 on any FAIL of the census, the fix or a probe row. No FAIL ends the stage early, so a red run shows both what the census found and what the probes saw.
+
+**Apple's anchor set** is read from three sources, each with its counts printed: `/System/Library/Keychains/SystemRootCertificates.keychain` (FAIL below 100), `/System/Library/Security/Certificates.bundle/Contents/Resources/Anchors/*.cer` (FAIL below 200), and the PKITrustStore asset's `SystemRootCertificates.keychain`, found with `find` under the asset and cryptex folders ("none" when there is none, never a FAIL). The excluded anchors are the union of the sources, one per certificate. An anchor whose key the tools cannot read (Apple's ML-DSA anchors) is printed "cannot hash", never hashed as empty input.
+
+**The probe rows.** Each runs by absolute path under `gtimeout` against two eMudhra test paths (a public test site's hosts whose chains end at emSign ECC Root CA - G3 and at AAA Certificate Services) and two controls (github.com, and gitlab.com, whose chain crosses AAA but ends at a root that stays):
+
+| Row | F (the row) | C (its control) |
+|---|---|---|
+| `/usr/bin/nscurl` (Apple's URLSession) | as is | the same row in the pre-fix pass |
+| `/usr/bin/curl`, `/usr/bin/git`, `/usr/bin/python3` as a job sees them | the env from `.env`; Apple's trust fallback on | the same row in the pre-fix pass |
+| the same three, bundle only | `OPENSSL_X509_TEA_DISABLE=1` | a saved unfiltered bundle (curl `--cacert`, git `http.sslCAInfo`, python `cafile=`: `/usr/bin/python3` ignores `SSL_CERT_FILE`) |
+| Homebrew node, the runner's externals node20 and node24 | the env from `.env` | `--use-openssl-ca` with a saved unfiltered bundle |
+
+Apple's LibreSSL clients (curl, git, python3) ask Apple's trust only when their bundle fails, so the job view rests on the deny and the bundle-only view on the filter. A C bundle counts only when it holds every excluded anchor's key (else C is "not available"). **K** asks whether the host's served chain (openssl@3 `s_client -showcerts`, the host pinned to one resolved address) verifies to the excluded anchors AND fails against a filtered copy the stage makes itself from the saved Homebrew bundle. K separates a test host from gitlab.com, whose chain crosses AAA but ends at a root that stays, and it holds before any filter.
+
+**The verdicts**, one per (row, test path): K false → "not measured: the host no longer serves an excluded chain"; K true and F trusts → FAIL; K true, both controls reached, C trusts and F fails with the client's certificate error (curl exit 60; Node `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` or `CERT_REVOKED`; python `SSLCertVerificationError`; git "SSL certificate problem"; nscurl `-1202` with `-9807`, read from its output because nscurl exits 0 on every failure) → "rejects"; anything else → "not measured: <what was seen>". One row can be exempt: nscurl × the AAA path, and only when the pre-fix pass already got nscurl's certificate error there (`-1202` with `-9807`: Apple's revocation of the test hosts' intermediate); it is then printed, never FAIL, never "rejects". Any other pre-fix answer on that row (it trusted, it timed out, another failure) gets the normal verdict. A control answer at HTTP level (a 403, an auth prompt, "remote: Not Found") is success; a certificate error on a control is a FAIL. "Not measured" rows are printed, never counted as a pass; when no row reads "rejects", the stage says that only the census speaks for the build.
+
+**The census** is the gate, offline: no certificate with an excluded key in the two bundles (each by its real path, every certificate hashed, at least 100); none in the CApath folders; a deny for each excluded anchor (`trust-settings-export -d`, keyed by SHA-1: every entry result 3, one for every policy or for SSL) and `security verify-cert -c <it> -p basic -L` non-zero, while the control roots (USERTrust RSA, USERTrust ECC, ISRG Root X1, by their SHA-256) exit 0; `.env` exactly as above; each externals Node's bundled roots (`tls.rootCertificates`) minus the Homebrew file's roots equal the named list `setup/emudhra.node-diff` (by SHA-256 fingerprint); and the runner's `bin/` and `externals/` equal the runner tarball's, which golden-build keeps in the guest until this stage.
+
+**The named Node list** (`setup/emudhra.node-diff`) is one line per entry: the externals folder name, the certificate's SHA-256 fingerprint, and its name for people (`#` lines are comments; only the first two fields are compared). It changes with the runner version or the base image, so it is part of a release. When it is absent or differs, the census FAILs and prints the computed list as `NODE-DIFF` lines: review them, then make the file from a run where the fix ran (a red run's list lacks the excluded roots).
+
+**The red run.** The fix is the only code between the lines `# >>> FIX` and `# <<< FIX`, so the stage is seen red with a copy made by `sed '/^# >>> FIX$/,/^# <<< FIX$/d' golden-emudhra`. That copy reads itself as a red run and then also requires K's own control: both test paths K true, github.com and gitlab.com K false. The shipped file has no flag that skips the fix. A change to the stage is seen red again before it is released.
+
+**Covered:** `/usr/bin/curl`, `/usr/bin/git` and `/usr/bin/python3` (their bundle, and Apple's trust they fall back to: the deny); Homebrew node and openssl@3 (the Homebrew bundle); the runner's externals node20 and node24 (through `.env`); Apple Security-framework clients — URLSession and Swift, Go on macOS, nscurl (the deny). **Not covered** (they carry their own roots): pip's vendored certifi, bun, Java, Rust webpki-roots, the runtimes that setup-* actions download, Electron (it drops `--use-openssl-ca`). The runner's .NET TLS is expected to be covered by the deny; it is not measured.
+
+**Limits.** A process started with `--use-bundled-ca` refuses to start (it cannot be combined with `--use-openssl-ca`). A workflow that sets its own `NODE_OPTIONS` or `SSL_CERT_FILE` drops that part of the fix silently. A reader of `/etc/ssl/cert.pem` with Apple's fallback off (`OPENSSL_X509_TEA_DISABLE=1`, or a non-Apple OpenSSL pointed at that file) loses chains that need AAA Certificate Services, because Apple's file has no other root for them (seen on jsDelivr's Cloudflare edge, Sectigo R46); jobs get the Homebrew file through `.env`, which has that root. The live probes depend on a third party's test hosts, whose leaves expire 2027-05-03; then every row reads "not measured" and only the census speaks. When Apple distrusts these roots itself, the deny becomes redundant (harmless).
+
+golden-build runs `sync` in the guest after the stage and before `tart stop` (which forces the VM off after 30 s), and stops when it fails. The census reads the RUNNING build VM; what proves the SAVED image is the job-level check on a job VM cloned from it. It runs after runner-enable, so queued jobs can use the new image first: [operations.md](operations.md) ("Rebuilding the image") names that window and why it is accepted.
+
+**The job-level check** is [../examples/emudhra-check.yml](../examples/emudhra-check.yml): in a job's own VM it runs three JS rows (a local action with `using: node24`, one with `using: node20`, and a `run:` step with the job's `node`; each prints its Node's version and path; C = the same Node with a bundle carried in the checkout; K's filtered copy = Apple's roots in that VM without the excluded ones), reports nscurl only, and GATES on the deny itself: result 3 in `trust-settings-export -d` and `verify-cert` non-zero for each excluded anchor, 0 for the control roots. It is seen red once on an image built without the stage.
+
+**The host** gets the same deny as a hand step of this fleet, not an adopter step of v0.1: [operations.md](operations.md) ("The host eMudhra deny").
+
+## Layout on the host
+
+- `/Users/ci/mac-runner/<VERSION>/` — an unpacked release (`v0.1.0-rc.N` and `v0.1.0` share `0.1.0/`). `/Users/ci/mac-runner/current` points at one of them. The switch is one rename: `ln -sfh <VERSION> current.new && mv -fh current.new current`, then `current` must read back as `<VERSION>`, before any other link changes.
+- `/Users/ci/mac-runner/runscaler.sha256` — the sha256 of the runscaler the last complete install left.
+- `/Users/ci/bin/<tool>` → `/Users/ci/mac-runner/current/bin/<tool>`. `/Users/ci/bin/runner` (runscaler) and `/Users/ci/Applications/tart.app` stay real files.
+- `/Users/ci/.config/runner/` (0700): `config.toml` (0600), `token-*` (0600), `enabled`, `wall-stamp`, `wall-proof`, `wall.conf`. Logs: `/Users/ci/Library/Logs/mac-runner/` (0700).
+
+## Install and update
+
+A release is installed by its `install-line.txt`, run as ci. The line only downloads the tarball, checks its sha256, unpacks it into a fresh folder `/Users/ci/mac-runner/.unpack.XXXXXX` and runs `<that>/<VERSION>/install`. install then takes over (it refuses to run from anywhere else):
+
+1. It refuses unless it runs as ci, the agent is disabled and the lock is free; it holds the lock for its whole run, checks again under it that the agent is disabled, and first removes the leftovers of earlier failed runs.
+2. It refuses below 16 GB of RAM and creates the config and log folders.
+3. It moves its own tree in as `/Users/ci/mac-runner/<VERSION>/` (an existing one is moved aside, the new one moved in and read back, the old one removed — a folder is never moved onto a folder). From then on it uses only paths in that folder.
+4. It fetches the downloads, replacing what differs. `/Users/ci/mac-runner/runscaler.sha256` records the runscaler of the last complete install (on a host without it: the runscaler it had before the first download). While the installed runscaler differs from that record, install names the check workflow in NEXT, also on a re-run after a failed install.
+5. It needs ci's GUI session (a LaunchAgent lives there), switches `current`, makes the links, (re)loads the LaunchAgent when its plist differs or it is not loaded (keeping the old plist as `/Users/ci/mac-runner/plist.prev`, never inside LaunchAgents, where launchd would load it), and creates `config.toml` from the example only when there is none, with `cpu = max(2, floor((ncpu − 2) / 2))` and `memory = max(4096, floor((RAM GB − 8) / 2) × 1024)`.
+6. It prints the next steps from facts, never from a version: ROOT LINE "not needed" only when FILES is green AND the record equals this release's four literals, field by field; WALL-CHECK "needed" when the wall proof does not match the installed tools, the shim refuses on the stamp (a disk-floor refusal is reported as such), or the stamp's macOS build is not this Mac's; NEXT names the token and `runner-start validate` when `config.toml` is new or a token file it names is absent.
+
+A re-run after a failure at any step ends in the same state as one clean run.
+
+## Releases and the trust chain
+
+A release is an annotated tag `v<VERSION>` or `v<VERSION>-rc.N` and a GitHub release with immutable releases on, and four assets: the tarball, `install-line.txt`, `root-line.txt` and `SHA256SUMS` (the hashes of the other three and of `setup/02-wall.sh` as unpacked from the tarball). One command builds all four from the tag. The release notes only point to the assets. Operators copy the lines from the assets of the release they chose. The trust root is the named human maintainers.
+
+## The release gate
+
+`tools/release-check` is one script, not a test framework, and it never runs a file of `setup/` or a rendered line. It is red when: a script fails `zsh -n`; the plist fails `plutil -lint`; `bin/tart-shim` is not the frozen file; `LICENSE` is not the Apache-2.0 text byte for byte; one of 02-wall.sh's four literals differs from the live record of the root files, or from its source (the shim, the shim.conf text, the manifest, the softnet binary extracted from the digest-checked tarball); `STAGE_SOFTNET` is not the manifest's destination; `STAGE_SHIM`'s folder is not `VERSION`; the tag is not `v$VERSION` or `v$VERSION-rc.N`; one of the shared constant names has two values across the scripts; a literal hash is not 64 lowercase hex; or home data is in any commit reachable from the tag, in any commit message, or in the tag's own tagger line and message. Home data is checked by generic rules (private addresses, MAC addresses, GitHub tokens, `/Users/<name>` paths; exempt: `/Users/ci`, `/Users/admin` — the VM's user —, a line marked `# release-check: allow`, and the frozen shim) and by a private list of the maintainer's own values, given as a required argument of `--build`, which no exemption covers. Each rule was seen red once on a planted input before the code was copied in.
+
+## Named residuals
+
+- The public repository shows the wall's design; the wall does not rely on secrecy.
+- What is checked by reading, not by a run: 02-wall.sh's own refusal paths, real-run's argument parse, runner-lock-free's `lsof` identity, and install's fresh-host paths (a first adopter's install output is the first live evidence).
+- The root files are frozen in v0.x with stale shim texts; `ci` is a fixed name; the public address is not on the wall's block list (a later release may add it — a root step for every host).
+- wall-check probes a list of TCP ports on the public address, not every port and no UDP; forwards it does not know about are the operator's to declare.
+- Tart is ci-owned and is hashed, then run by path a moment later: a swap of Tart inside that window would boot a Tart the stamp does not match (softnet and the flags stay). Only a deliberate swap while runscaler runs could hit it. A root-owned Tart was weighed and not taken: every Tart upgrade would become a root step.
+- The pinned base image may leave its registry; a release then pins another.
+- The eMudhra stage covers the clients it names and no others; its limits are in "The eMudhra stage" above. Its anchor reading is written four times (the stage, the two host scripts, the example check), because a root script may read nothing outside itself and a job has none of this repository's files.

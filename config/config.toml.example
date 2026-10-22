@@ -1,0 +1,43 @@
+# config.toml — runscaler 0.9.5's configuration for this host. install creates /Users/ci/.config/runner/config.toml
+# (0600) from this example ONLY when there is none, and sets cpu and memory below from this Mac. Then fill each
+# [[scaleset]] (README: "Configure the scale sets"). Top-level keys must stay ABOVE the first [table].
+log-level = "info"
+concurrent = 2                    # Apple allows 2 macOS VMs per host
+health-address = "127.0.0.1"
+drain-timeout = "60m"
+provider = "tart"
+max-runners = 2
+
+[tart]
+runner-dir = "/Users/admin/actions-runner"   # in the guest: where golden-build put the GitHub runner
+cpu = 4                           # install: max(2, floor((ncpu - 2) / 2))
+memory = 8192                     # install: MB, max(4096, floor((RAM GB - 8) / 2) x 1024)
+pool-size = 0                     # no warm pool: an idle warm VM of one scale set would hold one of the 2 slots
+cache-budget = 60                 # GB for Tart's image cache
+dns = ["1.1.1.1", "8.8.8.8"]
+
+# One [[scaleset]] per repository (or organization). Copy the block for each.
+#   url           the repository (or organization) the runners serve
+#   token         env:RUNNER_TOKEN_<X> reads the file /Users/ci/.config/runner/token-<x> (lower case; letters,
+#                 digits and _ only), 0600 — README: "The token"
+#   labels        what a workflow names in runs-on (liveapp's workflows use liveapp-mac)
+#   runner-group  organization scale sets only: the runner group this set joins. Without it, the organization's
+#                 Default group. The group decides which repositories can send jobs here (README: "Configure the
+#                 scale sets")
+#   runner-image  the name golden-build printed (liveapp-mac-golden-<yyyymmdd>)
+#   disable-update — the trade:
+#     false (this example): the GitHub runner in each VM updates itself whenever a newer runner exists (not only when
+#       GitHub retires the old one), so each job downloads it until you rebuild the image. Jobs never strand on a
+#       retired runner. runscaler's README recommends false for Tart.
+#     true: the runner stays the image's version (the fastest jobs). When GitHub retires that version, jobs queue
+#       SILENTLY until you rebuild the image (a new release's pin) — do it within GitHub's grace period.
+[[scaleset]]
+url = "https://github.com/OWNER/REPO"
+name = "liveapp-mac-REPO"
+token = "env:RUNNER_TOKEN_OWNER"
+provider = "tart"
+labels = ["liveapp-mac"]
+# runner-group = "GROUP"
+max-runners = 2
+runner-image = "liveapp-mac-golden-YYYYMMDD"
+disable-update = false

@@ -1,0 +1,125 @@
+#!/bin/zsh -f
+# wall-files-check — are the wall's root-owned files the ones 02-wall.sh installed, and is the wall stamp current?
+# Installed as /Users/ci/bin/wall-files-check; root-free, and it never executes the shim.
+# Design: docs/design.md ("The root files", "Two witnesses").
+# Prints exactly two kinds of line:
+#   FILES green                  — or one "FILES red: <reason>" line per fault
+#   STAMP current | STAMP none | STAMP stale: <what>
+# FILES: the shim, shim.conf and softnet hash to the record 02-wall.sh wrote (install.digests: shim, shim.conf, softnet
+# and softnet-tarball, each once, nothing else); each of softnet (-rwsr-xr-x), the shim (-rwxr-xr-x), shim.conf and
+# the record (-rw-r--r--), both directories and their parents (drwxr-xr-x) is OWNER, of its type (a symlink is not),
+# with EXACTLY that mode and no ACL (an ACL grants what the mode bits do not show; a shim ci cannot run would let
+# runscaler's PATH search fall through to another tart); the record is present, non-empty and readable.
+# A red FILES is a STOP: wall-check and runner-enable refuse. Exit 1 when red, else 0.
+# STAMP: the stamp's real/softnet/shim fields against the hashes of REAL, SOFTNET and SHIM as installed. Stale means
+# wall-check must run again; it is not a stop.
+# The constants below are the named inputs (all absolute). OWNER is the owner every checked path must have.
+SHIM=/usr/local/libexec/liveapp-ci/tart
+CONF=/usr/local/libexec/liveapp-ci/shim.conf
+RECORD=/usr/local/libexec/liveapp-ci/install.digests
+LIBDIR=/usr/local/libexec/liveapp-ci
+SOFTNET=/usr/local/bin/softnet
+BINDIR=/usr/local/bin
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+STAMP=/Users/ci/.config/runner/wall-stamp
+SHASUM=/usr/bin/shasum
+STAT=/usr/bin/stat
+LS=/bin/ls
+OWNER=root:wheel
+
+set -u
+export LC_ALL=C   # the record and stamp patterns in the C locale, whatever the caller's
+TOOLENV=(/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C)
+red=()
+typeset -A rec
+
+sha256_of() { # FILE -> REPLY = its sha256; returns 1 when it cannot be computed (the caller names the fault)
+  local out
+  out=$("${TOOLENV[@]}" $SHASUM -a 256 $1 2>/dev/null) || return 1
+  [[ $out =~ '^[0-9a-f]{64}  ' ]] || return 1
+  REPLY=${out[1,64]}
+}
+
+read_record() { # -> rec[…]; returns 1, with its reason in red, when the record cannot be used
+  local line
+  [[ -f $RECORD && -r $RECORD ]] || { red+=("record absent or unreadable: $RECORD"); return 1 }
+  [[ -s $RECORD ]] || { red+=("record empty: $RECORD"); return 1 }
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ '^(shim|shim\.conf|softnet|softnet-tarball) ([0-9a-f]{64})$' ]] \
+      || { red+=("record line not understood: $line"); return 1 }
+    (( ! ${+rec[$match[1]]} )) || { red+=("record field repeated: $match[1]"); return 1 }
+    rec[$match[1]]=$match[2]
+  done < $RECORD
+  for line in shim shim.conf softnet softnet-tarball; do
+    (( ${+rec[$line]} )) || { red+=("record field missing: $line"); return 1 }
+  done
+}
+
+check_path() { # check_path LABEL PATH MODE — present, of MODE's type, OWNER, exactly MODE (as `ls` writes it), no ACL
+  local label=$1 p=$2 want=$3 out
+  local -a f acl
+  [[ -e $p || -L $p ]] || { red+=("$label absent: $p"); return }
+  out=$("${TOOLENV[@]}" $STAT -f '%HT|%Su:%Sg|%Sp' $p 2>/dev/null) || { red+=("stat failed on $p"); return }
+  f=("${(@s:|:)out}")
+  (( ${#f} == 3 )) || { red+=("stat failed on $p"); return }
+  if [[ $want == d* ]]; then
+    [[ $f[1] == Directory ]] || { red+=("$label is not a directory: $p"); return }
+  else
+    [[ $f[1] == 'Regular File' ]] || { red+=("$label is not a regular file: $p"); return }
+  fi
+  [[ $f[2] == $OWNER ]] || red+=("$label owner $f[2], want $OWNER: $p")
+  [[ $f[3] == $want ]] || red+=("$label mode $f[3], want $want: $p")
+  out=$("${TOOLENV[@]}" $LS -lde $p 2>/dev/null) || { red+=("ls failed on $p"); return }
+  acl=("${(@f)out}")
+  (( ${#acl} == 1 )) || red+=("$label has an ACL: $p")
+}
+
+digest() { # digest FIELD PATH — the file hashes to the record's FIELD (absent or not a regular file: already named)
+  [[ -f $2 && ! -L $2 ]] || return
+  sha256_of $2 || { red+=("shasum failed on $2"); return }
+  [[ $REPLY == $rec[$1] ]] || red+=("$1 digest differs from the record: $2")
+}
+
+stamp_verdict() { # one STAMP line
+  local line k
+  local -A st
+  local -a differ
+  [[ -e $STAMP || -L $STAMP ]] || { print -r -- "STAMP none"; return }
+  [[ -f $STAMP && -r $STAMP && -s $STAMP ]] || { print -r -- "STAMP stale: stamp not understood"; return }
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ $line =~ '^(real|softnet|shim) ([0-9a-f]{64})$' || $line =~ '^(macos) ([0-9A-Za-z.]{1,32})$' ]] \
+       && (( ! ${+st[$match[1]]} )); then
+      st[$match[1]]=$match[2]
+    else
+      print -r -- "STAMP stale: stamp not understood"; return
+    fi
+  done < $STAMP
+  for k in real softnet shim macos; do
+    (( ${+st[$k]} )) || { print -r -- "STAMP stale: stamp not understood"; return }
+  done
+  for k in real softnet shim; do
+    case $k in (real) line=$REAL ;; (softnet) line=$SOFTNET ;; (shim) line=$SHIM ;; esac
+    [[ -f $line ]] && sha256_of $line || { print -r -- "STAMP stale: hashes not computed"; return }
+    [[ $REPLY == $st[$k] ]] || differ+=($k)
+  done
+  if (( ${#differ} == 0 )); then print -r -- "STAMP current"
+  elif (( ${#differ} == 1 )); then print -r -- "STAMP stale: $differ[1] differs"
+  else print -r -- "STAMP stale: ${(j:, :)differ} differ"
+  fi
+}
+
+record_ok=1
+read_record || record_ok=0
+check_path shim $SHIM -rwxr-xr-x
+check_path shim.conf $CONF -rw-r--r--
+if [[ -e $RECORD || -L $RECORD ]]; then check_path record $RECORD -rw-r--r--; fi
+check_path libdir $LIBDIR drwxr-xr-x
+check_path 'libdir parent' ${LIBDIR:h} drwxr-xr-x
+check_path softnet $SOFTNET -rwsr-xr-x
+check_path bindir $BINDIR drwxr-xr-x
+check_path 'bindir parent' ${BINDIR:h} drwxr-xr-x
+if (( record_ok )); then digest shim $SHIM; digest shim.conf $CONF; digest softnet $SOFTNET; fi
+
+if (( ${#red} == 0 )); then print -r -- "FILES green"; else print -rl -- ${red/#/FILES red: }; fi
+stamp_verdict
+(( ${#red} == 0 ))

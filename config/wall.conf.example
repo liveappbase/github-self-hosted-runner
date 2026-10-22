@@ -1,0 +1,6 @@
+# wall.conf — your router's port forwards, for wall-check. Copy it to /Users/ci/.config/runner/wall.conf (0600) ONLY
+# if your router forwards ports from its public address into your network. wall-check then also probes each of these
+# ports on your public address from the walled VM (besides 22 23 53 80 443 5900 7547 8080 8443). Without this file,
+# or without a forwards line: the fixed list only. A file that does not parse stops wall-check.
+# One line; ports 1-65535, separated by commas:
+# forwards = 32400, 51413

@@ -1,0 +1,25 @@
+#!/bin/zsh -f
+# golden-prune CONFIGURED [NAME...] — which golden images may go? Prints, one per line in name order, every
+# liveapp-mac-golden-<yyyymmdd> among NAMEs except CONFIGURED (the image config.toml names) and the newest other
+# generation (the way back). Pure: it reads only its arguments and deletes nothing; the live prune deletes exactly
+# what it prints. "Newest" is the date in the name, never a file time. Only a REAL date counts (20261332 or 20260230
+# is not golden); a name outside the pattern is never printed. Refuses (exit 1, nothing on stdout) when CONFIGURED
+# is not a golden name or not among NAMEs, or a golden name repeats.
+# Design: docs/operations.md ("Rebuilding the image").
+set -u
+export LC_ALL=C
+refuse() { print -u2 -r -- "golden-prune: REFUSE $*"; exit 1 }
+pat='^liveapp-mac-golden-[0-9]{8}$'
+(( $# >= 1 )) || refuse "usage: golden-prune CONFIGURED [NAME...]"
+configured=$1; shift
+isgolden() { # a golden name whose 8 digits are a real date (date reads them back as the same date)
+  [[ $1 =~ $pat ]] && [[ $(/usr/bin/env -i LC_ALL=C /bin/date -j -f %Y%m%d +%Y%m%d ${1##*-} 2>/dev/null) == ${1##*-} ]]
+}
+isgolden $configured || refuse "configured image is not a golden name: '$configured'"
+golden=()
+for n in "$@"; do isgolden $n && golden+=($n); done
+(( ${#${(@u)golden}} == ${#golden} )) || refuse "a golden name appears twice"
+(( ${golden[(Ie)$configured]} )) || refuse "configured image not present: '$configured'"
+others=(${(o)golden:#$configured})
+(( ${#others} <= 1 )) && exit 0
+print -rl -- ${others[1,-2]}
