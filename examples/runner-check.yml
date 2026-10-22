@@ -18,7 +18,7 @@ permissions:
   contents: read
 jobs:
   mac:
-    runs-on: [liveapp-mac]   # the labels of your [[scaleset]] in config.toml
+    runs-on: [mac-ci]   # the labels of your [[scaleset]] in config.toml
     timeout-minutes: 15
     steps:
       - name: Where the job runs

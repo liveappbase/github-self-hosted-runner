@@ -32,7 +32,7 @@ permissions:
   contents: read
 jobs:
   mac:
-    runs-on: [liveapp-mac]   # the labels of your [[scaleset]] in config.toml
+    runs-on: [mac-ci]   # the labels of your [[scaleset]] in config.toml
     timeout-minutes: 20
     env:
       EMUDHRA_C_BUNDLE: .github/emudhra/c-bundle.pem

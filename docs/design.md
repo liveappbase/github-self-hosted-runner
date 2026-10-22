@@ -10,7 +10,7 @@ Why the host is built the way it is. The code headers point at the sections belo
 4. **Our own LaunchAgent, a wrapper, and a root-owned `tart` shim** that is the per-VM admission point. The shim has no setting the environment can relax and reads no path from the environment.
 5. **One launchd mechanism: PathState.** The agent runs while a flag file exists; `runner-enable` writes the flag after its checks. Nothing needs `launchctl` from an SSH session after install.
 6. **Two witnesses** (below): one answers "do the installed root files match their record?", the other "does the wall's proof match the installed files?".
-7. **One custom label per host** (liveapp uses `liveapp-mac`), without `self-hosted`: a custom label alone routes a job to a self-hosted runner, and a bare `runs-on: self-hosted` job then cannot land on this host by accident.
+7. **One custom label per host** (for example `mac-ci`), without `self-hosted`: a custom label alone routes a job to a self-hosted runner, and a bare `runs-on: self-hosted` job then cannot land on this host by accident.
 8. **runscaler's known limits are named and worked around, not patched** ([../SECURITY.md](../SECURITY.md)).
 
 ## The CI shape

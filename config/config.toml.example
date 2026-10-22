@@ -20,7 +20,7 @@ dns = ["1.1.1.1", "8.8.8.8"]
 #   url           the repository (or organization) the runners serve
 #   token         env:RUNNER_TOKEN_<X> reads the file /Users/ci/.config/runner/token-<x> (lower case; letters,
 #                 digits and _ only), 0600 — README: "The token"
-#   labels        what a workflow names in runs-on (liveapp's workflows use liveapp-mac)
+#   labels        what a workflow names in runs-on (for example mac-ci)
 #   runner-group  organization scale sets only: the runner group this set joins. Without it, the organization's
 #                 Default group. The group decides which repositories can send jobs here (README: "Configure the
 #                 scale sets")
@@ -33,10 +33,10 @@ dns = ["1.1.1.1", "8.8.8.8"]
 #       SILENTLY until you rebuild the image (a new release's pin) — do it within GitHub's grace period.
 [[scaleset]]
 url = "https://github.com/OWNER/REPO"
-name = "liveapp-mac-REPO"
+name = "mac-ci-REPO"
 token = "env:RUNNER_TOKEN_OWNER"
 provider = "tart"
-labels = ["liveapp-mac"]
+labels = ["mac-ci"]
 # runner-group = "GROUP"
 max-runners = 2
 runner-image = "liveapp-mac-golden-YYYYMMDD"
