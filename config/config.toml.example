@@ -25,12 +25,15 @@ dns = ["1.1.1.1", "8.8.8.8"]
 #                 Default group. The group decides which repositories can send jobs here (README: "Configure the
 #                 scale sets")
 #   runner-image  the name golden-build printed (liveapp-mac-golden-<yyyymmdd>)
-#   disable-update — the trade:
-#     false (this example): the GitHub runner in each VM updates itself whenever a newer runner exists (not only when
-#       GitHub retires the old one), so each job downloads it until you rebuild the image. Jobs never strand on a
-#       retired runner. runscaler's README recommends false for Tart.
-#     true: the runner stays the image's version (the fastest jobs). When GitHub retires that version, jobs queue
-#       SILENTLY until you rebuild the image (a new release's pin) — do it within GitHub's grace period.
+#   disable-update — neither value keeps the runner current:
+#     false (this example): the runner may update itself when GitHub tells it to. That download is not checked by
+#       digest (docs/design.md, decision 3). Measured (2026-10): runners on 2.338.0, on sets created with false, did
+#       not update in the 3 days after 2.338.2 came out.
+#     true: the runner never updates itself. It stays the version the image was built with.
+#     GitHub retires each runner version some weeks after newer ones come out. A retired runner is refused and
+#       exits, and jobs stay queued, with either value (runscaler 0.10.0's README; not measured here). So rebuild
+#       the image from the release that pins each new runner, before the old version's runtime_deprecates_at
+#       (docs/operations.md, "Rebuilding the image").
 [[scaleset]]
 url = "https://github.com/OWNER/REPO"
 name = "mac-ci-REPO"

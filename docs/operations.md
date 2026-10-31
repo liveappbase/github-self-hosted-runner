@@ -17,7 +17,12 @@ Never run `runner doctor --fix` or a second `runner run` while the agent is enab
 
 ## Rebuilding the image
 
-When: a newer GitHub Actions runner is out (a job log names the runner version it ran); or a job fails with `Runner version vX.Y.Z is deprecated and cannot receive messages` (with `disable-update = true` the jobs then queue silently); or a release pins a new base image or runner.
+When: the host moved onto a release that pins a new runner or base image (README, "Update", step 5). With either `disable-update` value, the runner in the image does not keep itself current ([../config/config.toml.example](../config/config.toml.example)), so this rebuild is the only dependable way a new runner reaches the jobs.
+
+- Is the image behind? Compare a job log's `Current runner version` with the newest release of actions/runner.
+- The deadline: `gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>` prints `runtime_deprecates_at`.
+- After that date, by runscaler 0.10.0's README (not measured here): a runner on that version is refused on its first poll with `Runner version vX.Y.Z is deprecated and cannot receive messages` and exits, and the jobs stay queued. On Tart, runscaler's start-up check logs the refusal in `/Users/ci/Library/Logs/mac-runner/runscaler.log`, not in a job. Queued jobs mean a retired runner only when that line is there; "Outage recovery" lists the other causes.
+- What to do: before the deadline, move the host onto a release that pins a newer runner (README, "Update"). If no release pins one yet, ask for one in this repository's issues.
 
 1. The idle runbook steps 1–2.
 2. `/Users/ci/bin/golden-build` — prints `DONE: liveapp-mac-golden-<yyyymmdd>`. Its output is also kept in `/Users/ci/Library/Logs/mac-runner/golden-<yyyymmdd>.log`. Its last step is the eMudhra stage ([design.md](design.md), "The eMudhra stage"): it prints a verdict table and a census, and ends with `golden-emudhra: GREEN` or `RED`. On RED, golden-build stops and makes no image: read the `FAIL` lines. After a new runner version or base image, `no named list` or `the externals Node difference is not the named list` means the release needs a new `setup/emudhra.node-diff`: make it from the `NODE-DIFF` lines of a run where the fix ran, and have it reviewed.
