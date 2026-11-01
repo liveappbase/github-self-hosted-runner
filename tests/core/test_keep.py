@@ -6,7 +6,7 @@ own state into keep.jq. Every trigger has a control."""
 import unittest
 
 from tests.core.corejq import ok, run
-from tests.core.test_r1 import NOW, P, Run, fam, facts, removed, scaling
+from tests.core.test_r1 import NOW, OTHER, P, Run, failed, fam, facts, removed, scaling
 
 H = 3600
 KEEP = 72 * H
@@ -143,6 +143,42 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(self.keep_after(r, opened + KEEP)['verdict'], 'observe')
         out = self.keep_after(r, reopened + KEEP)
         self.assertEqual((out['verdict'], out['succeeded']), ('no-evidence', 0))
+
+    def test_codex_f3_no_accept_while_an_unsettled_run_can_still_reach_r1(self):
+        # a proven success, then three counted failures and no later record: KEEP must not accept; after the settle: R1
+        r = Run(self)
+        opened = r.now
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))
+        k = self.keep_after(r, opened + KEEP)
+        self.assertNotEqual(k['verdict'], 'accept', k)
+        self.assertIn('R1 may still come', k['reason'])
+        out = r.go('', now=r.now + 600)                                 # quiet: the failures settle
+        self.assertEqual(out['families']['fx']['verdict'], 'rollback')
+        self.assertEqual(self.keep_after(r, opened + KEEP)['verdict'], 'held')
+
+    def test_control_a_same_second_completion_in_the_next_pass_is_no_rollback_and_accepts(self):
+        r = Run(self)
+        opened = r.now
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))
+        self.assertEqual(r.go(removed(30, 'runner-0000cafe', 'job-completed'))['families']['fx']['verdict'], 'none')
+        self.assertEqual(r.go('', now=r.now + 600)['families']['fx']['verdict'], 'none')
+        k = self.keep_after(r, opened + KEEP)
+        self.assertEqual((k['verdict'], k['succeeded']), ('accept', 2))
+
+    def test_control_two_unsettled_failures_cannot_reach_r1_alone(self):
+        r = Run(self)
+        opened = r.now
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + scaling(25))
+        self.assertEqual(self.keep_after(r, opened + KEEP)['verdict'], 'accept')
+
+    def test_a_partial_line_held_after_two_failures_may_be_the_third(self):
+        r = Run(self)
+        opened = r.now
+        third = failed(30, OTHER)
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + third[:12])
+        k = self.keep_after(r, opened + KEEP)
+        self.assertEqual(k['verdict'], 'observe', k)
+        self.assertIn('R1 may still come', k['reason'])
 
     def test_a_success_without_provenance_is_not_counted(self):
         r = Run(self, opened=False)

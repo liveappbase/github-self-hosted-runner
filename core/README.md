@@ -114,16 +114,23 @@ for SETTLE (120 s of the glue's clock with the text unchanged, `state.carry_at`)
 | `Failed to start runner`: `did not connect to GitHub within` | yes, connect-class |
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
-| `Runner removed reason=exited` with no `jobId` | yes (and it takes back that runner's `Runner started`) |
+| `Runner removed reason=exited` with no `jobId` | yes (and it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later) |
+| `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set; that runner's failure is not counted and its `Runner started` is proof again |
 | `Runner exited before job completion` alone | no (unknown) |
 
-Proof of life on a set: `Runner removed reason=job-completed`; on Tart also `Runner started`, unless that runner is
-later removed `reason=exited` with no `jobId`.
+Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner
+started`, unless that runner is later removed `reason=exited` with no `jobId` (and no unknown-runner line takes that
+back).
 
-**R1.** Three counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A proof
-in the same second as a failure counts as between them, so a second is judged only once a later second is seen.
+**SETTLE.** A counted failure is settled only when no proof of life can still arrive for it: a later record of the log
+is 120 s of log time past it, or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
+`now` of the pass that read it. A failure that is not settled waits; nothing is judged from a partial second.
+
+**R1.** Three SETTLED counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A
+proof in the same second as a failure counts as between them; a proof after the run does not take it back.
 `connect_only` is true when every counted failure of that run is connect-class (CONNECT-ONLY: the glue retries once
-after 1 h before it rejects the version). The verdict holds for the candidate; no STOP takes it back.
+after 1 h before it rejects the version). The verdict holds for the candidate; no STOP takes it back. A run of three
+that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
 **NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min (≥ 3
 reads), with no job completed on it: it counts as the set's third failure, connect-class. A read that is not like
@@ -132,7 +139,9 @@ that (not ready included), a job completed on the set, or a gap starts the 30 mi
 **KEEP.** 72 h after the evidence window opened: at least one `result=succeeded` → `accept`; completions (results
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose
 R1 verdict or STOP stands, r1's own or one the glue holds in `facts.stops`: `held` (a person answers it: JOBS FAIL's
-lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts.
+lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts. KEEP never
+accepts while r1's `pending` stands (three counted failures, not all settled, the held record counted as one when it
+may be): `observe` until they settle.
 
 **IDLE.** Over every set in `facts.sets` (required: IDLE is never said of nothing) and every set the reads list: two
 reads; each set present with `metrics` on both (a read that does not list a set of `facts.sets` is not idle:
@@ -146,8 +155,9 @@ reads 0).
   excused set; `state.not_ready_since` (when each set was first read not ready). The glue calls it every pass with
   that pass's read, so the 24 h are measured; a pass with fewer than two reads is never `idle`.
 - `r1.jq` (log, healthz, facts, state, now): verdict `ok` | `wait`; `families.F` = `{"verdict": "none" | "rollback" |
-  "stop", "reason", "set", "connect_only", "failures", "stops", "open", "since", "gaps"}` (`rollback` outranks a
-  STOP; `stops` = `[{"stop", "reason"}]`); the new state.
+  "stop", "reason", "set", "connect_only", "failures", "stops", "open", "since", "gaps", "pending"}` (`rollback`
+  outranks a STOP; `stops` = `[{"stop", "reason"}]`; `pending` = `{"set", "failures", "settled"}` or null); the new
+  state.
 - `keep.jq` (facts, state, now): verdict `ok` | `wait`; `families.F` = `{"verdict": "none" | "observe" | "accept" |
   "jobs-fail" | "no-evidence" | "held", "reason", "since", "keep_at", "succeeded", "completions", "failed",
   "canceled"}`.

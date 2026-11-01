@@ -56,5 +56,6 @@ def runs_candidate($p; $config; $fam):
   and ($fam.sets | length) > 0
   and all($fam.sets[]; . as $s | $config.lines[$s] != null and $config.lines[$s] == $fam.candidate.lines[$s]);
 
-# the counted failures of one set's evidence since its newest proof of life (a proof in the same second is between)
-def run_of: (([.proof] + [.starts[].t]) | max) as $tp | [.fails[] | select($tp == null or .t > $tp)];
+# the counted failures of one set's evidence (r1.jq's state) since its newest proof of life, settled or not (a proof
+# in the same second is between): log seconds
+def run_of: ([.proofs[]?, .starts[]?.s] | max) as $b | [.fails[]? | select($b == null or .s > $b)];

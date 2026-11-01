@@ -115,9 +115,12 @@ class Lines(unittest.TestCase):
 def core_state(**ev):
     e = {'version': '2.339.0', 'lines': {'mac-a': 'img-new'}, 'open': True, 'since': NOW - 3600, 'gaps': 1,
          'succeeded': 2, 'failed': 1, 'canceled': 0, 'other': 0,
-         'sets': {'mac-a': {'fails': [{'t': '2026-11-01 05:00:10', 'c': True, 'x': 'x'}], 'starts': [], 'proof': None,
-                            'ns': None, 'completed': False}},
-         'verdict': None, 'stops': []}
+         'sets': {'mac-a': {'fails': [{'t': '2026-11-01 04:59:50', 's': 1793509190, 'c': True, 'x': 'x',
+                                       'seen': NOW - 600, 'settled': False},
+                                      {'t': '2026-11-01 05:00:10', 's': 1793509210, 'c': True, 'x': 'x',
+                                       'seen': NOW - 600, 'settled': True}],
+                            'starts': [], 'proofs': [1793509200], 'exits': [], 'ns': None, 'completed': False}},
+         'verdict': None, 'stops': [], 'pending': None}
     e.update(ev)
     return {'format': 1, 'families': {'fx': e}}
 

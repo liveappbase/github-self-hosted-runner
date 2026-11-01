@@ -1,12 +1,15 @@
-"""core/r1.jq — the log pass (PLAN D6): ownership by position, provenance, the classification table, R1 (three counted
-failures on one set with no proof of life between them -> ROLLBACK), CONNECT-ONLY, NOT SERVING, evidence gaps.
+"""core/r1.jq — the log pass (PLAN D6): ownership by position, provenance, the classification table with its D6
+AMENDMENT (an exited removal taken back by a later unknown-runner line), SETTLE (a failure is judged only when no proof
+of life can still arrive for it), R1 (three settled counted failures on one set with no proof of life between them ->
+ROLLBACK; `pending` while they may still come), CONNECT-ONLY, NOT SERVING, evidence gaps.
 Records are built by corejq.charm(), which test_records.py pins byte for byte to the real logs; the error texts are
 runscaler's own (internal/provider/tart.go, docker.go, internal/controller/controller.go at ae405a5), the benign
 "no longer exists" record is the Studio's real one. Every trigger has a control that comes out the other way."""
 import datetime
+import re
 import unittest
 
-from tests.core.corejq import charm, ok, run
+from tests.core.corejq import charm, fixture, ok, run
 
 NOW = 1793530800                                   # 2026-11-01 11:00:00 UTC (the glue's clock)
 P = {'pid': 4242, 'start': 1793520000}             # runscaler, started 08:00:00 UTC
@@ -49,6 +52,10 @@ def removed(sec, name, reason, job=True, result='succeeded', set_='mac-a'):
 
 def exited_warn(sec, name, set_='mac-a'):
     return charm(t(sec), 'WARN', set_, 'Runner exited before job completion; removing stale capacity', [('name', name)])
+
+
+def unknown(sec, name, set_='mac-a', what='completed'):
+    return charm(t(sec), 'WARN', set_, 'Job %s for unknown runner (already removed?)' % what, [('runnerName', name)])
 
 
 TAIL_OK = "√ Connected to GitHub\n\nCurrent runner version: '2.339.0'\n2026-11-01 05:00:00Z: Listening for Jobs\n"
@@ -240,16 +247,155 @@ class SameSecond(unittest.TestCase):
         log = removed(9, 'runner-0000beef', 'job-completed') + three(lambda i: OTHER)
         self.assertEqual(Run(self).fx(log)['verdict'], 'rollback')
 
-    def test_a_second_is_judged_only_once_a_later_second_is_seen(self):
+    def test_a_failure_is_judged_only_once_the_log_is_settle_past_it(self):
         r = Run(self)
-        log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER)
-        self.assertEqual(r.fx(log)['verdict'], 'none')
-        self.assertEqual(r.fx(scaling(31) + scaling(32))['verdict'], 'rollback')    # 31 is read: 32 follows it
+        log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(149) + scaling(150)
+        self.assertEqual(r.fx(log)['verdict'], 'none')                     # 149 is read: 119 s past the third
+        self.assertEqual(r.fx(scaling(151), now=r.now + 10)['verdict'], 'rollback')   # 150 is read: 120 s past it
 
     def test_control_the_proof_arrives_in_the_next_pass_in_the_same_second(self):
         r = Run(self)
         self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))['verdict'], 'none')
         self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + tail())['verdict'], 'none')
+
+
+def real_seq():
+    """hz-cut.log:55-59, the Linux host's real text: a runner started, its exited WARN, `Runner removed reason=exited`
+    with no jobId, then `Job started|completed for unknown runner (already removed?) runnerName=` it, 13 s later: the
+    runner ran a job (PLAN D6 AMENDMENT, S2-CHECKLIST)."""
+    seq = fixture('hz-cut.log').split('\n')[54:59]
+    assert 'Runner started name=runner-58c119b8' in seq[0] and 'reason=exited' in seq[2], seq
+    assert 'Job started for unknown runner' in seq[3] and 'Job completed for unknown runner' in seq[4], seq
+    return seq
+
+
+def shifted(lines, k, unknown_delay=0, rename=None):
+    """lines moved k x 5 min later, the runner named ...b<k> (the unknown-runner lines another name with rename), the
+    unknown-runner lines unknown_delay s later still."""
+    out = []
+    for l in lines:
+        m = re.match(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(.*)$', l)
+        late = 'for unknown runner' in l
+        when = (datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
+                + datetime.timedelta(minutes=5 * k, seconds=unknown_delay if late else 0))
+        name = rename if (late and rename) else 'runner-58c119b%d' % k
+        out.append(when.strftime('%Y-%m-%d %H:%M:%S') + m.group(2).replace('runner-58c119b8', name))
+    return out
+
+
+REAL_TAIL = '2026-10-26 02:00:00 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1\n' \
+            '2026-10-26 02:00:01 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1\n'
+
+
+class Settle(unittest.TestCase):
+    """SETTLE (PLAN D6): a counted failure is settled only when no proof of life can still arrive for it — the log has
+    moved SETTLE (120 s) of log time past it, or the log is quiet (nothing held) and a later pass's `now` is 120 s or
+    more past the `now` of the pass that read it. R1 judges only settled failures; a proof of life is between the
+    failures it falls among (same second = between), never one that comes after a run."""
+
+    def test_codex_f2_a_late_same_second_proof_after_another_sets_later_second(self):
+        log = (failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(31, 'mac-b')
+               + removed(30, 'runner-0000beef', 'job-completed') + tail())
+        self.assertEqual(Run(self).fx(log)['verdict'], 'none')
+
+    def test_control_an_unknown_record_in_its_place_rolls_back(self):
+        log = (failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(31, 'mac-b')
+               + charm(t(30), 'INFO', 'mac-a', 'Pool status', [('name', 'runner-0000beef')]) + tail())
+        self.assertEqual(Run(self).fx(log)['verdict'], 'rollback')
+
+    def test_out_of_order_across_a_pass_boundary(self):
+        # the builder's named edge: the proof of second 30 is read in the next pass, after a record of second 40
+        r = Run(self)
+        self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(40) + scaling(41))
+                         ['verdict'], 'none')
+        self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + tail())['verdict'], 'none')
+
+    def test_control_a_proof_after_the_run_does_not_take_it_back(self):
+        log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + removed(100, 'runner-0000beef', 'job-completed')
+        self.assertEqual(Run(self).fx(log + tail(200))['verdict'], 'rollback')
+        # also when the run settles in a later pass than the proof was read in
+        r = Run(self)
+        self.assertEqual(r.fx(log + scaling(101))['verdict'], 'none')     # 100 is read: 70 s past the third
+        self.assertEqual(r.fx(tail(200))['verdict'], 'rollback')
+
+    def test_a_quiet_log_settles_by_the_glue_clock(self):
+        r = Run(self)
+        self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))['verdict'], 'none')
+        self.assertEqual(r.fx('', now=r.now + 119)['verdict'], 'none')     # the third is held, then quiet 119 s
+        self.assertEqual(r.fx('', now=r.now + 1)['verdict'], 'rollback')   # read after 120 s quiet: settled
+
+    def docker(self):
+        return {'fx': fam('docker', ('linux-b',))}
+
+    def test_opus_f3_the_real_sequence_three_times_is_no_r1(self):
+        seq = real_seq()
+        log = '\n'.join(sum((shifted(seq, k) for k in range(3)), [])) + '\n' + REAL_TAIL
+        out = Run(self, self.docker()).go(log)
+        self.assertEqual(out['families']['fx']['verdict'], 'none', out['families']['fx'])
+        self.assertEqual(counted(out, 'linux-b'), 0)
+
+    def test_opus_f3_with_a_record_of_a_later_second_before_the_unknown_runner_lines(self):
+        seq = real_seq()
+        between = '2026-10-26 01:10:18 INFO linux-a: Scaling up runner currentCount=0 desiredCount=1'
+        log = '\n'.join(sum((shifted(seq[:3] + [between] + seq[3:], k) for k in range(3)), [])) + '\n' + REAL_TAIL
+        self.assertEqual(Run(self, self.docker()).fx(log)['verdict'], 'none')
+
+    def test_control_without_the_unknown_runner_lines_it_rolls_back(self):
+        seq = real_seq()[:3]
+        log = '\n'.join(sum((shifted(seq, k) for k in range(3)), [])) + '\n' + REAL_TAIL
+        r = Run(self, self.docker()).fx(log)
+        self.assertEqual((r['verdict'], len(r['failures'])), ('rollback', 3))
+
+    def test_control_an_unknown_runner_line_that_names_another_runner_is_no_proof(self):
+        log = '\n'.join(sum((shifted(real_seq(), k, rename='runner-0000feed') for k in range(3)), [])) + '\n' + REAL_TAIL
+        self.assertEqual(Run(self, self.docker()).fx(log)['verdict'], 'rollback')
+
+    def test_control_an_unknown_runner_line_settle_or_later_is_no_proof(self):
+        log = '\n'.join(sum((shifted(real_seq(), k, unknown_delay=120) for k in range(3)), [])) + '\n' + REAL_TAIL
+        self.assertEqual(Run(self, self.docker()).fx(log)['verdict'], 'rollback')
+
+    def test_on_tart_too(self):
+        tart = {'fx': fam('tart', ('linux-b',))}
+        log = '\n'.join(sum((shifted(real_seq(), k) for k in range(3)), [])) + '\n' + REAL_TAIL
+        self.assertEqual(Run(self, tart).fx(log)['verdict'], 'none')
+        log = '\n'.join(sum((shifted(real_seq()[:3], k) for k in range(3)), [])) + '\n' + REAL_TAIL
+        self.assertEqual(Run(self, tart).fx(log)['verdict'], 'rollback')
+
+    def test_an_exited_failure_taken_back_is_not_the_third(self):
+        # the line is after the run, so as a proof alone it would not be between: the exited failure itself goes
+        d = {'fx': fam('docker', ('linux-a',))}
+        run_ = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+                + removed(25, 'runner-0000beef', 'exited', job=False, set_='linux-a'))
+        out = Run(self, d).go(run_ + unknown(38, 'runner-0000beef', 'linux-a') + tail(200, 'linux-a'))
+        self.assertEqual((out['families']['fx']['verdict'], out['families']['fx']['pending']), ('none', None))
+        # control: no unknown-runner line
+        self.assertEqual(Run(self, d).fx(run_ + tail(200, 'linux-a'))['verdict'], 'rollback')
+
+    def test_the_unknown_runner_line_is_proof_of_life_for_the_set(self):
+        d = {'fx': fam('docker', ('linux-a',))}
+        log = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+               + removed(25, 'runner-0000beef', 'exited', job=False, set_='linux-a'))
+        after = failed(40, DOCKER_CREATE, 'linux-a') + tail(200, 'linux-a')
+        self.assertEqual(Run(self, d).fx(log + unknown(30, 'runner-0000beef', 'linux-a', 'started') + after)['verdict'],
+                         'none')                         # 30 lies between 20 and 40
+        self.assertEqual(Run(self, d).fx(log + after)['verdict'], 'rollback')
+
+    def test_the_start_of_a_runner_taken_back_is_proof_again(self):
+        # Tart: the start at 25 is proof between 20 and 30 once the unknown-runner line shows that runner ran a job
+        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
+               + removed(40, 'runner-0000beef', 'exited', job=False))
+        self.assertEqual(Run(self).fx(log + unknown(50, 'runner-0000beef') + tail(200))['verdict'], 'none')
+        self.assertEqual(Run(self).fx(log + tail(200))['verdict'], 'rollback')
+
+    def test_a_held_record_may_be_the_proof_so_the_clock_waits_for_it(self):
+        d = {'fx': fam('docker', ('linux-a',))}
+        r = Run(self, d)
+        r.go(failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+             + removed(25, 'runner-0000beef', 'exited', job=False, set_='linux-a') + scaling(30, 'linux-a'))
+        # 600 s later the log has moved only to 30 and holds the unknown-runner line: nothing is settled
+        self.assertEqual(r.fx(unknown(38, 'runner-0000beef', 'linux-a'))['verdict'], 'none')
+        out = r.go('')                                   # quiet: the held line is read, the exited failure taken back
+        self.assertEqual((out['families']['fx']['verdict'], out['families']['fx']['pending']), ('none', None))
 
 
 class Retired(unittest.TestCase):

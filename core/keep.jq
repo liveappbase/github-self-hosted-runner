@@ -38,6 +38,10 @@ C::now_in("keep") as $now
              | if $now < $at then
                  {verdict: "observe", keep_at: $at,
                   reason: "runner \($fam.candidate.version): observing since \($e.since | C::utc), KEEP at \($at | C::utc); \($ok) succeeded of \($done) completed"}
+               # never ACCEPT while a run that can still reach R1 waits for its failures to settle (r1.jq's pending)
+               elif $ok >= 1 and $e.pending != null then
+                 {verdict: "observe", keep_at: $at,
+                  reason: "runner \($fam.candidate.version): KEEP waits: set \($e.pending.set) has \($e.pending.failures) counted failures with no proof of life between them, \($e.pending.failures - $e.pending.settled) not settled yet (R1 may still come)"}
                elif $ok >= 1 then
                  {verdict: "accept", keep_at: $at, reason: "runner \($fam.candidate.version): \($ok) succeeded of \($done) completed in 72 h"}
                elif $done >= 1 then
