@@ -136,8 +136,12 @@ never a counted failure or a STOP. A partial line that can still become a contin
 `  `, `  err`, `  ` and a cut `│`, and right after a value line ` nam`) and belongs to the record before it; a cut
 header or another program's line, also one that starts with a space (` ---> Running in …`), leaves the record before
 it whole (it was written with its newline). So a partial line never holds R1: the failures before it
-settle. One cut the text cannot show: a short write that ends exactly at a newline inside a multi-line record leaves
-lines that read as a whole record, and it is read as one (a counted failure when its first lines say one).
+settle. A short write that ends exactly at a newline leaves no partial line: the lines before it are read as a whole
+record (a counted failure when they say one). The cuts the text cannot show end right after a value line (`  │ …`)
+or a ` key=value` line (the value or the keys may have ended there), or right after a header whose message may have
+no more lines. Two cuts at a newline that the text could show are read as whole records too: right after the header
+of a `Failed to start runner` with no `error` (runscaler always writes one) and right after a `  key=` line (a `  │ `
+line always follows one).
 
 **The classification** (a record of a set of family X, with provenance):
 
