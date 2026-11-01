@@ -70,6 +70,37 @@ class HeldStops(unittest.TestCase):
             self.assertIn('keep: facts.stops', err)
 
 
+class StopWithNoFamily(unittest.TestCase):
+    """A held STOP that names no family (no `family`, or one that is not a family's name) holds every family's ACCEPT:
+    fail closed, as a STOP with no version already does (Opus r3 F6: it held none). Two families fx and fy, candidate
+    2.340.0 each, 73 h, 5 succeeded: ACCEPT unless a STOP holds them."""
+
+    def verdicts(self, stops):
+        fams = {'fx': fam(version='2.340.0', image='img-newer'),
+                'fy': fam(sets=('mac-b',), version='2.340.0', image='img-y')}
+        e = ev(since=NOW - 73 * H, succeeded=5, version='2.340.0')
+        st = {'format': 1, 'families': {'fx': dict(e, lines={'mac-a': 'img-newer'}), 'fy': dict(e, lines={'mac-b': 'img-y'})}}
+        f = facts(fams)
+        f['stops'] = stops
+        return {k: v['verdict'] for k, v in ok(self, 'keep', state=st, facts=f, now=NOW)['families'].items()}
+
+    def test_opus_r3_f6_a_stop_with_no_family_holds_every_family(self):
+        for stop in ({'stop': 'JOBS FAIL ON THE NEW IMAGE', 'version': '2.340.0', 'user': 'ci', 'detail': {}},
+                     {'stop': 'ROLLBACK FAILED'},
+                     {'family': None, 'stop': 'HAND CHANGE', 'version': '2.340.0'},
+                     {'family': ['fx'], 'stop': 'JOBS FAIL ON THE NEW IMAGE', 'version': '2.340.0'}):
+            with self.subTest(stop):
+                self.assertEqual(self.verdicts([stop]), {'fx': 'held', 'fy': 'held'})
+
+    def test_control_a_stop_of_family_x_does_not_hold_family_y(self):
+        self.assertEqual(self.verdicts([{'family': 'fx', 'stop': 'JOBS FAIL ON THE NEW IMAGE', 'version': '2.340.0'}]),
+                         {'fx': 'held', 'fy': 'accept'})
+        self.assertEqual(self.verdicts([]), {'fx': 'accept', 'fy': 'accept'})
+
+    def test_control_a_no_evidence_with_no_family_still_heals(self):
+        self.assertEqual(self.verdicts([{'stop': 'NO EVIDENCE', 'version': '2.340.0'}]), {'fx': 'accept', 'fy': 'accept'})
+
+
 class OlderVersionStops(unittest.TestCase):
     """A held STOP holds the candidate's ACCEPT only when it is of the candidate's version, or its PLAN D7 row says a
     newer release does NOT proceed alone (Opus r2 F2): check failed, ROLLED BACK and PINNED RUNNER RETIRED close THEIR
