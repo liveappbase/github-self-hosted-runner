@@ -1,0 +1,14 @@
+5. the census (offline; it changes nothing)
+census: /etc/ssl/cert.pem -> /private/etc/ssl/cert.pem (as saved)
+census: /Users/admin/actions-runner/.env holds exactly NODE_OPTIONS=--use-openssl-ca, SSL_CERT_FILE=/opt/homebrew/Cellar/ca-certificates/2026-09-30/share/ca-certificates/cacert.pem (pass)
+census: the externals Node difference (bundled roots, tls.rootCertificates, minus /opt/homebrew/Cellar/ca-certificates/2026-09-30/share/ca-certificates/cacert.pem): one block per Node
+NODE-CENSUS BEGIN node20
+NODE-DIFF node20 3f034bb5704d44b2d08545a02057de93ebf3905fce721acbc730c06ddaee904 SecureSign Root CA12
+NODE-DIFF node20 4200f5043ac8590ebb527d209ed1503029fbcbd41ca1b506ec27f15ade7dac69 Secure Global CA
+NODE-DIFF node20 86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b emSign ECC Root CA - G3
+NODE-DIFF node20 bef256daf26e9c69bdec1602359798f3caf71821a03e018257c53c65617f3d4a FIRMAPROFESIONAL CA ROOT-A WEB
+NODE-CENSUS DONE node20 4
+NODE-CENSUS BEGIN node24
+NODE-CENSUS DONE node24 0
+NODE-CENSUS END 2
+census: /Users/admin/actions-runner/bin and externals equal the runner tarball's (412 entries, listing sha256 5d1c9f0f3f2e6a4b8a6c1e2d3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a) (pass)

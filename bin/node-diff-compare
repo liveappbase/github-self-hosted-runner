@@ -13,10 +13,13 @@
 # of BEGIN lines; each BEGIN has its DONE with the same folder and n = that block's NODE-DIFF count) and every computed
 # (folder, fingerprint) is in the named list. A named entry that was not computed prints
 #   NODE-DIFF-LOST <folder> <fingerprint> <name>
-# and is still a PASS: the runner's Node dropped a root, so its jobs trust less, and no new file is needed. FAIL (exit 1)
-# with one line per reason: a new entry (listed: the release needs a new, reviewed setup/emudhra.node-diff), a missing or
-# unclosed block, no END, a count mismatch, the named file or the census file absent or unreadable. The entries of a block
-# that did not complete are not reported lost (nothing was computed for them). Every line starts "node-diff-compare: ".
+# and is still a PASS. LOST means the root is no longer in the difference: the runner's Node dropped it (its jobs trust
+# one root less; no new file is needed), OR the Homebrew bundle holds it again. For an excluded root (emSign ECC Root
+# CA - G3 today), read the census's bundle FAIL first: that check still ends the stage RED. FAIL (exit 1) with one line
+# per reason: a new entry (listed: the release needs a new, reviewed setup/emudhra.node-diff), a missing or unclosed
+# block, a block twice, a NODE-DIFF line outside its block or without a 64-hex fingerprint, no END or a second one, a
+# count mismatch, the named file or the census file absent or unreadable. The entries of a block that did not complete
+# are not reported lost (nothing was computed for them). Every line starts "node-diff-compare: ".
 # A usage error: STOP, exit 2.
 set -u
 export LC_ALL=C

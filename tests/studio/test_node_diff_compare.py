@@ -1,6 +1,7 @@
 """bin/node-diff-compare NAMED_FILE CENSUS_FILE: the host PASSes a complete census that is a subset of the named list
-(each lost entry printed NODE-DIFF-LOST) and FAILs on a new entry, a missing or unclosed block, no END, a count
-mismatch, or an absent named file. Fixtures: tests/studio/fixtures/node-diff/ (the real line shapes of
+(each lost entry printed NODE-DIFF-LOST) and FAILs on a new entry, a missing or unclosed block, no END or a second one,
+a count mismatch, a NODE-DIFF line outside its block or without a 64-hex fingerprint, a block twice, or an absent
+named file. Fixtures: tests/studio/fixtures/node-diff/ (the real line shapes of
 setup/emudhra.node-diff and of the guest's census). Every FAIL cell runs its control (the equal census) too.
 """
 import os
@@ -103,6 +104,22 @@ class NodeDiffCompare(unittest.TestCase):
 
     def test_a_block_after_end_fails(self):
         self.assert_fail(fx('named.node-diff'), fx('census-after-end.txt'), 'after the END line')
+
+    # each fixture below is one line away from census-equal.txt (assert_fail runs that control too)
+
+    def test_a_second_end_line_fails(self):
+        self.assert_fail(fx('named.node-diff'), fx('census-two-ends.txt'), 'more than one END line')
+
+    def test_a_node_diff_line_outside_its_block_fails(self):
+        self.assert_fail(fx('named.node-diff'), fx('census-diff-outside-block.txt'),
+                         'a NODE-DIFF line outside its block: NODE-DIFF node20 3f034bb5')
+
+    def test_the_same_block_twice_fails(self):
+        self.assert_fail(fx('named.node-diff'), fx('census-block-twice.txt'), 'the block node20 appears twice')
+
+    def test_a_node_diff_line_without_a_64_hex_fingerprint_fails(self):
+        self.assert_fail(fx('named.node-diff'), fx('census-short-fingerprint.txt'),
+                         'a NODE-DIFF line without a SHA-256 fingerprint: NODE-DIFF node20 3f034bb5')
 
     def test_named_file_absent_fails(self):
         self.assert_fail(os.path.join(self.d, 'no-such.node-diff'), fx('census-equal.txt'), 'absent or unreadable',
