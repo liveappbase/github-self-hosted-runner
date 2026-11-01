@@ -6,8 +6,8 @@
 # A family's evidence per set: fails (counted failures: t, s = its log second, c = connect-class, x, seen = the `now`
 # of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started` of a runner
 # not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of
-# log time, that a `Job started|completed for unknown runner` naming the runner still takes back), ns (NOT SERVING),
-# completed.
+# log time, that a `Job started|completed for unknown runner` naming the runner still takes back; each holds the start
+# it took back, a proof for R1 until the exit is final), ns (NOT SERVING), completed.
 import "core" as C;
 import "logfmt" as L;
 
@@ -111,11 +111,22 @@ def settle_log($sec):
 def settle_quiet($now):
   .sets |= map_values(.fails |= map(if .settled != true and $now - .seen >= SETTLE then .settled = true else . end));
 
-# . = one set's evidence; $fs = failures -> runs: in log order, a new run starts at a failure when a proof of life
-# (a proof, or a start not taken back) lies between it and the one before (the same second as either = between)
-def runs($fs):
-  [.proofs[]?, .starts[]?.s] as $b
-  | reduce ($fs | sort_by(.s))[] as $f ([];
+# . = one set's evidence -> the log seconds of its proofs of life: its proofs and its Tart starts not taken back
+def barriers: [.proofs[]?, .starts[]?.s];
+
+# ... and, for R1, the Tart start an exited removal took back while that exit is not final (its failure not settled):
+# an unknown-runner line inside SETTLE may still give it back, so it is taken back only when none follows in SETTLE,
+# the rule the D6 AMENDMENT gives the exit itself (Opus r3 F1). `pending` counts it taken back (KEEP waits)
+def barriers_r1:
+  . as $e
+  | barriers + [.exits[]? | . as $x
+                | select($x.start != null and any($e.fails[]?; .n == $x.n and .s == $x.s and .settled != true))
+                | .start];
+
+# $fs = failures, $b = log seconds of proofs of life -> runs: in log order, a new run starts at a failure when a proof
+# of life lies between it and the one before (the same second as either = between)
+def runs($fs; $b):
+  reduce ($fs | sort_by(.s))[] as $f ([];
       if length == 0 then [[$f]]
       else .[-1][-1].s as $p
         | if any($b[]; . >= $p and . <= $f.s) then . + [[$f]] else .[-1] += [$f] end
@@ -128,7 +139,8 @@ def rollback($s; $run):
 def judge:
   if .verdict != null then .
   else (first(.sets | to_entries | sort_by(.key)[] | .key as $s
-              | (.value | runs([.fails[] | select(.settled)]))[] | select(length >= 3) | rollback($s; .)) // null) as $v
+              | (.value | runs([.fails[] | select(.settled)]; barriers_r1))[] | select(length >= 3)
+              | rollback($s; .)) // null) as $v
        | if $v != null then .verdict = $v else . end
   end;
 
@@ -158,7 +170,7 @@ def prune:
 def pending($pot):
   if .verdict != null then null
   else first(.sets | to_entries | sort_by(.key)[] | .key as $s
-             | (.value | runs(.fails + ($pot[$s] // [])))[] | select(length >= 3)
+             | (.value | runs(.fails + ($pot[$s] // []); barriers))[] | select(length >= 3)
              | {set: $s, failures: length, settled: ([.[] | select(.settled == true)] | length)}) // null
   end;
 

@@ -421,6 +421,69 @@ class Settle(unittest.TestCase):
         self.assertEqual((out['families']['fx']['verdict'], out['families']['fx']['pending']), ('none', None))
 
 
+class TakeBackSettles(unittest.TestCase):
+    """An exited removal with no jobId takes a Tart `Runner started` back only when no `Job started|completed for
+    unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE: the rule the D6 AMENDMENT gives
+    the exited removal itself (Opus r3 F1). Until the exit is final (its failure settles: by the log, or by the clock
+    when the log is quiet) the start stays a proof of life for R1, so where the capture falls between the removal and
+    the unknown-runner line changes no verdict. `pending` counts the start as taken back: KEEP waits for the exit.
+    Opus r3 F1's inputs, Tart fx on mac-a: failures 90, 95, runner X started 100, a failure 105 (all settled), with a
+    job completed at 200 (B, C) or not (A); then X removed `reason=exited` with no jobId at 500, and the unknown-runner
+    lines at 510, the capture ending after the first of them (A, B) or before them (C)."""
+
+    X = 'runner-0000beef'
+
+    def passes(self, proof_at_200, split, unknown_lines=True):
+        r = Run(self)
+        pre = failed(90, OTHER) + failed(95, OTHER) + started(100, self.X) + failed(105, OTHER)
+        if proof_at_200:
+            pre += removed(200, 'runner-0000cafe', 'job-completed')
+        ex = removed(500, self.X, 'exited', job=False)
+        first, second = unknown(510, self.X, 'mac-a', 'started'), unknown(510, self.X, 'mac-a', 'completed')
+        lines = first + second if unknown_lines else ''
+        if split == 'held':                             # the capture ends after `Job started for unknown runner`
+            p2, p3 = ex + first, second + tail(800)
+        elif split == 'between':                        # a record of another set follows the removal: it is read
+            p2, p3 = ex + scaling(501, 'mac-b'), lines + tail(800)
+        else:                                           # the same text in one pass
+            p2, p3 = ex + lines + tail(800), ''
+        return [r.fx(p) for p in (pre + tail(300), p2, p3)]
+
+    def verdicts(self, *a, **kw):
+        return [o['verdict'] for o in self.passes(*a, **kw)]
+
+    def test_opus_r3_f1_b_the_capture_ends_after_the_first_unknown_runner_line(self):
+        self.assertEqual(self.verdicts(True, 'held'), ['none'] * 3)
+
+    def test_opus_r3_f1_c_the_capture_ends_between_the_removal_and_the_unknown_runner_lines(self):
+        self.assertEqual(self.verdicts(True, 'between'), ['none'] * 3)
+
+    def test_opus_r3_f1_a_no_job_completed_after_the_run_is_the_same(self):
+        # the start is the only proof of life between 95 and 105: the unknown-runner line keeps it one, wherever the
+        # capture falls (the same text in one pass: none)
+        for split in ('held', 'between', 'one'):
+            self.assertEqual(self.verdicts(False, split), ['none'] * 3, split)
+
+    def test_control_no_unknown_runner_line_follows_the_start_is_taken_back_once_the_exit_is_final(self):
+        for proof_at_200 in (False, True):
+            for split in ('between', 'one'):
+                out = self.passes(proof_at_200, split, unknown_lines=False)[-1]
+                self.assertEqual(out['verdict'], 'rollback', (proof_at_200, split))
+                self.assertEqual([f['t'][-5:] for f in out['failures']][:3], ['01:30', '01:35', '01:45'],
+                                 (proof_at_200, split))
+        # by the clock too: the log quiet after the removal, SETTLE later the exit is final
+        r = Run(self)
+        r.go(failed(90, OTHER) + failed(95, OTHER) + started(100, self.X) + failed(105, OTHER) + tail(300))
+        self.assertEqual(r.fx(removed(500, self.X, 'exited', job=False) + scaling(501, 'mac-b'))['verdict'], 'none')
+        self.assertEqual(r.fx('', now=r.now + 119)['verdict'], 'none')
+        self.assertEqual(r.fx('', now=r.now + 600)['verdict'], 'rollback')
+
+    def test_while_the_exit_may_still_take_the_start_back_keep_waits(self):
+        # pass 2 of C: no verdict yet, and the run the exit would complete is pending
+        out = self.passes(True, 'between')[1]
+        self.assertEqual((out['verdict'], out['pending']), ('none', {'set': 'mac-a', 'failures': 3, 'settled': 3}))
+
+
 class Retired(unittest.TestCase):
     def test_deprecated_on_tart_stops_and_is_not_counted(self):
         r = Run(self).fx(three(lambda i: right_after('runner-0000000%d' % i, RETIRED)))

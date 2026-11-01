@@ -146,13 +146,16 @@ never a counted failure or a STOP. So a partial line never holds R1: the failure
 | `Failed to start runner`: `did not connect to GitHub within` | yes, connect-class |
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
-| `Runner removed reason=exited` with no `jobId` | yes (and it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later) |
+| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later) |
 | `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set; that runner's failure is not counted and its `Runner started` is proof again |
 | `Runner exited before job completion` alone | no (unknown) |
 
 Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner
-started`, unless that runner is later removed `reason=exited` with no `jobId` (and no unknown-runner line takes that
-back).
+started`, unless that runner is later removed `reason=exited` with no `jobId` and no unknown-runner line takes that
+back. The removal takes the start back only when it is final, by the same rule as its own failure: SETTLE passes with
+no such line (its failure settles, by the log or by the clock). Until then the start is still a proof of life for R1,
+so where a pass's capture falls between the removal and the unknown-runner line changes no verdict; `pending` counts
+the start as taken back (KEEP waits for the removal to be final).
 
 **SETTLE.** A counted failure is settled only when no proof of life can still arrive for it: a later record of the log
 is 120 s of log time past it, or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
