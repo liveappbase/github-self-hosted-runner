@@ -14,9 +14,10 @@
 # the text: a partial last line). The caller prepends it to the next interval's text. tokenize_final reads every
 # record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE, and P's text at the updater's
 # own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true. A
-# partial last line that starts with a space belongs to the record before it: it is a continuation line cut short
-# ("  ", "  err", "  " and a cut "│", " nam": a short write that ended at the start of a key, value or attribute line).
-# A partial last line of another shape (a cut header, another program's line) leaves the record before it whole.
+# partial last line that can still become a continuation line belongs to the record before it: it is one cut short
+# (" ", "  ", "  err", "  " and a cut "│", and right after a value line " nam": a short write that ended at the start of
+# a key, value or attribute line). A partial last line of another shape (a cut header, another program's line, also one
+# that starts with a space, such as " ---> Running in …") leaves the record before it whole.
 
 def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
@@ -38,6 +39,14 @@ def _kind:
   elif test("^ " + _key_re + "=") then "a"
   elif . == "" then "e"
   else "f" end;
+
+# . = a partial last line (kind "f"), $prev = the kind of the line before it -> can it still become a continuation line
+# of the record before it: a prefix of "  KEY=" (a multi-line value's key line), of "  │ " (a value line; a cut inside
+# "│" reads as U+FFFD), or, right after a value line, of " KEY=value" (more keys after a multi-line value). Nothing
+# else: another program's line that starts with a space is no continuation (Codex r4 F1)
+def _continues($prev):
+  test("^ {1,2}$") or test("^  " + _key_re + "$") or test("^  \ufffd{1,2}$")
+  or ($prev == "v" and test("^ " + _key_re + "$"));
 
 def _unquote:
   if length >= 2 and startswith("\"") and endswith("\"") then .[1:-1] | gsub("\\\\\""; "\"") else . end;
@@ -66,9 +75,10 @@ def _tokenize($final):
   | ($text | split("\n")) as $all
   | (if $complete then $all[:-1] else $all end) as $ls
   | [$ls[] | _kind] as $kinds0
-  # tokenize_final of a text that ends in a partial line that starts with a space: a continuation line cut short, of
-  # the record before it ("c"), not another program's line (Codex r3 F1, Opus r3 F2)
-  | (if $final and ($complete | not) and ($kinds0 | length) > 0 and $kinds0[-1] == "f" and ($ls[-1] | startswith(" "))
+  # tokenize_final of a text that ends in a partial line that can still become a continuation line: one cut short, of
+  # the record before it ("c"), not another program's line (Codex r3 F1, Opus r3 F2, Codex r4 F1)
+  | (if $final and ($complete | not) and ($kinds0 | length) > 0 and $kinds0[-1] == "f"
+        and ($ls[-1] | _continues(if ($kinds0 | length) > 1 then $kinds0[-2] else null end))
      then $kinds0[:-1] + ["c"] else $kinds0 end) as $kinds
   | ([range(0; $kinds | length) | select($kinds[.] == "h")] | last) as $last_h
   | (if ($ls | length) == 0 then 0

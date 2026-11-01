@@ -195,6 +195,28 @@ class Shapes(unittest.TestCase):
             self.assertEqual([r.get('partial') for r in out['records']], [None, None], repr(part[-12:]))
             self.assertEqual(out['records'][1]['attrs'], {'error': 'one\ntwo', 'name': 'runner-x'}, repr(part[-12:]))
 
+    def test_tokenize_final_a_partial_line_that_can_no_longer_become_a_continuation_leaves_the_record_whole(self):
+        # Codex r4 F1: only a prefix of a charm continuation line (`  key=`, `  │ …`, and ` key=value` right after a
+        # value line) marks the record before it partial. Another program's unterminated line that starts with a space
+        # (` ---> Running in abcdef`, one space then a character no key starts with, two spaces then no key or bar, a
+        # one-space key after a line that is no value line) is foreign text: the record before it was written with its
+        # newline and is whole
+        head = '2026-10-26 21:10:52 INFO mac-a: Scaling up runner currentCount=1\n'
+        rec = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n  │ one\n  │ two\n name=runner-x\n'
+        one = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry error="one" name=runner-x\n'
+        for whole, part in ((rec, ' ---> Running in abcdef'), (rec, ' -'), (rec, '  ->'), (rec, '  -->'), (rec, '  err or'),
+                            (rec, '  error=x'), (rec, ' nam'), (one, ' nam'), (one, ' ---> Running in abcdef')):
+            with self.subTest(repr(part)):
+                out = tok(self, head + whole + part, final=True)
+                self.assertEqual([r.get('partial') for r in out['records']], [None, None])
+                self.assertEqual(out['records'][1]['text'] + '\n', whole)
+        # controls: on the same records, a line that can still become a continuation line marks the record partial
+        for whole, part in ((rec[:rec.index(' name=')], ' nam'), (rec[:rec.index(' name=')], ' '), (one, ' '),
+                            (one, '  '), (one, '  err'), (one, '  ' + b'\xe2\x94'.decode('utf-8', 'surrogateescape'))):
+            with self.subTest('control ' + repr(part)):
+                out = tok(self, head + whole + part, final=True)
+                self.assertEqual([r.get('partial') for r in out['records']], [None, True])
+
     def test_continuation_lines_with_no_record_before_them_are_ignored(self):
         out = tok(self, '  │ tail of a record of an earlier interval\n'
                         '2026-10-26 21:10:54 INFO mac-a: Scaling up runner currentCount=1\n', final=True)

@@ -132,9 +132,10 @@ is never read from its first part. A held record is read once the log has been q
 clock with the text unchanged, `state.carry_at`). runscaler writes each record with one write, so a held text that
 still ends in a partial line then is a short write (a full disk): the record that line belongs to is read only as what
 a proof of life is (a job completed, a Tart start, an unknown-runner line); any other truncated record is unknown text,
-never a counted failure or a STOP. A partial line that starts with a space is a continuation line cut short (`  `,
-`  err`, `  ` and a cut `│`) and belongs to the record before it; a cut header or another program's line leaves the
-record before it whole (it was written with its newline). So a partial line never holds R1: the failures before it
+never a counted failure or a STOP. A partial line that can still become a continuation line is one cut short (` `,
+`  `, `  err`, `  ` and a cut `│`, and right after a value line ` nam`) and belongs to the record before it; a cut
+header or another program's line, also one that starts with a space (` ---> Running in …`), leaves the record before
+it whole (it was written with its newline). So a partial line never holds R1: the failures before it
 settle. One cut the text cannot show: a short write that ends exactly at a newline inside a multi-line record leaves
 lines that read as a whole record, and it is read as one (a counted failure when its first lines say one).
 

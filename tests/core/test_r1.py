@@ -1177,6 +1177,19 @@ class ContinuationCut(unittest.TestCase):
                 self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'],
                                  (how.__name__, partial[-20:]))
 
+    def test_codex_r4_f1_a_foreign_line_that_starts_with_a_space_leaves_a_complete_third_failure_whole(self):
+        # Codex r4 F1: failures 10, 20, 30, each written with its newline, then another program's unterminated line
+        # ` ---> Running in abcdef`. No continuation line starts so, so it is foreign text: the third failure is whole and
+        # counted -> R1 on 10, 20, 30, through a quiet pass and through the own-restart flush (the line in the text P
+        # held, or in P's tail). The third failure single-line (Codex's input) and multi-line (the line after a value line)
+        for third in (failed(30, OTHER), failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))):
+            for name, how in (('quiet', self.quiet), ('restart', self.restart),
+                              ("restart, in P's tail", lambda x: self.restart(x, in_tail=True))):
+                with self.subTest((name, third.count('\n'))):
+                    r, vs = how(third + ' ---> Running in abcdef')
+                    self.assertEqual(vs[-1], 'rollback')
+                    self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'])
+
 
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
     m = {'jobs_started': 5, 'jobs_completed': 4, 'desired_runners': 1}
