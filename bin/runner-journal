@@ -1,0 +1,29 @@
+#!/bin/zsh -f
+# runner-journal FILE KEY VALUE — append ONE line "KEY VALUE" to FILE and fsync it. It is the updater's one
+# append+fsync helper: golden-gate journals its clone name with it, and the updater writes its journal with it.
+# Design: docs/design.md ("The gate on a saved image").
+#   FILE   an absolute path in a folder that exists; a regular file, or absent (then it is created)
+#   KEY    matches ^[a-z][a-z0-9-]{0,40}$
+#   VALUE  one line: no control character (no newline, no tab), at most 1000 bytes; it may be empty
+# It appends with `>>`, then runs `dd if=/dev/null of=FILE conv=notrunc,fsync` and checks dd's exit status (zsh has no
+# fsync; dd is the one fsync a shell has on this host, measured). Exit 0, or "runner-journal: STOP <reason>" and exit 1.
+# A bad argument changes nothing. A failed dd leaves the line written but not known to be on disk: that is a STOP too.
+# Named residual: macOS fsync() does not flush the drive's own cache (only fcntl F_FULLFSYNC does), so a power loss can
+# still lose the newest line. A reader treats a missing last line as "that step may not have started".
+set -u
+export LC_ALL=C
+DD=/bin/dd
+
+stop() { print -r -- "runner-journal: STOP $*"; exit 1 }
+(( $# == 3 )) || stop "usage: runner-journal FILE KEY VALUE"
+file=$1 key=$2 value=$3
+[[ $file == /* ]] || stop "FILE must be an absolute path: '${file//[[:cntrl:]]/?}'"
+[[ -d ${file:h} ]] || stop "the folder of FILE does not exist: ${${file:h}//[[:cntrl:]]/?}"
+[[ ! -e $file || -f $file ]] || stop "FILE exists and is not a regular file: ${file//[[:cntrl:]]/?}"
+[[ $key =~ '^[a-z][a-z0-9-]{0,40}$' ]] || stop "KEY must match ^[a-z][a-z0-9-]{0,40}\$: '${key//[[:cntrl:]]/?}'"
+[[ $value != *[[:cntrl:]]* ]] || stop "VALUE holds a control character (a newline, a tab …): nothing written"
+(( ${#value} <= 1000 )) || stop "VALUE is ${#value} bytes, more than 1000: nothing written"   # LC_ALL=C: bytes
+print -r -- "$key $value" >> $file || stop "cannot append to $file"
+out=$($DD if=/dev/null of=$file conv=notrunc,fsync 2>&1) \
+  || stop "dd could not fsync $file (the line is written, not known to be on disk): ${${(f)out}[1]-}"
+exit 0
