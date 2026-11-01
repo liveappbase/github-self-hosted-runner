@@ -27,7 +27,11 @@ def facts_in($prog):
   | if ($f | length) == 1 and ($f[0] | type) == "object" and $f[0].format == facts_format then $f[0]
     else error("\($prog): facts: not one JSON object of format \(facts_format)") end
   | if .proc == null or ((.proc | type) == "object" and (.proc.before | proc_ok) and (.proc.after | proc_ok)) then .
-    else error("\($prog): facts: a proc read is not null or {pid: a positive integer, start: a number}: \(.proc | tojson)") end;
+    else error("\($prog): facts: a proc read is not null or {pid: a positive integer, start: a number}: \(.proc | tojson)") end
+  # restart: the updater's own restart of runscaler in this interval, {from: P, to: Q} (two process reads), or null
+  | if .restart == null or ((.restart | type) == "object" and .restart.from != null and .restart.to != null
+                            and (.restart.from | proc_ok) and (.restart.to | proc_ok)) then .
+    else error("\($prog): facts: restart is not null or {from: a process read, to: a process read}: \(.restart | tojson)") end;
 
 # an EMPTY state file is a fresh state
 def state_in($prog):

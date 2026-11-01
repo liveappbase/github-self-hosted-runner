@@ -158,18 +158,26 @@ C::now_in("r1") as $now
     (if C::same_proc($facts.proc.before; $facts.proc.after) then $facts.proc.before else null end) as $owner
     | ($state.boundary.owner // null) as $prev
     | (C::same_proc($prev; $owner) and $facts.continuous == true) as $owned
+    # the updater's own restart (PLAN D6: its own switches leave no gap): the glue says it restarted runscaler from the
+    # state's boundary process to this pass's process in this interval. A restart fact that does not match both is
+    # a foreign restart: a gap like any other
+    | ($facts.restart // null) as $rs
+    | ((C::same_proc($prev; $owner) | not) and $rs != null and C::same_proc($rs.from; $prev)
+       and C::same_proc($rs.to; $owner)) as $own_restart
     | ($facts.families // {}) as $fams
-    # each family with a candidate: its evidence (fresh for a new candidate), provenance now, counting this interval
+    # each family with a candidate: its evidence (fresh for a new window), provenance now, counting this interval,
+    # or carried across the updater's own restart (the window stays open; the interval's text counts neither way)
     | ($fams | with_entries(select(.value.candidate != null)
         | .key as $f | .value as $fam
         | ($state.families[$f] // null) as $old
         | (if C::same_window($old; $fam.candidate) then $old else fresh($fam.candidate) end) as $ev
         | C::runs_candidate($owner; $facts.config; $fam) as $prov
-        | .value = {ev: $ev, prov: $prov, counting: ($ev.open and $owned and $prov), provider: $fam.provider,
-                    sets: $fam.sets})) as $obs
-    # an open window that does not count this interval: an evidence gap. It closes the window; the window that
-    # opens again starts its counts, NOT SERVING and the KEEP clock from zero (below)
-    | ($obs | map_values(if .ev.open and (.counting | not) then .ev |= (.gaps += 1 | .open = false) else . end)) as $obs
+        | .value = {ev: $ev, prov: $prov, counting: ($ev.open and $owned and $prov),
+                    carried: ($ev.open and $own_restart and $prov), provider: $fam.provider, sets: $fam.sets})) as $obs
+    # an open window that neither counts this interval nor is carried across the updater's own restart: an evidence
+    # gap. It closes the window; the window that opens again starts its counts, NOT SERVING and the KEEP clock from zero
+    | ($obs | map_values(if .ev.open and (.counting | not) and (.carried | not) then .ev |= (.gaps += 1 | .open = false)
+                         else . end)) as $obs
     # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
     # (it may yet grow); a held record that ends with a newline is read whole once the log has been quiet for SETTLE
     | (if $owned then

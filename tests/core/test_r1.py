@@ -97,16 +97,20 @@ def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new', cl
                           'closed_at': P['start'] if closed_at is None else closed_at}}
 
 
-def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0):
+def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0, restart=None):
+    """restart: (FROM, TO), the glue's fact that it restarted runscaler from process FROM to TO in this interval."""
     after = before if after is None else after
     if lines is None:
         lines = {}
         for f in families.values():
             if f['candidate']:
                 lines.update(f['candidate']['lines'])
-    return {'format': 1, 'host': 'studio', 'sets': sorted(lines), 'proc': {'before': before, 'after': after},
-            'position': {'inode': '7', 'offset': offset, 'sha': 'x'}, 'continuous': continuous,
-            'config': {'installed': installed, 'lines': lines}, 'families': families}
+    out = {'format': 1, 'host': 'studio', 'sets': sorted(lines), 'proc': {'before': before, 'after': after},
+           'position': {'inode': '7', 'offset': offset, 'sha': 'x'}, 'continuous': continuous,
+           'config': {'installed': installed, 'lines': lines}, 'families': families}
+    if restart is not None:
+        out['restart'] = {'from': restart[0], 'to': restart[1]}
+    return out
 
 
 class Run:
@@ -486,6 +490,85 @@ class Ownership(unittest.TestCase):
         r = Run(self, opened=False)
         self.assertEqual(r.fx(three(lambda i: OTHER))['verdict'], 'none')
         self.assertEqual(r.fx(three(lambda i: OTHER, start=100))['verdict'], 'rollback')
+
+
+R = {'pid': 6161, 'start': 1793526000}             # a third runscaler
+
+
+class OwnRestart(unittest.TestCase):
+    """The updater's own restart is no gap (PLAN D6: its own switches leave no gap; another family's window does not end
+    X's evidence; Codex r1 F10, Opus r1 F10, G1): with facts.restart = {from: P, to: Q} matching the state's boundary
+    process and this pass's process, every family the restart did not switch keeps its counts, its NOT SERVING and its
+    KEEP clock while Q's config still names its candidate; the interval's own text counts neither way. A foreign
+    restart still makes a gap."""
+
+    def setUp(self):
+        self.fams = {'fx': fam(sets=('mac-a',)), 'fy': fam(sets=('mac-b',), image='img-y')}
+        # fy's switch: a new candidate, its line in the config Q runs
+        self.fy2 = {'fx': self.fams['fx'], 'fy': fam(sets=('mac-b',), image='img-y2', version='2.340.0',
+                                                       closed_at=NOW + 1800)}
+        # the interval: P's tail and Q's head, with a failure and a success on fx's set that count neither way
+        self.interval = (failed(50, OTHER) + removed(55, 'runner-0000cafe', 'job-completed')
+                         + charm(t(60), 'INFO', None, 'Starting scale sets', [('count', 2)]) + tail(300))
+
+    def before(self):
+        r = Run(self, self.fams)                        # both windows open at P
+        r.go(failed(10, OTHER) + failed(20, OTHER) + removed(25, 'runner-0000beef', 'job-completed')
+             + failed(30, OTHER) + failed(35, OTHER) + scaling(40))
+        return r, dict(r.state['families']['fx'])
+
+    def restart(self, r, restart=(P, Q), lines=None):
+        return r.go(self.interval, families=self.fy2, before=Q, installed=Q['start'] - 60, restart=restart,
+                    lines=lines or {'mac-a': 'img-new', 'mac-b': 'img-y2'})
+
+    def test_g1_fx_keeps_since_counts_and_failures_across_fys_restart(self):
+        r, fx0 = self.before()
+        self.assertEqual((fx0['succeeded'], len(fx0['sets']['mac-a']['fails'])), (1, 4))
+        out = self.restart(r)
+        fx1 = out['state']['families']['fx']
+        for k in ('open', 'since', 'gaps', 'succeeded', 'failed', 'sets'):
+            self.assertEqual(fx1[k], fx0[k], k)
+        # fy's new window opens at this boundary
+        fy1 = out['state']['families']['fy']
+        self.assertEqual((fy1['open'], fy1['since'], fy1['version']), (True, r.now, '2.340.0'))
+        # Q's own text counts from here: one more failure on mac-a makes the third since the proof at 25
+        out = r.go(failed(400, OTHER) + tail(600), families=self.fy2, before=Q, installed=Q['start'] - 60,
+                   lines={'mac-a': 'img-new', 'mac-b': 'img-y2'})
+        self.assertEqual(out['families']['fx']['verdict'], 'rollback')
+
+    def test_g1_the_keep_clock_stays(self):
+        r, fx0 = self.before()
+        self.restart(r)
+        k = ok(self, 'keep', state=r.state, facts=facts(self.fy2, before=Q, installed=Q['start'] - 60,
+                                                         lines={'mac-a': 'img-new', 'mac-b': 'img-y2'}),
+               now=fx0['since'] + 72 * 3600)['families']['fx']
+        self.assertEqual(k['verdict'], 'accept', k)
+
+    def test_control_the_same_text_with_no_restart_fact_is_a_gap(self):
+        r, fx0 = self.before()
+        out = self.restart(r, restart=None)
+        fx1 = out['state']['families']['fx']
+        self.assertEqual((fx1['gaps'], fx1['since'], fx1['succeeded'], counted(out)), (1, r.now, 0, 0))
+
+    def test_a_foreign_restart_is_a_gap(self):
+        for rs in ((P, R), (R, Q), (Q, P)):
+            r, fx0 = self.before()
+            fx1 = self.restart(r, restart=rs)['state']['families']['fx']
+            self.assertEqual((fx1['gaps'], fx1['since']), (1, r.now), rs)
+
+    def test_no_carry_when_qs_config_does_not_name_the_candidate(self):
+        r, fx0 = self.before()
+        fx1 = self.restart(r, lines={'mac-a': 'img-hand', 'mac-b': 'img-y2'})['state']['families']['fx']
+        self.assertEqual((fx1['gaps'], fx1['open']), (1, False))
+
+    def test_a_malformed_restart_fact_cannot_decide(self):
+        for bad in ({'from': P}, {'from': P, 'to': None}, {'from': {'start': 'x'}, 'to': Q}, 'P->Q', 7):
+            f = facts(self.fams, before=Q)
+            f['restart'] = bad
+            for prog in ('idle', 'r1', 'keep', 'status'):
+                rc, _, err = run(self, prog, state=[], log='', healthz=[], facts=f, now=NOW)
+                self.assertNotEqual(rc, 0, (prog, bad))
+                self.assertIn('%s: facts' % prog, err, (prog, bad))
 
 
 class Provenance(unittest.TestCase):

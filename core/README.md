@@ -63,6 +63,12 @@ returned unchanged, rc 0.
                                         the captured position (the sha of the 64 bytes before it)
   "continuous": true | false,           the glue read the log from the state's boundary to the position with no
                                         loss: same file or the rotation followed, and the boundary's sha matched
+  "restart": {"from": {"pid": N, "start": EPOCH}, "to": {"pid": N, "start": EPOCH}} | null,
+                                        the updater's OWN restart: "between the state's boundary and this position,
+                                        I restarted runscaler from process `from` to process `to`" (r1.jq). The
+                                        glue sets it on the pass after it restarted runscaler itself (a switch, a
+                                        rollback, a RECOVER) and saw `to` running, else null or absent. Not null and
+                                        not two process reads: rc != 0 on every program
   "config": {"installed": EPOCH, "lines": {"SET": "IMAGE", ...}},
                                         the config installed now and its install time (Studio: its mtime; the
                                         Linux host: the journaled `renamed` epoch)
@@ -90,6 +96,13 @@ the same P (pid and start), else it is ambiguous. The text between the state's b
 when both boundaries are P's and `continuous` is true; otherwise it is UNKNOWN: it counts neither way, and it is an
 EVIDENCE GAP for every family under observation (its R1 counts, NOT SERVING and the KEEP clock restart; the shim's
 unpaired refusals are dropped).
+
+**The updater's own restart is no gap** (PLAN D6: its own switches leave no gap; another family's window does not end
+X's evidence). When `facts.restart` says the glue restarted runscaler from P to Q in this interval, P is the state's
+boundary process and Q this pass's, every open window of a family this restart did not switch (the same candidate
+window) stays open while Q's config still names its candidate: its counts and failures, its NOT SERVING and its KEEP
+clock stay. The interval's own text (P's tail, Q's start) counts neither way. A family the restart switched has a new
+window anyway. A foreign restart (no such fact, or a `from` or `to` that does not match the process reads) is a gap.
 
 **Provenance.** P runs the config `facts.config` when `config.installed < P.start` (whole seconds; equal is not
 proven). Family X's events count when the text is P's and P's config names X's candidate on every set of X. An
