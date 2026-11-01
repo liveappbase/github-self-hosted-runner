@@ -1,6 +1,6 @@
 #!/bin/zsh -f
-# runner-enable — the ONLY way to turn the agent on. Writes FLAG (launchd then starts runscaler through runner-start)
-# only when ALL of these hold, and says which one does not:
+# runner-enable [--check] — the ONLY way to turn the agent on. Writes FLAG (launchd then starts runscaler through
+# runner-start) only when ALL of these hold, and says which one does not:
 #   - the wall's root files are FILES green (wall-files-check);
 #   - the shim's own check passes (the wall stamp matches Tart, softnet and the shim; free disk >= the floor);
 #   - the wall stamp's `macos` line is this Mac's build (sw_vers -buildVersion): the frozen shim never compares it, and
@@ -8,9 +8,12 @@
 #   - WALLPROOF names the sha256 of the wall-check, real-run and wall-files-check installed now (the tools the last
 #     PASS of wall-check ran): a changed tool needs a new proof;
 #   - the LaunchAgent is loaded in ci's GUI session;
-#   - the runner lock is free (no runscaler, no install, no wall-check or golden-build is running);
-#   - no VM other than runscaler's runner-<8 hex> is running.
+#   - no VM other than runscaler's runner-<8 hex> is running;
+#   - the runner lock is free (no runscaler, no install, no wall-check or golden-build is running).
 # FLAG is written while it holds the runner lock, so an install or a proof cannot start in between.
+# --check runs the same checks in the same order, except the lock: it never asks runner-lock-free, never takes the
+# lock and never writes FLAG, so it can run while runscaler runs. It ends with `runner-enable: check passed (…)`.
+# Any other argument: `runner-enable: REFUSE usage: runner-enable [--check]`, and nothing is checked or written.
 # Design: docs/design.md ("The service", "Stamp and wall proof").
 umask 077
 FLAG=/Users/ci/.config/runner/enabled
@@ -35,6 +38,11 @@ stamp_macos() { # -> 0 when the wall stamp's macos line is this Mac's build; els
   return 1
 }
 
+case $# in
+  (0) check=0 ;;
+  (1) [[ $1 == --check ]] && check=1 || die "usage: runner-enable [--check]" ;;
+  (*) die "usage: runner-enable [--check]" ;;
+esac
 [[ $($WFC | head -1) == "FILES green" ]] || die "FILES is not green: $($WFC | tr '\n' ' ')"
 out=$(/usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin $SHIM --liveapp-check 2>&1) || die "the shim's check fails: $out"
 stamp_macos || die "$REPLY: run $BIN/wall-check (a macOS update needs a new wall proof)"
@@ -47,9 +55,13 @@ done
   || die "the wall proof does not match the installed wall-check, real-run and wall-files-check: run $BIN/wall-check"
 /bin/launchctl print gui/$(/usr/bin/id -u)/$LABEL > /dev/null 2>&1 \
   || die "the LaunchAgent $LABEL is not loaded in ci's GUI session: run the install line again"
-lf=$($LOCKFREE) || die "the runner lock is not free ($lf): runscaler, an install, wall-check or golden-build is running"
 stray=(${(f)"$(/usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL list --source local | awk 'NR > 1 && $NF == "running" {print $2}' | grep -vE '^runner-[0-9a-f]{8}$')"})
 (( ${#stray} == 0 )) || die "a VM outside runscaler is running: ${stray[*]}"
+if (( check )); then
+  print -r -- "runner-enable: check passed ($out)"
+  exit 0
+fi
+lf=$($LOCKFREE) || die "the runner lock is not free ($lf): runscaler, an install, wall-check or golden-build is running"
 /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f -c 'umask 077; : > $1' runner-enable $FLAG \
   || die "cannot write $FLAG under the runner lock (did something take the lock just now?)"
 print -r -- "runner-enable: enabled ($out)"
