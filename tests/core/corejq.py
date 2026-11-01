@@ -71,8 +71,10 @@ def run(test, name, state=None, log=None, healthz=None, facts=None, now=None, ra
     argv = [jq(), '-n', '-L', os.path.join(CORE, 'lib'), '-f', os.path.join(CORE, name + '.jq')]
 
     def put(fname, text):
+        # surrogateescape: a text may carry bytes that are not UTF-8 (a short write that cut a character), as
+        # surrogates; they are written as those bytes
         p = os.path.join(d, fname)
-        with open(p, 'w', encoding='utf-8') as f:
+        with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:
             f.write(text)
         return p
 

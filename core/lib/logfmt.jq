@@ -13,7 +13,10 @@
 # record header is read, so the last one is always held, also when the text ends with a newline (with no header in
 # the text: a partial last line). The caller prepends it to the next interval's text. tokenize_final reads every
 # record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE, and P's text at the updater's
-# own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true.
+# own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true. A
+# partial last line that starts with a space belongs to the record before it: it is a continuation line cut short
+# ("  ", "  err", "  " and a cut "│", " nam": a short write that ended at the start of a key, value or attribute line).
+# A partial last line of another shape (a cut header, another program's line) leaves the record before it whole.
 
 def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
@@ -62,7 +65,11 @@ def _tokenize($final):
   | ($text | endswith("\n")) as $complete
   | ($text | split("\n")) as $all
   | (if $complete then $all[:-1] else $all end) as $ls
-  | [$ls[] | _kind] as $kinds
+  | [$ls[] | _kind] as $kinds0
+  # tokenize_final of a text that ends in a partial line that starts with a space: a continuation line cut short, of
+  # the record before it ("c"), not another program's line (Codex r3 F1, Opus r3 F2)
+  | (if $final and ($complete | not) and ($kinds0 | length) > 0 and $kinds0[-1] == "f" and ($ls[-1] | startswith(" "))
+     then $kinds0[:-1] + ["c"] else $kinds0 end) as $kinds
   | ([range(0; $kinds | length) | select($kinds[.] == "h")] | last) as $last_h
   | (if ($ls | length) == 0 then 0
      elif $final then ($ls | length)
@@ -84,6 +91,7 @@ def _tokenize($final):
              | .cur.text += "\n" + $l
            elif $k == "a" then .cur.attrs += ($l | _attrs) | .key = null | .cur.text += "\n" + $l
            elif $k == "e" then .
+           elif $k == "c" then .cur.text += "\n" + $l
            else .recs += [.cur] | .cur = null | .key = null end)
        # tokenize_final of a text that ends in a partial line: the record that line belongs to is `partial` (r1.jq reads
        # it only as a proof of life). A line of another program ended the record before it (.cur is null then)

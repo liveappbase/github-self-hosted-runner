@@ -21,7 +21,7 @@ HEADER = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (DEBU|INFO|WARN|ERRO|
 def tok(test, text, final=False):
     d = tmpdir(test)
     p = os.path.join(d, 'log.txt')
-    with open(p, 'w', encoding='utf-8') as f:
+    with open(p, 'w', encoding='utf-8', errors='surrogateescape') as f:   # surrogates: bytes that are not UTF-8
         f.write(text)
     r = subprocess.run([jq(), '-n', '-c', '-L', os.path.join(CORE, 'lib'), '--rawfile', 'log', p,
                         'import "logfmt" as L; $log | L::tokenize%s' % ('_final' if final else '')],
@@ -172,6 +172,28 @@ class Shapes(unittest.TestCase):
         # a partial line of another program ends the record before it, which is whole
         out = tok(self, head + PULL_LINE, final=True)
         self.assertEqual([r.get('partial') for r in out['records']], [None])
+
+    def test_tokenize_final_a_cut_at_the_start_of_a_continuation_line_marks_the_record_before_it(self):
+        # Codex r3 F1, Opus r3 F2: a short write that ends at the start of a continuation line leaves a last line of no
+        # kind ("  ", "  │" cut inside the "│", "  err", " nam", " "): it starts with a space, the shape of a
+        # continuation, so it belongs to the record before it, which is partial (not ended whole)
+        head = '2026-10-26 21:10:52 INFO mac-a: Scaling up runner currentCount=1\n'
+        rec = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n  │ one\n  │ two\n name=runner-x\n'
+        cut_bar = rec[:rec.index('  │ two')] + '  ' + b'\xe2\x94'.decode('utf-8', 'surrogateescape')   # bytes, not a char
+        for part in (rec[:rec.index('  │ two') + 2], cut_bar, rec[:rec.index('  error=') + 5],
+                     rec[:rec.index(' name=') + 4], rec[:rec.index(' name=') + 1]):
+            with self.subTest(repr(part[-12:])):
+                out = tok(self, head + part, final=True)
+                self.assertEqual([r.get('partial') for r in out['records']], [None, True])
+                self.assertEqual(out['records'][1]['msg'], 'Failed to start runner, will retry')
+                # its text: the record's lines as written, the cut line last
+                self.assertEqual(out['records'][1]['text'].count('\n'), part.count('\n'))
+        # controls: a cut inside the next record's header, or a line of another program, ends the record before it,
+        # which is whole (one write per record: it was written with its newline)
+        for part in (rec + '2026-10-26 21:10:5', rec + PULL_LINE):
+            out = tok(self, head + part, final=True)
+            self.assertEqual([r.get('partial') for r in out['records']], [None, None], repr(part[-12:]))
+            self.assertEqual(out['records'][1]['attrs'], {'error': 'one\ntwo', 'name': 'runner-x'}, repr(part[-12:]))
 
     def test_continuation_lines_with_no_record_before_them_are_ignored(self):
         out = tok(self, '  │ tail of a record of an earlier interval\n'

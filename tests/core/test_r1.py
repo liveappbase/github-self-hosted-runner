@@ -131,14 +131,15 @@ class Run:
         self.now = now or (self.now + 600)
         fams = families or self.families
         kw.setdefault('inode', self.inode)
-        kw.setdefault('offset', self.offset + len(log.encode('utf-8')))
+        kw.setdefault('offset', self.offset + len(log.encode('utf-8', 'surrogateescape')))
         out = ok(self.test, 'r1', state=self.state, log=log, healthz=list(healthz), facts=facts(fams, **kw), now=self.now)
         self.state, self.inode, self.offset = out['state'], kw['inode'], kw['offset']
         return out
 
     def stopped(self, p_text, inode=None):
         """The position the glue captures once P has exited: after P's text of this interval."""
-        return {'inode': inode or self.inode, 'offset': self.offset + len(p_text.encode('utf-8')), 'sha': 's'}
+        return {'inode': inode or self.inode, 'offset': self.offset + len(p_text.encode('utf-8', 'surrogateescape')),
+                'sha': 's'}
 
     def restart(self, p_text, q_text, frm=P, to=Q, stopped=None, **kw):
         """A pass after the updater's own restart: the glue stopped P, captured `stopped` once P had exited, started Q
@@ -1101,6 +1102,80 @@ class PartialLine(unittest.TestCase):
         out = r.go(rec[40:] + tail(), now=r.now + 60)
         self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['succeeded']), ('none', 1))
         self.assertEqual(self.quiet(r), ['none'] * 3)
+
+
+class ContinuationCut(unittest.TestCase):
+    """A short write that ends at the start of a continuation line of a multi-line record (after its indentation,
+    inside its `│`, inside a key line) leaves a last line that starts with a space: it belongs to the record before it,
+    which is `partial`, read only as what a proof of life is and never a counted failure (Codex r3 F1, Opus r3 F2),
+    whether the held text is read after SETTLE quiet or flushed at the updater's own restart (P has exited). The cut
+    record is the benign `right after connecting … no longer exists on the server` record of second 30, after two
+    counted failures, its benign line never written. Controls: a complete record missing only its newline is read as
+    what it is; a complete counted third failure followed by another record's partial line (a cut header, a line of
+    another program, a whole header line) is R1."""
+
+    def cuts(self):
+        rec = failed(30, right_after('runner-00000003', BENIGN))
+        upto = '\n'.join(rec.split('\n')[:3])           # the header, `  error=`, the first value line
+        return {'after the indentation': upto + '\n  ',
+                'inside the bar': upto + '\n  ' + b'\xe2\x94'.decode('utf-8', 'surrogateescape'),   # bytes, not a char
+                'inside the key line': rec[:rec.index('\n  error=') + len('\n  err')]}
+
+    def fails(self, r):
+        return len(r.state['families']['fx']['sets']['mac-a']['fails'])
+
+    def quiet(self, text):
+        r = Run(self)
+        vs = [r.fx(failed(10, OTHER) + failed(20, OTHER) + text)['verdict']]
+        return r, vs + [r.fx('', now=r.now + 600)['verdict'] for _ in range(3)]
+
+    def restart(self, text, in_tail=False):
+        """P's text ends in the cut (P held it at its last pass, or wrote it after), then the updater stopped P and
+        started Q; Q's text moves the log on."""
+        r, q = Run(self), dict(installed=Q['start'] - 60)
+        if in_tail:
+            vs = [r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))['verdict']]
+            vs.append(r.restart(text, tail(300), **q)['families']['fx']['verdict'])
+        else:
+            vs = [r.fx(failed(10, OTHER) + failed(20, OTHER) + text)['verdict']]
+            vs.append(r.restart('', tail(300), **q)['families']['fx']['verdict'])
+        return r, vs + [r.fx('', before=Q, **q)['verdict']]
+
+    def test_codex_r3_f1_opus_r3_f2_the_cut_record_is_no_counted_failure_through_a_quiet_pass(self):
+        for name, cut in self.cuts().items():
+            with self.subTest(name):
+                r, vs = self.quiet(cut)
+                self.assertEqual(vs, ['none'] * 4)
+                self.assertEqual((self.fails(r), r.state['families']['fx']['pending'], r.state['carry']), (2, None, ''))
+
+    def test_codex_r3_f1_opus_r3_f2_the_cut_record_is_no_counted_failure_through_the_own_restart_flush(self):
+        for name, cut in self.cuts().items():
+            with self.subTest(name):
+                r, vs = self.restart(cut)
+                self.assertEqual(vs, ['none'] * 3)
+                self.assertEqual((self.fails(r), r.state['families']['fx']['pending']), (2, None))
+        for name in ('after the indentation', 'inside the key line'):       # the cut in P's tail of the restart pass
+            with self.subTest(name + ', in P\'s tail'):
+                r, vs = self.restart(self.cuts()[name], in_tail=True)
+                self.assertEqual((vs, self.fails(r)), (['none'] * 3, 2))
+
+    def test_control_a_complete_record_missing_only_its_newline_is_what_it_is(self):
+        benign = failed(30, right_after('runner-00000003', BENIGN))[:-1]
+        proof = failed(30, OTHER) + removed(30, 'runner-0000beef', 'job-completed')[:-1]
+        for how in (self.quiet, self.restart):
+            r, vs = how(benign)
+            self.assertEqual((vs[-1], self.fails(r)), ('none', 2), how.__name__)
+            r, vs = how(proof)                          # a job completed in the third failure's second: between
+            self.assertEqual((vs[-1], r.state['families']['fx']['succeeded']), ('none', 1), how.__name__)
+
+    def test_control_a_complete_third_failure_then_another_records_partial_line_is_r1(self):
+        third = failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))
+        for partial in ('2026-11-01 05:00:4', PULL_LINE, scaling(40)[:-1]):
+            for how in (self.quiet, self.restart):
+                r, vs = how(third + partial)
+                self.assertEqual(vs[-1], 'rollback', (how.__name__, partial[-20:]))
+                self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'],
+                                 (how.__name__, partial[-20:]))
 
 
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
