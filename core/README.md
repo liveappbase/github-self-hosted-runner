@@ -87,7 +87,7 @@ returned unchanged, rc 0.
                                         previous image (status.jq only)
   "stops": [{"family": "F", "stop": "NAME", "version": "V", "user": "USER" | null, "detail": {...}}]
                                         the STOPs the glue holds (status.jq, and keep.jq: see KEEP; not a list is
-                                        rc != 0; one with no family holds every family); version: the release the
+                                        rc != 0; one with no family, or "", holds every family); version: the release the
                                         STOP is of; detail, as the STOP needs it:
                                         text (the failing line or step), hand (the hand line), failures and
                                         connect_only (r1's), counts (keep's), step "build" and build_user (the Linux
@@ -210,7 +210,8 @@ starts the 30 min again.
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose
 R1 verdict or STOP stands, r1's own or one the glue holds in `facts.stops`: `held` (a person answers it: JOBS FAIL's
 lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts. A held
-STOP holds every family when it names none (no `family`, or one that is not a name: fail closed, as for `version`).
+STOP holds every family when it names none (no `family`, `""`, or one that is not a name: fail closed, as for
+`version`).
 It holds the candidate only when it is of the candidate's `version` (or names none), or when its D7 row says a newer
 release does NOT proceed alone (`lib/stops.jq`): check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version
 closed that version's candidate, and a newer release proceeds alone past them. KEEP never

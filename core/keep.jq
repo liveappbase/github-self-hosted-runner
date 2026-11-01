@@ -24,9 +24,10 @@ C::now_in("keep") as $now
         # (JOBS FAIL: `back` or `retry` to keep it), so it is never turned into ACCEPT here. It holds THIS candidate
         # when it is of the candidate's version (or names none), or when its D7 row says a newer release does NOT
         # proceed alone: check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version closed that candidate,
-        # and the newer one proceeds alone (Opus r2 F2). A STOP that names no family (none, or not a name) holds every
-        # family: fail closed, as one that names no version does (Opus r3 F6)
-        | ([$held[] | select((.family == $f or (.family | type) != "string") and .stop != "NO EVIDENCE"
+        # and the newer one proceeds alone (Opus r2 F2). A STOP that names no family (none, "", or not a name) holds
+        # every family: fail closed, as one that names no version does (Opus r3 F6, Opus r4 F5: a glue's unset
+        # variable expands to "")
+        | ([$held[] | select((.family == $f or (.family | type) != "string" or .family == "") and .stop != "NO EVIDENCE"
                              and (.version == null or .version == $fam.candidate.version
                                   or (S::newer_proceeds(.stop) | not)))] | first) as $hs
         | ($e.succeeded // 0) as $ok | ($e.failed // 0) as $bad | ($e.other // 0) as $oth | ($e.canceled // 0) as $can

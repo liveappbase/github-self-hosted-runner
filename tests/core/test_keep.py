@@ -71,8 +71,8 @@ class HeldStops(unittest.TestCase):
 
 
 class StopWithNoFamily(unittest.TestCase):
-    """A held STOP that names no family (no `family`, or one that is not a family's name) holds every family's ACCEPT:
-    fail closed, as a STOP with no version already does (Opus r3 F6: it held none). Two families fx and fy, candidate
+    """A held STOP that names no family (no `family`, "", or one that is not a family's name) holds every family's
+    ACCEPT: fail closed, as a STOP with no version already does (Opus r3 F6, r4 F5: it held none). Two families fx and fy, candidate
     2.340.0 each, 73 h, 5 succeeded: ACCEPT unless a STOP holds them."""
 
     def verdicts(self, stops):
@@ -89,6 +89,13 @@ class StopWithNoFamily(unittest.TestCase):
                      {'stop': 'ROLLBACK FAILED'},
                      {'family': None, 'stop': 'HAND CHANGE', 'version': '2.340.0'},
                      {'family': ['fx'], 'stop': 'JOBS FAIL ON THE NEW IMAGE', 'version': '2.340.0'}):
+            with self.subTest(stop):
+                self.assertEqual(self.verdicts([stop]), {'fx': 'held', 'fy': 'held'})
+
+    def test_opus_r4_f5_an_empty_family_is_no_family_and_holds_every_family(self):
+        # a glue's unset variable expands to "": the likeliest "no family" shape (Opus r4 F5: it held none)
+        for stop in ({'family': '', 'stop': 'JOBS FAIL ON THE NEW IMAGE', 'version': '2.340.0'},
+                     {'family': '', 'stop': 'ROLLBACK FAILED'}):
             with self.subTest(stop):
                 self.assertEqual(self.verdicts([stop]), {'fx': 'held', 'fy': 'held'})
 
