@@ -1,9 +1,10 @@
 """core/TESTED_JQ, the ONE list of the jq builds the core and the watchdog are tested with: its rows parse, and the jq
 these tests run under is one of its rows for the area `core` (so a run under an untested jq is RED, never green)."""
+import os
 import re
 import unittest
 
-from tests.core.corejq import jq_version, tested_rows
+from tests.core.corejq import REPO, jq_version, tested_rows
 
 
 class TestedJq(unittest.TestCase):
@@ -21,6 +22,30 @@ class TestedJq(unittest.TestCase):
         v = jq_version()
         core = [r[0] for r in tested_rows() if 'core' in r[1]]
         self.assertIn(v, core, 'the jq under test prints %r: not a core row of core/TESTED_JQ %r' % (v, core))
+
+    def test_every_documented_test_line_names_the_local_rows_jq(self):
+        # a maintainer's line that runs the unit tests runs them under the first jq on PATH unless it names JQ, and a
+        # Homebrew jq first on PATH is no row: the line is RED there (Opus r1 F11, r2 F6). Every *.md line outside
+        # tests/ that runs `unittest discover` names `JQ=` with a local row's path (the CI lines run in containers and
+        # live in the workflow file, not in a doc)
+        local = ['JQ=' + r[2][len('local:'):] for r in tested_rows() if r[2].startswith('local:')]
+        self.assertTrue(local)
+        found = []
+        for d, dirs, files in os.walk(REPO):
+            dirs[:] = [x for x in dirs if x not in ('.git', 'tests')]
+            for fn in files:
+                if fn.endswith('.md'):
+                    p = os.path.join(d, fn)
+                    with open(p, encoding='utf-8') as f:
+                        for n, line in enumerate(f, 1):
+                            where = '%s:%d' % (os.path.relpath(p, REPO), n)
+                            spans = [m.group(0) for m in re.finditer(r'`[^`]*unittest discover[^`]*`', line)]
+                            found += [(where, s) for s in spans]
+                            if line.count('unittest discover') > sum(s.count('unittest discover') for s in spans):
+                                found.append((where, 'not in a `command`: ' + line.strip()[:120]))
+        self.assertTrue(found, 'no documented test line found: the sweep reads nothing')
+        bad = [(w, cmd) for w, cmd in found if not any(cmd.startswith('`' + j + ' ') for j in local)]
+        self.assertEqual(bad, [], 'a documented test line does not name %s' % ' or '.join(local))
 
     def test_the_watchdog_rows_include_every_core_row(self):
         rows = tested_rows()
