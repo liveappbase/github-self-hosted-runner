@@ -68,6 +68,8 @@ returned unchanged, rc 0.
                                         Linux host: the journaled `renamed` epoch)
   "families": {"FAMILY": {"provider": "tart" | "docker", "sets": ["SET", ...],
                           "candidate": {"version": "V", "lines": {"SET": "IMAGE", ...}, "closed_at": EPOCH} | null,
+                                        (closed_at: when the switch window closed; a retry's new window has its
+                                        own, so its evidence and verdict start fresh)
                           "back_until": EPOCH | null}},
                                         the candidate = the release under observation (switched, not accepted);
                                         back_until = after an ACCEPT, the end of the 7 days `back` restores the
@@ -129,7 +131,9 @@ is 120 s of log time past it, or the log is quiet (no record held) and this pass
 **R1.** Three SETTLED counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A
 proof in the same second as a failure counts as between them; a proof after the run does not take it back.
 `connect_only` is true when every counted failure of that run is connect-class (CONNECT-ONLY: the glue retries once
-after 1 h before it rejects the version). The verdict holds for the candidate; no STOP takes it back. A run of three
+after 1 h before it rejects the version). The verdict holds for the candidate's window; no STOP takes it back. A
+window is the candidate's version, lines AND `closed_at`: a retry that switches to the same lines in a new window
+(a new `closed_at`) starts fresh evidence, with no verdict (r1 and keep alike). A run of three
 that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
 **NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min, with no

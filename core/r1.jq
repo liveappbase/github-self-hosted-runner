@@ -19,8 +19,9 @@ def SETTLE: 120;
 # a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone)
 def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 
-def fresh($cand): {version: $cand.version, lines: $cand.lines, open: false, since: null, gaps: 0,
-                   succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: [], pending: null};
+def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
+                   gaps: 0, succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: [],
+                   pending: null};
 def set0: {fails: [], starts: [], proofs: [], exits: [], ns: null, completed: false};
 
 # every value of the record's attributes, one text
@@ -162,8 +163,7 @@ C::now_in("r1") as $now
     | ($fams | with_entries(select(.value.candidate != null)
         | .key as $f | .value as $fam
         | ($state.families[$f] // null) as $old
-        | (if $old != null and $old.version == $fam.candidate.version and $old.lines == $fam.candidate.lines
-           then $old else fresh($fam.candidate) end) as $ev
+        | (if C::same_window($old; $fam.candidate) then $old else fresh($fam.candidate) end) as $ev
         | C::runs_candidate($owner; $facts.config; $fam) as $prov
         | .value = {ev: $ev, prov: $prov, counting: ($ev.open and $owned and $prov), provider: $fam.provider,
                     sets: $fam.sets})) as $obs

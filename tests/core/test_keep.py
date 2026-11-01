@@ -13,9 +13,10 @@ KEEP = 72 * H
 
 
 def ev(since=NOW, open_=True, succeeded=0, failed=0, canceled=0, other=0, verdict=None, stops=(), version='2.339.0'):
-    return {'version': version, 'lines': {'mac-a': 'img-new'}, 'open': open_, 'since': since if open_ else None,
-            'gaps': 0, 'succeeded': succeeded, 'failed': failed, 'canceled': canceled, 'other': other, 'sets': {},
-            'verdict': verdict, 'stops': list(stops)}
+    """r1's evidence of fam()'s candidate (its window: closed_at = P's start), as r1.jq writes it."""
+    return {'version': version, 'lines': {'mac-a': 'img-new'}, 'closed_at': P['start'], 'open': open_,
+            'since': since if open_ else None, 'gaps': 0, 'succeeded': succeeded, 'failed': failed,
+            'canceled': canceled, 'other': other, 'sets': {}, 'verdict': verdict, 'stops': list(stops), 'pending': None}
 
 
 def keep(test, e, now, families=None, stops=None):
@@ -111,6 +112,17 @@ class Keep(unittest.TestCase):
     def test_evidence_of_another_candidate_is_not_used(self):
         r = keep(self, ev(succeeded=3, since=P['start'], version='2.338.0'), P['start'] + KEEP)
         self.assertEqual(r['verdict'], 'no-evidence')
+
+    def test_evidence_of_another_window_of_the_same_candidate_is_not_used(self):
+        # a retry switches to the same lines in a new window (a new closed_at): the old window's evidence and verdict
+        # are not this one's (Opus r1 F6)
+        retry = {'fx': fam(closed_at=NOW + 3 * H)}
+        old = dict(ev(succeeded=3), closed_at=P['start'])
+        self.assertEqual(keep(self, old, NOW + 3 * H + KEEP, families=retry)['verdict'], 'no-evidence')
+        rb = {'verdict': 'rollback', 'set': 'mac-a', 'failures': [], 'connect_only': True}
+        self.assertEqual(keep(self, dict(old, verdict=rb), NOW + 3 * H + KEEP, families=retry)['verdict'], 'no-evidence')
+        # control: the same window's evidence is used
+        self.assertEqual(keep(self, dict(old, closed_at=NOW + 3 * H), NOW + KEEP, families=retry)['verdict'], 'accept')
 
     def test_a_family_with_no_candidate_is_none(self):
         r = keep(self, ev(succeeded=3), NOW + KEEP, families={'fx': dict(fam(), candidate=None)})

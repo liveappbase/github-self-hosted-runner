@@ -46,6 +46,12 @@ def wait_output($prog; $state):
 # epoch seconds -> "YYYY-MM-DD HH:MM UTC"
 def utc: floor | strftime("%Y-%m-%d %H:%M UTC");
 
+# r1's evidence $e is of the candidate's window: the same version and lines, and the same switch (closed_at). A retry
+# switches to the same lines in a new window, which starts fresh: a verdict belongs to its window (Opus r1 F6)
+def same_window($e; $cand):
+  $e != null and $cand != null and $e.version == $cand.version and $e.lines == $cand.lines
+  and $e.closed_at == $cand.closed_at;
+
 # a process read {pid, start}: the same process when both are there and equal
 def same_proc($a; $b): $a != null and $b != null and $a.pid == $b.pid and $a.start == $b.start;
 

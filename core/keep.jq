@@ -18,8 +18,7 @@ C::now_in("keep") as $now
       if $fam.candidate == null then {verdict: "none", reason: "no candidate under observation"}
       else
         ($state.families[$f] // null) as $e0
-        | (if $e0 != null and $e0.version == $fam.candidate.version and $e0.lines == $fam.candidate.lines
-           then $e0 else null end) as $e
+        | (if C::same_window($e0; $fam.candidate) then $e0 else null end) as $e
         # a STOP the glue holds for the family, other than NO EVIDENCE (which heals itself): a person answers it
         # (JOBS FAIL: `back` or `retry` to keep it), so it is never turned into ACCEPT here
         | ([$held[] | select(.family == $f and .stop != "NO EVIDENCE")] | first) as $hs

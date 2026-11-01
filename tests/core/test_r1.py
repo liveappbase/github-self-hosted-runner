@@ -91,9 +91,10 @@ def three(err_of, set_='mac-a', start=10):
     return ''.join(failed(start + 10 * i, err_of(i), set_) for i in range(3)) + tail(start + 140, set_)
 
 
-def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new'):
+def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new', closed_at=None):
     return {'provider': provider, 'sets': list(sets),
-            'candidate': {'version': version, 'lines': {s: image for s in sets}, 'closed_at': P['start']}}
+            'candidate': {'version': version, 'lines': {s: image for s in sets},
+                          'closed_at': P['start'] if closed_at is None else closed_at}}
 
 
 def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0):
@@ -701,6 +702,25 @@ class Sticky(unittest.TestCase):
         r = Run(self)
         r.fx(three(lambda i: OTHER))
         self.assertEqual(r.fx(removed(100, 'runner-0000beef', 'job-completed') + scaling(110))['verdict'], 'rollback')
+
+    # a verdict belongs to its window (the candidate's closed_at), not only to the candidate's lines (Opus r1 F6): the
+    # Linux host's CONNECT-ONLY retry and `retry FAMILY` switch to the SAME lines, in a new window
+    def test_opus_f6_a_retry_with_the_same_lines_and_a_new_closed_at_is_a_new_verdict(self):
+        r = Run(self)
+        self.assertEqual(r.fx(three(lambda i: OTHER))['verdict'], 'rollback')
+        retry = {'fx': fam(closed_at=NOW + 7200)}
+        out = r.go('', families=retry, now=r.now + 7200, before=Q, installed=Q['start'] - 60)
+        self.assertEqual(out['families']['fx']['verdict'], 'none')
+        out = r.go(scaling(1000) + tail(1100), families=retry, before=Q, installed=Q['start'] - 60)
+        self.assertEqual((out['families']['fx']['verdict'], out['families']['fx']['open']), ('none', True))
+        self.assertEqual(out['state']['families']['fx']['closed_at'], NOW + 7200)
+
+    def test_control_the_same_closed_at_keeps_the_verdict_across_a_new_process(self):
+        r = Run(self)
+        r.fx(three(lambda i: OTHER))
+        out = r.go('', now=r.now + 7200, before=Q, installed=Q['start'] - 60)
+        self.assertEqual(out['families']['fx']['verdict'], 'rollback')
+        self.assertEqual(r.fx(tail(1100), before=Q, installed=Q['start'] - 60)['verdict'], 'rollback')
 
 
 class Formats(unittest.TestCase):
