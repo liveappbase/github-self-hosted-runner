@@ -1,8 +1,8 @@
 #!/bin/zsh -f
-# runner-start run | runner-start validate [CONFIG] — the one way runscaler starts; the LaunchAgent sh.liveapp.mac-runner
-# runs `runner-start run`. `validate CONFIG` checks and validates CONFIG (an absolute path to a regular file) in place of
-# the configured one, with the same checks: the updater validates a temporary copy of its target config that way while
-# runscaler runs. `run` takes no CONFIG.
+# runner-start run | runner-start validate [CONFIG] — the one way runscaler starts; the LaunchAgent
+# sh.liveapp.mac-runner runs `runner-start run`. `validate CONFIG` checks and validates CONFIG (an absolute path to a
+# regular file, not a symlink) in place of the configured one, with the same checks: the updater validates a temporary
+# copy of its target config that way while runscaler runs. `run` takes no CONFIG.
 # Design: docs/design.md ("The service"). Refuses (and never starts runscaler) when a token file the config names
 # (env:RUNNER_TOKEN_X -> token-x; a comment line names none) is missing, empty or not 0600; when `tart` on its PATH is
 # not the shim; or when a configured runner-image is not on this host. `run` also refuses when the wall stamp's macOS

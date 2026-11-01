@@ -110,7 +110,7 @@ Copy the two lines only from the assets of the release you chose — never from 
 2. Run the new release's `install-line.txt` as ci. Read what install prints.
 3. Only if install prints `ROOT LINE NEEDED`: the new release's `root-line.txt`, in the admin's own session.
 4. If install prints `WALL-CHECK needed`: `/Users/ci/bin/wall-check`.
-5. If the new release pins another runner or base image than your image was built with: rebuild the image now ([docs/operations.md](docs/operations.md), "Rebuilding the image", steps 2–5), then go to step 7. This is the only dependable way a new runner reaches the jobs. To compare: `RUNNER_VERSION` and `BASE` in `/Users/ci/bin/golden-build` are what the release pins. Your image's build log, `/Users/ci/Library/Logs/mac-runner/golden-<yyyymmdd>.log` (the date in `runner-image`), printed `runner <version>` and `start: … from <base>`.
+5. If the new release pins another runner or base image than your image was built with: rebuild the image now ([docs/operations.md](docs/operations.md), "Rebuilding the image", steps 2–5), then go to step 7. This is the only dependable way a new runner reaches the jobs. To compare: `/Users/ci/bin/golden-build --print-runner` prints the runner version a build uses now, and `BASE` in `/Users/ci/bin/golden-build` is the base the release pins. Your image's build log, `/Users/ci/Library/Logs/mac-runner/golden-<yyyymmdd>.log` (the date in `runner-image`), printed the line `runner <version>` and `start: … from <base>, …`.
 6. `/Users/ci/bin/runner-enable`.
 7. If install printed that runscaler was replaced: run the check workflow, and look for the job's VM in `/Users/ci/Library/Logs/mac-runner/admissions.log`.
 
