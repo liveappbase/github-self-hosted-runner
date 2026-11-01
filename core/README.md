@@ -157,7 +157,7 @@ line always follows one).
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
 | `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes within SETTLE before or after it (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
-| `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set; that runner's failure is not counted and its `Runner started` is proof again (it is not taken back) |
+| `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set, each such line at its own log time, before or after the removal (a job's started and completed lines can lie apart); that runner's failure is not counted and its `Runner started` is proof again (it is not taken back) |
 | `Runner exited before job completion` alone | no (unknown) |
 
 Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner

@@ -525,14 +525,16 @@ class UnknownRunnerLineFirst(unittest.TestCase):
                     self.assertIn(sec(30), s['proofs'])
                     self.assertEqual((s['starts'], s['exits'], s['unknowns']), ([], [], []))   # nothing left waiting
             with self.subTest((provider, 'right after the removal')):
-                # .unknowns holds only lines that named no removal yet: the removal they took back ends them at once
+                # .unknowns holds only lines that named no removal yet: the removal they took back ends them at once;
+                # the removal stays in .exits, taken (a later line naming its runner is a proof too: EveryUnknownRunnerLine)
                 set_ = 'mac-a' if provider == 'tart' else 'linux-b'
                 r = Run(self, {'fx': fam(provider, (set_,))})
                 out = r.go(exited_warn(29, self.X, set_) + unknown(30, self.X, set_, 'started')
                            + unknown(30, self.X, set_, 'completed') + removed(31, self.X, 'exited', job=False, set_=set_)
                            + scaling(32, set_) + scaling(33, set_))
                 s = out['state']['families']['fx']['sets'][set_]
-                self.assertEqual((s['fails'], s['exits'], s['unknowns'], s['proofs']), ([], [], [], [sec(30)]))
+                self.assertEqual((s['fails'], [(x['n'], x['s'], x.get('taken')) for x in s['exits']], s['unknowns'],
+                                  s['proofs']), ([], [(self.X, sec(31), True)], [], [sec(30)]))
 
     def test_opus_r4_f3_the_runners_tart_start_stays_a_proof_of_life(self):
         # a failure at 27: X's start at 25 is the only proof of life between 20 and 27, so it must not be taken back
@@ -562,6 +564,71 @@ class UnknownRunnerLineFirst(unittest.TestCase):
                 with self.subTest((provider, split)):
                     fx = self.run_(provider, name='runner-0000feed', split=split)[1]['families']['fx']
                     self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '00:31'])
+
+
+class EveryUnknownRunnerLine(unittest.TestCase):
+    """Every `Job started|completed for unknown runner (already removed?) runnerName=<X>` line within SETTLE of X's
+    exited removal, before or after it, is a proof of life for the set at its OWN log time, not only one of them (Codex
+    r5 F1): a job's started and completed lines can lie seconds apart, with a counted failure between them. Lines before
+    the removal (the removal finds them all), after it (the first takes the removal back, the later ones are proofs
+    too), and on both sides of it. One pass, and split: the first part read in one pass, the rest in the next."""
+
+    X, Y = 'runner-0000beef', 'runner-0000feed'
+
+    def last(self, provider, shape, name, split):
+        """SHAPE codex (Codex r5 F1: failures 10, 20; X's line 30, or NAME's; a failure 35; X's line 40 | X removed
+        reason=exited with no jobId 41), before (failures 10, 20; X's line 30; failures 35, 38; X's line 40, or NAME's; a
+        failure 45 | X removed 46), after (X removed 25; X's line 30 | failures 35, 38; X's line 40, or NAME's; a failure
+        45) or both (X's line 30; X removed 31 | failures 35, 38; X's line 40, or NAME's; a failure 45); SPLIT at |: the
+        first part and a record after it (held) in one pass, the rest in the next. -> the last pass's fx"""
+        set_, err = ('mac-a', OTHER) if provider == 'tart' else ('linux-b', DOCKER_CREATE)
+        F = lambda s: failed(s, err, set_)                                     # noqa: E731
+        U = lambda s, n, w: unknown(s, n, set_, w)                             # noqa: E731
+        Xr = lambda s: removed(s, self.X, 'exited', job=False, set_=set_)      # noqa: E731
+        end = scaling(300, set_) + scaling(301, set_)
+        first, held, second = {
+            'codex': (F(10) + F(20) + U(30, name, 'started') + F(35) + U(40, self.X, 'completed'), 40, Xr(41) + end),
+            'before': (F(10) + F(20) + U(30, self.X, 'started') + F(35) + F(38) + U(40, name, 'completed') + F(45), 45,
+                       Xr(46) + end),
+            'after': (Xr(25) + U(30, self.X, 'started'), 31, F(35) + F(38) + U(40, name, 'completed') + F(45) + end),
+            'both': (U(30, self.X, 'started') + Xr(31), 31, F(35) + F(38) + U(40, name, 'completed') + F(45) + end)}[shape]
+        r = Run(self, {'fx': fam(provider, (set_,))})
+        if split:
+            r.go(first + scaling(held, set_))
+            return r.fx(second)
+        return r.fx(first + second)
+
+    def test_codex_r5_f1_every_line_before_the_removal_is_a_proof(self):
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    fx = self.last(provider, 'codex', self.X, split)
+                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                with self.subTest((provider, split, 'control: the line at 30 names another runner')):
+                    fx = self.last(provider, 'codex', self.Y, split)
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '00:35'])
+
+    def test_each_line_before_the_removal_is_needed_not_only_the_newest_or_the_oldest(self):
+        # the line at 30 lies between 20 and 35, the line at 40 between 38 and 45: each is the only proof there
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    fx = self.last(provider, 'before', self.X, split)
+                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                with self.subTest((provider, split, 'control: the line at 40 names another runner')):
+                    fx = self.last(provider, 'before', self.Y, split)
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:35', '00:38', '00:45'])
+
+    def test_every_line_after_the_removal_is_a_proof_and_on_both_sides(self):
+        for shape in ('after', 'both'):
+            for provider in ('tart', 'docker'):
+                for split in (False, True):
+                    with self.subTest((shape, provider, split)):
+                        fx = self.last(provider, shape, self.X, split)
+                        self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                    with self.subTest((shape, provider, split, 'control: the line at 40 names another runner')):
+                        fx = self.last(provider, shape, self.Y, split)
+                        self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:35', '00:38', '00:45'])
 
 
 class Retired(unittest.TestCase):

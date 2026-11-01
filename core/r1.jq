@@ -6,9 +6,10 @@
 # A family's evidence per set: fails (counted failures: t, s = its log second, c = connect-class, x, seen = the `now`
 # of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started` of a runner
 # not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of
-# log time, that a `Job started|completed for unknown runner` naming the runner still takes back; each holds the start
-# it took back, a proof for R1 until the exit is final), unknowns (those unknown-runner lines, within SETTLE of log
-# time, that named no such removal yet: one may still come and is taken back at once), ns (NOT SERVING), completed.
+# log time: one that a `Job started|completed for unknown runner` naming the runner still takes back holds the start it
+# took back, a proof for R1 until the exit is final; one taken back already is `taken`, and every later line naming its
+# runner is a proof too), unknowns (those unknown-runner lines, within SETTLE of log time, that named no such removal
+# yet: one may still come and finds them all), ns (NOT SERVING), completed.
 import "core" as C;
 import "logfmt" as L;
 
@@ -83,28 +84,34 @@ def apply($ev; $s; $t; $sec; $seen):
     | if $ev.result == "succeeded" then .succeeded += 1 elif $ev.result == "failed" then .failed += 1
       elif $ev.result == "canceled" then .canceled += 1 else .other += 1 end
   # the D6 AMENDMENT, both ways (Opus r4 F3): runscaler logs the removal only after RemoveInstance, so a job message for
-  # the dead runner can log its unknown-runner line first. One naming this runner less than SETTLE before (.unknowns
-  # holds only those: settle_log ends the others): the runner ran a job. The removal is no counted failure, the line
-  # is proof of life for the set, and the runner's start is a proof (not taken back)
+  # the dead runner can log its unknown-runner line first. Lines naming this runner less than SETTLE before (.unknowns
+  # holds only those: settle_log ends the others): the runner ran a job. The removal is no counted failure, EACH line is
+  # a proof of life for the set at its own log time (Codex r5 F1: a job's started and completed lines can lie apart,
+  # with a failure between them), and the runner's start is a proof (not taken back). The removal stays in .exits,
+  # taken, so a line naming its runner after it is a proof too
   elif $ev.k == "exited" then
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
-                 | ([.unknowns[]? | select(.n == $ev.name) | .s] | max) as $u
-                 | if $u != null then .proofs += [$u, ($st // empty)] | .unknowns |= map(select(.n != $ev.name))
+                 | ([.unknowns[]? | select(.n == $ev.name) | .s] | unique) as $us
+                 | if ($us | length) > 0 then .proofs += $us + [($st // empty)] | .unknowns |= map(select(.n != $ev.name))
+                        | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st, taken: true}]
                    else .fails += [{t: $t, s: $sec, c: false, x: "Runner removed reason=exited, no job: \($ev.name)",
                                     seen: $seen, settled: false, n: $ev.name}]
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st}]
                    end
                  | .starts |= map(select(.n != $ev.name)))
   # the D6 AMENDMENT: a `Job started|completed for unknown runner` naming a runner removed `reason=exited` with no
-  # jobId less than SETTLE before (.exits holds only those: settle_log and settle_quiet end the others): that runner
-  # ran a job. Its exited failure is not counted, the line is proof of life for the set, and the runner's start is
-  # proof again. A line that names no such removal waits in .unknowns for one that may still come (above)
+  # jobId less than SETTLE before (.exits holds only those: settle_log ends the others): that runner ran a job. The
+  # line is a proof of life for the set at its own log time. The first such line takes the removal back: its exited
+  # failure is not counted, the runner's start is proof again, and the removal is `taken`; every later line naming it
+  # is a proof as well (Codex r5 F1's class, after the removal). A line that names no such removal waits in .unknowns
+  # for one that may still come (above)
   elif $ev.k == "unknown" then
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.exits[] | select($ev.name != "" and .n == $ev.name)] | first) as $x
                  | if $x == null then (if $ev.name != "" then .unknowns += [{n: $ev.name, s: $sec}] else . end)
-                   else .exits |= map(select(.n != $ev.name))
+                   elif $x.taken == true then .proofs += [$sec]
+                   else .exits |= map(if .n == $x.n and .s == $x.s then .taken = true else . end)
                         | .fails |= map(select((.n == $ev.name and .s == $x.s) | not))
                         | .proofs += [$sec, ($x.start // empty)]
                    end)
