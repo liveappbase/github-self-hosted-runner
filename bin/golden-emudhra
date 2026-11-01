@@ -13,7 +13,8 @@
 #   3. the fix (the lines between the FIX markers): each distinct real bundle file filtered once, in place; a deny in
 #      the admin trust settings for each excluded anchor; <runner-dir>/.env with NODE_OPTIONS and SSL_CERT_FILE.
 #   4. the POST-FIX probe pass.
-#   5. the census: the GATE, offline.
+#   5. the census: the GATE, offline. Its Node part is a census only (one block per externals Node, then an END line):
+#      the HOST compares it with the named list, with bin/node-diff-compare of the same tree, right after this step.
 #   6. the verdicts: print everything, then exit 1 on any FAIL (census, fix or probe), else 0.
 # The RED run is this stage with step 3 left out. Make that copy with
 #   sed '/^# >>> FIX$/,/^# <<< FIX$/d' golden-emudhra > <another folder>/golden-emudhra
@@ -21,7 +22,10 @@
 # flag that skips the fix. Every probe runs by absolute path under gtimeout; each deny under `sudo gtimeout -k 5 30`
 # (a timeout or a non-zero exit is a FAIL: the build stops, it never hangs). The guest work folder holds the unfiltered
 # copies; it is removed on every exit. Every line is prefixed "golden-emudhra: "; the last one says GREEN or RED.
-# The named Node difference list is setup/emudhra.node-diff of the same tree (NODEDIFF). Exit: 0 GREEN; 1 RED or STOP.
+# The named Node difference list is setup/emudhra.node-diff of the same tree (NODEDIFF). node-diff-compare PASSes a
+# complete census that is a subset of it (each named entry not computed: a NODE-DIFF-LOST line) and FAILs on a new entry,
+# a missing block or no END; a FAIL makes the stage RED. The guest's raw census lines go to a host temp file
+# (${TMPDIR:-/tmp}/golden-emudhra-census.*), removed on exit. The hand path runs the same code. Exit: 0 GREEN; 1 RED or STOP.
 set -u
 export LC_ALL=C
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
@@ -647,29 +651,23 @@ census_env() {
   elif [[ "$(<$f)" == "${(F)want}" ]]; then say "census: $f holds exactly ${(j:, :)want} (pass)"
   else fail "census: $f is not exactly ${(j:, :)want}: it holds the keys ${(j:, :)${${(f)"$(<$f)"}%%=*}}"; fi
 }
-census_nodediff() { # NAMED (the file's text, or @ABSENT@)
-  local named=$1 b r l out; local -a computed want have q
+census_nodediff() { # the census of each externals Node's difference; the HOST compares it (node-diff-compare)
+  # One block per $RUNNER_DIR/externals/node*/bin/node: NODE-CENSUS BEGIN <folder>, one NODE-DIFF line per entry
+  # (sorted), NODE-CENSUS DONE <folder> <n>; then NODE-CENSUS END <number of blocks>. A Node that cannot compute its
+  # difference is a FAIL here, and its block gets no DONE line (so the host FAILs it too).
+  local b r l out n=0; local -a got
+  say "census: the externals Node difference (bundled roots, tls.rootCertificates, minus ${BREW_BUNDLE:A}): one block per Node; the host compares it with setup/emudhra.node-diff"
   for b in $RUNNER_DIR/externals/node*/bin/node(N); do
-    r=${b:h:h:t}
+    r=${b:h:h:t}; n=$(( n + 1 ))
+    say "NODE-CENSUS BEGIN $r"
     if ! out=$(/usr/bin/env -i $BASEENV $T -k 5 60 $b -e $NODEDIFF_JS ${BREW_BUNDLE:A} 2>&1); then
       one "$out"; fail "census: $r: the Node difference cannot be computed: $REPLY"; continue
     fi
-    for l in ${(f)out}; do computed+=("$r $l"); done
+    got=(${(o)${(f)out}})
+    for l in $got; do say "NODE-DIFF $r $l"; done
+    say "NODE-CENSUS DONE $r ${#got}"
   done
-  computed=(${(o)computed})
-  say "census: the externals Node difference (bundled roots, tls.rootCertificates, minus ${BREW_BUNDLE:A}): ${#computed} entries"
-  for l in $computed; do say "NODE-DIFF $l"; done
-  if [[ $named == @ABSENT@ ]]; then
-    fail "census: no named list: setup/emudhra.node-diff is absent (the computed difference is printed above, NODE-DIFF lines)"
-    return
-  fi
-  for l in ${(f)named}; do [[ $l == '#'* || -z ${l//[[:space:]]/} ]] && continue; q=(${=l}); want+=("$q[1] ${q[2]-}"); done
-  for l in $computed; do q=(${=l}); have+=("$q[1] $q[2]"); done
-  want=(${(o)want}) have=(${(o)have})
-  if [[ "${(j:,:)want}" == "${(j:,:)have}" ]]; then say "census: it equals the named list setup/emudhra.node-diff (${#have} entries) (pass)"; return; fi
-  fail "census: the externals Node difference is not the named list setup/emudhra.node-diff"
-  for l in ${have:|want}; do say "census:   in the image, not in the named list: $l"; done
-  for l in ${want:|have}; do say "census:   in the named list, not in the image: $l"; done
+  say "NODE-CENSUS END $n"
 }
 treelist() { # DIR OUT — one line per file ("f SHA256  PATH") and per symlink ("l TARGET PATH") of DIR's bin and externals
   ( cd $1 && { /usr/bin/find bin externals -type f -print0 | /usr/bin/xargs -0 /usr/bin/shasum -a 256 | /usr/bin/sed 's/^/f /'
@@ -695,15 +693,15 @@ census_digests() { # TARBALL SHA256
   fi
   /bin/rm -rf -- ${W:?}/rt
 }
-census() { # NAMED TARBALL SHA256
+census() { # TARBALL SHA256
   need $T $O $SEC $PLUTIL
   say "5. the census (offline; it changes nothing)"
   census_bundles
   census_anchors
   census_deny
   census_env
-  census_nodediff $1
-  census_digests $2 $3
+  census_nodediff
+  census_digests $1 $2
 }
 
 # ---- step 6: the verdicts
@@ -793,7 +791,7 @@ case ${1-} in
   (save) save ;;
   (probe) probe ${3-} ;;
   (fix) fix ;;
-  (census) census "${3-}" "${4-}" "${5-}" ;;
+  (census) census "${3-}" "${4-}" ;;
   (report) report ${3-0} || exit 1 ;;
   (*) say "STOP unknown step '${1-}'"; exit 2 ;;
 esac
@@ -802,13 +800,18 @@ EOS
 )
 
 /bin/zsh -f -n -c "$GUEST" || die "the guest part does not parse (above)"
+RAW=   # when set: phase also appends the guest's raw lines (without the prefix) to this host file
 phase() { # STEP WORKDIR [ARGS…] — one step in the guest; its output prefixed; returns the step's exit status
   local l
-  tart exec $vm /bin/zsh -f -c "$GUEST" golden-emudhra-guest "$@" 2>&1 | while IFS= read -r l; do say "$l"; done
+  tart exec $vm /bin/zsh -f -c "$GUEST" golden-emudhra-guest "$@" 2>&1 | while IFS= read -r l; do
+    say "$l"; [[ -z $RAW ]] || print -r -- "$l" >> $RAW
+  done
   return ${pipestatus[1]}
 }
-W=
-cleanup() { # remove the guest work folder (it holds the unfiltered copies); return 1 when it is still there
+W= raw=
+cleanup() { # remove the host's census file, and the guest work folder (it holds the unfiltered copies); return 1 when
+  # the guest folder is still there
+  [[ -z $raw ]] || { /bin/rm -f -- $raw; raw= }
   [[ -n $W ]] || return 0
   gexec /bin/rm -rf -- ${W:?} > /dev/null 2>&1
   if gexec /bin/test -e $W > /dev/null 2>&1; then say "could NOT remove the guest work folder $W"; return 1; fi
@@ -816,6 +819,7 @@ cleanup() { # remove the guest work folder (it holds the unfiltered copies); ret
   W=
 }
 trap cleanup EXIT
+raw=$(/usr/bin/mktemp ${TMPDIR:-/tmp}/golden-emudhra-census.XXXXXX) || { raw=; die "mktemp on the host failed" }   # not -t: it ignores TMPDIR (measured)
 
 gexec /usr/bin/true > /dev/null 2>&1 || die "$vm does not answer tart exec"
 W=$(gexec /usr/bin/mktemp -d /private/tmp/golden-emudhra.XXXXXX) || { W=; die "mktemp in the guest failed" }
@@ -830,8 +834,12 @@ fixed=1
 phase fix $W || problems+=("step 3 (the fix) did not complete")
 # <<< FIX
 phase probe $W post || problems+=("step 4 (the post-fix probe pass) did not complete")
-if [[ -f $NODEDIFF && -r $NODEDIFF ]]; then named=$(<$NODEDIFF); else named=@ABSENT@; fi
-phase census $W "$named" $tgz $tsha || problems+=("step 5 (the census) did not complete")
+RAW=$raw
+phase census $W $tgz $tsha || problems+=("step 5 (the census) did not complete")
+RAW=
+# the Node census: the HOST compares the guest's blocks with the named list (the hand path runs the same code)
+/bin/zsh -f ${0:A:h}/node-diff-compare $NODEDIFF $raw 2>&1 | while IFS= read -r l; do say "$l"; done
+(( ${pipestatus[1]} == 0 )) || problems+=("the externals Node difference: node-diff-compare did not PASS (above)")
 phase report $W $fixed; r=$?
 (( r == 0 || r == 1 )) || problems+=("step 6 (the verdicts) did not complete")
 for m in $problems; do say "FAIL $m"; done

@@ -1,0 +1,10 @@
+5. the census (offline; it changes nothing)
+census: /etc/ssl/cert.pem -> /private/etc/ssl/cert.pem (as saved)
+census: /Users/admin/actions-runner/.env holds exactly NODE_OPTIONS=--use-openssl-ca, SSL_CERT_FILE=/opt/homebrew/Cellar/ca-certificates/2026-09-30/share/ca-certificates/cacert.pem (pass)
+census: the externals Node difference (bundled roots, tls.rootCertificates, minus /opt/homebrew/Cellar/ca-certificates/2026-09-30/share/ca-certificates/cacert.pem): one block per Node
+NODE-CENSUS BEGIN node20
+FAIL census: node20: the Node difference cannot be computed: ERROR 1 certificate(s) of /opt/homebrew/Cellar/ca-certificates/2026-09-30/share/ca-certificates/cacert.pem cannot be read
+NODE-CENSUS BEGIN node24
+NODE-CENSUS DONE node24 0
+NODE-CENSUS END 2
+census: /Users/admin/actions-runner/bin and externals equal the runner tarball's (412 entries, listing sha256 5d1c9f0f3f2e6a4b8a6c1e2d3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a) (pass)
