@@ -10,7 +10,7 @@
 #      n1-* or runner-* name. Then it takes the runner lock (LOCK; a lock already held: STOP) and checks
 #      FLAG again under it.
 #   2. The clone's name is s1-gate-<UTC yyyymmddHHMMSS>. Any s1-gate-* already in the tart list: STOP, with the exact
-#      delete line for a person; it never deletes by pattern.
+#      lines for a person (its VM may still run: tart stop NAME, then tart delete NAME); it never deletes by pattern.
 #   3. With --journal FILE: `runner-journal FILE gate-clone <name>` BEFORE `tart clone` (a failure STOPs, no clone).
 #      Without it: it prints "golden-gate: clone <name>" before the clone.
 #   4. tart clone IMAGE <name>; real-run <name> in the background (console log LOGDIR/<name>-vm.log); it waits until
@@ -21,12 +21,24 @@
 # The lock is held by THIS process (zsh's zsystem flock, an fcntl lock) until it exits. lockf's flock and this lock
 # exclude each other on macOS (measured both ways), so runscaler, install, wall-check, golden-build and
 # runner-lock-free see it. Not golden-build's lockf wrapper: on a TERM or HUP to the process group, lockf lets the lock
-# go at once while its child still cleans up (measured: the clone was deleted with the lock free). A SIGKILL leaves the
-# clone: the journal names it for the updater's RECOVER.
-# Output: the gate's lines, then "golden-gate: GREEN IMAGE" (exit 0), "golden-gate: RED IMAGE" (exit 1: the gate said
-# red), or "golden-gate: STOP …" / "golden-gate: REFUSE …" (exit 2: it could not run, or the clone may be left).
-# The proof still owed (LIVE, on the Studio, in a stop an operator starts): RED on an s1 clone of the pinned base
-# image, GREEN on the current golden image.
+# go at once while its child still cleans up (measured: the clone was deleted with the lock free).
+# Signal the PROCESS GROUP. A TERM to this pid alone acts only after the running gate step ends (zsh runs a trap after
+# its foreground job; measured: a 6 s step, then exit at 7 s), so a short TERM-then-KILL grace leaves the clone.
+# After a SIGKILL of this process: the lock is free at once, the clone stays, and real-run and the clone's VM keep
+# running (orphans). The journal's gate-clone line names the clone: tart stop NAME, then tart delete NAME. Until then
+# the next golden-gate STOPs on it and prints those two lines.
+# Output: the gate's lines, then "golden-gate: GREEN IMAGE" (exit 0: golden-emudhra exit 0, its last line GATE GREEN),
+# "golden-gate: RED IMAGE" (exit 1: golden-emudhra exit 1, its last line GATE RED: the gate step ran to its end and
+# found a FAIL), or "golden-gate: STOP …" / "golden-gate: REFUSE …" (exit 2: it could not run; the gate did not
+# complete, as golden-emudhra's GATE STOP or any other end; or the clone may be left). A STOP never says the image is
+# bad: it was not checked.
+# The proof still owed (LIVE, on the Studio, in a stop an operator starts; the script that runs it is later work):
+#   RED on a local copy of the CURRENT golden image whose guest ran setup/emudhra-undeny.sh (the deny removed,
+#   everything else the same). The RED counts only when the output holds, for each excluded anchor, the line
+#   "FAIL census: <subject> (SHA-1 …): no deny in the admin trust settings", and no STOP. The control: GREEN on the
+#   current golden image. Not the pinned base image: it lacks what golden-build adds to the guest (coreutils, whose
+#   gtimeout the save step needs first: golden-build's `brew install coreutils`; the runner and its Node), so its
+#   result would be STOP; and its OCI ref is not a local image name (IMAGE is refused).
 set -u
 export LC_ALL=C
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
@@ -68,7 +80,9 @@ NAME=s1-gate-$(/bin/date -u +%Y%m%d%H%M%S)
 list=(${(f)"$(tart list --source local -q)"}) || stop "tart list failed"
 left=(${(M)list:#s1-gate-*})
 if (( ${#left} )); then
-  for v in $left; do print -r -- "golden-gate: a leftover gate clone: $v; delete it with: $REAL delete $v"; done
+  for v in $left; do   # its VM may still run (a SIGKILL leaves real-run running): stop it, then delete it
+    print -r -- "golden-gate: a leftover gate clone: $v; stop it, then delete it: $REAL stop $v; $REAL delete $v"
+  done
   stop "a leftover gate clone is there (above): delete it by its name first; golden-gate never deletes by pattern"
 fi
 (( ${list[(Ie)$img]} )) || refuse "$img is not a local Tart image"
@@ -119,7 +133,7 @@ say "the VM answers tart exec: the gate (golden-emudhra --gate $NAME)"
 # not `| while read`: an INT that arrives in that loop cuts the EXIT trap short after its first command (measured)
 /bin/zsh -f ${0:A:h}/golden-emudhra --gate $NAME 2>&1 | /usr/bin/tee $glog
 grc=$pipestatus[1]
-last=$(/usr/bin/tail -n 1 -- $glog 2>/dev/null)   # its last line: GATE GREEN or GATE RED, when it ran to its end
+last=$(/usr/bin/tail -n 1 -- $glog 2>/dev/null)   # its last line: GATE GREEN, GATE RED or GATE STOP <why>
 tart stop $NAME || stop "tart stop $NAME failed"
 n=0; while kill -0 $runpid 2>/dev/null; do (( n++ < 120 )) || stop "the VM did not stop"; /bin/sleep 1; done
 runpid=

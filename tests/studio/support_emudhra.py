@@ -114,7 +114,7 @@ case $1 in
   (/usr/bin/true) exit 0 ;;
   (/usr/bin/mktemp) print -r -- @W@; exit 0 ;;
   (/bin/rm) print -r -- "rm ${@[2,-1]}" >> $D/calls; exit 0 ;;
-  (/bin/test) exit 1 ;;
+  (/bin/test) [[ -f $D/guest-folder-stays ]] && exit 0; exit 1 ;;   # `test -e W` after the rm: gone, unless told
   (/bin/zsh)
     [[ $2 == -f && $3 == -c && $5 == golden-emudhra-guest ]] || { print -r -- "stub tart: guest shape: $1 $2 $3" >> $D/unexpected; exit 9 }
     /bin/zsh -f -n -c "$4" || { print -r -- "stub tart: the guest part does not parse" >> $D/unexpected; exit 9 }

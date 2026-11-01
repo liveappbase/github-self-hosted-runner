@@ -5,6 +5,8 @@ TERM, HUP).
 A copy runs with FLAG, LOCK, LOGDIR, REAL and REALRUN rewritten into the test's folder, a stub tart (its `delete`
 records whether the runner lock is still held at that moment: lockf -t 0 answers 75), a stub real-run that runs until
 the stub `tart stop` marks its VM stopped, the real runner-journal, and a stub golden-emudhra beside the copy.
+GateVerdicts puts a copy of the REAL golden-emudhra there instead: its tart is the same stub, whose exec answers each
+guest step from scenario files, so golden-gate's verdict is read from what golden-emudhra really prints.
 """
 import os
 import re
@@ -13,14 +15,15 @@ import subprocess
 import time
 import unittest
 
-from tests.studio.support_emudhra import BASE_ENV, ZSH, copy_script, lines, read, run, stub, tmpdir, write
+from tests.studio.support_emudhra import BASE_ENV, REPO, ZSH, copy_script, lines, read, run, stub, tmpdir, write
 
 IMAGE = 'liveapp-mac-golden-20261101'
 OTHERS = ['liveapp-mac-golden-20261031', 'gold-20261101', 'runner-abc123']
 NAME_RE = r'^s1-gate-[0-9]{14}$'
 
 TART = r'''D=@D@
-print -r -- "$*" >> $D/tart-calls
+if [[ $1 == exec ]]; then print -r -- "$1 $2 $3" >> $D/tart-calls   # one line per call (a guest script is long)
+else print -r -- "$*" >> $D/tart-calls; fi
 case $1 in
   (list) [[ $2 == --source && $3 == local && $4 == -q ]] || exit 3
     [[ -f $D/flag-on-list ]] && : > @FLAG@   # the agent enabled between golden-gate's first check and its lock
@@ -29,8 +32,19 @@ case $1 in
     if [[ -f @J@ ]] && (( ${${(f)"$(<@J@)"}[(Ie)gate-clone $3]} )); then print -r -- yes >> $D/clone-journal
     else print -r -- no >> $D/clone-journal; fi
     (( ${${(f)"$(<$D/vms)"}[(Ie)$2]} )) || exit 1
-    print -r -- $3 >> $D/vms; exit 0 ;;
-  (exec) (( ${${(f)"$(<$D/vms)"}[(Ie)$2]} )) || exit 1; exit 0 ;;
+    print -r -- $3 >> $D/vms
+    [[ -f $D/clone-block ]] && { : > $D/clone-started; /bin/sleep 30 }   # a clone still being made
+    exit 0 ;;
+  (exec) (( ${${(f)"$(<$D/vms)"}[(Ie)$2]} )) || exit 1
+    case $3 in   # the real golden-emudhra's guest calls (GateVerdicts); golden-gate's own is `exec NAME true`
+      (/usr/bin/mktemp) print -r -- /private/tmp/golden-emudhra.T3st ;;
+      (/bin/test) exit 1 ;;   # `test -e W` after the rm: the guest work folder is gone
+      (/bin/zsh) [[ $7 == golden-emudhra-guest ]] || exit 9
+        print -r -- $8 >> $D/guest-steps
+        [[ -f $D/scenario/$8.out ]] && /bin/cat $D/scenario/$8.out
+        [[ -f $D/scenario/$8.rc ]] && exit $(<$D/scenario/$8.rc) ;;
+    esac
+    exit 0 ;;
   (stop) : > $D/stopped.$2; exit 0 ;;
   (delete)
     /usr/bin/lockf -k -t 0 @LOCK@ /usr/bin/true 2>/dev/null; rc=$?
@@ -51,6 +65,7 @@ print -r -- "$*" >> $D/emudhra-args
 s=$(<$D/gatescen)
 case $s in
   (green) print -r -- "golden-emudhra: gate: no FAIL"; print -r -- "golden-emudhra: GATE GREEN"; exit 0 ;;
+  (green-no-line) print -r -- "golden-emudhra: gate: no FAIL"; exit 0 ;;   # exit 0, but no GATE GREEN line
   (red) print -r -- "golden-emudhra: FAIL census: AAA Certificate Services: no deny"; print -r -- "golden-emudhra: GATE RED"; exit 1 ;;
   (stop) print -r -- "golden-emudhra: STOP $2 does not answer tart exec"; exit 1 ;;
   (sleep*) : > $D/gate-started; /bin/sleep ${s#sleep }; print -r -- "golden-emudhra: GATE GREEN"; exit 0 ;;
@@ -59,7 +74,9 @@ exit 9
 '''
 
 
-class GoldenGate(unittest.TestCase):
+class GateRig:
+    """The copy, its stubs and the helpers; a TestCase class mixes this in."""
+
     def setUp(self):
         d = self.d = tmpdir(self)
         self.lock = os.path.join(d, 'runner.lock')
@@ -122,6 +139,28 @@ class GoldenGate(unittest.TestCase):
     def assert_no_clone(self):
         self.assertEqual([c for c in self.f('tart-calls') if c.startswith(('clone ', 'delete '))], [])
 
+    def started(self, flag):
+        """Start golden-gate in a process group of its own; return it once the stub wrote D/FLAG."""
+        p = subprocess.Popen(self.argv(), env=dict(BASE_ENV, HOME=self.d), cwd=self.d, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+        self.addCleanup(self.reap, p)
+        t0 = time.time()
+        while not os.path.exists(os.path.join(self.d, flag)):
+            self.assertIsNone(p.poll(), 'golden-gate ended before the stub wrote ' + flag)
+            self.assertLess(time.time() - t0, 30, 'the stub did not write ' + flag)
+            time.sleep(0.05)
+        return p
+
+    def reap(self, p):
+        # the group the test started (its own session): kill what is left of it, the leader gone or not
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.wait()
+
+
+class GoldenGate(GateRig, unittest.TestCase):
     # ---- the paths through the gate
 
     def test_green_deletes_its_clone_under_the_lock(self):
@@ -154,6 +193,15 @@ class GoldenGate(unittest.TestCase):
         self.assertFalse(any(l.startswith(('golden-gate: RED', 'golden-gate: GREEN')) for l in out), r.stdout)
         self.assert_clone_deleted_under_the_lock()
 
+    def test_exit_0_without_the_gate_green_line_is_stop(self):
+        self.scen('green-no-line')
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertTrue(out[-1].startswith('golden-gate: STOP the gate did not run to its end'), r.stdout)
+        self.assertFalse(any(l.startswith(('golden-gate: RED', 'golden-gate: GREEN')) for l in out), r.stdout)
+        self.assert_clone_deleted_under_the_lock()
+        # control: test_green_deletes_its_clone_under_the_lock (exit 0 with the GATE GREEN line)
+
     def test_a_clone_still_there_after_the_delete_is_stop(self):
         write(os.path.join(self.d, 'keep-on-delete'), '')
         r, out = self.gate()
@@ -167,15 +215,7 @@ class GoldenGate(unittest.TestCase):
 
     def signalled(self, sig):
         self.scen('sleep 30')
-        p = subprocess.Popen(self.argv(), env=dict(BASE_ENV, HOME=self.d), cwd=self.d, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, start_new_session=True)
-        self.addCleanup(self.reap, p)
-        started = os.path.join(self.d, 'gate-started')
-        t0 = time.time()
-        while not os.path.exists(started):
-            self.assertIsNone(p.poll(), 'golden-gate ended before the gate started')
-            self.assertLess(time.time() - t0, 30, 'the stub gate did not start')
-            time.sleep(0.05)
+        p = self.started('gate-started')
         os.killpg(p.pid, sig)
         out, err = p.communicate(timeout=60)
         t0 = time.time()   # with a wrapper process, the cleanup may outlive the process the test started
@@ -184,14 +224,6 @@ class GoldenGate(unittest.TestCase):
         self.assert_clone_deleted_under_the_lock()
         self.assertEqual(p.returncode, 2, out + err)
         self.assertIn('golden-gate: STOP interrupted', out)
-
-    def reap(self, p):
-        # the group the test started (its own session): kill what is left of it, the leader gone or not
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        p.wait()
 
     def test_term_to_the_group(self):
         self.signalled(signal.SIGTERM)
@@ -202,17 +234,21 @@ class GoldenGate(unittest.TestCase):
     def test_hup_to_the_group(self):
         self.signalled(signal.SIGHUP)
 
+    def test_term_while_tart_clone_runs_deletes_only_its_name(self):
+        write(os.path.join(self.d, 'clone-block'), '')   # the stub's clone has made NAME and is still running
+        p = self.started('clone-started')
+        os.killpg(p.pid, signal.SIGTERM)
+        out, err = p.communicate(timeout=60)
+        self.assertEqual(p.returncode, 2, out + err)
+        self.assertIn('golden-gate: STOP interrupted (TERM)', out)
+        self.assert_clone_deleted_under_the_lock()   # NAME deleted, the lock held; no other image deleted
+        self.assertEqual(self.f('realrun-args'), [])   # nothing booted
+        # control: test_green_deletes_its_clone_under_the_lock (no signal)
+
     def test_term_with_the_clone_left_after_the_delete_is_stop(self):
         write(os.path.join(self.d, 'keep-on-delete'), '')
         self.scen('sleep 30')
-        p = subprocess.Popen(self.argv(), env=dict(BASE_ENV, HOME=self.d), cwd=self.d, stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE, text=True, start_new_session=True)
-        self.addCleanup(self.reap, p)
-        t0 = time.time()
-        while not os.path.exists(os.path.join(self.d, 'gate-started')):
-            self.assertIsNone(p.poll())
-            self.assertLess(time.time() - t0, 30)
-            time.sleep(0.05)
+        p = self.started('gate-started')
         os.killpg(p.pid, signal.SIGTERM)
         out, err = p.communicate(timeout=60)
         self.assertEqual(p.returncode, 2, out + err)
@@ -239,7 +275,9 @@ class GoldenGate(unittest.TestCase):
         r, out = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
 
-    def test_flag_appearing_before_the_lock_refuses_under_it(self):
+    def test_flag_appearing_after_the_first_check_refuses(self):
+        # black-box this proves a second FLAG check after the first `tart list`; that it is under the lock is
+        # test_the_flag_recheck_comes_after_the_lock (no external call runs between the lock and the check)
         write(os.path.join(self.d, 'flag-on-list'), '')
         r, out = self.gate()
         self.assertEqual(r.returncode, 2, r.stdout)
@@ -250,6 +288,17 @@ class GoldenGate(unittest.TestCase):
         os.remove(self.flag)
         r, out = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_the_flag_recheck_comes_after_the_lock(self):
+        src = read(os.path.join(REPO, 'bin', 'golden-gate')).splitlines()
+        at = lambda pred: [i for i, l in enumerate(src) if pred(l)]
+        lock = at(lambda l: l.startswith('zsystem flock '))
+        checks = at(lambda l: l.startswith('[[ ! -e $FLAG ]] || refuse '))
+        clone = at(lambda l: l.startswith('tart clone '))
+        self.assertEqual((len(lock), len(checks), len(clone)), (1, 2, 1), (lock, checks, clone))
+        self.assertLess(checks[0], lock[0])              # the first check, before the lock
+        self.assertLess(lock[0], checks[1])              # the recheck: under the lock
+        self.assertLess(checks[1], clone[0])             # and before any clone
 
     def test_lock_held_stops_with_no_clone(self):
         holder = subprocess.Popen(['/usr/bin/lockf', '-k', self.lock, '/bin/sleep', '60'], start_new_session=True,
@@ -274,6 +323,8 @@ class GoldenGate(unittest.TestCase):
         r, out = self.gate()
         self.assertEqual(r.returncode, 2, r.stdout)
         self.assertIn('%s delete s1-gate-x' % self.tart, r.stdout)   # the exact delete line, for a person
+        # its VM may still run (a gate killed with SIGKILL leaves real-run running): stop it, then delete it
+        self.assertIn('%s stop s1-gate-x; %s delete s1-gate-x' % (self.tart, self.tart), r.stdout)
         self.assertTrue(out[-1].startswith('golden-gate: STOP'), r.stdout)
         self.assert_no_clone()
         self.assertIn('s1-gate-x', self.vms())
@@ -318,6 +369,51 @@ class GoldenGate(unittest.TestCase):
             r = run([ZSH, '-f', self.tool] + argv, env={'HOME': self.d}, cwd=self.d)
             self.assertEqual(r.returncode, 2, argv)
             self.assert_no_tart_call()
+
+
+
+class GateVerdicts(GateRig, unittest.TestCase):
+    """golden-gate behind the REAL golden-emudhra (a copy whose tart is the same stub; the stub's exec answers each guest
+    step from D/scenario/<step>.out and .rc): RED only when the gate step ran to its end with a FAIL; a step that did not
+    complete is STOP, so the RED of the owed live proof can only come from the deny check."""
+
+    def setUp(self):
+        super().setUp()
+        copy_script(self, 'bin/golden-emudhra', os.path.join(self.d, 'bin', 'golden-emudhra'),
+                    rewrites=[('REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart', 'REAL=' + self.tart)],
+                    allow_ci=('HOME=/Users/ci ',))
+        self.guest('save', '1. save\n')
+        self.guest('gate', 'census: control USERTrust RSA: verify-cert exits 0 (pass)\ngate: no FAIL\n')
+
+    def guest(self, step, out, rc=0):
+        write(os.path.join(self.d, 'scenario', step + '.out'), out)
+        write(os.path.join(self.d, 'scenario', step + '.rc'), '%d\n' % rc)
+
+    def test_a_save_that_did_not_complete_is_stop_not_red(self):
+        self.guest('save', 'STOP missing in the guest: /opt/homebrew/bin/gtimeout\n', rc=2)
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn('golden-emudhra: GATE STOP the save step did not complete: the gate did not run', out)
+        self.assertTrue(out[-1].startswith('golden-gate: STOP'), r.stdout)
+        self.assertFalse(any(l.startswith(('golden-gate: RED', 'golden-gate: GREEN')) for l in out), r.stdout)
+        self.assertEqual(self.f('guest-steps'), ['save'])   # the deny check never ran
+        self.assert_clone_deleted_under_the_lock()
+
+    def test_control_a_gate_fail_is_red(self):
+        self.guest('gate', 'FAIL census: AAA Certificate Services (SHA-1 X): no deny in the admin trust settings (none)\n',
+                   rc=1)
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(out[-1], 'golden-gate: RED ' + IMAGE)
+        self.assertEqual(self.f('guest-steps'), ['save', 'gate'])
+        self.assert_clone_deleted_under_the_lock()
+
+    def test_control_green(self):
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(out[-1], 'golden-gate: GREEN ' + IMAGE)
+        self.assertEqual(self.f('guest-steps'), ['save', 'gate'])
+        self.assert_clone_deleted_under_the_lock()
 
 
 if __name__ == '__main__':

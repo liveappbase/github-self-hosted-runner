@@ -3,10 +3,16 @@
 # golden-emudhra --gate VM — the gate on a SAVED image (the same guest part: one copy of the checks).
 # Design: docs/design.md ("The eMudhra stage"). golden-build runs it as ci while it holds the runner lock.
 # --gate: VM is a running s1-* clone of a saved image (bin/golden-gate makes it and holds the lock). It runs only the
-# guest steps save (it writes only inside the guest work folder) and gate (census_deny: a deny and verify-cert non-zero
-# for each excluded anchor, verify-cert 0 for each control root), then the cleanup: never the probes, the fix or the
-# census. It ends "golden-emudhra: GATE GREEN" (exit 0) or "golden-emudhra: GATE RED" (exit 1, the FAIL lines above
-# it); a step that did not complete is RED too. A STOP (exit 1, no GATE line) means it could not start.
+# guest steps save (it writes only inside the guest work folder) and gate (census_anchors' floors: a source save could
+# not read, or one below its floor, FAILs, so a gate that read no anchors is never GREEN; then census_deny: a deny and
+# verify-cert non-zero for each excluded anchor, verify-cert 0 for each control root), then the cleanup: never the
+# probes, the fix or the census. It ends with one of:
+#   "golden-emudhra: GATE GREEN" (exit 0);
+#   "golden-emudhra: GATE RED" (exit 1): the gate step ran to its end and reported a FAIL (the FAIL lines are above);
+#   "golden-emudhra: GATE STOP <why>" (exit 2): the save step did not complete, the gate step ended with an exit that
+#     is not 0 or 1 (a tool missing in the guest, save's records missing, a tart exec that failed), or the guest work
+#     folder could not be removed after a green gate. Its FAIL lines are above it. The image is NOT checked: never RED.
+# A STOP before the start (exit 1, no GATE line) means it could not start.
 # The incident: eMudhra's intermediate keys were compromised. homebrew-core a2ee7ae08c6 excludes three root keys by the
 # SHA-256 of their public key (SPKI); EXCLUDED_SPKI in the guest part copies them with that commit's source line.
 # VM is a RUNNING gold-* build VM that answers `tart exec`. The stage drives the guest ONLY through `tart exec`, as the
@@ -31,7 +37,8 @@
 # The named Node difference list is setup/emudhra.node-diff of the same tree (NODEDIFF). node-diff-compare PASSes a
 # complete census that is a subset of it (each named entry not computed: a NODE-DIFF-LOST line) and FAILs on a new entry,
 # a missing block or no END; a FAIL makes the stage RED. The guest's raw census lines go to a host temp file
-# (${TMPDIR:-/tmp}/golden-emudhra-census.*), removed on exit. The hand path runs the same code. Exit: 0 GREEN; 1 RED or STOP.
+# (${TMPDIR:-/tmp}/golden-emudhra-census.*), removed on exit. The hand path runs the same code.
+# The build's exit: 0 GREEN; 1 RED or STOP.
 set -u
 export LC_ALL=C
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
@@ -657,13 +664,16 @@ census_deny() {
     else fail "census: control $q[2]: verify-cert exits $rc: $REPLY (a control root must stay trusted)"; fi
   done
 }
-gate() { # the gate on a SAVED image (golden-emudhra --gate, after save): census_deny alone, the census's own check — a
-  # deny and verify-cert non-zero for each excluded anchor, verify-cert 0 for each control root. It writes only inside W
-  # (ts.plist); exit 1 on any FAIL of its own, else 0
+gate() { # the gate on a SAVED image (golden-emudhra --gate, after save): the census's own checks — census_anchors (each
+  # source save read, at its floor: a gate that read no anchors is never clean), then census_deny (a deny and
+  # verify-cert non-zero for each excluded anchor, verify-cert 0 for each control root). It writes only inside W
+  # (ts.plist); exit 1 on any FAIL of its own, else 0; exit 2 (it did not run) when save's records are missing
   need $T $SEC $PLUTIL
-  say "the gate (offline; it changes nothing): a deny and verify-cert for each excluded anchor, the control roots trusted"
+  say "the gate (offline; it changes nothing): the anchor sources at their floors, a deny and verify-cert for each excluded anchor, the control roots trusted"
   : > $W/fail.txt
-  [[ -f $W/excluded.tsv && -f $W/controls.tsv ]] || { fail "gate: the save step left no excluded.tsv or controls.tsv"; exit 1 }
+  [[ -f $W/excluded.tsv && -f $W/controls.tsv && -s $W/sources.tsv ]] \
+    || { say "STOP the save step left no excluded.tsv, controls.tsv or sources.tsv: the gate did not run"; exit 2 }
+  census_anchors
   census_deny
   [[ -s $W/fail.txt ]] && exit 1
   say "gate: no FAIL"
@@ -853,18 +863,20 @@ W=$(gexec /usr/bin/mktemp -d /private/tmp/golden-emudhra.XXXXXX) || { W=; die "m
 [[ $W =~ '^/private/tmp/golden-emudhra\.[A-Za-z0-9]+$' ]] || { W=; die "mktemp in the guest printed an unexpected path" }
 if [[ $mode == gate ]]; then   # save, then the gate step, then the cleanup: never the probes, the fix or the census
   say "start: the gate on $vm (a clone of a saved image); the order: save, the gate"
-  problems=()
+  red=0 stops=()   # RED only when the gate step ran to its end and found a FAIL; anything incomplete is a STOP
   if phase save $W; then
     phase gate $W; r=$?
-    if (( r == 1 )); then problems+=("the gate found a FAIL (above)")
-    elif (( r != 0 )); then problems+=("the gate step did not complete (exit $r)"); fi
+    if (( r == 1 )); then red=1
+    elif (( r != 0 )); then stops+=("the gate step did not complete (exit $r)"); fi
   else
-    problems+=("the save step did not complete: the gate did not run")
+    stops+=("the save step did not complete: the gate did not run")
   fi
-  cleanup || problems+=("the guest work folder was not removed")
+  cleanup || stops+=("the guest work folder was not removed")
   trap - EXIT
-  for m in $problems; do say "FAIL $m"; done
-  (( ${#problems} == 0 )) || { say "GATE RED"; exit 1 }
+  (( red )) && say "FAIL the gate found a FAIL (above)"
+  for m in $stops; do say "FAIL $m"; done
+  (( red )) && { say "GATE RED"; exit 1 }
+  (( ${#stops} == 0 )) || { say "GATE STOP ${(j:; :)stops}"; exit 2 }
   say "GATE GREEN"
   exit 0
 fi

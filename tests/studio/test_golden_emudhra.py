@@ -160,7 +160,8 @@ class HostNodeDiff(unittest.TestCase):
 
 
 class GateHost(unittest.TestCase):
-    """golden-emudhra --gate VM: the guest steps save and gate only, then the cleanup; GATE GREEN (0) or GATE RED (1)."""
+    """golden-emudhra --gate VM: the guest steps save and gate only, then the cleanup; GATE GREEN (0), GATE RED (1: the
+    gate step ran to its end and found a FAIL) or GATE STOP (2: a step did not complete; the image is not checked)."""
 
     VM = 's1-gate-20261101120000'
 
@@ -195,18 +196,38 @@ class GateHost(unittest.TestCase):
         self.assertIn('golden-emudhra: FAIL the gate found a FAIL (above)', out)
         self.assertEqual(self.steps(), ['save', 'gate'])
 
-    def test_a_save_that_did_not_complete_is_red(self):
+    def assert_stop(self, r, out, why):
+        """GATE STOP <why> (exit 2), never a GATE RED or GATE GREEN line; the cleanup ran."""
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertEqual(out[-1], 'golden-emudhra: GATE STOP ' + why)
+        self.assertIn('golden-emudhra: FAIL ' + why, out)
+        self.assertFalse([l for l in out if l in ('golden-emudhra: GATE RED', 'golden-emudhra: GATE GREEN')], r.stdout)
+        self.assertIn('rm -rf -- ' + GUEST_W, lines(os.path.join(self.d, 'calls')))
+
+    def test_a_save_that_did_not_complete_is_stop_not_red(self):
         scenario(self.d, 'save', out='STOP missing in the guest: /opt/homebrew/bin/node\n', rc=2)
         r, out = self.gate()
-        self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')
+        self.assert_stop(r, out, 'the save step did not complete: the gate did not run')
         self.assertEqual(self.steps(), ['save'])   # the gate did not run on an incomplete save
+        # control: test_gate_red (the gate step ran to its end with a FAIL, exit 1) stays GATE RED
 
-    def test_a_gate_step_that_did_not_complete_is_red(self):
+    def test_a_gate_step_that_did_not_complete_is_stop_not_red(self):
         scenario(self.d, 'gate', out='STOP missing in the guest: /opt/homebrew/bin/gtimeout\n', rc=2)
         r, out = self.gate()
+        self.assert_stop(r, out, 'the gate step did not complete (exit 2)')
+
+    def test_a_guest_folder_left_after_a_green_gate_is_stop(self):
+        write(os.path.join(self.d, 'guest-folder-stays'), '')   # the stub's `test -e W` then says it is still there
+        r, out = self.gate()
+        self.assert_stop(r, out, 'the guest work folder was not removed')
+
+    def test_a_red_gate_stays_red_when_the_guest_folder_is_left(self):
+        write(os.path.join(self.d, 'guest-folder-stays'), '')
+        scenario(self.d, 'gate', out='FAIL census: AAA Certificate Services (SHA-1 X): no deny in the admin trust settings (none)\n', rc=1)
+        r, out = self.gate()
         self.assertEqual(r.returncode, 1, r.stdout)
-        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')
+        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')   # the gate ran to its end and said FAIL: that is the verdict
+        self.assertIn('golden-emudhra: FAIL the guest work folder was not removed', out)
 
     def test_the_vm_must_be_an_s1_clone(self):
         for bad in ('gold-20261101', 'runner-x', 'n1-x', 's1-', 's1-a b', '-s1-x'):
@@ -221,7 +242,9 @@ class GateHost(unittest.TestCase):
 
 
 class GuestGate(unittest.TestCase):
-    """The guest step `gate`: census_deny alone on a saved image. Exit 1 on any FAIL, else 0; it never writes a deny."""
+    """The guest step `gate` on a saved image: census_anchors' floors (a source save could not read, or one below its
+    floor, FAILs, so a gate that read no anchors is never clean), then census_deny. Exit 1 on any FAIL, else 0; exit 2
+    (STOP) when save's records are missing; it never writes a deny."""
 
     SHA1 = 'D1EB23A46D17D68FD92564C2F1F1601764D8E349'
     CONTROLS = ('e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2',
@@ -259,6 +282,22 @@ esac
         write(os.path.join(self.w, 'fail.txt'), '')
         with open(os.path.join(self.sec, 'ts.plist'), 'wb') as f:   # the admin trust settings: a deny (result 3)
             plistlib.dump({'trustList': {self.SHA1: {'trustSettings': [{'kSecTrustSettingsResult': 3}]}}}, f)
+        self.sources()
+
+    def sources(self, kc=100, anchors=200):
+        """The anchor sources save records (sources.tsv: LABEL NAME PATH FLOOR VERSION; anchors/LABEL.tsv: one line per
+        certificate). KC or ANCHORS is the number of hashed certificates of that source, or 'unreadable'. The floors
+        are save's own (KC_FLOOR 100, ANCHORS_FLOOR 200): the defaults put each source at its floor."""
+        rows = []
+        for label, name, path, floor, n in (
+                ('kc', 'SystemRootCertificates.keychain', '/System/Library/Keychains/SystemRootCertificates.keychain', 100, kc),
+                ('anchors', 'Certificates.bundle/Anchors', '/System/Library/Security/Certificates.bundle/Contents/Resources/Anchors', 200, anchors)):
+            version = 'unreadable' if n == 'unreadable' else '-'
+            rows.append('%s\t%s\t%s\t%d\t%s\n' % (label, name, path, floor, version))
+            certs = '' if n == 'unreadable' else ''.join(
+                '%064x\t%064x\tsubject %d\t/saved/c%04d.pem\n' % (i + 1, i + 1, i, i + 1) for i in range(n))
+            write(os.path.join(self.w, 'anchors', label + '.tsv'), certs)
+        write(os.path.join(self.w, 'sources.tsv'), ''.join(rows))
 
     def gate(self):
         r = run([ZSH, '-f', self.guest, 'gate', self.w], cwd=self.d)
@@ -288,10 +327,49 @@ esac
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertTrue(any('a control root must stay trusted' in l for l in out), r.stdout)
 
-    def test_no_records_from_save_fails(self):
-        os.remove(os.path.join(self.w, 'excluded.tsv'))
+    def test_no_records_from_save_is_stop_not_a_fail(self):
+        # the gate did not run: exit 2 (the host's GATE STOP), never exit 1 (a verdict on the image)
+        for rec in ('excluded.tsv', 'controls.tsv', 'sources.tsv'):
+            with self.subTest(rec):
+                p = os.path.join(self.w, rec)
+                keep = read(p)
+                os.remove(p)
+                r, out = self.gate()
+                write(p, keep)   # back before any assertion: each subtest misses only its own record
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertTrue(out and out[-1].startswith('STOP the save step left no '), r.stdout)
+                self.assertFalse([l for l in out if l.startswith('FAIL')], r.stdout)
+        write(os.path.join(self.w, 'sources.tsv'), '')   # save always records kc and anchors: none is no record
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.sources()   # control: every record there
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_an_anchor_source_that_cannot_be_read_fails_with_nothing_to_deny(self):
+        # blind: a gate that read no anchors finds no excluded anchor, so nothing to deny would look clean
+        write(os.path.join(self.w, 'excluded.tsv'), '')
+        self.sources(kc='unreadable')
         r, out = self.gate()
         self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('FAIL census: anchors SystemRootCertificates.keychain '
+                      '(/System/Library/Keychains/SystemRootCertificates.keychain) cannot be read', out)
+        self.sources()   # control: every source at its floor and nothing to deny is the build's "nothing to deny"
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_an_anchor_source_below_its_floor_fails(self):
+        write(os.path.join(self.w, 'excluded.tsv'), '')
+        for kc, anchors, what in ((99, 200, 'SystemRootCertificates.keychain: 99 hashed, below the floor 100'),
+                                  (100, 199, 'Certificates.bundle/Anchors: 199 hashed, below the floor 200')):
+            with self.subTest(what):
+                self.sources(kc=kc, anchors=anchors)
+                r, out = self.gate()
+                self.assertEqual(r.returncode, 1, r.stdout)
+                self.assertTrue(any(l.startswith('FAIL census: anchors ' + what) for l in out), r.stdout)
+        self.sources()   # control: at the floors
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_a_fail_left_by_an_earlier_step_does_not_count(self):
         write(os.path.join(self.w, 'fail.txt'), 'an earlier FAIL\n')
