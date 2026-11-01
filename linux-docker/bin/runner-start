@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# runner-start run|validate|delete NAME — the one way runscaler starts on the Linux CI host (Linux only: GNU stat, ss).
+# The systemd user unit runscaler.service of RS_USER runs `runner-start run`. RUNNER_START_CONFIG picks another config.
+# REFUSES, and never starts runscaler, when:
+#   - the host config (HOST_CONF, below) is absent, not root's, or lacks a key this script reads;
+#   - the config's file name does not end in .toml (viper reads the type from the extension);
+#   - the config has a key the render does not write (per table), or a key that is not plain ASCII [A-Za-z0-9_-]
+#     (viper resolves a quoted dotted key or a non-ASCII letter differently from this parser);
+#   - the config does not parse, has no [[scaleset]], or a set does not RESOLVE — as runscaler's loader does
+#     (internal/config/load.go: builtin defaults <- top-level tables minus global/identity keys <- the set's own tables;
+#     keys are case-insensitive) — to: provider "docker"; docker.dind the TOML boolean false (anything else, in any
+#     spelling, decodes to a daemon socket in every job); docker.socket = D1's shared socket; docker.network = "runners";
+#     token "env:RUNNER_TOKEN_*". A key spelled twice in one table (after lowercasing) is refused: which one wins is not
+#     ours to guess;
+#   - (run/validate) D1 does not answer; its `runners` network is missing; it is not the Docker version the seccomp
+#     profile was cut from; the local registry does not answer (runscaler's start pull would fail); (run only) the
+#     health port is already bound;
+#   - a token file the config names (env:RUNNER_TOKEN_X -> token-x) is missing, empty or not 0600;
+#   - (run/delete: the two modes in which runscaler takes its lock; validate takes none) /tmp/runner.lock is held by
+#     another process — named, so the unit's restart loop says WHO in the journal.
+# The token reaches runscaler only through its environment, never its arguments.
+set -euo pipefail
+# THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
+# this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
+# is not KEY=value, a key twice or a key missing: REFUSE on stderr, exit 1, before anything else runs.
+HOST_CONF=/etc/liveapp-ci/host.conf
+host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF sets that variable
+  local me=$1 l k o seen=" "; shift
+  o=$(stat -c '%a %U' "$HOST_CONF" 2>/dev/null) || { echo "$me: REFUSE no host config $HOST_CONF (linux-docker/README.md)" >&2; exit 1; }
+  [[ $o =~ ^[0-7][0145][0145]\ root$ ]] || { echo "$me: REFUSE $HOST_CONF must be root's and writable by root only: [$o]" >&2; exit 1; }
+  while IFS= read -r l || [ -n "$l" ]; do
+    case $l in ''|'#'*) continue ;; esac
+    [[ $l =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9][A-Za-z0-9._:/-]*)$ ]] || { echo "$me: REFUSE $HOST_CONF: want KEY=value, got [$l]" >&2; exit 1; }
+    k=${BASH_REMATCH[1]}; [[ " $* " == *" $k "* ]] || continue
+    [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
+    printf -v "$k" %s "${BASH_REMATCH[2]}"; seen="$seen$k "
+  done < "$HOST_CONF"
+  for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
+}
+host_conf runner-start RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT
+umask 077
+RUNNER=/home/${RS_USER}/bin/runner
+CONFIG=${RUNNER_START_CONFIG:-/home/${RS_USER}/.config/runner/config.toml}
+TOKEN_DIR=/home/${RS_USER}/.config/runner
+SOCK=/home/${RUN_USER}/run/docker.sock
+D1=unix://$SOCK
+PROFILE_DOCKER=29.9.0
+HEALTH_PORT=${RS_HEALTH_PORT}
+REGISTRY=http://127.0.0.1:${REGISTRY_PORT}/v2/
+die() { echo "runner-start: REFUSE $*" >&2; exit 1; }
+mode=${1-}
+case $mode in
+  run|validate) args=("$mode") ;;
+  delete) [ -n "${2-}" ] || die "usage: runner-start delete NAME"; args=(scaleset delete "$2") ;;
+  *) die "usage: runner-start run|validate|delete NAME" ;;
+esac
+[ -r "$CONFIG" ] || die "no config: $CONFIG"
+case $CONFIG in *.toml) ;; *) die "the config's name must end in .toml (runscaler takes the config type from the extension): $CONFIG" ;; esac
+names=$(python3 - "$CONFIG" "$SOCK" runners 2>&1 <<'PY'
+import re, sys, tomllib
+cfg, SOCK, NET = sys.argv[1:4]
+def low(t, path):
+    if isinstance(t, dict):
+        out = {}
+        for k, v in t.items():
+            # viper finds a key by its longest dotted prefix first and lowercases with Go's rules, so a quoted
+            # "docker.dind" or a non-ASCII letter would resolve differently there than here (r5 A5-2/B5-3)
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", k):
+                sys.exit(f"the key {path}{k!r} is not a plain ASCII key: {cfg}")
+            lk = k.lower()
+            if lk in out:
+                sys.exit(f"the key {path}{lk} is spelled twice (keys are case-insensitive): {cfg}")
+            out[lk] = low(v, f"{path}{lk}.")
+        return out
+    if isinstance(t, list):
+        return [low(x, path) for x in t]
+    return t
+try:
+    with open(cfg, "rb") as f:
+        c = low(tomllib.load(f), "")
+except (OSError, tomllib.TOMLDecodeError) as e:
+    sys.exit(f"the config does not parse ({e}): {cfg}")
+sets = c.pop("scaleset", None)
+if not isinstance(sets, list) or not sets or not all(isinstance(s, dict) for s in sets):
+    sys.exit(f"the config has no [[scaleset]] table: {cfg}")
+# Only the keys 03-runscaler.sh renders, per table: anything else (shared-volume, cache-volumes, cache, …) changes
+# what a job gets and is refused, whatever runscaler would make of it.
+DOCKER_KEYS = {"socket", "dind", "network", "cpu", "memory", "pids-limit"}
+ALLOWED = {"": {"log-level", "concurrent", "health-address", "health-port", "drain-timeout", "provider", "docker"},
+           "docker": DOCKER_KEYS,
+           "scaleset": {"url", "name", "token", "runner-group", "labels", "max-runners", "runner-image", "docker"}}
+def allowed(t, where, path):
+    for k, v in t.items():
+        if k not in ALLOWED[where]:
+            sys.exit(f"the key {path}{k} is not one the render writes: {cfg}")
+        if k == "docker":
+            if not isinstance(v, dict):
+                sys.exit(f"{path}docker is not a table: {cfg}")
+            allowed(v, "docker", f"{path}docker.")
+allowed(c, "", "")
+for i, s in enumerate(sets):
+    allowed(s, "scaleset", f"scaleset[{i}].")
+GLOBAL = {"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout", "concurrent"}
+IDENTITY = {"url", "name", "token", "labels", "min-runners"}
+def merge(a, b):
+    out = dict(a)
+    for k, v in b.items():
+        out[k] = merge(out[k], v) if isinstance(out.get(k), dict) and isinstance(v, dict) else v
+    return out
+builtin = {"provider": "docker", "docker": {"dind": True}}   # load.go builtinDefaults: the keys this guard reads
+top = {k: v for k, v in c.items() if k not in GLOBAL | IDENTITY}
+tokens = set()
+for i, s in enumerate(sets):
+    r = merge(merge(builtin, top), s)
+    n = f"scaleset[{i}] {s.get('name', '')!r}"
+    d = r.get("docker")
+    if "backend" in r:
+        sys.exit(f"{n}: the deprecated key 'backend' (an alias of provider) is not ours: {cfg}")
+    if r.get("provider") != "docker":
+        sys.exit(f"{n}: provider resolves to {r.get('provider')!r}, want 'docker': {cfg}")
+    if not isinstance(d, dict):
+        sys.exit(f"{n}: docker resolves to {d!r}, want a table: {cfg}")
+    if d.get("dind") is not False:
+        sys.exit(f"{n}: docker.dind resolves to {d.get('dind')!r}, want the boolean false (anything else gives every job a daemon socket): {cfg}")
+    if d.get("socket") != SOCK:
+        sys.exit(f"{n}: docker.socket resolves to {d.get('socket')!r}, want {SOCK!r}: {cfg}")
+    if d.get("network") != NET:
+        sys.exit(f"{n}: docker.network resolves to {d.get('network')!r}, want {NET!r}: {cfg}")
+    t = s.get("token")
+    if not isinstance(t, str) or not re.fullmatch(r"env:RUNNER_TOKEN_[A-Z0-9_]+", t):
+        sys.exit(f"{n}: token is {'set' if t else 'absent'} but not env:RUNNER_TOKEN_<NAME>: {cfg}")
+    tokens.add(t[4:])
+print(" ".join(sorted(tokens)))
+PY
+) || die "$names"
+if [ "$mode" != delete ]; then   # a delete talks to GitHub only
+  v=$(docker -H "$D1" version --format '{{.Server.Version}}' 2>&1) || die "D1 does not answer at $D1: $v"
+  docker -H "$D1" network inspect runners >/dev/null 2>&1 || die "D1 has no network 'runners' (every job start would fail): run 02-d1.sh"
+  [ "$v" = "$PROFILE_DOCKER" ] || die "D1 runs Docker $v, the seccomp profile was cut from $PROFILE_DOCKER: regenerate it (plan §2.2) before starting"
+  curl -fs -m 5 -o /dev/null "$REGISTRY" || die "the local registry does not answer at $REGISTRY: as ${RUN_USER}, run 'docker start runner-registry'"
+  [ "$mode" != run ] || { b=$(ss -ltnH "sport = :$HEALTH_PORT" 2>/dev/null); [ -z "$b" ] || die "127.0.0.1:$HEALTH_PORT (runscaler's health port) is already bound: $b"; }
+fi
+for name in $names; do
+  f=$TOKEN_DIR/token-$(printf %s "${name#RUNNER_TOKEN_}" | tr 'A-Z' 'a-z')
+  [ -f "$f" ] && [ -s "$f" ] || die "token file missing or empty: $f"
+  [ "$(stat -c %a "$f")" = 600 ] || die "token file is not 0600: $f"
+  export "$name=$(cat "$f")"
+done
+# runscaler's lock is a constant /tmp/runner.lock that runscaler itself makes 0666, so any host user can hold it and
+# block a start or a delete. Name the holder. `validate` takes no lock, so it is not checked there.
+if [ "$mode" != validate ] && s=$(stat -c '%d %i' /tmp/runner.lock 2>/dev/null); then
+  d=${s% *}; ino=${s#* }   # /proc/locks names a file as MAJ:MIN:INODE, major and minor in hex
+  key=$(printf '%02x:%02x:%s' $(( (d >> 8) & 0xfff )) $(( (d & 0xff) | ((d >> 12) & 0xfff00) )) "$ino")
+  holder=$(awk -v k="$key" '$2 == "FLOCK" && $6 == k {print $5; exit}' /proc/locks)
+  [ -z "$holder" ] || die "/tmp/runner.lock is held by pid $holder ($(ps -o user=,args= -p "$holder" 2>/dev/null | cut -c1-80)): runscaler cannot $mode until that process ends"
+fi
+exec "$RUNNER" "${args[@]}" --config "$CONFIG"

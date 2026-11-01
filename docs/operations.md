@@ -171,7 +171,7 @@ For a host whose tools were installed by hand into `/Users/ci/bin` (files, not l
 
 A release is never changed after publishing: a fix is a new version.
 
-1. On the maintainer's machine: `tools/release-check --private-list <your private list>` must be GREEN (the repository's own CI runs only the generic rules; the private list never leaves the maintainer's machine). This is required before every tag, also when the hosted CI did not run.
+1. On the maintainer's machine: `tools/release-check --private-list <your private list>` must be GREEN (the repository's own CI runs only the generic rules; the private list never leaves the maintainer's machine). This is required before every tag, also when the hosted CI did not run. A maintainer who runs a Linux host of `linux-docker/` puts that host's values in the list too (its address, its host name, its user names).
 2. `git tag -a v<VERSION>-rc.<N> -m "<VERSION> rc <N>"` (or `v<VERSION>` for the final release, on the same commit as its last rc). Do not push it yet.
 3. `tools/release-check --build v<VERSION>-rc.<N> --private-list <your private list>` on that LOCAL tag. It also checks the tag's tagger line and message, then builds the tarball, `install-line.txt`, `root-line.txt` and `SHA256SUMS` into one folder and prints their hashes. If it is RED, nothing is built: delete the local tag (`git tag -d v<VERSION>-rc.<N>`), fix the cause, and tag again.
 4. Only then push the tag: `git push origin v<VERSION>-rc.<N>`.

@@ -10,6 +10,8 @@ Turn an Apple-silicon Mac into a GitHub Actions host that runs every job in a **
 
 Status: **v0.1.0, pre-release.** The design and its reasons: [docs/design.md](docs/design.md). Day-to-day work: [docs/operations.md](docs/operations.md). What the wall does and does not protect: [SECURITY.md](SECURITY.md).
 
+A Linux host that runs each job in a fresh Docker container has its own folder and install: [linux-docker/README.md](linux-docker/README.md).
+
 Licence: [Apache-2.0](LICENSE) for the code in this repository. What it downloads keeps its own licence (below).
 
 ## Requirements
