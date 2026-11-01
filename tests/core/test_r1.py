@@ -1,0 +1,474 @@
+"""core/r1.jq — the log pass (PLAN D6): ownership by position, provenance, the classification table, R1 (three counted
+failures on one set with no proof of life between them -> ROLLBACK), CONNECT-ONLY, NOT SERVING, evidence gaps.
+Records are built by corejq.charm(), which test_records.py pins byte for byte to the real logs; the error texts are
+runscaler's own (internal/provider/tart.go, docker.go, internal/controller/controller.go at ae405a5), the benign
+"no longer exists" record is the Studio's real one. Every trigger has a control that comes out the other way."""
+import datetime
+import unittest
+
+from tests.core.corejq import charm, ok, run
+
+NOW = 1793530800                                   # 2026-11-01 07:00:00 UTC (the glue's clock)
+P = {'pid': 4242, 'start': 1793520000}             # runscaler, started 04:20:00
+Q = {'pid': 5151, 'start': 1793525000}             # a later runscaler
+INSTALLED = P['start'] - 60                        # the config was installed a minute before P started
+BASE = datetime.datetime(2026, 11, 1, 5, 0, 0)     # log times (no zone; never compared with NOW)
+
+
+def t(sec):
+    return (BASE + datetime.timedelta(seconds=sec)).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def failed(sec, err, set_='mac-a'):
+    return charm(t(sec), 'ERRO', set_, 'Failed to start runner, will retry', [('error', err)])
+
+
+def scaling(sec, set_='mac-a'):
+    return charm(t(sec), 'INFO', set_, 'Scaling up runner', [('currentCount', 0), ('desiredCount', 1)])
+
+
+def started(sec, name, set_='mac-a'):
+    return charm(t(sec), 'INFO', set_, 'Runner started', [('name', name), ('instanceID', name), ('startupTime', '22.4s')])
+
+
+def removed(sec, name, reason, job=True, result='succeeded', set_='mac-a'):
+    a = [('name', name), ('instanceID', name), ('reason', reason)]
+    if job:
+        a += [('jobId', '2ce18645-b726-290f-1564-ea0902058718'), ('repo', 'example-org/example'),
+              ('workflowRunId', '15885850636'), ('job', 'build (9150)')]
+        if result:
+            a += [('result', result)]
+    return charm(t(sec), 'INFO', set_, 'Runner removed', a)
+
+
+def exited_warn(sec, name, set_='mac-a'):
+    return charm(t(sec), 'WARN', set_, 'Runner exited before job completion; removing stale capacity', [('name', name)])
+
+
+TAIL_OK = "√ Connected to GitHub\n\nCurrent runner version: '2.339.0'\n2026-11-01 05:00:00Z: Listening for Jobs\n"
+
+
+def before_connecting(vm):
+    return ('failed to start runner: runner process exited on %s before connecting to GitHub; runner log:\n'
+            'Starting Runner listener with startup type: service\nAn error occurred: Not configured.' % vm)
+
+
+def right_after(vm, line):
+    return ('failed to start runner: runner process exited on %s right after connecting to GitHub; runner log:\n%s%s\n'
+            'Exiting runner...' % (vm, TAIL_OK, line))
+
+
+BENIGN = 'The runner no longer exists on the server. Cleaning up local configuration.'
+RETIRED = 'Runner version v2.339.0 is deprecated and cannot receive messages.'
+
+
+def did_not_connect(vm):
+    return ('failed to start runner: runner on %s did not connect to GitHub within 5m0s; newest runner diagnostics:\n'
+            '[2026-11-01 05:00:00Z INFO RunnerServer] Establish connection' % vm)
+
+
+JIT = 'failed to generate JIT config: POST https://api.github.com/actions/runner-registration: 422 Unprocessable Entity'
+DOCKER_CREATE = 'failed to create runner container: Error response from daemon: No such image: example-runner'
+DOCKER_START = 'failed to start runner container: Error response from daemon: OCI runtime create failed'
+OTHER = 'failed to start runner on runner-0000aaaa: tart exec: exit status 1'
+SHIM = 'liveapp-ci-shim: REFUSE free disk below the floor: 93 GiB < 100 GiB'
+
+
+def three(err_of, set_='mac-a', start=10):
+    return ''.join(failed(start + 10 * i, err_of(i), set_) for i in range(3)) + scaling(start + 40, set_)
+
+
+def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new'):
+    return {'provider': provider, 'sets': list(sets),
+            'candidate': {'version': version, 'lines': {s: image for s in sets}, 'closed_at': P['start']}}
+
+
+def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0):
+    after = before if after is None else after
+    if lines is None:
+        lines = {}
+        for f in families.values():
+            if f['candidate']:
+                lines.update(f['candidate']['lines'])
+    return {'format': 1, 'host': 'studio', 'sets': sorted(lines), 'proc': {'before': before, 'after': after},
+            'position': {'inode': '7', 'offset': offset, 'sha': 'x'}, 'continuous': continuous,
+            'config': {'installed': installed, 'lines': lines}, 'families': families}
+
+
+class Run:
+    """Passes of the glue: each pass gives the text since the last one; the state goes from pass to pass."""
+
+    def __init__(self, test, families=None, opened=True):
+        self.test, self.families, self.state, self.now = test, families or {'fx': fam()}, [], NOW
+        if opened:
+            self.go()
+
+    def go(self, log='', healthz=(), now=None, families=None, **kw):
+        self.now = now or (self.now + 600)
+        fams = families or self.families
+        out = ok(self.test, 'r1', state=self.state, log=log, healthz=list(healthz), facts=facts(fams, **kw), now=self.now)
+        self.state = out['state']
+        return out
+
+    def fx(self, log='', **kw):
+        return self.go(log, **kw)['families']['fx']
+
+
+class R1(unittest.TestCase):
+    def test_three_connect_failures_roll_back_connect_only(self):
+        r = Run(self).fx(three(lambda i: before_connecting('runner-0000000%d' % i)))
+        self.assertEqual(r['verdict'], 'rollback', r)
+        self.assertEqual(r['set'], 'mac-a')
+        self.assertTrue(r['connect_only'])
+        self.assertEqual(len(r['failures']), 3)
+
+    def test_control_a_job_completed_between_them_is_proof_of_life(self):
+        log = (failed(10, before_connecting('runner-00000001')) + failed(20, before_connecting('runner-00000002'))
+               + removed(25, 'runner-0000beef', 'job-completed') + failed(30, before_connecting('runner-00000003'))
+               + scaling(40))
+        self.assertEqual(Run(self).fx(log)['verdict'], 'none')
+
+    def test_two_failures_are_not_r1(self):
+        log = failed(10, before_connecting('runner-00000001')) + failed(20, OTHER) + scaling(40)
+        self.assertEqual(Run(self).fx(log)['verdict'], 'none')
+
+    def test_did_not_connect_is_connect_class(self):
+        r = Run(self).fx(three(lambda i: did_not_connect('runner-0000000%d' % i)))
+        self.assertEqual((r['verdict'], r['connect_only']), ('rollback', True))
+
+    def test_any_other_start_failure_counts_and_is_not_connect_class(self):
+        r = Run(self).fx(three(lambda i: OTHER))
+        self.assertEqual((r['verdict'], r['connect_only']), ('rollback', False))
+
+    def test_one_non_connect_failure_makes_the_run_not_connect_only(self):
+        errs = [before_connecting('runner-00000001'), OTHER, did_not_connect('runner-00000003')]
+        r = Run(self).fx(three(lambda i: errs[i]))
+        self.assertEqual((r['verdict'], r['connect_only']), ('rollback', False))
+
+    def test_jit_failures_are_not_counted(self):
+        self.assertEqual(Run(self).fx(three(lambda i: JIT))['verdict'], 'none')
+
+    def test_docker_container_failures_count(self):
+        for err in (DOCKER_CREATE, DOCKER_START):
+            r = Run(self, {'fx': fam('docker', ('linux-a',))}).fx(three(lambda i: err, 'linux-a'))
+            self.assertEqual((r['verdict'], r['connect_only']), ('rollback', False), err)
+
+    def test_records_of_another_set_do_not_count_for_the_family(self):
+        self.assertEqual(Run(self).fx(three(lambda i: OTHER, 'mac-b'))['verdict'], 'none')
+
+    def test_failures_on_three_different_sets_are_not_r1(self):
+        run_ = Run(self, {'fx': fam(sets=('mac-a', 'mac-b', 'mac-c'))})
+        log = failed(10, OTHER, 'mac-a') + failed(20, OTHER, 'mac-b') + failed(30, OTHER, 'mac-c') + scaling(40)
+        self.assertEqual(run_.fx(log)['verdict'], 'none')
+        # control: the same three on one of them
+        self.assertEqual(Run(self, {'fx': fam(sets=('mac-a', 'mac-b'))}).fx(three(lambda i: OTHER, 'mac-b'))['verdict'],
+                         'rollback')
+
+
+class ConnectClassTexts(unittest.TestCase):
+    def test_no_longer_exists_on_the_server_is_benign(self):
+        self.assertEqual(Run(self).fx(three(lambda i: right_after('runner-0000000%d' % i, BENIGN)))['verdict'], 'none')
+
+    def test_control_right_after_connecting_without_it_counts(self):
+        r = Run(self).fx(three(lambda i: right_after('runner-0000000%d' % i, 'An error occurred: Access denied.')))
+        self.assertEqual((r['verdict'], r['connect_only']), ('rollback', True))
+
+
+class ProofOfLife(unittest.TestCase):
+    def test_tart_runner_started_is_proof_of_life(self):
+        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER) + scaling(40))
+        self.assertEqual(Run(self).fx(log)['verdict'], 'none')
+
+    def test_a_start_taken_back_by_exited_without_a_job(self):
+        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
+               + removed(35, 'runner-0000beef', 'exited', job=False) + scaling(40))
+        r = Run(self).fx(log)
+        self.assertEqual(r['verdict'], 'rollback', r)
+        self.assertEqual(len(r['failures']), 4)
+
+    def test_control_a_start_confirmed_by_another_removal_stays_proof(self):
+        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
+               + removed(35, 'runner-0000beef', 'scaled-down', job=False) + scaling(40))
+        self.assertEqual(Run(self).fx(log)['verdict'], 'none')
+
+    def test_a_confirmed_start_leaves_the_state(self):
+        r = Run(self)
+        out = r.go(started(10, 'runner-0000beef') + removed(20, 'runner-0000beef', 'scaled-down', job=False) + scaling(30))
+        self.assertEqual(out['state']['families']['fx']['sets']['mac-a']['starts'], [])
+        # control: an unconfirmed start stays (it may yet be taken back)
+        out = Run(self).go(started(10, 'runner-0000beef') + scaling(30))
+        self.assertEqual(len(out['state']['families']['fx']['sets']['mac-a']['starts']), 1)
+
+    def test_docker_runner_started_is_not_proof_of_life(self):
+        log = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+               + started(25, 'runner-0000beef', 'linux-a') + failed(30, DOCKER_CREATE, 'linux-a') + scaling(40, 'linux-a'))
+        self.assertEqual(Run(self, {'fx': fam('docker', ('linux-a',))}).fx(log)['verdict'], 'rollback')
+
+    def test_exited_without_a_job_counts_and_with_a_job_does_not(self):
+        nojob = ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', job=False) for i in range(3))
+        self.assertEqual(Run(self).fx(nojob + scaling(50))['verdict'], 'rollback')
+        withjob = ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', result=None) for i in range(3))
+        self.assertEqual(Run(self).fx(withjob + scaling(50))['verdict'], 'none')
+
+    def test_the_exited_warning_alone_is_unknown(self):
+        warns = ''.join(exited_warn(10 * i + 10, 'runner-0000000%d' % i) for i in range(3))
+        self.assertEqual(Run(self).fx(warns + scaling(50))['verdict'], 'none')
+
+
+class SameSecond(unittest.TestCase):
+    def test_a_proof_in_the_same_second_as_the_third_failure_is_between_in_both_orders(self):
+        for proof_first in (True, False):
+            third, proof = failed(30, OTHER), removed(30, 'runner-0000beef', 'job-completed')
+            log = failed(10, OTHER) + failed(20, OTHER) + (proof + third if proof_first else third + proof) + scaling(40)
+            self.assertEqual(Run(self).fx(log)['verdict'], 'none', proof_first)
+
+    def test_a_proof_in_the_same_second_as_the_first_failure_is_between_in_both_orders(self):
+        proofs = {'job': removed(30, 'runner-0000beef', 'job-completed'), 'start': started(30, 'runner-0000beef')}
+        for kind, proof in proofs.items():
+            for proof_first in (True, False):
+                first = failed(30, OTHER)
+                log = (proof + first if proof_first else first + proof) + failed(40, OTHER) + failed(50, OTHER) + scaling(60)
+                self.assertEqual(Run(self).fx(log)['verdict'], 'none', (kind, proof_first))
+
+    def test_control_the_proof_a_second_before_the_first_failure(self):
+        log = removed(9, 'runner-0000beef', 'job-completed') + three(lambda i: OTHER)
+        self.assertEqual(Run(self).fx(log)['verdict'], 'rollback')
+
+    def test_a_second_is_judged_only_once_a_later_second_is_seen(self):
+        r = Run(self)
+        log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER)
+        self.assertEqual(r.fx(log)['verdict'], 'none')
+        self.assertEqual(r.fx(scaling(31))['verdict'], 'rollback')
+
+    def test_control_the_proof_arrives_in_the_next_pass_in_the_same_second(self):
+        r = Run(self)
+        self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))['verdict'], 'none')
+        self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + scaling(31))['verdict'], 'none')
+
+
+class Retired(unittest.TestCase):
+    def test_deprecated_on_tart_stops_and_is_not_counted(self):
+        r = Run(self).fx(three(lambda i: right_after('runner-0000000%d' % i, RETIRED)))
+        self.assertEqual(r['verdict'], 'stop', r)
+        self.assertEqual(r['stops'][0]['stop'], 'PINNED RUNNER RETIRED')
+
+    def test_one_deprecated_record_is_enough(self):
+        r = Run(self).fx(failed(10, right_after('runner-00000001', RETIRED)) + scaling(20))
+        self.assertEqual(r['verdict'], 'stop')
+
+    def test_control_on_docker_it_is_any_other_text(self):
+        r = Run(self, {'fx': fam('docker', ('linux-a',))}).fx(three(lambda i: 'failed to start runner: ' + RETIRED,
+                                                                     'linux-a'))
+        self.assertEqual(r['verdict'], 'rollback')
+
+
+class Shim(unittest.TestCase):
+    def test_a_refusal_in_the_start_failure_stops_and_is_not_counted(self):
+        err = lambda i: 'failed to clone VM: tart clone base runner-0000000%d: exit status 1: %s' % (i, SHIM)
+        r = Run(self).fx(three(err))
+        self.assertEqual(r['verdict'], 'stop', r)
+        self.assertEqual(r['stops'][0]['stop'], 'SHIM REFUSED')
+        self.assertIn('free disk below the floor: 93 GiB < 100 GiB', r['stops'][0]['reason'])
+
+    def vm_refused(self, sec, vm):
+        return charm(t(sec), 'ERRO', 'mac-a', 'VM exited unexpectedly',
+                     [('name', vm), ('error', 'tart run %s --no-graphics: exit status 1: %s' % (vm, SHIM))])
+
+    def agent(self, vm):
+        return 'guest agent not ready on %s: context deadline exceeded' % vm
+
+    def test_a_refused_vm_and_its_start_failure_pair_by_name_across_passes(self):
+        r = Run(self)
+        r.fx(self.vm_refused(10, 'runner-00000001') + self.vm_refused(11, 'runner-00000002')
+             + self.vm_refused(12, 'runner-00000003'))
+        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 1))) for i in range(3)) + scaling(40))
+        self.assertEqual(out['verdict'], 'stop', out)
+        self.assertEqual(out['stops'][0]['stop'], 'SHIM REFUSED')
+
+    def test_control_start_failures_of_other_vms_count(self):
+        r = Run(self)
+        r.fx(self.vm_refused(10, 'runner-00000001'))
+        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 5))) for i in range(3)) + scaling(40))
+        self.assertEqual(out['verdict'], 'rollback', out)
+
+    def test_no_stop_takes_r1_back(self):
+        r = Run(self)
+        r.fx(self.vm_refused(10, 'runner-00000001'))
+        out = r.fx(three(lambda i: OTHER, start=20))
+        self.assertEqual(out['verdict'], 'rollback')
+        self.assertEqual(out['stops'][0]['stop'], 'SHIM REFUSED')
+
+
+class Ownership(unittest.TestCase):
+    def test_a_stable_process_keeps_its_evidence_across_passes(self):
+        r = Run(self)
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
+        self.assertEqual(r.fx(failed(30, OTHER) + scaling(40))['verdict'], 'rollback')
+
+    def test_text_of_an_unseen_process_counts_neither_way(self):
+        # P seen -> P dies -> an unseen U runs and logs -> V (=Q) seen: U's text counts neither way, and it is a gap
+        r = Run(self)
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
+        self.assertEqual(r.fx(failed(30, OTHER) + failed(31, OTHER) + failed(32, OTHER) + scaling(40), before=Q)['verdict'],
+                         'none')
+        # counting resumes with Q: two more failures do not join the ones before the gap
+        self.assertEqual(r.fx(failed(50, OTHER) + failed(60, OTHER) + scaling(70), before=Q)['verdict'], 'none')
+        self.assertEqual(r.fx(failed(80, OTHER) + scaling(90), before=Q)['verdict'], 'rollback')
+
+    def test_a_restart_between_the_first_read_and_the_capture_makes_the_boundary_ambiguous(self):
+        r = Run(self)
+        r.fx('', before=P, after=Q)                     # the capture is no boundary of P nor of Q
+        self.assertEqual(r.fx(three(lambda i: OTHER), before=Q)['verdict'], 'none')   # Q's first text is UNKNOWN
+        self.assertEqual(r.fx(three(lambda i: OTHER, start=100), before=Q)['verdict'], 'rollback')
+
+    def test_a_cursor_that_does_not_match_is_a_gap(self):
+        r = Run(self)
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
+        self.assertEqual(r.fx(failed(30, OTHER) + scaling(40), continuous=False)['verdict'], 'none')
+        out = r.go(failed(50, OTHER) + scaling(60))
+        self.assertEqual(out['families']['fx']['verdict'], 'none')
+        self.assertEqual(out['state']['families']['fx']['gaps'], 1)
+
+    def test_the_first_pass_counts_nothing(self):
+        r = Run(self, opened=False)
+        self.assertEqual(r.fx(three(lambda i: OTHER))['verdict'], 'none')
+        self.assertEqual(r.fx(three(lambda i: OTHER, start=100))['verdict'], 'rollback')
+
+
+class Provenance(unittest.TestCase):
+    def test_installed_in_the_start_second_is_not_proven(self):
+        r = Run(self, opened=False)
+        r.go(installed=P['start'])
+        self.assertEqual(r.fx(three(lambda i: OTHER), installed=P['start'])['verdict'], 'none')
+        # control: a second earlier is proven
+        r2 = Run(self, opened=False)
+        r2.go(installed=P['start'] - 1)
+        self.assertEqual(r2.fx(three(lambda i: OTHER), installed=P['start'] - 1)['verdict'], 'rollback')
+
+    def test_a_config_that_does_not_name_the_candidate_counts_nothing(self):
+        r = Run(self, opened=False)
+        r.go(lines={'mac-a': 'img-old'})
+        self.assertEqual(r.fx(three(lambda i: OTHER), lines={'mac-a': 'img-old'})['verdict'], 'none')
+
+    def test_another_familys_lines_do_not_matter(self):
+        fams = {'fx': fam(sets=('mac-a',)), 'fy': fam(sets=('mac-b',), image='img-y')}
+        lines = {'mac-a': 'img-new', 'mac-b': 'img-hand'}      # fy's set runs another image: fy has no provenance
+        r = Run(self, fams, opened=False)
+        r.go(lines=lines)
+        out = r.go(three(lambda i: OTHER) + three(lambda i: OTHER, 'mac-b', start=100), lines=lines)
+        self.assertEqual(out['families']['fx']['verdict'], 'rollback')
+        self.assertEqual(out['families']['fy']['verdict'], 'none')
+
+    def test_a_new_candidate_starts_fresh_evidence(self):
+        r = Run(self)
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
+        newer = {'fx': fam(version='2.340.0', image='img-newer')}
+        r.go('', families=newer)
+        self.assertEqual(r.go(failed(30, OTHER) + scaling(40), families=newer)['families']['fx']['verdict'], 'none')
+
+    def test_a_family_with_no_candidate_leaves_the_state(self):
+        r = Run(self)
+        r.fx(failed(10, OTHER) + scaling(15))
+        out = r.go('', families={'fx': dict(fam(), candidate=None)})
+        self.assertNotIn('fx', out['state'].get('families', {}))
+        self.assertEqual(out['families']['fx']['verdict'], 'none')
+
+
+class Carry(unittest.TestCase):
+    def test_a_record_split_across_passes_counts_once_whole(self):
+        r = Run(self)
+        rec = failed(30, right_after('runner-00000003', BENIGN))
+        cut = rec.index('The runner no longer')
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
+        # the whole record is benign: not the third failure
+        self.assertEqual(r.fx(rec[cut:] + scaling(40))['verdict'], 'none')
+
+    def test_control_the_same_split_of_a_counted_record(self):
+        r = Run(self)
+        rec = failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))
+        cut = rec.index('An error occurred')
+        r.fx(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
+        self.assertEqual(r.fx(rec[cut:] + scaling(40))['verdict'], 'rollback')
+
+
+def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
+    m = {'jobs_started': 5, 'jobs_completed': 4, 'desired_runners': 1}
+    if assigned:
+        m['assigned_jobs'] = assigned
+    return {'status': 'ok', 'scale_sets': [{'name': set_, 'ready': ready, 'idle': idle, 'busy': busy, 'metrics': m}]}
+
+
+class NotServing(unittest.TestCase):
+    def setUp(self):
+        self.fams = {'fx': fam('docker', ('linux-a',))}
+
+    def reads(self, r, n, **kw):
+        out = None
+        for _ in range(n):
+            out = r.go('', healthz=[hz(**kw)])
+        return out['families']['fx']
+
+    def test_thirty_minutes_of_not_serving_is_the_third_failure_connect_class(self):
+        r = Run(self, self.fams)
+        self.assertEqual(self.reads(r, 3)['verdict'], 'none')          # 0, 10, 20 min
+        out = self.reads(r, 1)                                          # 30 min, 4 reads
+        self.assertEqual((out['verdict'], out['connect_only']), ('rollback', True), out)
+
+    def test_it_needs_three_reads_as_well_as_30_minutes(self):
+        r = Run(self, self.fams)
+        r.go('', healthz=[hz()], now=r.now + 600)
+        self.assertEqual(r.go('', healthz=[hz()], now=r.now + 2400)['families']['fx']['verdict'], 'none')   # 2 reads, 40 min
+        self.assertEqual(r.go('', healthz=[hz()], now=r.now + 600)['families']['fx']['verdict'], 'rollback')
+
+    def test_control_a_not_ready_read_starts_the_30_minutes_again(self):
+        r = Run(self, self.fams)
+        self.reads(r, 2)
+        self.reads(r, 1, ready=False)
+        self.assertEqual(self.reads(r, 3)['verdict'], 'none')
+        self.assertEqual(self.reads(r, 1)['verdict'], 'rollback')
+
+    def test_control_a_job_completed_on_the_set_starts_it_again(self):
+        r = Run(self, self.fams)
+        self.reads(r, 2)
+        r.go(removed(10, 'runner-0000beef', 'job-completed', set_='linux-a') + scaling(11, 'linux-a'), healthz=[hz()])
+        self.assertEqual(self.reads(r, 2)['verdict'], 'none')
+
+    def test_control_busy_or_nothing_assigned_is_serving(self):
+        for kw in ({'busy': 1}, {'assigned': 0}, {'idle': 0}):
+            r = Run(self, self.fams)
+            self.assertEqual(self.reads(r, 5, **kw)['verdict'], 'none', kw)
+
+    def test_a_gap_starts_it_again(self):
+        r = Run(self, self.fams)
+        self.reads(r, 3)
+        r.go('', healthz=[hz()], continuous=False)
+        self.assertEqual(self.reads(r, 2)['verdict'], 'none')
+
+    def test_with_two_counted_failures_the_run_is_not_connect_only(self):
+        r = Run(self, self.fams)
+        r.go(failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a') + scaling(30, 'linux-a'))
+        out = self.reads(r, 4)
+        self.assertEqual((out['verdict'], out['connect_only']), ('rollback', False))
+
+
+class Sticky(unittest.TestCase):
+    def test_a_rollback_verdict_holds_for_the_candidate(self):
+        r = Run(self)
+        r.fx(three(lambda i: OTHER))
+        self.assertEqual(r.fx(removed(100, 'runner-0000beef', 'job-completed') + scaling(110))['verdict'], 'rollback')
+
+
+class Formats(unittest.TestCase):
+    def test_an_unknown_state_format_waits(self):
+        st = {'format': 3}
+        out = ok(self, 'r1', state=st, log='', healthz=[], facts=facts({'fx': fam()}), now=NOW)
+        self.assertEqual((out['verdict'], out['state']), ('wait', st))
+
+    def test_no_log_input_cannot_decide(self):
+        rc, _, err = run(self, 'r1', state=[], healthz=[], facts=facts({'fx': fam()}), now=NOW)
+        self.assertNotEqual(rc, 0)
+        self.assertIn('r1: --rawfile log is required', err)
+
+
+if __name__ == '__main__':
+    unittest.main()

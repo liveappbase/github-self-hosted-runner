@@ -100,6 +100,61 @@ def run(test, name, state=None, log=None, healthz=None, facts=None, now=None, ra
     return p.returncode, out, p.stderr
 
 
+def _printable(c):
+    return c == ' ' or c.isprintable()
+
+
+def _esc(s, quotes):
+    # charm log v2 escapeStringForOutput
+    if all(_printable(c) and c != '"' for c in s):
+        return s
+    out = []
+    for c in s:
+        if quotes and c == '"':
+            out.append('\\"')
+        elif _printable(c):
+            out.append(c)
+        else:
+            out.append({'\a': '\\a', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t',
+                        '\v': '\\v'}.get(c) or ('\\x%02x' % ord(c) if ord(c) < 32 else '\\u%04x' % ord(c)))
+    return ''.join(out)
+
+
+def _needs_quoting(s):
+    return any(c in '"=' or c.isspace() or not _printable(c) for c in s)
+
+
+def charm(t, lvl, set_, msg, attrs=()):
+    """One record as runscaler writes it (charm log v2 text.go textFormatter, with a set prefix or none). attrs: an
+    ordered list of (key, value). test_records.py pins this against lines of the real logs, byte for byte."""
+    b = '%s %s' % (t, lvl)
+    if set_:
+        b += ' %s:' % set_
+    b += ' ' + msg
+    for i, (k, v) in enumerate(attrs):
+        more = i < len(attrs) - 1
+        v = str(v)
+        raw = v == ''
+        if raw:
+            v = '""'
+        if '\n' in v:
+            b += '\n  %s=\n' % k
+            s = v
+            while True:
+                nl = s.find('\n')
+                if nl == -1:
+                    if s != '':
+                        b += '  │ ' + _esc(s, False) + ('\n' if more else '')
+                    break
+                b += '  │ ' + _esc(s[:nl], False) + '\n'
+                s = s[nl + 1:]
+        elif not raw and _needs_quoting(v):
+            b += ' %s="%s"' % (k, _esc(v, True))
+        else:
+            b += ' %s=%s' % (k, v)
+    return b + '\n'
+
+
 def ok(test, name, **kw):
     rc, out, err = run(test, name, **kw)
     test.assertEqual(rc, 0, 'core/%s.jq failed: %s' % (name, err))
