@@ -6,6 +6,8 @@ import "core" as C;
 import "logfmt" as L;
 
 def NS_SECONDS: 1800;
+# SETTLE: a held record is read once the log has been quiet this long (the glue's clock; the text unchanged)
+def SETTLE: 120;
 
 def fresh($cand): {version: $cand.version, lines: $cand.lines, open: false, since: null, gaps: 0,
                    succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: []};
@@ -101,7 +103,18 @@ C::now_in("r1") as $now
     # an open window that does not count this interval: an evidence gap. It closes the window; the window that
     # opens again starts its counts, NOT SERVING and the KEEP clock from zero (below)
     | ($obs | map_values(if .ev.open and (.counting | not) then .ev |= (.gaps += 1 | .open = false) else . end)) as $obs
-    | (if $owned then (($state.carry // "") + $log | L::tokenize) else {records: [], carry: ""} end) as $tok
+    # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
+    # (it may yet grow); a held record that ends with a newline is read whole once the log has been quiet for SETTLE
+    | (if $owned then
+         ($state.carry // "") as $c0
+         | if $log == "" and $c0 != "" and ($c0 | endswith("\n")) and ($state.carry_at | type) == "number"
+              and $now - $state.carry_at >= SETTLE
+           then ($c0 | L::tokenize_final) + {carry_at: null}
+           else ($c0 + $log | L::tokenize) as $t
+                | $t + {carry_at: (if $t.carry == "" then null elif $t.carry == $c0 then ($state.carry_at // $now)
+                                   else $now end)}
+           end
+       else {records: [], carry: "", carry_at: null} end) as $tok
     | (reduce $tok.records[] as $r ({obs: $obs, last_t: (if $owned then $state.last_t else null end),
                                      refused: (if $owned then ($state.refused // []) else [] end)};
          (if .last_t != null and $r.t > .last_t then .obs |= map_values(if .counting then .ev |= judge else . end)
@@ -160,6 +173,7 @@ C::now_in("r1") as $now
        reason: "the log pass of \($tok.records | length) records\(if $owned then "" else " (the text before this boundary is UNKNOWN: it counts neither way)" end)",
        lines: [$out | to_entries[] | select(.value.reason != "no candidate under observation") | "\(.key): \(.value.reason)"],
        families: $out,
-       state: ($state + {boundary: {owner: $owner, position: $facts.position}, carry: $tok.carry, last_t: $done.last_t,
+       state: ($state + {boundary: {owner: $owner, position: $facts.position}, carry: $tok.carry,
+                         carry_at: $tok.carry_at, last_t: $done.last_t,
                          refused: $done.refused, families: ($obs | map_values(.ev))})}
   end

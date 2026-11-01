@@ -96,8 +96,10 @@ pass whose P has no provenance closes the window; the next one with provenance o
 
 **The log.** Records are runscaler's text format: `YYYY-MM-DD HH:MM:SS LEVEL [SET: ]MESSAGE key=value ...`,
 multi-line values as `  key=` and `  │ ` lines (joined with newlines), and lines of other programs (a Docker pull)
-ignored. The last record is held to the next pass (`state.carry`) when the text does not end with a newline, or when
-it ends on a `  key=` line with no value yet.
+ignored. A record is complete only when a following record header is read, so the last record of a pass is always
+held to the next one (`state.carry`), also when the text ends with a newline: a record cut at the captured position
+is never read from its first part. A held record that ends with a newline is read whole once the log has been quiet
+for SETTLE (120 s of the glue's clock with the text unchanged, `state.carry_at`); a partial last line never is.
 
 **The classification** (a record of a set of family X, with provenance):
 

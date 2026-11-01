@@ -9,8 +9,10 @@
 #
 # tokenize: the log text -> {"records": [RECORD], "carry": TEXT}. RECORD = {"t", "lvl", "set" (null for a global
 # record), "msg", "attrs" (top-level keys only; quoted values unquoted, multi-line values joined with "\n"), "text" (the
-# record's lines as written)}. carry = the last record when it may be incomplete (the text does not end with a newline,
-# or it ends on a "  key=" line): the caller prepends it to the next interval's text.
+# record's lines as written)}. carry = the last record, from its header on: a record is complete only when a following
+# record header is read, so the last one is always held, also when the text ends with a newline (with no header in
+# the text: a partial last line). The caller prepends it to the next interval's text. tokenize_final reads every
+# record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE).
 
 def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
@@ -54,7 +56,7 @@ def _header:
   | ($p.r | _split_message) as $m
   | {t: $h.t, lvl: $h.lvl, set: $p.set, msg: $m.msg, attrs: ($m.attrs | _attrs), text: .};
 
-def tokenize:
+def _tokenize($final):
   . as $text
   | ($text | endswith("\n")) as $complete
   | ($text | split("\n")) as $all
@@ -62,8 +64,12 @@ def tokenize:
   | [$ls[] | _kind] as $kinds
   | ([range(0; $kinds | length) | select($kinds[.] == "h")] | last) as $last_h
   | (if ($ls | length) == 0 then 0
-     elif ($complete | not) then ($last_h // (($ls | length) - 1))
-     elif $kinds[-1] == "k" and $last_h != null then $last_h
+     elif $final then ($ls | length)
+     # the last record is not complete until a following record header is read: a value line, a "  key=" line or
+     # more " key=value" may still come, also when the text ends with a newline (Codex r1 F1)
+     elif $last_h != null then $last_h
+     # no header: only a partial last line may be the start of one
+     elif ($complete | not) then (($ls | length) - 1)
      else ($ls | length) end) as $cut
   | {records:
       (reduce range(0; $cut) as $i ({recs: [], cur: null, key: null};
@@ -82,3 +88,6 @@ def tokenize:
        | map(.attrs |= with_entries(if (.value | type) == "array" then .value |= join("\n") else . end))),
      carry: (if $cut < ($ls | length) then ($ls[$cut:] | join("\n")) + (if $complete then "\n" else "" end)
              else "" end)};
+
+def tokenize: _tokenize(false);
+def tokenize_final: _tokenize(true);

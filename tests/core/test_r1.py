@@ -27,6 +27,12 @@ def scaling(sec, set_='mac-a'):
     return charm(t(sec), 'INFO', set_, 'Scaling up runner', [('currentCount', 0), ('desiredCount', 1)])
 
 
+def tail(sec=160, set_='mac-a'):
+    """The log moves on: two records at least SETTLE (120 s of log time) after a cell's events, so every failure before
+    them is settled. Two, because the last record of a pass is held (it may yet grow): the first one is read."""
+    return scaling(sec, set_) + scaling(sec + 1, set_)
+
+
 def started(sec, name, set_='mac-a'):
     return charm(t(sec), 'INFO', set_, 'Runner started', [('name', name), ('instanceID', name), ('startupTime', '22.4s')])
 
@@ -75,7 +81,7 @@ SHIM = 'liveapp-ci-shim: REFUSE free disk below the floor: 93 GiB < 100 GiB'
 
 
 def three(err_of, set_='mac-a', start=10):
-    return ''.join(failed(start + 10 * i, err_of(i), set_) for i in range(3)) + scaling(start + 40, set_)
+    return ''.join(failed(start + 10 * i, err_of(i), set_) for i in range(3)) + tail(start + 140, set_)
 
 
 def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new'):
@@ -125,11 +131,11 @@ class R1(unittest.TestCase):
     def test_control_a_job_completed_between_them_is_proof_of_life(self):
         log = (failed(10, before_connecting('runner-00000001')) + failed(20, before_connecting('runner-00000002'))
                + removed(25, 'runner-0000beef', 'job-completed') + failed(30, before_connecting('runner-00000003'))
-               + scaling(40))
+               + tail())
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_two_failures_are_not_r1(self):
-        log = failed(10, before_connecting('runner-00000001')) + failed(20, OTHER) + scaling(40)
+        log = failed(10, before_connecting('runner-00000001')) + failed(20, OTHER) + tail()
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_did_not_connect_is_connect_class(self):
@@ -158,7 +164,7 @@ class R1(unittest.TestCase):
 
     def test_failures_on_three_different_sets_are_not_r1(self):
         run_ = Run(self, {'fx': fam(sets=('mac-a', 'mac-b', 'mac-c'))})
-        log = failed(10, OTHER, 'mac-a') + failed(20, OTHER, 'mac-b') + failed(30, OTHER, 'mac-c') + scaling(40)
+        log = failed(10, OTHER, 'mac-a') + failed(20, OTHER, 'mac-b') + failed(30, OTHER, 'mac-c') + tail()
         self.assertEqual(run_.fx(log)['verdict'], 'none')
         # control: the same three on one of them
         self.assertEqual(Run(self, {'fx': fam(sets=('mac-a', 'mac-b'))}).fx(three(lambda i: OTHER, 'mac-b'))['verdict'],
@@ -176,19 +182,19 @@ class ConnectClassTexts(unittest.TestCase):
 
 class ProofOfLife(unittest.TestCase):
     def test_tart_runner_started_is_proof_of_life(self):
-        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER) + scaling(40))
+        log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER) + tail())
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_a_start_taken_back_by_exited_without_a_job(self):
         log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
-               + removed(35, 'runner-0000beef', 'exited', job=False) + scaling(40))
+               + removed(35, 'runner-0000beef', 'exited', job=False) + tail())
         r = Run(self).fx(log)
         self.assertEqual(r['verdict'], 'rollback', r)
         self.assertEqual(len(r['failures']), 4)
 
     def test_control_a_start_confirmed_by_another_removal_stays_proof(self):
         log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
-               + removed(35, 'runner-0000beef', 'scaled-down', job=False) + scaling(40))
+               + removed(35, 'runner-0000beef', 'scaled-down', job=False) + tail())
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_a_confirmed_start_leaves_the_state(self):
@@ -201,25 +207,25 @@ class ProofOfLife(unittest.TestCase):
 
     def test_docker_runner_started_is_not_proof_of_life(self):
         log = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
-               + started(25, 'runner-0000beef', 'linux-a') + failed(30, DOCKER_CREATE, 'linux-a') + scaling(40, 'linux-a'))
+               + started(25, 'runner-0000beef', 'linux-a') + failed(30, DOCKER_CREATE, 'linux-a') + tail(160, 'linux-a'))
         self.assertEqual(Run(self, {'fx': fam('docker', ('linux-a',))}).fx(log)['verdict'], 'rollback')
 
     def test_exited_without_a_job_counts_and_with_a_job_does_not(self):
         nojob = ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', job=False) for i in range(3))
-        self.assertEqual(Run(self).fx(nojob + scaling(50))['verdict'], 'rollback')
+        self.assertEqual(Run(self).fx(nojob + tail())['verdict'], 'rollback')
         withjob = ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', result=None) for i in range(3))
-        self.assertEqual(Run(self).fx(withjob + scaling(50))['verdict'], 'none')
+        self.assertEqual(Run(self).fx(withjob + tail())['verdict'], 'none')
 
     def test_the_exited_warning_alone_is_unknown(self):
         warns = ''.join(exited_warn(10 * i + 10, 'runner-0000000%d' % i) for i in range(3))
-        self.assertEqual(Run(self).fx(warns + scaling(50))['verdict'], 'none')
+        self.assertEqual(Run(self).fx(warns + tail())['verdict'], 'none')
 
 
 class SameSecond(unittest.TestCase):
     def test_a_proof_in_the_same_second_as_the_third_failure_is_between_in_both_orders(self):
         for proof_first in (True, False):
             third, proof = failed(30, OTHER), removed(30, 'runner-0000beef', 'job-completed')
-            log = failed(10, OTHER) + failed(20, OTHER) + (proof + third if proof_first else third + proof) + scaling(40)
+            log = failed(10, OTHER) + failed(20, OTHER) + (proof + third if proof_first else third + proof) + tail()
             self.assertEqual(Run(self).fx(log)['verdict'], 'none', proof_first)
 
     def test_a_proof_in_the_same_second_as_the_first_failure_is_between_in_both_orders(self):
@@ -227,7 +233,7 @@ class SameSecond(unittest.TestCase):
         for kind, proof in proofs.items():
             for proof_first in (True, False):
                 first = failed(30, OTHER)
-                log = (proof + first if proof_first else first + proof) + failed(40, OTHER) + failed(50, OTHER) + scaling(60)
+                log = (proof + first if proof_first else first + proof) + failed(40, OTHER) + failed(50, OTHER) + tail(180)
                 self.assertEqual(Run(self).fx(log)['verdict'], 'none', (kind, proof_first))
 
     def test_control_the_proof_a_second_before_the_first_failure(self):
@@ -238,12 +244,12 @@ class SameSecond(unittest.TestCase):
         r = Run(self)
         log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER)
         self.assertEqual(r.fx(log)['verdict'], 'none')
-        self.assertEqual(r.fx(scaling(31))['verdict'], 'rollback')
+        self.assertEqual(r.fx(scaling(31) + scaling(32))['verdict'], 'rollback')    # 31 is read: 32 follows it
 
     def test_control_the_proof_arrives_in_the_next_pass_in_the_same_second(self):
         r = Run(self)
         self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))['verdict'], 'none')
-        self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + scaling(31))['verdict'], 'none')
+        self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + tail())['verdict'], 'none')
 
 
 class Retired(unittest.TestCase):
@@ -253,7 +259,7 @@ class Retired(unittest.TestCase):
         self.assertEqual(r['stops'][0]['stop'], 'PINNED RUNNER RETIRED')
 
     def test_one_deprecated_record_is_enough(self):
-        r = Run(self).fx(failed(10, right_after('runner-00000001', RETIRED)) + scaling(20))
+        r = Run(self).fx(failed(10, right_after('runner-00000001', RETIRED)) + tail())
         self.assertEqual(r['verdict'], 'stop')
 
     def test_control_on_docker_it_is_any_other_text(self):
@@ -281,14 +287,14 @@ class Shim(unittest.TestCase):
         r = Run(self)
         r.fx(self.vm_refused(10, 'runner-00000001') + self.vm_refused(11, 'runner-00000002')
              + self.vm_refused(12, 'runner-00000003'))
-        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 1))) for i in range(3)) + scaling(40))
+        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 1))) for i in range(3)) + tail())
         self.assertEqual(out['verdict'], 'stop', out)
         self.assertEqual(out['stops'][0]['stop'], 'SHIM REFUSED')
 
     def test_control_start_failures_of_other_vms_count(self):
         r = Run(self)
         r.fx(self.vm_refused(10, 'runner-00000001'))
-        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 5))) for i in range(3)) + scaling(40))
+        out = r.fx(''.join(failed(20 + i, self.agent('runner-0000000%d' % (i + 5))) for i in range(3)) + tail())
         self.assertEqual(out['verdict'], 'rollback', out)
 
     def test_no_stop_takes_r1_back(self):
@@ -303,7 +309,7 @@ class Ownership(unittest.TestCase):
     def test_a_stable_process_keeps_its_evidence_across_passes(self):
         r = Run(self)
         r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
-        self.assertEqual(r.fx(failed(30, OTHER) + scaling(40))['verdict'], 'rollback')
+        self.assertEqual(r.fx(failed(30, OTHER) + tail())['verdict'], 'rollback')
 
     def test_text_of_an_unseen_process_counts_neither_way(self):
         # P seen -> P dies -> an unseen U runs and logs -> V (=Q) seen: U's text counts neither way, and it is a gap
@@ -313,7 +319,7 @@ class Ownership(unittest.TestCase):
                          'none')
         # counting resumes with Q: two more failures do not join the ones before the gap
         self.assertEqual(r.fx(failed(50, OTHER) + failed(60, OTHER) + scaling(70), before=Q)['verdict'], 'none')
-        self.assertEqual(r.fx(failed(80, OTHER) + scaling(90), before=Q)['verdict'], 'rollback')
+        self.assertEqual(r.fx(failed(80, OTHER) + tail(200), before=Q)['verdict'], 'rollback')
 
     def test_a_restart_between_the_first_read_and_the_capture_makes_the_boundary_ambiguous(self):
         r = Run(self)
@@ -325,7 +331,7 @@ class Ownership(unittest.TestCase):
         r = Run(self)
         r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
         self.assertEqual(r.fx(failed(30, OTHER) + scaling(40), continuous=False)['verdict'], 'none')
-        out = r.go(failed(50, OTHER) + scaling(60))
+        out = r.go(failed(50, OTHER) + tail(200))
         self.assertEqual(out['families']['fx']['verdict'], 'none')
         self.assertEqual(out['state']['families']['fx']['gaps'], 1)
 
@@ -364,7 +370,7 @@ class Provenance(unittest.TestCase):
         r.fx(failed(10, OTHER) + failed(20, OTHER) + scaling(25))
         newer = {'fx': fam(version='2.340.0', image='img-newer')}
         r.go('', families=newer)
-        self.assertEqual(r.go(failed(30, OTHER) + scaling(40), families=newer)['families']['fx']['verdict'], 'none')
+        self.assertEqual(r.go(failed(30, OTHER) + tail(), families=newer)['families']['fx']['verdict'], 'none')
 
     def test_a_family_with_no_candidate_leaves_the_state(self):
         r = Run(self)
@@ -374,21 +380,92 @@ class Provenance(unittest.TestCase):
         self.assertEqual(out['families']['fx']['verdict'], 'none')
 
 
+def counted(out, set_='mac-a'):
+    """The counted failures r1's state holds for family fx's set."""
+    return len(out['state']['families']['fx']['sets'].get(set_, {}).get('fails', []))
+
+
 class Carry(unittest.TestCase):
+    """A record cut at the pass boundary is not complete until a following record header is read: the last record of
+    a pass is held to the next one, also when the text ends with a newline (Codex r1 F1). A held record is read when
+    the log has been quiet for SETTLE (120 s of the glue's clock, the text unchanged) and ends with a newline."""
+
     def test_a_record_split_across_passes_counts_once_whole(self):
         r = Run(self)
         rec = failed(30, right_after('runner-00000003', BENIGN))
         cut = rec.index('The runner no longer')
         r.fx(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
         # the whole record is benign: not the third failure
-        self.assertEqual(r.fx(rec[cut:] + scaling(40))['verdict'], 'none')
+        self.assertEqual(r.fx(rec[cut:] + tail())['verdict'], 'none')
 
     def test_control_the_same_split_of_a_counted_record(self):
         r = Run(self)
         rec = failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))
         cut = rec.index('An error occurred')
         r.fx(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
-        self.assertEqual(r.fx(rec[cut:] + scaling(40))['verdict'], 'rollback')
+        self.assertEqual(r.fx(rec[cut:] + tail())['verdict'], 'rollback')
+
+    def cuts(self, rec):
+        # before the record, and after every newline of it (the last one: the record whole in the first pass)
+        return [0] + [i + 1 for i, c in enumerate(rec) if c == '\n']
+
+    def test_the_benign_record_split_at_every_newline_is_the_unsplit_verdict(self):
+        rec = failed(30, right_after('runner-00000003', BENIGN))
+        unsplit = Run(self)
+        out = unsplit.go(failed(10, OTHER) + failed(20, OTHER) + rec + tail())
+        self.assertEqual((out['families']['fx']['verdict'], counted(out)), ('none', 2))
+        self.assertGreaterEqual(len(self.cuts(rec)), 9)        # the header, the key line, seven value lines
+        for cut in self.cuts(rec):
+            r = Run(self)
+            r.go(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
+            out = r.go(rec[cut:] + tail())
+            self.assertEqual((out['families']['fx']['verdict'], counted(out)), ('none', 2), (cut, rec[:cut][-60:]))
+
+    def test_control_the_counted_record_split_at_every_newline_rolls_back(self):
+        rec = failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))
+        for cut in self.cuts(rec):
+            r = Run(self)
+            r.go(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
+            out = r.go(rec[cut:] + tail())
+            self.assertEqual(out['families']['fx']['verdict'], 'rollback', cut)
+            self.assertEqual(len(out['families']['fx']['failures']), 3, cut)
+
+    def test_the_last_record_waits_for_a_following_header(self):
+        r = Run(self)
+        out = r.go(removed(10, 'runner-0000beef', 'job-completed'))
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 0)      # held: it may yet grow
+        out = r.go(scaling(20), now=r.now + 30)
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 1)      # a header followed it: read
+
+    def test_a_held_record_is_read_when_the_log_is_quiet_for_settle(self):
+        r = Run(self)
+        r.go(removed(10, 'runner-0000beef', 'job-completed'))
+        out = r.go('', now=r.now + 119)
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 0)      # quiet for 119 s: still held
+        out = r.go('', now=r.now + 1)
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 1)      # quiet for 120 s: read
+        self.assertEqual(out['state']['carry'], '')
+
+    def test_control_a_record_that_grows_is_not_quiet(self):
+        r = Run(self)
+        rec = failed(30, right_after('runner-00000003', BENIGN))
+        cut = rec.index('  │ The runner no longer')
+        r.go(failed(10, OTHER) + failed(20, OTHER) + rec[:cut])
+        out = r.go(rec[cut:], now=r.now + 600)          # it grew in this pass: the 120 s start again
+        self.assertNotEqual(out['state']['carry'], '')
+        out = r.go('', now=r.now + 60)                  # quiet for 60 s since it grew (660 s since it was first held)
+        self.assertNotEqual(out['state']['carry'], '')
+        out = r.go('', now=r.now + 60)                  # quiet for 120 s: read whole, benign
+        self.assertEqual(out['state']['carry'], '')
+        self.assertEqual((out['families']['fx']['verdict'], counted(out)), ('none', 2))
+
+    def test_a_partial_last_line_is_never_read_alone(self):
+        r = Run(self)
+        rec = removed(10, 'runner-0000beef', 'job-completed')
+        r.go(rec[:-20])
+        out = r.go('', now=r.now + 3600)
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 0)
+        self.assertEqual(out['state']['carry'], rec[:-20])
 
 
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
