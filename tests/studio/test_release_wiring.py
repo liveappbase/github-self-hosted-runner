@@ -6,7 +6,7 @@ import os
 import re
 import unittest
 
-from tests.studio.support_emudhra import REPO, ZSH, read, run, tmpdir, write
+from tests.studio.support_emudhra import REPO, ZSH, assert_no_ci, read, run, tmpdir, write
 
 GIT_ENV = {'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
            'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
@@ -30,8 +30,12 @@ class ReleaseCheckRealrun(unittest.TestCase):
     def check(self, realrun_in_gate):
         d = tmpdir(self)
         env = dict(GIT_ENV, HOME=d)
-        write(os.path.join(d, 'tools', 'release-check'), read(os.path.join(REPO, 'tools', 'release-check')), 0o755)
-        for f in ('golden-build', 'golden-gate'):
+        rc_text = read(os.path.join(REPO, 'tools', 'release-check'))
+        # the script under test: its /Users/ci strings are compared, never opened (and --build is not used here)
+        assert_no_ci(self, rc_text, ('/Users/ci/mac-runner', '/Users/ci and /Users/admin', '/Users/ci or /Users/admin'),
+                     'tools/release-check')
+        write(os.path.join(d, 'tools', 'release-check'), rc_text, 0o755)
+        for f in ('golden-build', 'golden-gate'):   # data for release-check: read, never run
             write(os.path.join(d, 'bin', f), read(os.path.join(REPO, 'bin', f)), 0o755)
         gate = os.path.join(d, 'bin', 'golden-gate')
         text = read(gate)
