@@ -80,7 +80,7 @@ def q(p):
 
 
 class Rig:
-    def __init__(self, test):
+    def __init__(self, test, cat_body=None):
         self.test = test
         sb = self.sb = Sandbox(test)
         self.vms = sb.mkdir('vms')
@@ -103,7 +103,8 @@ class Rig:
             ('HOME=/Users/ci ', 'HOME=%s ' % sb.home),
             ('vol=/Users/ci/.tart; [[ -d $vol ]] || vol=/Users/ci', 'vol=%s' % sb.home),
             ('FLOOR_GIB=200', 'FLOOR_GIB=0'),
-        ], allow=['Run as ci on the host: /Users/ci/bin/golden-build'])
+        ] + ([] if cat_body is None else [('/bin/cat -- $f', sb.stub('cat', cat_body, folder=fake) + ' -- $f')]),
+            allow=['Run as ci on the host: /Users/ci/bin/golden-build'])
         sb.stub('golden-emudhra', 'exit 0', folder=os.path.dirname(self.script))
         sb.stub('date', DATE % {'cnt': q(sb.path('date.count')), 'd1': CLOCK[0], 'd2': CLOCK[1]})
         sb.stub('sw_vers', 'print -r -- %s.0' % MAJOR)
@@ -301,6 +302,18 @@ class TestPin(unittest.TestCase):
                                  % r.pin)
                 self.assertEqual(r.tart(), [])
                 self.assertEqual(os.listdir(r.logdir), [], 'nothing reached the locked step')
+
+    def test_e_pin_read_failure_stops(self):
+        # cat prints a good pin, then fails: the pin is not trusted
+        r = Rig(self, cat_body='/bin/cat $2; exit 1')
+        r.write_pin(GOOD_PIN)
+        res = r.run('--print-runner')
+        self.assertEqual((res.returncode, res.stdout),
+                         (1, "golden-build: STOP host pin %s is not one line 'VERSION SHA256'\n" % r.pin))
+        r = Rig(self, cat_body='/bin/cat $2; exit 0')   # the control: the same read, no failure
+        r.write_pin(GOOD_PIN)
+        res = r.run('--print-runner')
+        self.assertEqual((res.returncode, res.stdout), (0, 'host pin %s (release literal %s)\n' % (PIN_V, LIT_V)))
 
     def test_e_control_flag_and_lock_are_live(self):
         r = Rig(self)

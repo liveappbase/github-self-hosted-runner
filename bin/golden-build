@@ -1,6 +1,6 @@
 #!/bin/zsh -f
-# golden-build [--date YYYYMMDD] — build the golden runner image liveapp-mac-golden-<yyyymmdd> from the pinned Cirrus
-# base. golden-build --print-runner — print the runner version a build would use and where it comes from; nothing else.
+# golden-build [--date YYYYMMDD] — build the golden runner image liveapp-mac-golden-<yyyymmdd> from the pinned
+# Cirrus base. golden-build --print-runner — print the runner version a build would use and where it comes from.
 # Design: docs/operations.md ("Rebuilding the image"). Run as ci on the host: /Users/ci/bin/golden-build
 # The date is --date (a real date), else today's, read from the clock ONCE. The runner version and its sha256 come
 # from the host pin $PINDIR/mac-golden when that exists (the updater writes it; a person normally never does), else
