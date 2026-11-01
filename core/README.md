@@ -156,19 +156,20 @@ line always follows one).
 | `Failed to start runner`: `did not connect to GitHub within` | yes, connect-class |
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
-| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes within SETTLE before or after it (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
+| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes less than SETTLE before or after it, by their own log times (each waits SETTLE + ORDER of log time for the other: a record may be read up to ORDER late) (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
 | `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set, each such line at its own log time, before or after the removal (a job's started and completed lines can lie apart); that runner's failure is not counted and its `Runner started` is proof again (it is not taken back) |
 | `Runner exited before job completion` alone | no (unknown) |
 
 Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner
 started`, unless that runner is later removed `reason=exited` with no `jobId` and no unknown-runner line takes that
-back. The removal takes the start back only when it is final, by the same rule as its own failure: SETTLE passes with
-no such line (its failure settles, by the log or by the clock). Until then the start is still a proof of life for R1,
+back. The removal takes the start back only when it is final, by the same rule as its own failure: no such line comes
+before its failure settles (by the log SETTLE + ORDER past it, or by the clock). Until then the start is still a proof of life for R1,
 so where a pass's capture falls between the removal and the unknown-runner line changes no verdict; `pending` counts
 the start as taken back (KEEP waits for the removal to be final).
 
 **SETTLE.** A counted failure is settled only when no proof of life can still arrive for it: a later record of the log
-is 120 s of log time past it, or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
+is 120 s of log time past it (an exited removal's: SETTLE + ORDER, 130 s, as its unknown-runner line may still be read
+ORDER late), or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
 `now` of the pass that read it. A failure that is not settled waits; nothing is judged from a partial second.
 
 **ORDER and the log's clock.** runscaler stamps a record when it logs it and writes it under one lock, so records
@@ -205,7 +206,7 @@ of runners not yet removed, at most 16 (a runner leaves by a `Runner removed` li
 `reason=shutdown`, but one whose RemoveInstance fails never does: beyond 16, the oldest start is read as confirmed, a
 proof of life, which loses only a take-back and so can only delay R1; Apple allows 2 macOS VMs per host); the
 runs of three or more settled failures that only such a start keeps apart (R1 if it is taken back), each with the
-first proof after it; and the exited removals and the unknown-runner lines of the last SETTLE of log time. Everything
+first proof after it; and the exited removals and the unknown-runner lines of the last SETTLE + ORDER of log time. Everything
 else before that proof is settled and judged, and the proof keeps it from every later failure. So a set's entries are
 bounded by what it logs in SETTLE (plus a pass's records not yet settled by the clock) and by 16 starts, never by the
 hours, and neither is a pass's time.

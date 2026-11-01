@@ -5,11 +5,11 @@
 #
 # A family's evidence per set: fails (counted failures: t, s = its log second, c = connect-class, x, seen = the `now`
 # of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started` of a runner
-# not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of
-# log time: one that a `Job started|completed for unknown runner` naming the runner still takes back holds the start it
+# not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE +
+# ORDER of log time: one that a `Job started|completed for unknown runner` naming the runner still takes back holds the start it
 # took back, a proof for R1 until the exit is final; one taken back already is `taken`, and every later line naming its
-# runner is a proof too), unknowns (those unknown-runner lines, within SETTLE of log time, that named no such removal
-# yet: one may still come and finds them all), ns (NOT SERVING), completed.
+# runner is a proof too), unknowns (those unknown-runner lines, within SETTLE + ORDER of log time, that named no such
+# removal yet: one may still come and finds them all), ns (NOT SERVING), completed.
 import "core" as C;
 import "logfmt" as L;
 
@@ -27,6 +27,15 @@ def ORDER: 10;
 # RemoveInstance fails is never removed, so beyond this the oldest start is read as confirmed, a proof of life (Opus r4
 # F6). That loses only a take-back, which can only delay R1
 def STARTS_MAX: 16;
+
+# the D6 AMENDMENT's window: an exited removal and an unknown-runner line naming its runner less than SETTLE of log time
+# apart, either way round. A removal or a line inside it can still be read up to ORDER after a record SETTLE past its
+# partner, so each waits for the other SETTLE + ORDER of log time (settle_log), and they match by their own log times
+def in_window($a; $b): $a - $b < SETTLE and $b - $a < SETTLE;
+
+# . = a counted failure: a record of log second $sec settles it. An exited removal waits ORDER more: a line inside its
+# window may still be read ORDER late, and take it back
+def settled_by($sec): $sec - .s >= (if .n != null then SETTLE + ORDER else SETTLE end);
 
 # a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone: a
 # record more than ORDER before the newest one read is an evidence gap, see read)
@@ -84,16 +93,17 @@ def apply($ev; $s; $t; $sec; $seen):
     | if $ev.result == "succeeded" then .succeeded += 1 elif $ev.result == "failed" then .failed += 1
       elif $ev.result == "canceled" then .canceled += 1 else .other += 1 end
   # the D6 AMENDMENT, both ways (Opus r4 F3): runscaler logs the removal only after RemoveInstance, so a job message for
-  # the dead runner can log its unknown-runner line first. Lines naming this runner less than SETTLE before (.unknowns
-  # holds only those: settle_log ends the others): the runner ran a job. The removal is no counted failure, EACH line is
+  # the dead runner can log its unknown-runner line first. Lines naming this runner in its window (.unknowns holds them
+  # SETTLE + ORDER: settle_log ends the others): the runner ran a job. The removal is no counted failure, EACH line is
   # a proof of life for the set at its own log time (Codex r5 F1: a job's started and completed lines can lie apart,
   # with a failure between them), and the runner's start is a proof (not taken back). The removal stays in .exits,
   # taken, so a line naming its runner after it is a proof too
   elif $ev.k == "exited" then
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
-                 | ([.unknowns[]? | select(.n == $ev.name) | .s] | unique) as $us
-                 | if ($us | length) > 0 then .proofs += $us + [($st // empty)] | .unknowns |= map(select(.n != $ev.name))
+                 | ([.unknowns[]? | select(.n == $ev.name and in_window(.s; $sec)) | .s] | unique) as $us
+                 | if ($us | length) > 0 then .proofs += $us + [($st // empty)]
+                        | .unknowns |= map(select((.n == $ev.name and in_window(.s; $sec)) | not))
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st, taken: true}]
                    else .fails += [{t: $t, s: $sec, c: false, x: "Runner removed reason=exited, no job: \($ev.name)",
                                     seen: $seen, settled: false, n: $ev.name}]
@@ -101,14 +111,14 @@ def apply($ev; $s; $t; $sec; $seen):
                    end
                  | .starts |= map(select(.n != $ev.name)))
   # the D6 AMENDMENT: a `Job started|completed for unknown runner` naming a runner removed `reason=exited` with no
-  # jobId less than SETTLE before (.exits holds only those: settle_log ends the others): that runner ran a job. The
+  # jobId in its window (.exits holds them SETTLE + ORDER: settle_log ends the others): that runner ran a job. The
   # line is a proof of life for the set at its own log time. The first such line takes the removal back: its exited
   # failure is not counted, the runner's start is proof again, and the removal is `taken`; every later line naming it
   # is a proof as well (Codex r5 F1's class, after the removal). A line that names no such removal waits in .unknowns
   # for one that may still come (above)
   elif $ev.k == "unknown" then
     .sets[$s] = ((.sets[$s] // set0)
-                 | ([.exits[] | select($ev.name != "" and .n == $ev.name)] | first) as $x
+                 | ([.exits[] | select($ev.name != "" and .n == $ev.name and in_window(.s; $sec))] | first) as $x
                  | if $x == null then (if $ev.name != "" then .unknowns += [{n: $ev.name, s: $sec}] else . end)
                    elif $x.taken == true then .proofs += [$sec]
                    else .exits |= map(if .n == $x.n and .s == $x.s then .taken = true else . end)
@@ -131,17 +141,17 @@ def apply($ev; $s; $t; $sec; $seen):
   elif $ev.k == "shim" or $ev.k == "refused" then add_stop("SHIM REFUSED"; "set \($s): \($ev.reason)")
   else . end;
 
-# SETTLE by the log: a record of log second $sec settles every failure SETTLE or more before it, and ends the exits
-# that no unknown-runner line took back in time and the unknown-runner lines no exit came for in time; .newest = the
-# newest log second read (. = family evidence)
+# SETTLE by the log: a record of log second $sec settles every failure SETTLE or more before it (an exited removal:
+# SETTLE + ORDER, settled_by), and ends the exits and the unknown-runner lines SETTLE + ORDER or more before it: no
+# partner inside their window can still be read; .newest = the newest log second read (. = family evidence)
 def settle_log($sec):
-  .sets |= map_values(.fails |= map(if .settled != true and $sec - .s >= SETTLE then .settled = true else . end)
-                      | .exits |= map(select($sec - .s < SETTLE))
-                      | .unknowns = [.unknowns[]? | select($sec - .s < SETTLE)])
+  .sets |= map_values(.fails |= map(if .settled != true and settled_by($sec) then .settled = true else . end)
+                      | .exits |= map(select($sec - .s < SETTLE + ORDER))
+                      | .unknowns = [.unknowns[]? | select($sec - .s < SETTLE + ORDER)])
   | .newest = ([.newest, $sec] | max);
 
 # SETTLE by the clock, when the log is quiet (nothing held): a failure read SETTLE or more before `now`. (An exit
-# ends only by the log: a later unknown-runner line inside its SETTLE of log time still takes the failure back.)
+# ends only by the log: a later unknown-runner line inside its window still takes the failure back.)
 def settle_quiet($now):
   .sets |= map_values(.fails |= map(if .settled != true and $now - .seen >= SETTLE then .settled = true else . end));
 
@@ -149,7 +159,7 @@ def settle_quiet($now):
 def barriers: [.proofs[]?, .starts[]?.s];
 
 # ... and, for R1, the Tart start an exited removal took back while that exit is not final (its failure not settled):
-# an unknown-runner line inside SETTLE may still give it back, so it is taken back only when none follows in SETTLE,
+# an unknown-runner line inside its window may still give it back, so it is taken back only when none can still come,
 # the rule the D6 AMENDMENT gives the exit itself (Opus r3 F1). `pending` counts it taken back (KEEP waits)
 def barriers_r1:
   . as $e
@@ -180,11 +190,11 @@ def judge:
 
 # a step back to log second $r (read): a failure the records ahead of $r settled stays settled for the judge before the
 # gap only when $r does not contradict that: it lies more than ORDER after $r (the clock's old times, settled by records
-# of the same times), or $r itself is SETTLE past it. A failure near $r was settled only by a record $r contradicts
-# (one stamped before a step back and written after it, Opus r5 F3): it goes with the gap
+# of the same times), or $r itself settles it (settled_by). A failure near $r was settled only by a record $r
+# contradicts (one stamped before a step back and written after it, Opus r5 F3): it goes with the gap
 def unsettle_near($r):
-  .sets |= map_values(.fails |= map(if .settled == true and .s <= $r + ORDER and $r - .s < SETTLE then .settled = false
-                                    else . end));
+  .sets |= map_values(.fails |= map(if .settled == true and .s <= $r + ORDER and (settled_by($r) | not)
+                                    then .settled = false else . end));
 
 # what can still matter (Codex r2 F4, Opus r2 F3, F5): $c = the newest proof (in .proofs, a Tart start not taken back
 # excluded) at or before the oldest failure that is not settled yet (any, when all are), and SETTLE or more before the

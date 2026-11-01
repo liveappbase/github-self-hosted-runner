@@ -217,8 +217,9 @@ class ProofOfLife(unittest.TestCase):
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_a_start_taken_back_by_exited_without_a_job(self):
+        # the log moves SETTLE + ORDER past the removal (its window ends: TheWindowWaitsForOrder)
         log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
-               + removed(35, 'runner-0000beef', 'exited', job=False) + tail())
+               + removed(35, 'runner-0000beef', 'exited', job=False) + tail(200))
         r = Run(self).fx(log)
         self.assertEqual(r['verdict'], 'rollback', r)
         self.assertEqual(len(r['failures']), 4)
@@ -629,6 +630,60 @@ class EveryUnknownRunnerLine(unittest.TestCase):
                     with self.subTest((shape, provider, split, 'control: the line at 40 names another runner')):
                         fx = self.last(provider, shape, self.Y, split)
                         self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:35', '00:38', '00:45'])
+
+
+class TheWindowWaitsForOrder(unittest.TestCase):
+    """The D6 AMENDMENT's window is SETTLE (120 s) of log time between an exited removal and an unknown-runner line naming
+    its runner, before or after it. Records are out of order by up to ORDER (10 s), so a removal or a line inside the
+    window can still be read up to ORDER after a record SETTLE past its partner: the core keeps a line waiting for its
+    removal, and a removal waiting for its line, SETTLE + ORDER of log time, matches them by their own log times
+    (less than SETTLE apart), and settles an exited failure only SETTLE + ORDER after it (Codex r5 F2's requirement,
+    for the disorder the core reads). Failures 10, 20; a record of 152; one partner 7 s out of order, read after it."""
+
+    X = 'runner-0000beef'
+
+    def last(self, provider, shape, partner_at, split):
+        """SHAPE before: X's line at PARTNER_AT, the record of 152 | X removed reason=exited, no jobId, at 145 (7 s late);
+        after: X removed at 30, the record of 152 | X's line at PARTNER_AT, read after 152. SPLIT at |: the first part and
+        a record of 153 (held) in one pass, the rest in the next. -> the last pass's fx"""
+        set_, err = ('mac-a', OTHER) if provider == 'tart' else ('linux-b', DOCKER_CREATE)
+        U = unknown(partner_at, self.X, set_, 'completed')
+        first = failed(10, err, set_) + failed(20, err, set_)
+        if shape == 'before':
+            first += U + scaling(152, set_)
+            second = removed(145, self.X, 'exited', job=False, set_=set_)
+        else:
+            first += removed(30, self.X, 'exited', job=False, set_=set_) + scaling(152, set_)
+            second = U
+        second += scaling(300, set_) + scaling(301, set_)
+        r = Run(self, {'fx': fam(provider, (set_,))})
+        if split:
+            r.go(first + scaling(153, set_))
+            return r.fx(second)
+        return r.fx(first + second)
+
+    def test_a_removal_written_late_finds_its_line_less_than_settle_before_it(self):
+        # the line at 30, the removal at 145 (115 s after it), read after a record of 152 (122 s after the line)
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    fx = self.last(provider, 'before', 30, split)
+                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                with self.subTest((provider, split, 'control: the line at 25, SETTLE before the removal')):
+                    fx = self.last(provider, 'before', 25, split)
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '02:25'])
+
+    def test_a_line_written_late_takes_back_its_removal_less_than_settle_before_it(self):
+        # the removal at 30, the line at 145 (115 s after it), read after a record of 152 (122 s after the removal):
+        # the exited failure is not settled by 152 either, so no pass judges it before the line is read
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    fx = self.last(provider, 'after', 145, split)
+                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                with self.subTest((provider, split, 'control: the line at 150, SETTLE after the removal')):
+                    fx = self.last(provider, 'after', 150, split)
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '00:30'])
 
 
 class Retired(unittest.TestCase):
