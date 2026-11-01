@@ -47,7 +47,7 @@ RUNNER_REC=/Users/ci/mac-runner/runscaler.sha256
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
 LABEL=sh.liveapp.mac-runner
 AGENTS=/Users/ci/Library/LaunchAgents
-TOOLS=(golden-build golden-prune real-run runner-disable runner-enable runner-lock-free runner-start wall-check wall-files-check)
+TOOLS=(golden-build golden-gate golden-prune real-run runner-disable runner-enable runner-lock-free runner-start wall-check wall-files-check)
 MIN_RAM_GB=16
 
 stop() { print -r -- "install: STOP $*"; exit 1 }
