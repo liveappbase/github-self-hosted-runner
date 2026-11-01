@@ -90,11 +90,26 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
 
 ## A host that already runs these scripts from a hand copy
 
-Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, and nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
+Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, checks that the pool runs the config and image its records name, and does nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
 
 1. Install step 1 (the host config, with the values the host uses today).
 2. Install step 3 for both users, then Install step 4.
-3. Check the host config against the running pool, read only. This release's `pool-ready` takes the health port from the host config; give it the set names from the host config. It must end with `READY`:
+3. Check that runscaler runs the installed config.toml, read only. It prints the image config.toml names for both sets and the record that names it too (`image.ref`, or after a `back` the kept config, `config.toml.pre-image`), and checks that runscaler started after config.toml was installed (pool-image.sh's own rule, in whole seconds). It must end with `OK   runscaler started`. A line that starts with `STOP` says what to do: the move stops there; do it, then run this check again:
+   ```
+   ssh <RS_USER>@<host> 'bash -s' <<'EOF'
+   R=~/.config/runner; img() { sed -n 's/^runner-image = "\(.*\)"$/\1/p' "$1" | sort -u; }
+   c=$(img $R/config.toml); r=$(cat "/home/$(sed -n 's/^RUN_USER=//p' /etc/liveapp-ci/host.conf)/run/image.ref")
+   [ "$(grep -c '^runner-image = ' $R/config.toml)" = 2 ] && [ "$(printf '%s\n' "$c" | grep -c .)" = 1 ] || { echo "STOP config.toml does not name ONE runner image for both sets: read $R/config.toml and find out what changed it"; exit 1; }
+   if [ "$c" = "$r" ]; then echo "OK   config.toml names $c for both sets; image.ref names it too"
+   elif cmp -s $R/config.toml.pre-image $R/config.toml; then echo "OK   config.toml names $c for both sets; it is the kept config of a back (image.ref still names the rejected $r)"
+   else echo "STOP config.toml names $c, image.ref names $r, and config.toml is not the kept config of a back: a build that no up has put into the pool, or a file changed by hand. Put image.ref's image into the pool with this release's up (A new runner release, steps 3 and 4), or make image.ref name $c again (as RUN_USER); then run this check again"; exit 1; fi
+   a=$(systemctl --user show runscaler -p ActiveEnterTimestamp --value --timestamp=unix); a=${a#@}; m=$(stat -c %Y $R/config.toml)
+   [ "$(systemctl --user is-active runscaler)" = active ] && [[ $a =~ ^[0-9]+$ ]] || { echo "STOP runscaler is not active: read journalctl --user -u runscaler"; exit 1; }
+   [ "$a" -gt "$m" ] || { echo "STOP config.toml was installed at $m, after runscaler started at $a: runscaler does not run this file. Restart it when no job runs (systemctl --user restart runscaler), then run this check again"; exit 1; }
+   echo "OK   runscaler started at $a, after config.toml was installed at $m: it runs this config.toml"
+   EOF
+   ```
+4. Check the host config against the running pool, read only. This release's `pool-ready` takes the health port from the host config; give it the set names from the host config. It must end with `READY`:
    ```
    ssh <RS_USER>@<host> 'bash ~/build/bin/pool-ready <MAIN_SET> <SMALL_SET>'
    ```
