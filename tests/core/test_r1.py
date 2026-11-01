@@ -328,11 +328,13 @@ class Settle(unittest.TestCase):
         self.assertEqual(Run(self).fx(log)['verdict'], 'rollback')
 
     def test_out_of_order_across_a_pass_boundary(self):
-        # the builder's named edge: the proof of second 30 is read in the next pass, after a record of second 40
+        # the builder's named edge: the proof of second 30 is read in the next pass, after a record of second 40 (held at
+        # the first pass, read first in the next): ORDER (10 s) out of order, no gap
         r = Run(self)
-        self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(40) + scaling(41))
+        self.assertEqual(r.fx(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(39) + scaling(40))
                          ['verdict'], 'none')
-        self.assertEqual(r.fx(removed(30, 'runner-0000beef', 'job-completed') + tail())['verdict'], 'none')
+        out = r.go(removed(30, 'runner-0000beef', 'job-completed') + tail())
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('none', 0))
 
     def test_control_a_proof_after_the_run_does_not_take_it_back(self):
         log = failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + removed(100, 'runner-0000beef', 'job-completed')
@@ -979,7 +981,7 @@ class Provenance(unittest.TestCase):
         lines = {'mac-a': 'img-new', 'mac-b': 'img-hand'}      # fy's set runs another image: fy has no provenance
         r = Run(self, fams, opened=False)
         r.go(lines=lines)
-        out = r.go(three(lambda i: OTHER) + three(lambda i: OTHER, 'mac-b', start=100), lines=lines)
+        out = r.go(three(lambda i: OTHER) + three(lambda i: OTHER, 'mac-b', start=200), lines=lines)
         self.assertEqual(out['families']['fx']['verdict'], 'rollback')
         self.assertEqual(out['families']['fy']['verdict'], 'none')
 
@@ -1270,12 +1272,13 @@ class ContinuationCut(unittest.TestCase):
 
 class ClockStepBack(unittest.TestCase):
     """runscaler stamps its records with local time and no zone, so on a host whose zone has summer time its log times
-    step back one hour once a year (or when the clock is set back). A record whose log time is more than SETTLE (120 s)
-    before the newest log time read is no out-of-order write (SETTLE rests on those being less): the times before it
-    and after it cannot be compared, so it is an evidence gap (Opus r4 F2). What is settled before it is judged first;
-    then the window starts again at it, as after UNKNOWN text: its counts, NOT SERVING and KEEP clock from zero, and
-    every log time (the newest read, the settle and prune points) from the new times. A record SETTLE or less out of
-    order is no gap; a forward jump is no gap (it settles what is before it, as any later record does)."""
+    step back one hour once a year (or when the clock is set back). A record whose log time is more than ORDER (10 s)
+    before the newest log time read is outside what the core reads (records are out of order by less; the class Order):
+    the times before it and after it cannot be compared, so it is an evidence gap (Opus r4 F2). What is settled before
+    it is judged first (what its record does not contradict); then the window starts again at it, as after UNKNOWN text:
+    its counts, NOT SERVING and KEEP clock from zero, and every log time (the newest read, the settle and prune points)
+    from the new times. A record ORDER or less out of order is no gap; a forward jump is no gap (it settles what is
+    before it, as any later record does)."""
 
     def docker(self):
         return {'fx': fam('docker', ('linux-b',))}
@@ -1339,17 +1342,22 @@ class ClockStepBack(unittest.TestCase):
             ev = r.state['families']['fx']
             self.assertEqual((ev['gaps'], ev['since'], ev['succeeded']), (0, NOW, 130), third)
 
-    def test_control_a_record_settle_or_less_out_of_order_is_no_gap(self):
-        # failures 10, 20; a record of 30 + d is read, then the failure of 30, d s out of order -> R1 on 10, 20, 30
-        for d in (60, 120):
+    def test_control_a_record_order_or_less_out_of_order_is_no_gap(self):
+        # failures 10, 20; a record of 30 + d is read, then the failure of 30, d s out of order -> R1 on 10, 20, 30, for d
+        # up to ORDER (10 s)
+        for d in (1, 10):
             with self.subTest(d):
                 out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.s(30 + d) + self.f(30) + self.s(300)
                                                   + self.s(301))
                 self.assertEqual(([f['t'][-2:] for f in out['families']['fx']['failures']],
                                   out['state']['families']['fx']['gaps']), (['10', '20', '30'], 0))
-        # 121 s is a step back: a gap. 10 and 20 are settled at it and judged (no R1: two), then the window starts again
-        out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.s(151) + self.f(30) + self.s(300) + self.s(301))
-        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('none', 1))
+        # more than ORDER is a step back: a gap (11 s; 60 and 120 s, which round 4 still read as out-of-order writes; 121
+        # s). 10 and 20 are no run of three, then the window starts again at it: no R1
+        for d in (11, 60, 120, 121):
+            with self.subTest(d):
+                out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.s(30 + d) + self.f(30) + self.s(300)
+                                                  + self.s(301))
+                self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('none', 1))
 
     def test_a_run_settled_before_the_step_is_judged_before_the_gap(self):
         # failures 10, 20, 30, settled by a record of 200; then, in the same pass, the clock steps back an hour -> R1 on
@@ -1382,6 +1390,121 @@ class ClockStepBack(unittest.TestCase):
         # the clock steps forward an hour after failures 10, 20, 30: the record after the jump settles them -> R1
         out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.f(30) + self.s(3630) + self.s(3631))
         self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('rollback', 0))
+
+
+class Order(unittest.TestCase):
+    """ORDER (10 s of log time): runscaler stamps a record when it logs it and writes it under one lock, so records are
+    out of order by goroutine scheduling only (the Linux host's real log: 0 records out of order in 4,455). The core
+    claims no more: a record more than ORDER before the newest log time read is outside what it reads, an evidence gap
+    (counts and the KEEP clock start again), never a verdict. SETTLE stays 120 s: it is how long a LATER proof may take
+    to arrive (the unknown-runner line, up to 16 s after its removal), which is not disorder. At such a step back, what
+    is settled is judged first only when the step's own record does not contradict that: the failure lies more than
+    ORDER after it (the old times, settled by records of the same times), or the step's record itself is SETTLE past
+    it. Inputs: Codex r5 F2, Opus r5 F2 (C1, C2), Opus r5 F3 (shape A)."""
+
+    X = 'runner-0000beef'
+
+    def docker(self):
+        return {'fx': fam('docker', ('linux-b',))}
+
+    def f(self, s):
+        return failed(s, DOCKER_CREATE, 'linux-b')
+
+    def j(self, s, k=0xcafe):
+        return removed(s, 'runner-%08x' % k, 'job-completed', set_='linux-b')
+
+    def s(self, s):
+        return scaling(s, 'linux-b')
+
+    def passes(self, texts, families=None, split=False):
+        """One pass of all the texts (or, SPLIT, one pass per text), then two quiet passes. -> (the run, the verdicts)"""
+        r = Run(self, families or self.docker())
+        vs = [r.fx(x)['verdict'] for x in texts] if split else [r.fx(''.join(texts))['verdict']]
+        return r, vs + [r.fx('')['verdict'] for _ in range(2)]
+
+    def test_codex_r5_f2_a_removal_more_than_order_out_of_order_is_a_gap_never_a_rollback(self):
+        # Codex r5 F2: failures 10, 20; X's unknown-runner line 30; a record of 150; X removed reason=exited with no jobId
+        # stamped 31 (119 s out of order); the log moves on. Both providers, one pass and split before the removal
+        for provider, set_, err in (('tart', 'mac-a', OTHER), ('docker', 'linux-b', DOCKER_CREATE)):
+            first = (failed(10, err, set_) + failed(20, err, set_) + unknown(30, self.X, set_, 'started')
+                     + scaling(150, set_))
+            second = removed(31, self.X, 'exited', job=False, set_=set_) + scaling(300, set_) + scaling(301, set_)
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    r, vs = self.passes([first, second], {'fx': fam(provider, (set_,))}, split)
+                    self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * len(vs), 1))
+
+    def opus_r5_f2(self, d, quiet, step=True):
+        """Opus r5 F2 (its probe_r5_smallstep.py): true failures 100, 110, a job completed 115, the log quiet QUIET s,
+        failures 5 and 10 s later, the log moves on; with STEP the clock stepped back D s before those failures"""
+        s = (lambda real: real - d) if step else (lambda real: real)
+        a = 115 + quiet
+        return [self.f(100), self.f(110), self.j(115), self.f(s(a + 5)), self.f(s(a + 10)), self.s(s(a + 300)),
+                self.s(s(a + 301))]
+
+    def test_opus_r5_f2_a_step_back_more_than_order_is_a_gap_and_no_r1(self):
+        # C1: the clock steps back 60 s; C2: it steps back 1 h after the log was quiet 59 min (seen as 60 s back). One
+        # pass, and one pass per record
+        for name, d, quiet in (('C1', 60, 0), ('C2', 3600, 3540)):
+            for split in (False, True):
+                with self.subTest((name, split)):
+                    r, vs = self.passes(self.opus_r5_f2(d, quiet), split=split)
+                    self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * len(vs), 1))
+                with self.subTest((name, split, 'control: no step')):
+                    r, vs = self.passes(self.opus_r5_f2(d, quiet, step=False), split=split)
+                    self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * len(vs), 0))
+
+    def shape_a(self, step=True, late_pre=True, proof=True, next_at=3606):
+        """Opus r5 F3 shape A (its probe_r5_jumps.py), in write order: a job completed 3540; the clock steps back 1 h at
+        3600; failures at true 3601, 3602, 3603; a record stamped 3599 (before the step) written 5 s late, after them;
+        a record of true NEXT_AT; a job completed at true 3602 (the second failure's second: between) written 18 s
+        late; the log moves on"""
+        s = (lambda real: real - 3600) if step else (lambda real: real)
+        w = [self.j(3540, 1), self.f(s(3601)), self.f(s(3602)), self.f(s(3603))]
+        if late_pre:
+            w.append(self.s(3599))
+        w.append(self.s(s(next_at)))
+        if proof:
+            w.append(self.j(s(3602), 2))
+        return w + [self.s(s(3900)), self.s(s(3901))]
+
+    def test_opus_r5_f3_shape_a_a_record_stamped_before_a_step_back_and_written_after_it_is_no_r1(self):
+        # the late pre-step record (3599) settles the failures of the new times, and the next record of the new times is
+        # a second step back. It lies right after those failures, so it contradicts the record that settled them, and
+        # they go with the gap. Also when that record is stamped before the failures (less than ORDER: 05:00:00). In one
+        # pass, and in one pass per record: then the pass that reads the late record holds the step's record (its header
+        # whole, so its time is known) and does not judge what the next pass's step will drop
+        for next_at in (3606, 3600):
+            for split in (False, True):
+                with self.subTest(next_at=next_at, split=split):
+                    r, vs = self.passes(self.shape_a(next_at=next_at), split=split)
+                    self.assertEqual(vs, ['none'] * len(vs))
+                    self.assertGreaterEqual(r.state['families']['fx']['gaps'], 1)
+        with self.subTest('control: no late pre-step record'):
+            r, vs = self.passes(self.shape_a(late_pre=False))
+            self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * 3, 1))
+        with self.subTest('control: true log times'):
+            r, vs = self.passes(self.shape_a(step=False))
+            self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * 3, 0))
+        with self.subTest('control: true log times, no proof: a real run'):
+            r, vs = self.passes(self.shape_a(step=False, proof=False))
+            self.assertEqual(vs, ['rollback'] * 3)
+            self.assertEqual([f['t'][-5:] for f in r.fx('')['failures']], ['00:01', '00:02', '00:03'])
+
+    def test_a_step_whose_own_record_settles_the_failures_still_judges_them(self):
+        # failures 10, 20, 30, a record of 200, then one of 185 (15 s back: a gap); 185 is SETTLE past each failure, so
+        # it settles them itself -> R1 on 10, 20, 30, judged before the gap. Control: a record of 145 instead (more than
+        # ORDER back, less than SETTLE past 30): 30 is settled only by 200, which 145 contradicts -> no R1. In one pass,
+        # and with the step's record held at the end of the pass that reads 200 (read by the next pass)
+        for split in (False, True):
+            with self.subTest(split=split):
+                r, vs = self.passes([self.f(10) + self.f(20) + self.f(30) + self.s(200) + self.s(185), self.s(186)],
+                                    split=split)
+                self.assertEqual(([f['t'][-2:] for f in r.fx('')['failures']], r.state['families']['fx']['gaps']),
+                                 (['10', '20', '30'], 1))
+                r, vs = self.passes([self.f(10) + self.f(20) + self.f(30) + self.s(200) + self.s(145), self.s(146)],
+                                    split=split)
+                self.assertEqual((vs, r.state['families']['fx']['gaps']), (['none'] * len(vs), 1))
 
 
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
@@ -1470,7 +1593,7 @@ class Sticky(unittest.TestCase):
     def test_a_rollback_verdict_holds_for_the_candidate(self):
         r = Run(self)
         r.fx(three(lambda i: OTHER))
-        self.assertEqual(r.fx(removed(100, 'runner-0000beef', 'job-completed') + scaling(110))['verdict'], 'rollback')
+        self.assertEqual(r.fx(removed(200, 'runner-0000beef', 'job-completed') + scaling(210))['verdict'], 'rollback')
 
     # a verdict belongs to its window (the candidate's closed_at), not only to the candidate's lines (Opus r1 F6): the
     # Linux host's CONNECT-ONLY retry and `retry FAMILY` switch to the SAME lines, in a new window

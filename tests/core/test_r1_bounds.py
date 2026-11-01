@@ -160,10 +160,11 @@ class StillDecides(unittest.TestCase):
         # log moves on; then R0 is removed `reason=exited` with no jobId (that takes its start back) and the exit is
         # final. With STARTS_MAX more starts R0's is the oldest beyond the cap: it is read as confirmed, a proof of life
         # between 20 and 30 -> no R1 (only a take-back is lost, which delays R1). With one fewer it is still a start:
-        # the exit takes it back -> R1 on 10, 20, 30. The oldest by log time: also when R0's start is written late (less
-        # than SETTLE out of order) and read after the others
+        # the exit takes it back -> R1 on 10, 20, 30. The oldest by log time: also when R0's start is written late (at
+        # most ORDER, 10 s, out of order: the others then start at 31-34) and read after the others
         def last(n, late):
-            r0, more = started(25, 'runner-00000000'), ''.join(started(40 + i, 'runner-%08x' % (i + 1)) for i in range(n))
+            r0 = started(25, 'runner-00000000')
+            more = ''.join(started((31 + i // 4) if late else (40 + i), 'runner-%08x' % (i + 1)) for i in range(n))
             r = Run(self)
             r.go(failed(10, OTHER) + failed(20, OTHER) + (failed(30, OTHER) + more + r0 if late else r0 + failed(30, OTHER) + more)
                  + tail(300))
@@ -186,16 +187,16 @@ class StillDecides(unittest.TestCase):
 
     def test_unsettled_failures_before_a_newer_proof_stay(self):
         # failures 10 and 20 are read with a job completed at 25 after them, not yet settled; a failure of second 24
-        # written late (inside SETTLE) joins them: no proof between 10, 20 and 24 -> R1
+        # written late (7 s, inside ORDER) joins them: no proof between 10, 20 and 24 -> R1
         r = Run(self)
-        r.go(failed(10, OTHER) + failed(20, OTHER) + removed(25, 'runner-0000beef', 'job-completed') + scaling(40)
-             + scaling(41))
+        r.go(failed(10, OTHER) + failed(20, OTHER) + removed(25, 'runner-0000beef', 'job-completed') + scaling(30)
+             + scaling(31))
         out = r.go(failed(24, OTHER) + tail(300))
         self.assertEqual([f['t'][-2:] for f in out['families']['fx']['failures']], ['10', '20', '24'])
         # control: the late failure is of second 25, the proof's own: between
         r = Run(self)
-        r.go(failed(10, OTHER) + failed(20, OTHER) + removed(25, 'runner-0000beef', 'job-completed') + scaling(40)
-             + scaling(41))
+        r.go(failed(10, OTHER) + failed(20, OTHER) + removed(25, 'runner-0000beef', 'job-completed') + scaling(30)
+             + scaling(31))
         self.assertEqual(r.fx(failed(25, OTHER) + tail(300))['verdict'], 'none')
 
     def docker_f3(self):
@@ -205,8 +206,8 @@ class StillDecides(unittest.TestCase):
 
     def test_opus_r3_f3_a_failure_written_out_of_order_joins_its_run(self):
         # Docker fx on linux-b: failures 10, 20; the log moves on (150 settles them); a job completed at 160; a record of
-        # 160. The failure of 159 is written less than SETTLE out of order, after the job completed of 160, and read in
-        # the next pass: a record a pass reads may be up to SETTLE older than the newest one read, so nothing that a
+        # 160. The failure of 159 is written out of order (1-2 s, inside ORDER), after the job completed of 160, and read
+        # in the next pass: a record a pass reads may be up to ORDER older than the newest one read, so nothing that a
         # failure still to come could join goes. The same R1 as the records in order, or in one pass
         d, F, J, S = self.docker_f3()
         for name, p1, p2 in (('in order', F(10) + F(20) + S(150) + F(159) + J(160) + S(160) + S(161), tail(400, 'linux-b')),
@@ -220,18 +221,18 @@ class StillDecides(unittest.TestCase):
                 self.assertEqual([f['t'][-5:] for f in r.fx(p2)['failures']], ['00:10', '00:20', '02:39'])
 
     def test_the_prune_point_is_settle_behind_the_newest_record_read(self):
-        # the edge: the newest record read is of 278, so a failure of 159 may still come (119 s out of order) -> R1
+        # failures 10, 20 (settled by 150), a job completed at 160: while the newest record read is less than SETTLE past
+        # the proof of 160 (278), nothing before that proof goes; once it is SETTLE past it (280), what is before it goes.
+        # The point stays SETTLE behind although a record still to come is at most ORDER (10 s) out of order: one more
+        # is an evidence gap (test_r1.py Order), so a failure of 159 read after either is a gap, never a verdict
         d, F, J, S = self.docker_f3()
-        r = Run(self, d)
-        self.assertEqual(r.fx(F(10) + F(20) + S(150) + J(160) + S(278) + S(279))['verdict'], 'none')
-        self.assertEqual([f['t'][-5:] for f in r.fx(F(159) + tail(400, 'linux-b'))['failures']], ['00:10', '00:20', '02:39'])
-        # control: once a record of 280 is read (SETTLE past the proof of 160), what is before that proof goes: a
-        # failure of 159 read now would be more than SETTLE out of order, which SETTLE rests on never happening (read so,
-        # it is a log clock that stepped back: an evidence gap, test_r1.py ClockStepBack)
-        r = Run(self, d)
-        r.fx(F(10) + F(20) + S(150) + J(160) + S(280) + S(281))
-        self.assertEqual(len(r.state['families']['fx']['sets']['linux-b']['fails']), 0)
-        self.assertEqual(r.fx(F(159) + tail(400, 'linux-b'))['verdict'], 'none')
+        for last, kept in ((278, 2), (280, 0)):
+            with self.subTest(last):
+                r = Run(self, d)
+                self.assertEqual(r.fx(F(10) + F(20) + S(150) + J(160) + S(last) + S(last + 1))['verdict'], 'none')
+                self.assertEqual(len(r.state['families']['fx']['sets']['linux-b']['fails']), kept)
+                out = r.go(F(159) + tail(400, 'linux-b'))
+                self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('none', 1))
 
     def test_two_runs_a_tart_start_keeps_apart_stay_apart_from_each_other(self):
         # Tart: failures 10, 15, runner A started 20, a failure 22, a job completed 25; failures 30, 35, runner B started

@@ -171,15 +171,22 @@ the start as taken back (KEEP waits for the removal to be final).
 is 120 s of log time past it, or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
 `now` of the pass that read it. A failure that is not settled waits; nothing is judged from a partial second.
 
-**The log's clock.** runscaler stamps its records with local time and no zone. The glue should run runscaler with
-`TZ=UTC`: then its log times never step back with summer time. A record whose log time is more than SETTLE before the
-newest log time read is no out-of-order write (SETTLE rests on those being less): the clock stepped back (summer time
-ended, or the clock was set back), and the times before it cannot be compared with the times after it. A step back
-costs an EVIDENCE GAP: the failures settled before it are judged (R1 may come), then the window starts again at it, as
-after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass that reads it; failures not
-settled yet go), and every log time it keeps (the newest read, the settle and prune points) starts from the new times.
-A record SETTLE or less out of order is no gap. A clock that steps forward is no gap: the first record after it settles
-the failures before it, as any later record does.
+**ORDER and the log's clock.** runscaler stamps a record when it logs it and writes it under one lock, so records
+reach the log out of order only by goroutine scheduling: well under a second (the Linux host's real log: 0 records out
+of order in 4,455). The core claims no more than ORDER = 10 s of log time: a record more than ORDER before the newest
+log time read is outside what it reads, an EVIDENCE GAP, never a verdict. That is a record written far out of order,
+or a log clock that stepped back (runscaler stamps local time with no zone: summer time ended, or the clock was set
+back), and the times before it cannot be compared with the times after it. The gap: the failures settled before it
+are judged first (R1 may come), but only those whose settlement the step's record does not contradict (the failure
+lies more than ORDER after it, in the clock's old times, or the step's record is itself SETTLE past it; a failure near
+it was settled only by a record it contradicts, such as one stamped before a step back and written after it); then the
+window starts again at it, as after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass
+that reads it; the other failures go), and every log time it keeps (the newest read, the settle and prune points)
+starts from the new times. A record whose header the pass holds (its time is whole) is read first by the next pass, so
+a step back it shows is judged the same way at the end of the pass that holds it. A record ORDER or less out of order
+is no gap. A clock that steps forward is no gap: the first record after it settles the failures before it, as any
+later record does. SETTLE is not disorder: it is how long a later proof may take to arrive. The glue should run
+runscaler with `TZ=UTC`: then its log times never step back with summer time.
 
 **R1.** Three SETTLED counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A
 proof in the same second as a failure counts as between them; a proof after the run does not take it back.
@@ -191,7 +198,7 @@ that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
 **The state stays bounded.** Per set, r1 keeps only what can still matter: the newest proof of life that is at or
 before the oldest failure not settled yet (any, when every failure is settled) and SETTLE or more before the newest log
-time read — a record may be written up to SETTLE out of order (what SETTLE rests on), so a failure still to come is
+time read — a record still to come is at most ORDER out of order (one more is a gap), so a failure still to come is
 never before that proof — and everything from its second on (the failures and proofs of the last SETTLE of log time,
 the newest proof before them, and the settled failures since that proof: at most two, a third is R1); the Tart starts
 of runners not yet removed, at most 16 (a runner leaves by a `Runner removed` line, also at runscaler's stop,

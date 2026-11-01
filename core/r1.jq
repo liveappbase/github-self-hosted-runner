@@ -17,13 +17,18 @@ def NS_SECONDS: 1800;
 # this far past it in log time, or the log is quiet (nothing held) and a later pass's `now` is this far past the `now`
 # of the pass that read it. The same quiet reads a held record (the glue's clock, the text unchanged).
 def SETTLE: 120;
+# ORDER: how far out of order records may be written, in log time. runscaler stamps a record when it logs it and writes
+# it under one lock, so only goroutine scheduling reorders them (the Linux host's real log: 0 records out of order in
+# 4,455). A record more than ORDER before the newest log time read is outside what the core reads: an evidence gap,
+# never a verdict (read). SETTLE is not disorder: it is how long a LATER proof may take to arrive
+def ORDER: 10;
 # the Tart starts a set keeps of runners not yet removed (Apple allows 2 macOS VMs per host): a runner whose
 # RemoveInstance fails is never removed, so beyond this the oldest start is read as confirmed, a proof of life (Opus r4
 # F6). That loses only a take-back, which can only delay R1
 def STARTS_MAX: 16;
 
 # a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone: a
-# clock that steps back more than SETTLE is an evidence gap, see read)
+# record more than ORDER before the newest one read is an evidence gap, see read)
 def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 
 def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
@@ -166,10 +171,18 @@ def judge:
        | if $v != null then .verdict = $v else . end
   end;
 
+# a step back to log second $r (read): a failure the records ahead of $r settled stays settled for the judge before the
+# gap only when $r does not contradict that: it lies more than ORDER after $r (the clock's old times, settled by records
+# of the same times), or $r itself is SETTLE past it. A failure near $r was settled only by a record $r contradicts
+# (one stamped before a step back and written after it, Opus r5 F3): it goes with the gap
+def unsettle_near($r):
+  .sets |= map_values(.fails |= map(if .settled == true and .s <= $r + ORDER and $r - .s < SETTLE then .settled = false
+                                    else . end));
+
 # what can still matter (Codex r2 F4, Opus r2 F3, F5): $c = the newest proof (in .proofs, a Tart start not taken back
 # excluded) at or before the oldest failure that is not settled yet (any, when all are), and SETTLE or more before the
-# newest log second read: a record still to come may be written up to SETTLE out of order (what SETTLE rests on), so
-# a failure still to come is never before $c (Opus r3 F3). Every failure before $c is settled and judged, and $c keeps
+# newest log second read: a record still to come is at most ORDER out of order (one more is a gap, read), so a failure
+# still to come is never before $c (Opus r3 F3). Every failure before $c is settled and judged, and $c keeps
 # it from every later one: it goes, unless a Tart start that may still be taken back is all that keeps it from R1 — a
 # run of three or more with only Tart starts between them stays, with the first proof after it. A Tart start stays
 # until its runner is removed. Proofs before $c go; $c's own second stays (same second = between)
@@ -205,16 +218,18 @@ def open_at($now): .open = true | .since = $now | .sets = {} | .pending = null |
 
 # . = {obs, refused}: records $recs read for every family whose .[$flag] is true, by the pass of $seen ($now: this
 # pass's). Each record settles by its log time; a partial record (a short write, read after SETTLE quiet or at P's exit)
-# is only what a proof of life is, any other truncated record is unknown text. A record more than SETTLE before the
-# newest log time read is no out-of-order write (SETTLE rests on those being less): the log's clock stepped back (it
-# has no zone: summer time, or a clock set back), and the times before it cannot be compared with the times after it.
-# It is an evidence gap (Opus r4 F2): what is settled is judged, then the window starts again at it, as after UNKNOWN
-# text (counts, NOT SERVING, the KEEP clock), its log times (newest, the settle and prune points) from the new times
+# is only what a proof of life is, any other truncated record is unknown text. A record more than ORDER before the
+# newest log time read is outside what the core reads (records are out of order by less: ORDER): the log's clock
+# stepped back (it has no zone: summer time, or a clock set back), or a record was written far out of order, and the
+# times before it cannot be compared with the times after it. It is an evidence gap (Opus r4 F2, Codex r5 F2, Opus r5
+# F2): what is settled is judged (only what the record does not contradict, unsettle_near), then the window starts
+# again at it, as after UNKNOWN text (counts, NOT SERVING, the KEEP clock), its log times (newest, the settle and prune
+# points) from the new times
 def read($recs; $flag; $seen; $now):
   reduce $recs[] as $r (.;
     ($r.t | lsec) as $sec
-    | .obs |= map_values(if .[$flag] and .ev.newest != null and $sec < .ev.newest - SETTLE
-                         then .ev |= (judge | .gaps += 1 | open_at($now)) else . end)
+    | .obs |= map_values(if .[$flag] and .ev.newest != null and $sec < .ev.newest - ORDER
+                         then .ev |= (unsettle_near($sec) | judge | .gaps += 1 | open_at($now)) else . end)
     | .obs |= map_values(if .[$flag] then .ev |= settle_log($sec) else . end)
     | if $r.set == null then .
       else
@@ -334,6 +349,9 @@ C::now_in("r1") as $now
     # the record still held may be a counted failure of a family set: R1 may still come with it (KEEP waits). A held
     # text that ends in a partial line may hold the start of one more record, on any set
     | ($tok.carry | if . == "" then [] else L::tokenize_final.records end) as $held
+    # the held record's log second (its header is whole: a cut header is no record): the next pass reads it first, so a
+    # step back it shows is judged now as that step will judge (unsettle_near): this pass does not judge what it drops
+    | ($held | map(.t | lsec) | first) as $hsec
     # the end of the pass, for every family that counts this pass's (last) text: SETTLE by the clock when nothing is
     # held, then R1 on the settled failures, then what can no longer matter goes, then the run that may still reach R1
     | ($done.obs | map_values(
@@ -345,7 +363,9 @@ C::now_in("r1") as $now
                  else . end)
              | if $tok.carry == "" or ($tok.carry | endswith("\n")) then .
                else reduce $fsets[] as $s (.; .[$s] += [{s: 1e18, settled: false}]) end) as $pot
-          | .ev |= ((if $tok.carry == "" then settle_quiet($now) else . end) | judge | prune | .pending = pending($pot))
+          | .ev |= ((if $tok.carry == "" then settle_quiet($now) else . end)
+                    | (if $hsec != null and .newest != null and $hsec < .newest - ORDER then unsettle_near($hsec) else . end)
+                    | judge | prune | .pending = pending($pot))
         else . end)) as $obs0
     # windows that open at this boundary: the process runs the candidate (the KEEP clock starts now)
     | ($obs0 | map_values(if (.ev.open | not) and .prov then .ev |= open_at($now) else . end)) as $obs
