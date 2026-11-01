@@ -689,13 +689,108 @@ class Carry(unittest.TestCase):
         self.assertEqual(out['state']['carry'], '')
         self.assertEqual((out['families']['fx']['verdict'], counted(out)), ('none', 2))
 
-    def test_a_partial_last_line_is_never_read_alone(self):
+    def test_a_partial_last_line_is_held_until_the_log_is_quiet_for_settle(self):
         r = Run(self)
         rec = removed(10, 'runner-0000beef', 'job-completed')
         r.go(rec[:-20])
-        out = r.go('', now=r.now + 3600)
-        self.assertEqual(out['state']['families']['fx']['succeeded'], 0)
-        self.assertEqual(out['state']['carry'], rec[:-20])
+        out = r.go('', now=r.now + 119)
+        self.assertEqual((out['state']['carry'], out['state']['families']['fx']['succeeded']), (rec[:-20], 0))
+        out = r.go('', now=r.now + 1)                   # quiet for 120 s: released, read as what it is
+        self.assertEqual(out['state']['carry'], '')
+        self.assertEqual(out['state']['families']['fx']['sets']['mac-a']['proofs'][-1:], [sec(10)])
+
+
+def sec(s):
+    """A log time of t(s) in r1's seconds (strptime | mktime: the log's time read as UTC)."""
+    return int((BASE - datetime.datetime(1970, 1, 1)).total_seconds()) + s
+
+
+class PartialLine(unittest.TestCase):
+    """A text that ends in a partial line holds it (it may yet grow). runscaler writes each record with one write
+    (internal/config/logfile.go), so a partial line still partial after the log has been quiet for SETTLE is a short
+    write (a full disk): it is released and read as what it is — a proof of life when its text is one; any other
+    truncated record is unknown text, never a counted failure — so the failures before it settle and R1 can come
+    (Codex r2 F2, Opus r2 F4; PLAN D6: no STOP disarms R1 while a candidate is live)."""
+
+    def quiet(self, r, n=3, dt=10000):
+        return [r.fx('', now=r.now + dt)['verdict'] for _ in range(n)]
+
+    def test_codex_r2_f2_three_failures_then_a_partial_scaling_record_reach_r1(self):
+        r = Run(self)
+        out = r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + scaling(31)[:-1])
+        self.assertEqual(out['families']['fx']['verdict'], 'none')
+        out = r.go('', now=r.now + 10000)
+        self.assertEqual((out['families']['fx']['verdict'], len(out['families']['fx']['failures'])), ('rollback', 3))
+
+    def test_opus_r2_f4_a_partial_header_or_a_line_of_another_program_reach_r1(self):
+        d = {'fx': fam('docker', ('linux-b',))}
+        run3 = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
+                + failed(30, DOCKER_CREATE, 'linux-b') + scaling(31, 'linux-a'))
+        for partial in ('2026-11-01 05:00:3', 'localhost:5000/example-runner@sha256:00: Pulling from example-runner'):
+            r = Run(self, d)
+            self.assertEqual(r.fx(run3 + partial)['verdict'], 'none', partial)
+            self.assertEqual(self.quiet(r, 1, 4 * 3600), ['rollback'], partial)
+
+    def test_control_a_partial_line_that_is_a_complete_proof_is_one(self):
+        # the job completed in the third failure's second, its newline missing: proof of life between them
+        r = Run(self)
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + removed(30, 'runner-0000beef', 'job-completed')[:-1])
+        self.assertEqual(self.quiet(r), ['none'] * 3)
+        self.assertEqual((r.state['families']['fx']['succeeded'], r.state['families']['fx']['pending']), (1, None))
+        # cut inside its attributes, after reason=job-completed: still a job completed
+        r = Run(self)
+        rec = removed(30, 'runner-0000beef', 'job-completed')
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + rec[:rec.index(' repo=')])
+        self.assertEqual(self.quiet(r), ['none'] * 3)
+
+    def test_a_partial_tart_start_and_a_partial_unknown_runner_line_are_proofs_of_life(self):
+        # Tart: a runner started in the third failure's second, its newline missing
+        r = Run(self)
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + started(30, 'runner-0000beef')[:-1])
+        self.assertEqual(self.quiet(r), ['none'] * 3)
+        # Docker: the unknown-runner line naming the runner removed reason=exited takes its failure back
+        d = {'fx': fam('docker', ('linux-a',))}
+        run_ = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+                + removed(25, 'runner-0000beef', 'exited', job=False, set_='linux-a'))
+        line = unknown(38, 'runner-0000beef', 'linux-a')
+        r = Run(self, d)
+        r.go(run_ + line[:-1])
+        self.assertEqual(self.quiet(r), ['none'] * 3)
+        # control: cut inside the runner's name, it names no runner removed so: the exited failure is the third
+        r = Run(self, d)
+        r.go(run_ + line[:line.index('beef')])
+        self.assertEqual(self.quiet(r, 1), ['rollback'])
+
+    def test_a_truncated_record_that_is_no_proof_of_life_is_unknown_text(self):
+        # cut inside `reason=job-completed`: a removal of no known reason, no proof; the run of three reaches R1
+        r = Run(self)
+        rec = removed(30, 'runner-0000beef', 'job-completed')
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + rec[:rec.index('-completed')])
+        self.assertEqual(self.quiet(r, 1), ['rollback'])
+        # nor does it confirm that runner's Tart start: the start stays a start
+        r = Run(self)
+        r.go(started(5, 'runner-0000beef') + scaling(6) + rec[:rec.index('-completed')])
+        self.quiet(r, 1)
+        self.assertEqual([s['n'] for s in r.state['families']['fx']['sets']['mac-a']['starts']], ['runner-0000beef'])
+        # a truncated start failure is not counted: two failures and it are no R1, and nothing is pending
+        r = Run(self)
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER)[:-1])
+        self.assertEqual(self.quiet(r), ['none'] * 3)
+        self.assertEqual((counted(r.go('', now=r.now + 600)), r.state['families']['fx']['pending']), (2, None))
+
+    def test_control_the_same_start_failure_with_its_newline_is_counted(self):
+        r = Run(self)
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))
+        self.assertEqual(self.quiet(r, 1), ['rollback'])
+
+    def test_control_a_partial_line_that_completes_within_settle_is_read_whole(self):
+        # Opus r2 F4's control: it completes into a job completed in the third failure's second -> no R1
+        r = Run(self)
+        rec = removed(30, 'runner-0000beef', 'job-completed')
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + rec[:40])
+        out = r.go(rec[40:] + tail(), now=r.now + 60)
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['succeeded']), ('none', 1))
+        self.assertEqual(self.quiet(r), ['none'] * 3)
 
 
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):

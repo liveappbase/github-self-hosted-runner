@@ -12,7 +12,8 @@
 # record's lines as written)}. carry = the last record, from its header on: a record is complete only when a following
 # record header is read, so the last one is always held, also when the text ends with a newline (with no header in
 # the text: a partial last line). The caller prepends it to the next interval's text. tokenize_final reads every
-# record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE).
+# record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE, and P's text at the updater's
+# own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true.
 
 def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
@@ -84,6 +85,9 @@ def _tokenize($final):
            elif $k == "a" then .cur.attrs += ($l | _attrs) | .key = null | .cur.text += "\n" + $l
            elif $k == "e" then .
            else .recs += [.cur] | .cur = null | .key = null end)
+       # tokenize_final of a text that ends in a partial line: the record that line belongs to is `partial` (r1.jq reads
+       # it only as a proof of life). A line of another program ended the record before it (.cur is null then)
+       | (if $final and ($complete | not) and .cur != null then .cur.partial = true else . end)
        | (if .cur != null then .recs + [.cur] else .recs end)
        | map(.attrs |= with_entries(if (.value | type) == "array" then .value |= join("\n") else . end))),
      carry: (if $cut < ($ls | length) then ($ls[$cut:] | join("\n")) + (if $complete then "\n" else "" end)

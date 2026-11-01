@@ -179,11 +179,12 @@ C::now_in("r1") as $now
     | ($obs | map_values(if .ev.open and (.counting | not) and (.carried | not) then .ev |= (.gaps += 1 | .open = false)
                          else . end)) as $obs
     # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
-    # (it may yet grow); a held record that ends with a newline is read whole once the log has been quiet for SETTLE
+    # (it may yet grow); once the log has been quiet for SETTLE it is read as it is. runscaler writes a record with one
+    # write, so a held text still partial then is a short write (a full disk): its partial record counts only as a
+    # proof of life (Codex r2 F2, Opus r2 F4: a partial line must not hold R1 for ever)
     | (if $owned then
          ($state.carry // "") as $c0
-         | if $log == "" and $c0 != "" and ($c0 | endswith("\n")) and ($state.carry_at | type) == "number"
-              and $now - $state.carry_at >= SETTLE
+         | if $log == "" and $c0 != "" and ($state.carry_at | type) == "number" and $now - $state.carry_at >= SETTLE
            # read now, as of the pass that held it unchanged
            then ($c0 | L::tokenize_final) + {carry_at: null, seen: $state.carry_at}
            else ($c0 + $log | L::tokenize) as $t
@@ -198,7 +199,12 @@ C::now_in("r1") as $now
            else
              .refused as $refused
              | reduce (.obs | to_entries[] | select(.value.counting and any(.value.sets[]; . == $r.set)) | .key) as $f (.;
-                 .obs[$f].provider as $prov | ($r | classify($prov; $refused)) as $ev
+                 .obs[$f].provider as $prov
+                 # a partial record (a short write, read after SETTLE quiet) is only what a proof of life is; any
+                 # other truncated record is unknown text
+                 | ($r | classify($prov; $refused)
+                    | if $r.partial == true and (.k != "completed" and .k != "start" and .k != "unknown") then {k: "none"}
+                      else . end) as $ev
                  | .obs[$f].ev |= apply($ev; $r.set; $r.t; $sec; $tok.seen)
                  | if $ev.k == "refused" then .refused = (.refused + $ev.vms | unique)
                    elif $ev.k == "paired" then .refused -= $ev.vms

@@ -157,6 +157,20 @@ class Shapes(unittest.TestCase):
         self.assertEqual(out['records'][0]['text'].count('\n'), 0)   # neither the Digest line nor the orphan value line
         self.assertEqual(len(out['records']), 2)
 
+    def test_tokenize_final_marks_the_record_its_partial_last_line_belongs_to(self):
+        head = '2026-10-26 21:10:52 INFO mac-a: Scaling up runner currentCount=1\n'
+        for part in ('2026-10-26 21:10:53 INFO mac-a: Runner removed name=runner-x reason=job-comp',
+                     '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n  │ runner process ex',
+                     '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n  │ one\n name=runn'):
+            out = tok(self, head + part, final=True)
+            self.assertEqual([r.get('partial') for r in out['records']], [None, True], part)
+            # control: the same text with its newline is no partial record
+            self.assertEqual([r.get('partial') for r in tok(self, head + part + '\n', final=True)['records']],
+                             [None, None], part)
+        # a partial line of another program ends the record before it, which is whole
+        out = tok(self, head + 'localhost:5000/example-runner@sha256:00: Pulling from example-runner', final=True)
+        self.assertEqual([r.get('partial') for r in out['records']], [None])
+
     def test_continuation_lines_with_no_record_before_them_are_ignored(self):
         out = tok(self, '  │ tail of a record of an earlier interval\n'
                         '2026-10-26 21:10:54 INFO mac-a: Scaling up runner currentCount=1\n', final=True)

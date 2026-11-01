@@ -114,8 +114,11 @@ pass whose P has no provenance closes the window; the next one with provenance o
 multi-line values as `  key=` and `  │ ` lines (joined with newlines), and lines of other programs (a Docker pull)
 ignored. A record is complete only when a following record header is read, so the last record of a pass is always
 held to the next one (`state.carry`), also when the text ends with a newline: a record cut at the captured position
-is never read from its first part. A held record that ends with a newline is read whole once the log has been quiet
-for SETTLE (120 s of the glue's clock with the text unchanged, `state.carry_at`); a partial last line never is.
+is never read from its first part. A held record is read once the log has been quiet for SETTLE (120 s of the glue's
+clock with the text unchanged, `state.carry_at`). runscaler writes each record with one write, so a held text that
+still ends in a partial line then is a short write (a full disk): the record that line belongs to is read only as what
+a proof of life is (a job completed, a Tart start, an unknown-runner line); any other truncated record is unknown text,
+never a counted failure or a STOP. So a partial line never holds R1: the failures before it settle.
 
 **The classification** (a record of a set of family X, with provenance):
 
