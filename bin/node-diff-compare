@@ -1,0 +1,95 @@
+#!/bin/zsh -f
+# node-diff-compare NAMED_FILE CENSUS_FILE — the HOST half of the eMudhra stage's Node check. Design: docs/design.md
+# ("The named Node list"). golden-emudhra runs it after its census step as ${0:A:h}/node-diff-compare: the build and the
+# hand path run the same code (no flag). It reads two files and changes nothing.
+# NAMED_FILE is setup/emudhra.node-diff: one line per entry, "<folder> <SHA-256 fingerprint> <name for people>"; `#`
+# lines and blank lines are skipped; only the first two fields are compared. CENSUS_FILE is the guest's census output
+# (raw lines, without the host's prefix); only lines that START with NODE-CENSUS or NODE-DIFF are read:
+#   NODE-CENSUS BEGIN <folder>                 one block per externals Node executable
+#   NODE-DIFF <folder> <fingerprint> <name…>   one line per entry that Node computed (its roots minus the Homebrew file's)
+#   NODE-CENSUS DONE <folder> <n>              n = the block's NODE-DIFF lines; absent when that Node could not compute
+#   NODE-CENSUS END <number of blocks>         once, after every block
+# PASS (exit 0) only when the census is complete (exactly one END, after every BEGIN and DONE; END's number = the number
+# of BEGIN lines; each BEGIN has its DONE with the same folder and n = that block's NODE-DIFF count) and every computed
+# (folder, fingerprint) is in the named list. A named entry that was not computed prints
+#   NODE-DIFF-LOST <folder> <fingerprint> <name>
+# and is still a PASS: the runner's Node dropped a root, so its jobs trust less, and no new file is needed. FAIL (exit 1)
+# with one line per reason: a new entry (listed: the release needs a new, reviewed setup/emudhra.node-diff), a missing or
+# unclosed block, no END, a count mismatch, the named file or the census file absent or unreadable. The entries of a block
+# that did not complete are not reported lost (nothing was computed for them). Every line starts "node-diff-compare: ".
+# A usage error: STOP, exit 2.
+set -u
+export LC_ALL=C
+
+say() { print -r -- "node-diff-compare: $*" }
+show() { local s=${1//[[:cntrl:]]/?}; REPLY=${s[1,200]} }   # a census line as printable text, at most 200 chars
+(( $# == 2 )) || { say "STOP usage: node-diff-compare NAMED_FILE CENSUS_FILE"; exit 2 }
+named=$1 census=$2
+fails=()
+typeset -A want wname hname begun done
+
+if [[ -f $named && -r $named ]]; then
+  for l in ${(f)"$(<$named)"}; do
+    [[ $l == '#'* || -z ${l//[[:space:]]/} ]] && continue
+    q=(${=l}); k="$q[1] ${q[2]-}"
+    want[$k]=1; wname[$k]=${(j: :)q[3,-1]}
+  done
+else
+  fails+=("the named list $named is absent or unreadable")
+fi
+
+have=() cur= cnt=0 nbegin=0 nend=0 endn=
+if [[ -f $census && -r $census ]]; then
+  for l in ${(f)"$(<$census)"}; do
+    [[ $l == 'NODE-CENSUS '* || $l == 'NODE-DIFF '* ]] || continue
+    q=(${=l}); show "$l"
+    if (( nend )) && [[ $l != 'NODE-CENSUS END '* ]]; then fails+=("a line after the END line: $REPLY"); continue; fi
+    if [[ $q[1] == NODE-DIFF ]]; then
+      if [[ -z $cur || ${q[2]-} != $cur ]]; then fails+=("a NODE-DIFF line outside its block: $REPLY"); continue; fi
+      [[ ${q[3]-} =~ '^[0-9a-f]{64}$' ]] || { fails+=("a NODE-DIFF line without a SHA-256 fingerprint: $REPLY"); continue }
+      cnt=$(( cnt + 1 )); k="$q[2] $q[3]"; have+=("$k"); hname[$k]=${(j: :)q[4,-1]}
+      continue
+    fi
+    case ${q[2]-}:${#q} in
+      (BEGIN:3)
+        [[ -n $cur ]] && fails+=("the block $cur has no DONE line (its Node could not compute, or the census stopped)")
+        (( ${+begun[$q[3]]} )) && fails+=("the block $q[3] appears twice")
+        begun[$q[3]]=1; cur=$q[3] cnt=0 nbegin=$(( nbegin + 1 )) ;;
+      (DONE:4)
+        if [[ $q[3] != $cur ]]; then fails+=("a DONE line without its BEGIN: $REPLY"); continue; fi
+        if [[ $q[4] =~ '^[0-9]+$' ]] && (( 10#$q[4] == cnt )); then done[$cur]=1
+        else fails+=("the block $cur: its DONE says $q[4] entries, the block has $cnt NODE-DIFF lines"); fi
+        cur= ;;
+      (END:3)
+        nend=$(( nend + 1 ))
+        (( nend == 1 )) || { fails+=("more than one END line"); continue }
+        [[ -n $cur ]] && fails+=("the block $cur has no DONE line (its Node could not compute, or the census stopped)")
+        cur= endn=$q[3] ;;
+      (*) fails+=("a NODE-CENSUS line not understood: $REPLY") ;;
+    esac
+  done
+  [[ -n $cur ]] && fails+=("the block $cur has no DONE line (its Node could not compute, or the census stopped)")
+  if (( nend == 0 )); then fails+=("no END line: the census is incomplete")
+  elif [[ ! $endn =~ '^[0-9]+$' ]] || (( 10#$endn != nbegin )); then fails+=("END says $endn blocks, the census has $nbegin")
+  fi
+else
+  fails+=("the census file $census is absent or unreadable")
+fi
+
+# the subset rule: every computed entry must be named; a named entry not computed is LOST (a PASS)
+for k in ${(u)have}; do
+  (( ${+want[$k]} )) || fails+=("a new entry, not in the named list: $k ${hname[$k]} (the release needs a new setup/emudhra.node-diff, reviewed)")
+done
+lost=0
+for k in ${(ko)want}; do
+  (( ${have[(Ie)$k]} )) && continue
+  f=${k%% *}
+  (( ${+begun[$f]} && ! ${+done[$f]} )) && continue   # its block did not complete: a FAIL above, not a loss
+  say "NODE-DIFF-LOST $k${wname[$k]:+ $wname[$k]}"; lost=$(( lost + 1 ))
+done
+
+for m in $fails; do say "FAIL $m"; done
+(( ${#fails} == 0 )) || exit 1
+uniq=(${(u)have})
+say "PASS: ${#uniq} computed entries in $nbegin block(s), each in the named list; $lost named entries lost"
+exit 0
