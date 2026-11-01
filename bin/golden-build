@@ -1,14 +1,24 @@
 #!/bin/zsh -f
-# golden-build — build the golden runner image liveapp-mac-golden-<yyyymmdd> from the pinned Cirrus base.
+# golden-build [--date YYYYMMDD] — build the golden runner image liveapp-mac-golden-<yyyymmdd> from the pinned Cirrus
+# base. golden-build --print-runner — print the runner version a build would use and where it comes from; nothing else.
 # Design: docs/operations.md ("Rebuilding the image"). Run as ci on the host: /Users/ci/bin/golden-build
-# It holds the runner lock for its whole run (so runscaler cannot start), refuses while the agent is enabled (before
-# the lock and again under it), and boots the build VM only through real-run (the wall's flags). The configured image
-# name never exists half-built: the work happens in gold-<date>, which is cloned to the final name only after a clean
-# stop, then deleted. Any gold-* left by an earlier run is stopped and deleted at the start and at the end. Its output
-# (the stage's verdict table and census among it) is also appended to LOGDIR/golden-<yyyymmdd>.log. INT, TERM and HUP
-# end the build through `exit`, so that cleanup runs; tee -i lets a Ctrl-C's cleanup lines into the log too. The build
-# VM's console log is LOGDIR/golden-<yyyymmdd>-vm.log. It stops BEFORE `tart pull` when the host's macOS major is
-# below BASE_MACOS_MAJOR (the base image's; a guest newer than the host does not boot).
+# The date is --date (a real date), else today's, read from the clock ONCE. The runner version and its sha256 come
+# from the host pin $PINDIR/mac-golden when that exists (the updater writes it; a person normally never does), else
+# from the release literals RUNNER_VERSION and RUNNER_SHA. A pin is a regular file, not a symlink, of exactly one
+# line `VERSION SHA256`: any other pin STOPS the build and --print-runner, and never falls back to the literals. The
+# download URL comes from the version through one template (runner_url), for the literal and a pin alike. All three
+# are resolved once, before the agent check; the step under the lock gets them as arguments and reads neither the
+# pin nor the clock, so a build across midnight still uses one date for every name and both logs.
+# --print-runner prints `host pin V (release literal L)` or `release literal L (no host pin)`. It takes no lock,
+# calls no tart and runs while the agent is enabled.
+# A build holds the runner lock for its whole run (so runscaler cannot start), refuses while the agent is enabled
+# (before the lock and again under it), and boots the build VM only through real-run (the wall's flags). The configured
+# image name never exists half-built: the work happens in gold-<date>, which is cloned to the final name only after a
+# clean stop, then deleted. Any gold-* left by an earlier run is stopped and deleted at the start and at the end. Its
+# output (the stage's verdict table and census among it) is also appended to LOGDIR/golden-<yyyymmdd>.log. INT, TERM
+# and HUP end the build through `exit`, so that cleanup runs; tee -i lets a Ctrl-C's cleanup lines into the log too.
+# The build VM's console log is LOGDIR/golden-<yyyymmdd>-vm.log. It stops BEFORE `tart pull` when the host's macOS
+# major is below BASE_MACOS_MAJOR (the base image's; a guest newer than the host does not boot).
 # Its last step before `tart stop` is the eMudhra stage, bin/golden-emudhra of the same tree (docs/design.md, "The
 # eMudhra stage"): the build STOPS when the stage exits non-zero, so no image is made. The runner tarball stays in the
 # guest until that stage (it compares bin/ and externals/ with it) and is removed right after it. Then `sync` in the
@@ -19,31 +29,78 @@ REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
 REALRUN=/Users/ci/bin/real-run
 BASE=ghcr.io/cirruslabs/macos-golden-gate-base@sha256:5302a9ea6cd68c059d00fa253fe75c8ebdf4e0dc8c45d4e136ecc6e7a4c02b70
 BASE_MACOS_MAJOR=27   # the macOS major of BASE (a new BASE moves both lines, in one release)
-RUNNER_URL=https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-osx-arm64-2.338.2.tar.gz
 RUNNER_SHA=25a065af409ffa317ab4d5a3b614dd15fc9c40f2172bc1b35a1b1258e919a388
-RUNNER_VERSION=2.338.2
+RUNNER_VERSION=2.338.2   # with RUNNER_SHA, the release literal; a host pin wins over both (see above)
 LOCK=/tmp/runner.lock
 FLAG=/Users/ci/.config/runner/enabled
 LOGDIR=/Users/ci/Library/Logs/mac-runner
+STATEDIR=/Users/ci/.local/state/runner-updater
+PINDIR=$STATEDIR/pin   # the updater's host pins, one file per image family; this one's is mac-golden
 FLOOR_GIB=200     # base + golden image ~50 GiB, one rebuild generation ~50, two jobs' growth ~40, and the shim's 100
 DISK_GB=90        # the base image has ~7 GiB free; jobs need room (plan: >= 25 GB free after provisioning)
 
 die() { print -r -- "golden-build: STOP $*"; exit 1 }
 say() { print -r -- "golden-build: $(date '+%H:%M:%S') $*" }
+runner_url() { REPLY=https://github.com/actions/runner/releases/download/v$1/actions-runner-osx-arm64-$1.tar.gz }
+isdate() { # a real date: YYYYMMDD that date reads back as the same date (as golden-prune's isgolden)
+  [[ $1 =~ '^[0-9]{8}$' ]] && [[ $(/usr/bin/env -i LC_ALL=C /bin/date -j -f %Y%m%d +%Y%m%d $1 2>/dev/null) == $1 ]]
+}
+isversion() { [[ $1 =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && $1 == "$MATCH" ]] }
+issha() { [[ $1 =~ '^[0-9a-f]{64}$' && $1 == "$MATCH" ]] }
+pin() { # -> 0 and reply=(VERSION SHA) for a good host pin; 1 when there is none; a bad pin STOPS
+  local f=$PINDIR/mac-golden c
+  [[ -e $f || -L $f ]] || return 1
+  [[ -f $f && ! -L $f && -r $f ]] || die "host pin $f is not one line 'VERSION SHA256'"
+  c=$(/bin/cat -- $f && print -rn -- .) || die "host pin $f is not one line 'VERSION SHA256'"
+  c=${${c%.}%$'\n'}   # the whole file, less one final newline
+  [[ $c =~ '^([0-9]+\.[0-9]+\.[0-9]+) ([0-9a-f]{64})$' && $c == "$match[1] $match[2]" ]] \
+    || die "host pin $f is not one line 'VERSION SHA256'"   # the compare catches what the regex cannot see (a NUL)
+  reply=($match[1] $match[2])
+}
+
 if [[ ${1-} != --locked ]]; then
+  usage='golden-build [--date YYYYMMDD] | golden-build --print-runner'
+  date= print_runner=0
+  if (( $# == 1 )) && [[ $1 == --print-runner ]]; then print_runner=1
+  elif (( $# == 2 )) && [[ $1 == --date ]]; then
+    isdate $2 || die "usage: --date takes a real date YYYYMMDD, not '$2'"
+    date=$2
+  elif (( $# )); then die "usage: $usage"
+  fi
+  if pin; then ver=$reply[1] sha=$reply[2] src=host-pin
+  else ver=$RUNNER_VERSION sha=$RUNNER_SHA src=release-literal
+  fi
+  if (( print_runner )); then
+    if [[ $src == host-pin ]]; then print -r -- "host pin $ver (release literal $RUNNER_VERSION)"
+    else print -r -- "release literal $RUNNER_VERSION (no host pin)"
+    fi
+    exit 0
+  fi
+  if [[ -z $date ]]; then
+    date=$(date +%Y%m%d)
+    isdate $date || die "cannot read today's date (date printed '$date')"
+  fi
   [[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): run runner-disable first"
   [[ -d $LOGDIR ]] || die "no log folder $LOGDIR: run the install line again"
-  log=$LOGDIR/golden-$(date +%Y%m%d).log
-  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked 2>&1 | /usr/bin/tee -i -a $log
+  log=$LOGDIR/golden-$date.log
+  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked $date $ver $sha $src 2>&1 | /usr/bin/tee -i -a $log
   rc=$pipestatus[1]
   (( rc != 75 )) || die "the runner lock is held: runscaler, an install, wall-check or another golden-build is running"
   print -r -- "golden-build: this output is also in $log"
   exit $rc
 fi
-# under the lock: the agent may have been enabled between the first check and the lock
+# under the lock, with what the first process resolved: --locked DATE VERSION SHA SOURCE (checked again here)
+(( $# == 5 )) || die "usage: --locked DATE VERSION SHA SOURCE is golden-build's own step: run golden-build without it"
+isdate $2 || die "--locked: not a real date: '$2'"
+isversion $3 || die "--locked: not a runner version: '$3'"
+issha $4 || die "--locked: not a sha256: '$4'"
+[[ $5 == (host-pin|release-literal) ]] || die "--locked: the source is not host-pin or release-literal: '$5'"
+ver=$3 sha=$4 src=${5/-/ }
+runner_url $ver; url=$REPLY
+# the agent may have been enabled between the first check and the lock
 [[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): run runner-disable first"
 
-DATE=$(date +%Y%m%d) GOLD=gold-$(date +%Y%m%d) OUT=liveapp-mac-golden-$(date +%Y%m%d)
+DATE=$2 GOLD=gold-$2 OUT=liveapp-mac-golden-$2
 tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }   # tart set --disk-size runs diskutil
 gexec() { tart exec $GOLD "$@" }   # a command inside the build VM, as its admin user
 clean() { local vm
@@ -60,7 +117,7 @@ trap 'trap "" PIPE; exit 130' INT
 trap 'trap "" PIPE; exit 143' TERM
 trap 'trap "" PIPE; exit 129' HUP
 
-say "start: $OUT from $BASE"
+say "start: $OUT from $BASE, runner $ver ($src)"
 (( ${${(f)"$(tart list --source local -q)"}[(Ie)$OUT]} == 0 )) || die "$OUT already exists: delete it or wait a day"
 host_major=$(sw_vers -productVersion | cut -d. -f1)
 [[ $host_major =~ '^[0-9]+$' ]] || die "cannot read this Mac's macOS version"
@@ -93,10 +150,10 @@ svc=$(gexec networksetup -listallnetworkservices | /usr/bin/sed -n '2p')
 gexec sudo networksetup -setdnsservers "$svc" 1.1.1.1 8.8.8.8 || die "setting DNS failed"
 say "DNS on '$svc': $(gexec networksetup -getdnsservers "$svc" | tr '\n' ' ')"
 
-gexec sh -c "curl -fsSL --max-time 600 -o /tmp/runner.tgz $RUNNER_URL && echo '$RUNNER_SHA  /tmp/runner.tgz' | shasum -a 256 -c - && rm -rf /Users/admin/actions-runner && mkdir -p /Users/admin/actions-runner && tar -xzf /tmp/runner.tgz -C /Users/admin/actions-runner" \
-  || die "runner $RUNNER_VERSION download/check/unpack failed"
+gexec sh -c "curl -fsSL --max-time 600 -o /tmp/runner.tgz $url && echo '$sha  /tmp/runner.tgz' | shasum -a 256 -c - && rm -rf /Users/admin/actions-runner && mkdir -p /Users/admin/actions-runner && tar -xzf /tmp/runner.tgz -C /Users/admin/actions-runner" \
+  || die "runner $ver download/check/unpack failed"
 v=$(gexec /Users/admin/actions-runner/config.sh --version) || die "runner --version failed"
-[[ $v == $RUNNER_VERSION ]] || die "runner version $v, want $RUNNER_VERSION"
+[[ $v == "$ver" ]] || die "runner version $v, want $ver"
 say "runner $v"
 
 gexec sh -c 'HOMEBREW_NO_AUTO_UPDATE=1 /opt/homebrew/bin/brew install coreutils' > /dev/null || die "brew install coreutils failed"
@@ -118,7 +175,7 @@ gfree=$(gexec df -k / | awk 'NR==2 {print int($4/1048576)}')
 (( gfree >= 25 )) || die "guest free disk ${gfree} GB < 25"
 say "guest free ${gfree} GiB"
 
-/bin/zsh -f ${0:A:h}/golden-emudhra $GOLD /tmp/runner.tgz $RUNNER_SHA || die "the eMudhra stage failed (above): no image was made"
+/bin/zsh -f ${0:A:h}/golden-emudhra $GOLD /tmp/runner.tgz $sha || die "the eMudhra stage failed (above): no image was made"
 gexec rm -f /tmp/runner.tgz || die "removing the runner tarball from the guest failed"
 say "removed the runner tarball from the guest"
 gexec /bin/sync || die "sync in the guest failed: no image was made"
