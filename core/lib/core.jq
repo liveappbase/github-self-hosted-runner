@@ -22,16 +22,24 @@ def now_in($prog):
 def proc_ok: . == null or ((type == "object") and (.pid | type) == "number" and .pid >= 1 and .pid == (.pid | floor)
                            and (.start | type) == "number");
 
+# a log position {inode, offset, sha}: the file's inode (a string or a number), the byte offset (a whole number >= 0),
+# the sha of the 64 bytes before it
+def position_ok: type == "object" and ((.inode | type) == "string" or (.inode | type) == "number")
+                 and (.offset | type) == "number" and .offset >= 0 and .offset == (.offset | floor)
+                 and (.sha | type) == "string";
+
 def facts_in($prog):
   need($prog; "facts") as $f
   | if ($f | length) == 1 and ($f[0] | type) == "object" and $f[0].format == facts_format then $f[0]
     else error("\($prog): facts: not one JSON object of format \(facts_format)") end
   | if .proc == null or ((.proc | type) == "object" and (.proc.before | proc_ok) and (.proc.after | proc_ok)) then .
     else error("\($prog): facts: a proc read is not null or {pid: a positive integer, start: a number}: \(.proc | tojson)") end
-  # restart: the updater's own restart of runscaler in this interval, {from: P, to: Q} (two process reads), or null
+  # restart: the updater's own restart of runscaler in this interval, {from: P, to: Q, stopped: the position captured
+  # once P had exited, before Q started}, or null
   | if .restart == null or ((.restart | type) == "object" and .restart.from != null and .restart.to != null
-                            and (.restart.from | proc_ok) and (.restart.to | proc_ok)) then .
-    else error("\($prog): facts: restart is not null or {from: a process read, to: a process read}: \(.restart | tojson)") end;
+                            and (.restart.from | proc_ok) and (.restart.to | proc_ok) and (.restart.stopped | position_ok))
+    then .
+    else error("\($prog): facts: restart is not null or {from: a process read, to: a process read, stopped: a position}: \(.restart | tojson)") end;
 
 # an EMPTY state file is a fresh state
 def state_in($prog):

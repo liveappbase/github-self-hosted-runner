@@ -97,8 +97,10 @@ def fam(provider='tart', sets=('mac-a',), version='2.339.0', image='img-new', cl
                           'closed_at': P['start'] if closed_at is None else closed_at}}
 
 
-def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0, restart=None):
-    """restart: (FROM, TO), the glue's fact that it restarted runscaler from process FROM to TO in this interval."""
+def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, lines=None, offset=0, restart=None,
+          inode='7'):
+    """restart: (FROM, TO, STOPPED), the glue's fact that it restarted runscaler from process FROM to TO in this
+    interval, STOPPED the log position it captured once FROM had exited, before it started TO."""
     after = before if after is None else after
     if lines is None:
         lines = {}
@@ -106,27 +108,41 @@ def facts(families, before=P, after=None, continuous=True, installed=INSTALLED, 
             if f['candidate']:
                 lines.update(f['candidate']['lines'])
     out = {'format': 1, 'host': 'studio', 'sets': sorted(lines), 'proc': {'before': before, 'after': after},
-           'position': {'inode': '7', 'offset': offset, 'sha': 'x'}, 'continuous': continuous,
+           'position': {'inode': inode, 'offset': offset, 'sha': 'x'}, 'continuous': continuous,
            'config': {'installed': installed, 'lines': lines}, 'families': families}
     if restart is not None:
-        out['restart'] = {'from': restart[0], 'to': restart[1]}
+        out['restart'] = {'from': restart[0], 'to': restart[1], 'stopped': restart[2]}
     return out
 
 
 class Run:
-    """Passes of the glue: each pass gives the text since the last one; the state goes from pass to pass."""
+    """Passes of the glue: each pass gives the text since the last one; the state goes from pass to pass. The captured
+    position follows the text: the log file's inode (a pass may name a new one: the log rotated) and its byte offset."""
 
     def __init__(self, test, families=None, opened=True):
         self.test, self.families, self.state, self.now = test, families or {'fx': fam()}, [], NOW
+        self.inode, self.offset = '7', 0
         if opened:
             self.go()
 
     def go(self, log='', healthz=(), now=None, families=None, **kw):
         self.now = now or (self.now + 600)
         fams = families or self.families
+        kw.setdefault('inode', self.inode)
+        kw.setdefault('offset', self.offset + len(log.encode('utf-8')))
         out = ok(self.test, 'r1', state=self.state, log=log, healthz=list(healthz), facts=facts(fams, **kw), now=self.now)
-        self.state = out['state']
+        self.state, self.inode, self.offset = out['state'], kw['inode'], kw['offset']
         return out
+
+    def stopped(self, p_text, inode=None):
+        """The position the glue captures once P has exited: after P's text of this interval."""
+        return {'inode': inode or self.inode, 'offset': self.offset + len(p_text.encode('utf-8')), 'sha': 's'}
+
+    def restart(self, p_text, q_text, frm=P, to=Q, stopped=None, **kw):
+        """A pass after the updater's own restart: the glue stopped P, captured `stopped` once P had exited, started Q
+        and saw it running. The text: P's up to `stopped`, then Q's."""
+        kw.setdefault('before', to)
+        return self.go(p_text + q_text, restart=(frm, to, stopped or self.stopped(p_text)), **kw)
 
     def fx(self, log='', **kw):
         return self.go(log, **kw)['families']['fx']
@@ -495,21 +511,31 @@ class Ownership(unittest.TestCase):
 R = {'pid': 6161, 'start': 1793526000}             # a third runscaler
 
 
+def qstart(sec):
+    """Q's first records (the Linux host's real shape, hz-cut.log:83-91)."""
+    return charm(t(sec), 'INFO', None, 'Starting scale sets', [('count', 2), ('concurrent', 3)])
+
+
 class OwnRestart(unittest.TestCase):
-    """The updater's own restart is no gap (PLAN D6: its own switches leave no gap; another family's window does not end
-    X's evidence; Codex r1 F10, Opus r1 F10, G1): with facts.restart = {from: P, to: Q} matching the state's boundary
-    process and this pass's process, every family the restart did not switch keeps its counts, its NOT SERVING and its
-    KEEP clock while Q's config still names its candidate; the interval's own text counts neither way. A foreign
-    restart still makes a gap."""
+    """The updater's own restart is no gap, and nothing in it is dropped (PLAN D6, OWNERSHIP BY POSITION; Opus r2 F1,
+    Codex r2 F3): the glue stops P itself, waits until P has exited, captures that position (`stopped`), starts Q and
+    sees it running; the next pass's facts.restart = {from: P, to: Q, stopped}. Text from the state's boundary to
+    `stopped` is P's (P's held record is complete: read once, with P's provenance), text after it is Q's. The restart is
+    HOST-wide (the Studio runs one runscaler for every family): every family whose window was open keeps its counts,
+    its pending run and its KEEP clock while Q's config still names its candidate; a family the restart switched opens
+    its window at `stopped`. A `restart` whose from/to do not match the process reads, or whose `stopped` is not
+    between the boundary and `position` on the boundary's file or the one it rotated to, is a foreign restart: a gap."""
 
     def setUp(self):
+        # one runscaler: fx on mac-a is under observation; the updater switches fy (mac-b) to a new candidate
         self.fams = {'fx': fam(sets=('mac-a',)), 'fy': fam(sets=('mac-b',), image='img-y')}
-        # fy's switch: a new candidate, its line in the config Q runs
         self.fy2 = {'fx': self.fams['fx'], 'fy': fam(sets=('mac-b',), image='img-y2', version='2.340.0',
                                                        closed_at=NOW + 1800)}
-        # the interval: P's tail and Q's head, with a failure and a success on fx's set that count neither way
-        self.interval = (failed(50, OTHER) + removed(55, 'runner-0000cafe', 'job-completed')
-                         + charm(t(60), 'INFO', None, 'Starting scale sets', [('count', 2)]) + tail(300))
+
+    def q(self, **kw):
+        """Q's facts: the config Q runs names fx's candidate and fy's new one, installed before Q started."""
+        return dict(dict(families=self.fy2, installed=Q['start'] - 60, lines={'mac-a': 'img-new', 'mac-b': 'img-y2'}),
+                    **kw)
 
     def before(self):
         r = Run(self, self.fams)                        # both windows open at P
@@ -517,58 +543,277 @@ class OwnRestart(unittest.TestCase):
              + failed(30, OTHER) + failed(35, OTHER) + scaling(40))
         return r, dict(r.state['families']['fx'])
 
-    def restart(self, r, restart=(P, Q), lines=None):
-        return r.go(self.interval, families=self.fy2, before=Q, installed=Q['start'] - 60, restart=restart,
-                    lines=lines or {'mac-a': 'img-new', 'mac-b': 'img-y2'})
-
-    def test_g1_fx_keeps_since_counts_and_failures_across_fys_restart(self):
+    def test_g1_fx_keeps_its_window_across_fys_restart(self):
         r, fx0 = self.before()
         self.assertEqual((fx0['succeeded'], len(fx0['sets']['mac-a']['fails'])), (1, 4))
-        out = self.restart(r)
+        out = r.restart(removed(55, 'runner-0000cafe', 'job-completed'), qstart(60) + scaling(70, 'mac-b'), **self.q())
         fx1 = out['state']['families']['fx']
-        for k in ('open', 'since', 'gaps', 'succeeded', 'failed', 'sets'):
+        for k in ('open', 'since', 'gaps'):
             self.assertEqual(fx1[k], fx0[k], k)
-        # fy's new window opens at this boundary
+        self.assertEqual((fx1['succeeded'], len(fx1['sets']['mac-a']['fails'])), (2, 4))   # P's job completed counts
         fy1 = out['state']['families']['fy']
         self.assertEqual((fy1['open'], fy1['since'], fy1['version']), (True, r.now, '2.340.0'))
-        # Q's own text counts from here: one more failure on mac-a makes the third since the proof at 25
-        out = r.go(failed(400, OTHER) + tail(600), families=self.fy2, before=Q, installed=Q['start'] - 60,
-                   lines={'mac-a': 'img-new', 'mac-b': 'img-y2'})
-        self.assertEqual(out['families']['fx']['verdict'], 'rollback')
 
     def test_g1_the_keep_clock_stays(self):
         r, fx0 = self.before()
-        self.restart(r)
-        k = ok(self, 'keep', state=r.state, facts=facts(self.fy2, before=Q, installed=Q['start'] - 60,
-                                                         lines={'mac-a': 'img-new', 'mac-b': 'img-y2'}),
-               now=fx0['since'] + 72 * 3600)['families']['fx']
-        self.assertEqual(k['verdict'], 'accept', k)
+        r.restart(removed(55, 'runner-0000cafe', 'job-completed'), qstart(60) + scaling(70, 'mac-b'), **self.q())
+        k = ok(self, 'keep', state=r.state, facts=facts(**self.q(before=Q)), now=fx0['since'] + 72 * 3600)
+        self.assertEqual(k['families']['fx']['verdict'], 'accept', k)
+
+    def test_ps_text_up_to_stopped_counts_for_fx(self):
+        # P's tail holds the third failure since the proof at 25
+        r, _ = self.before()
+        r.restart(failed(50, OTHER), qstart(60) + scaling(70, 'mac-b'), **self.q())
+        out = r.go(tail(300, 'mac-b'), **self.q(before=Q))
+        self.assertEqual([f['t'] for f in out['families']['fx']['failures']], [t(30), t(35), t(50)])
 
     def test_control_the_same_text_with_no_restart_fact_is_a_gap(self):
-        r, fx0 = self.before()
-        out = self.restart(r, restart=None)
+        r, _ = self.before()
+        out = r.go(failed(50, OTHER) + qstart(60) + scaling(70, 'mac-b'), **self.q(before=Q))
         fx1 = out['state']['families']['fx']
         self.assertEqual((fx1['gaps'], fx1['since'], fx1['succeeded'], counted(out)), (1, r.now, 0, 0))
+        self.assertEqual(r.fx(tail(300, 'mac-b'), **self.q(before=Q))['verdict'], 'none')
+
+    def test_qs_text_after_stopped_counts_for_fx(self):
+        r, _ = self.before()
+        r.restart('', qstart(60) + failed(400, OTHER) + scaling(410, 'mac-b'), **self.q())
+        out = r.go(tail(600, 'mac-b'), **self.q(before=Q))
+        self.assertEqual([f['t'] for f in out['families']['fx']['failures']], [t(30), t(35), t(400)])
+
+    def test_the_switched_family_counts_qs_text_from_stopped(self):
+        # P's tail holds a benign multi-line record (its value lines are written with a 3-byte character): `stopped` is
+        # a BYTE offset of the text. fy's new candidate runs from Q on, so its window opens at `stopped`: Q's first
+        # record, a job completed on mac-b, is fy's, and so are Q's two failures, which the third in the next pass
+        # joins (R1)
+        p_tail = failed(50, right_after('runner-00000003', BENIGN)) + removed(55, 'runner-0000cafe', 'job-completed')
+        self.assertNotEqual(len(p_tail), len(p_tail.encode('utf-8')))
+        q_text = (removed(90, 'runner-0000f00d', 'job-completed', set_='mac-b') + failed(100, OTHER, 'mac-b')
+                  + failed(110, OTHER, 'mac-b') + scaling(115))
+        r, _ = self.before()
+        out = r.restart(p_tail, q_text, **self.q())
+        self.assertEqual((out['state']['families']['fy']['succeeded'], out['families']['fy']['since']), (1, r.now))
+        out = r.go(failed(120, OTHER, 'mac-b') + tail(300, 'mac-b'), **self.q(before=Q))
+        self.assertEqual([f['t'] for f in out['families']['fy']['failures']], [t(100), t(110), t(120)])
+        # control: the same text in P's part is of fy's old image: it counts for no window
+        r, _ = self.before()
+        out = r.restart(p_tail + q_text, '', **self.q())
+        self.assertEqual(out['state']['families']['fy']['succeeded'], 0)
+        out = r.go(failed(120, OTHER, 'mac-b') + tail(300, 'mac-b'), **self.q(before=Q))
+        self.assertEqual(out['families']['fy']['verdict'], 'none')
+
+    def test_host_wide_a_family_in_progress_keeps_counts_clock_and_pending(self):
+        # liveapp-6c: the Studio's ONE runscaler. fy switches; fx has a success, two failures read and a third in P's
+        # tail, not settled at `stopped`: fx keeps its counts, its KEEP clock and its pending run, then R1 comes
+        r = Run(self, self.fams)
+        since = r.now
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + scaling(25, 'mac-b'))
+        out = r.restart(failed(30, OTHER), qstart(60) + scaling(70, 'mac-b'), **self.q())
+        fx1 = out['families']['fx']
+        self.assertEqual((fx1['verdict'], fx1['open'], fx1['since'], fx1['gaps']), ('none', True, since, 0))
+        self.assertEqual(out['state']['families']['fx']['succeeded'], 1)
+        self.assertEqual((fx1['pending']['set'], fx1['pending']['failures']), ('mac-a', 3), fx1)
+        k = ok(self, 'keep', state=r.state, facts=facts(**self.q(before=Q)), now=since + 72 * 3600)['families']['fx']
+        self.assertEqual(k['verdict'], 'observe', k)
+        self.assertEqual(r.fx('', **self.q(before=Q))['verdict'], 'rollback')
+        # control: P's tail also holds the job completed in the third failure's second
+        r = Run(self, self.fams)
+        r.go(removed(5, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + scaling(25, 'mac-b'))
+        r.restart(failed(30, OTHER) + removed(30, 'runner-0000cafe', 'job-completed'), qstart(60), **self.q())
+        self.assertEqual(r.fx('', **self.q(before=Q))['verdict'], 'none')
 
     def test_a_foreign_restart_is_a_gap(self):
-        for rs in ((P, R), (R, Q), (Q, P)):
+        for frm, to in ((P, R), (R, Q), (Q, P)):
+            r, _ = self.before()
+            fx1 = r.restart(failed(50, OTHER), qstart(60), frm=frm, to=to, **self.q(before=Q))['state']['families']['fx']
+            self.assertEqual((fx1['gaps'], fx1['since']), (1, r.now), (frm, to))
+
+    def test_a_stopped_not_between_the_boundary_and_the_position_is_a_gap(self):
+        p_tail, q_text = failed(50, OTHER), qstart(60) + scaling(70, 'mac-b')
+        cases = {
+            'before the boundary': lambda r: dict(r.stopped(''), offset=r.offset - 1),
+            'past the position': lambda r: dict(r.stopped(p_tail + q_text), offset=r.stopped(p_tail + q_text)['offset'] + 1),
+            'another file': lambda r: r.stopped(p_tail, inode='9'),
+        }
+        for name, st in cases.items():
+            r, _ = self.before()
+            fx1 = r.restart(p_tail, q_text, stopped=st(r), **self.q())['state']['families']['fx']
+            self.assertEqual((fx1['gaps'], fx1['since']), (1, r.now), name)
+        # control: at the boundary itself, and at the position itself, it is between
+        for name, st in (('at the boundary', lambda r: r.stopped('')),
+                         ('at the position', lambda r: r.stopped(p_tail + q_text))):
             r, fx0 = self.before()
-            fx1 = self.restart(r, restart=rs)['state']['families']['fx']
-            self.assertEqual((fx1['gaps'], fx1['since']), (1, r.now), rs)
+            fx1 = r.restart(p_tail, q_text, stopped=st(r), **self.q())['state']['families']['fx']
+            self.assertEqual((fx1['gaps'], fx1['since']), (0, fx0['since']), name)
+
+    def test_a_text_that_is_not_the_boundary_to_the_position_or_not_continuous_is_a_gap(self):
+        r, _ = self.before()
+        p_tail, q_text = failed(50, OTHER), qstart(60)
+        # the offsets say 5 bytes more than the text holds: `stopped` cannot be placed in it
+        fx1 = r.restart(p_tail, q_text, offset=r.offset + len((p_tail + q_text).encode('utf-8')) + 5,
+                        **self.q())['state']['families']['fx']
+        self.assertEqual(fx1['gaps'], 1)
+        r, _ = self.before()
+        fx1 = r.restart(failed(50, OTHER), qstart(60), continuous=False, **self.q())['state']['families']['fx']
+        self.assertEqual(fx1['gaps'], 1)
+
+    def test_rotation_stopped_on_the_rotated_file(self):
+        # liveapp-6c: Q's first write rotates runner.log, so `stopped` is on the boundary's file (now runner.log.1) and
+        # `position` on the new one; the glue read across the rotation (continuous)
+        r, fx0 = self.before()
+        p_tail, q_text = failed(50, OTHER), qstart(60) + scaling(70, 'mac-b')
+        st = r.stopped(p_tail)
+        out = r.restart(p_tail, q_text, stopped=st, inode='8', offset=len(q_text.encode('utf-8')), **self.q())
+        self.assertEqual((out['state']['families']['fx']['gaps'], out['state']['families']['fx']['since']),
+                         (0, fx0['since']))
+        out = r.go(tail(300, 'mac-b'), **self.q(before=Q))
+        self.assertEqual([f['t'] for f in out['families']['fx']['failures']], [t(30), t(35), t(50)])
+        # P rotated it before it stopped: `stopped` is on the new file, as is `position`
+        r, fx0 = self.before()
+        p_old, p_new = failed(50, OTHER), failed(51, OTHER)
+        st = {'inode': '8', 'offset': len(p_new.encode('utf-8')), 'sha': 's'}
+        out = r.restart(p_old + p_new, q_text, stopped=st, inode='8', offset=len((p_new + q_text).encode('utf-8')),
+                        **self.q())
+        self.assertEqual(out['state']['families']['fx']['gaps'], 0)
+        # control: a `stopped` on neither the boundary's file nor the one it rotated to (at an offset that would place
+        # it at the end of P's tail on either)
+        r, _ = self.before()
+        out = r.restart(p_tail, q_text, stopped={'inode': '9', 'offset': 0, 'sha': 's'}, inode='8',
+                        offset=len(q_text.encode('utf-8')), **self.q())
+        self.assertEqual(out['state']['families']['fx']['gaps'], 1)
+
+    def test_rotation_a_stopped_past_the_rotated_files_part_or_a_position_past_the_text_is_a_gap(self):
+        p_tail, q_text = failed(50, OTHER), qstart(60) + scaling(70, 'mac-b')
+        r, _ = self.before()
+        st = dict(r.stopped(p_tail), offset=r.stopped(p_tail)['offset'] + 1)    # one byte past runner.log.1's end
+        out = r.restart(p_tail, q_text, stopped=st, inode='8', offset=len(q_text.encode('utf-8')), **self.q())
+        self.assertEqual(out['state']['families']['fx']['gaps'], 1)
+        # the position says the new file holds a byte more than the text does
+        r, _ = self.before()
+        n = len((p_tail + q_text).encode('utf-8'))
+        out = r.restart(p_tail, q_text, stopped={'inode': '8', 'offset': len(p_tail.encode('utf-8')) + 1, 'sha': 's'},
+                        inode='8', offset=n + 1, **self.q())
+        self.assertEqual(out['state']['families']['fx']['gaps'], 1)
+        # control: the new file holds all of the text, `stopped` at its start
+        r, _ = self.before()
+        out = r.restart('', p_tail + q_text, stopped={'inode': '8', 'offset': 0, 'sha': 's'}, inode='8',
+                        offset=len((p_tail + q_text).encode('utf-8')), **self.q())
+        self.assertEqual(out['state']['families']['fx']['gaps'], 0)
 
     def test_no_carry_when_qs_config_does_not_name_the_candidate(self):
-        r, fx0 = self.before()
-        fx1 = self.restart(r, lines={'mac-a': 'img-hand', 'mac-b': 'img-y2'})['state']['families']['fx']
+        r, _ = self.before()
+        fx1 = r.restart(failed(50, OTHER), qstart(60),
+                        **self.q(lines={'mac-a': 'img-hand', 'mac-b': 'img-y2'}))['state']['families']['fx']
         self.assertEqual((fx1['gaps'], fx1['open']), (1, False))
 
+    def test_a_window_q_does_not_run_is_judged_on_ps_text_before_it_closes(self):
+        # P's text holds fx's third failure and moves 120 s past it; Q runs a hand image on mac-a
+        r, _ = self.before()
+        out = r.restart(failed(50, OTHER) + scaling(200, 'mac-b'), qstart(300),
+                        **self.q(lines={'mac-a': 'img-hand', 'mac-b': 'img-y2'}))
+        fx1 = out['families']['fx']
+        self.assertEqual((fx1['verdict'], fx1['open']), ('rollback', False))
+        self.assertEqual([f['t'] for f in fx1['failures']], [t(30), t(35), t(50)])
+
+    def test_the_shims_refused_vms_pair_across_the_restart(self):
+        # P's last pass reads three refused VMs; P's tail holds their start failures: paired, not counted
+        def vm_refused(sec, vm):
+            return charm(t(sec), 'ERRO', 'mac-a', 'VM exited unexpectedly',
+                         [('name', vm), ('error', 'tart run %s --no-graphics: exit status 1: %s' % (vm, SHIM))])
+        r = Run(self, self.fams)
+        r.go(vm_refused(10, 'runner-00000001') + vm_refused(11, 'runner-00000002') + vm_refused(12, 'runner-00000003')
+             + scaling(13, 'mac-b'))
+        p_tail = ''.join(failed(20 + i, 'guest agent not ready on runner-0000000%d: context deadline exceeded' % (i + 1))
+                         for i in range(3))
+        r.restart(p_tail, qstart(300) + scaling(301, 'mac-b'), **self.q())
+        out = r.fx('', **self.q(before=Q))
+        self.assertEqual((out['verdict'], out['stops'][0]['stop']), ('stop', 'SHIM REFUSED'), out)
+
     def test_a_malformed_restart_fact_cannot_decide(self):
-        for bad in ({'from': P}, {'from': P, 'to': None}, {'from': {'start': 'x'}, 'to': Q}, 'P->Q', 7):
+        st = {'inode': '7', 'offset': 10, 'sha': 's'}
+        for bad in ({'from': P}, {'from': P, 'to': None, 'stopped': st}, {'from': {'start': 'x'}, 'to': Q, 'stopped': st},
+                    {'from': P, 'to': Q}, {'from': P, 'to': Q, 'stopped': None}, {'from': P, 'to': Q, 'stopped': 7},
+                    {'from': P, 'to': Q, 'stopped': dict(st, offset=-1)}, {'from': P, 'to': Q, 'stopped': dict(st, offset='10')},
+                    {'from': P, 'to': Q, 'stopped': dict(st, offset=1.5)}, {'from': P, 'to': Q, 'stopped': dict(st, inode=None)},
+                    {'from': P, 'to': Q, 'stopped': dict(st, sha=None)}, 'P->Q', 7):
             f = facts(self.fams, before=Q)
             f['restart'] = bad
             for prog in ('idle', 'r1', 'keep', 'status'):
                 rc, _, err = run(self, prog, state=[], log='', healthz=[], facts=f, now=NOW)
                 self.assertNotEqual(rc, 0, (prog, bad))
                 self.assertIn('%s: facts' % prog, err, (prog, bad))
+        # control: a well-formed fact decides
+        f = facts(self.fams, before=Q, restart=(P, Q, st))
+        for prog in ('idle', 'r1', 'keep', 'status'):
+            self.assertEqual(run(self, prog, state=[], log='', healthz=[], facts=f, now=NOW)[0], 0, prog)
+
+
+class OwnRestartReviewInputs(unittest.TestCase):
+    """The review's inputs, exactly: across the updater's own restart, P's text and P's held record are read with P's
+    provenance, so a proof of life in them is never lost (Opus r2 F1 A, B, C: Docker fx on linux-b observed, the updater
+    switches fy on linux-a) and a failure in them is never dropped (Codex r2 F3)."""
+
+    def setUp(self):
+        self.fams = {'fx': fam('docker', ('linux-b',)), 'fy': fam('docker', ('linux-a',), image='img-y')}
+        self.fy2 = {'fx': self.fams['fx'], 'fy': fam('docker', ('linux-a',), image='img-y2', version='2.340.0',
+                                                       closed_at=NOW + 1800)}
+        self.qkw = dict(families=self.fy2, installed=Q['start'] - 60, lines={'linux-b': 'img-new', 'linux-a': 'img-y2'})
+
+    def q_start(self, sec):
+        return (qstart(sec) + charm(t(sec), 'INFO', 'linux-b', 'refreshing token', [('githubConfigUrl', 'https://github.com/example-org')])
+                + charm(t(sec + 1), 'INFO', 'linux-a', 'refreshing token', [('githubConfigUrl', 'https://github.com/example-org')]))
+
+    def verdicts(self, p_last, p_tail):
+        r = Run(self, self.fams)
+        vs = [r.fx(p_last)['verdict']]
+        vs.append(r.restart(p_tail, self.q_start(900), **self.qkw)['families']['fx']['verdict'])
+        vs.append(r.fx(scaling(1100, 'linux-a') + scaling(1101, 'linux-a'), before=Q, **self.qkw)['verdict'])
+        vs.append(r.fx('', before=Q, **self.qkw)['verdict'])
+        return vs
+
+    def test_opus_r2_f1_a_the_unknown_runner_lines_in_ps_tail(self):
+        p_last = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
+                  + removed(26, 'runner-0000beef', 'exited', job=False, set_='linux-b') + scaling(27, 'linux-a'))
+        p_tail = (unknown(39, 'runner-0000beef', 'linux-b', 'started') + unknown(39, 'runner-0000beef', 'linux-b')
+                  + charm(t(45), 'INFO', 'linux-b', 'Shutting down runners', []))
+        self.assertEqual(self.verdicts(p_last, p_tail), ['none'] * 4)
+
+    def test_opus_r2_f1_b_a_same_second_proof_held_at_ps_last_pass(self):
+        p_last = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
+                  + failed(30, DOCKER_CREATE, 'linux-b') + removed(30, 'runner-0000cafe', 'job-completed', set_='linux-b'))
+        self.assertEqual(self.verdicts(p_last, charm(t(45), 'INFO', 'linux-b', 'Shutting down runners', [])), ['none'] * 4)
+
+    def test_opus_r2_f1_c_an_out_of_order_proof_in_ps_tail(self):
+        p_last = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
+                  + failed(30, DOCKER_CREATE, 'linux-b') + scaling(31, 'linux-a') + scaling(31, 'linux-a'))
+        p_tail = (removed(30, 'runner-0000cafe', 'job-completed', set_='linux-b')
+                  + charm(t(45), 'INFO', 'linux-b', 'Shutting down runners', []))
+        self.assertEqual(self.verdicts(p_last, p_tail), ['none'] * 4)
+
+    def test_control_d_no_proof_anywhere_rolls_back(self):
+        p_last = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
+                  + failed(30, DOCKER_CREATE, 'linux-b') + scaling(31, 'linux-a') + scaling(32, 'linux-a'))
+        self.assertIn('rollback', self.verdicts(p_last, charm(t(45), 'INFO', 'linux-b', 'Shutting down runners', [])))
+
+    def test_codex_r2_f3_a_held_same_second_proof_is_read_once_with_ps_provenance(self):
+        r = Run(self)
+        r.go(failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER) + removed(30, 'runner-0000beef', 'job-completed'))
+        out = r.restart('', '', installed=Q['start'] - 60)
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['succeeded']), ('none', 1))
+        self.assertEqual(r.fx('', before=Q, installed=Q['start'] - 60)['verdict'], 'none')
+
+    def test_codex_r2_f3_a_held_third_failure_is_not_dropped_and_keep_does_not_accept(self):
+        r = Run(self)
+        opened = r.now
+        r.go(removed(0, 'runner-0000beef', 'job-completed') + failed(10, OTHER) + failed(20, OTHER) + failed(30, OTHER))
+        out = r.restart('', '', installed=Q['start'] - 60)
+        self.assertEqual(out['families']['fx']['pending']['failures'], 3)
+        qf = facts(r.families, before=Q, installed=Q['start'] - 60)
+        self.assertEqual(ok(self, 'keep', state=r.state, facts=qf, now=opened + 74 * 3600)['families']['fx']['verdict'],
+                         'observe')
+        out = r.go('', before=Q, installed=Q['start'] - 60, now=NOW + 74 * 3600)
+        self.assertEqual((out['families']['fx']['verdict'], len(out['families']['fx']['failures'])), ('rollback', 3))
+        self.assertEqual(ok(self, 'keep', state=r.state, facts=qf, now=NOW + 74 * 3600)['families']['fx']['verdict'],
+                         'held')
 
 
 class Provenance(unittest.TestCase):

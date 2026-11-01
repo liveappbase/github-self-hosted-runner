@@ -61,15 +61,19 @@ returned unchanged, rc 0.
                                         a read that is not null and not {pid: a positive integer, start: a number}
                                         is rc != 0 on every program (it would prove ownership it does not have)
   "position": {"inode": "...", "offset": N, "sha": "..."},
-                                        the captured position (the sha of the 64 bytes before it)
+                                        the captured position: the log file's inode, the byte offset in it, the
+                                        sha of the 64 bytes before it
   "continuous": true | false,           the glue read the log from the state's boundary to the position with no
                                         loss: same file or the rotation followed, and the boundary's sha matched
-  "restart": {"from": {"pid": N, "start": EPOCH}, "to": {"pid": N, "start": EPOCH}} | null,
-                                        the updater's OWN restart: "between the state's boundary and this position,
-                                        I restarted runscaler from process `from` to process `to`" (r1.jq). The
-                                        glue sets it on the pass after it restarted runscaler itself (a switch, a
-                                        rollback, a RECOVER) and saw `to` running, else null or absent. Not null and
-                                        not two process reads: rc != 0 on every program
+  "restart": {"from": {"pid": N, "start": EPOCH}, "to": {"pid": N, "start": EPOCH},
+              "stopped": {"inode": "...", "offset": N, "sha": "..."}} | null,
+                                        the updater's OWN restart in this interval (r1.jq): the glue stopped
+                                        runscaler `from` itself, waited until it had exited, captured the log
+                                        position then (`stopped`, the shape of `position`: the inode, the byte
+                                        offset, the sha of the 64 bytes before it, checked by the glue as it checks
+                                        `position`), then started `to` and saw it running. Set on the pass after the
+                                        restart (a switch, a rollback, a RECOVER), else null or absent. Not null and
+                                        not two process reads and a position: rc != 0 on every program
   "config": {"installed": EPOCH, "lines": {"SET": "IMAGE", ...}},
                                         the config installed now and its install time (Studio: its mtime; the
                                         Linux host: the journaled `renamed` epoch)
@@ -94,20 +98,29 @@ returned unchanged, rc 0.
 
 **Ownership by position.** The captured position is a boundary of process P when `proc.before` and `proc.after` are
 the same P (pid and start), else it is ambiguous. The text between the state's boundary and this one belongs to P
-when both boundaries are P's and `continuous` is true; otherwise it is UNKNOWN: it counts neither way, and it is an
-EVIDENCE GAP for every family under observation (its R1 counts, NOT SERVING and the KEEP clock restart; the shim's
-unpaired refusals are dropped).
+when both boundaries are P's and `continuous` is true; across the updater's own restart it is P's up to `stopped` and
+Q's after it (below); otherwise it is UNKNOWN: it counts neither way, and it is an EVIDENCE GAP for every family under
+observation (its R1 counts, NOT SERVING and the KEEP clock restart; the shim's unpaired refusals are dropped).
 
-**The updater's own restart is no gap** (PLAN D6: its own switches leave no gap; another family's window does not end
-X's evidence). When `facts.restart` says the glue restarted runscaler from P to Q in this interval, P is the state's
-boundary process and Q this pass's, every open window of a family this restart did not switch (the same candidate
-window) stays open while Q's config still names its candidate: its counts and failures, its NOT SERVING and its KEEP
-clock stay. The interval's own text (P's tail, Q's start) counts neither way. A family the restart switched has a new
-window anyway. A foreign restart (no such fact, or a `from` or `to` that does not match the process reads) is a gap.
+**The updater's own restart is no gap, and nothing in it is dropped** (PLAN D6: its own switches leave no gap; another
+family's window does not end X's evidence). When `facts.restart` says the glue restarted runscaler from P to Q in this
+interval, P is the state's boundary process, Q this pass's, `continuous` is true and `stopped` lies between the
+boundary and `position`, the text is split at `stopped` by ownership: up to it is P's (P was the only runscaler and has
+exited, so P's held record is complete and is read once, with P's provenance: for every family whose window was open at
+the boundary), after it Q's. The restart is host-wide (one runscaler serves every family): every open window whose
+candidate Q's config still names stays open with its counts, failures, pending run, NOT SERVING and KEEP clock, and
+counts Q's text too; a window whose candidate Q does not run is judged on P's text and closes (a gap); a family whose
+candidate Q runs and whose window is not open (the family the restart switched) opens it at `stopped` and counts Q's
+text. `stopped` lies between when it is on the boundary's file and the text holds exactly `position.offset -
+boundary.offset` bytes of that file, or, when the log rotated in the interval (runscaler may rotate at Q's first
+write), when it is on the boundary's file within that file's part of the text, or on the new file at or before
+`position`. Offsets are bytes; the text is split at the character that starts there. Otherwise, or with no such fact,
+or a `from` or `to` that does not match the process reads, it is a foreign restart: a gap.
 
 **Provenance.** P runs the config `facts.config` when `config.installed < P.start` (whole seconds; equal is not
 proven). Family X's events count when the text is P's and P's config names X's candidate on every set of X. An
-evidence window opens at a boundary of P with provenance (the KEEP clock starts at `now`); text after it counts. A
+evidence window opens at a boundary of P with provenance (the KEEP clock starts at `now`); text after it counts. At the
+updater's own restart the window opens at `stopped` (the KEEP clock still starts at `now`). A
 pass whose P has no provenance closes the window; the next one with provenance opens a new one.
 
 **The log.** Records are runscaler's text format: `YYYY-MM-DD HH:MM:SS LEVEL [SET: ]MESSAGE key=value ...`,

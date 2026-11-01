@@ -162,6 +162,55 @@ def pending($pot):
              | {set: $s, failures: length, settled: ([.[] | select(.settled == true)] | length)}) // null
   end;
 
+# . = family evidence: a window opens (the KEEP clock starts at $now; counts and NOT SERVING start from zero)
+def open_at($now): .open = true | .since = $now | .sets = {} | .pending = null | .succeeded = 0 | .failed = 0
+                   | .canceled = 0 | .other = 0;
+
+# . = {obs, refused}: records $recs read for every family whose .[$flag] is true, by the pass of $seen. Each record
+# settles by its log time; a partial record (a short write, read after SETTLE quiet or at P's exit) is only what a
+# proof of life is, any other truncated record is unknown text
+def read($recs; $flag; $seen):
+  reduce $recs[] as $r (.;
+    ($r.t | lsec) as $sec
+    | .obs |= map_values(if .[$flag] then .ev |= settle_log($sec) else . end)
+    | if $r.set == null then .
+      else
+        .refused as $refused
+        | reduce (.obs | to_entries[] | select(.value[$flag] and any(.value.sets[]; . == $r.set)) | .key) as $f (.;
+            .obs[$f].provider as $prov
+            | ($r | classify($prov; $refused)
+               | if $r.partial == true and (.k != "completed" and .k != "start" and .k != "unknown") then {k: "none"}
+                 else . end) as $ev
+            | .obs[$f].ev |= apply($ev; $r.set; $r.t; $sec; $seen)
+            | if $ev.k == "refused" then .refused = (.refused + $ev.vms | unique)
+              elif $ev.k == "paired" then .refused -= $ev.vms
+              else . end)
+      end);
+
+# . = a text; $b = a byte offset in it -> the index of the character that starts there (jq slices strings by
+# character), or null when none does (inside a character, before the text or past it)
+def char_at($b):
+  . as $s
+  | [0, ($s | length)]
+  | until(.[0] >= .[1]; (((.[0] + .[1]) / 2) | floor) as $m
+                       | if ($s[:$m] | utf8bytelength) < $b then [$m + 1, .[1]] else [.[0], $m] end)
+  | .[0] as $i | if ($s[:$i] | utf8bytelength) == $b then $i else null end;
+
+# the updater's own restart: the byte offset of `stopped` ($st) in this pass's text of $n bytes, which runs from the
+# state's boundary ($bnd) to `position` ($pos), or null when it cannot be placed: on the boundary's file, the text holds
+# exactly the $pos.offset - $bnd.offset bytes of it; when the log rotated (the glue read across it: continuous), the
+# text is the boundary's file to its end and then the new file to `position`, and `stopped` is on one of the two (on
+# the boundary's file, before that file's part of the text ends). Outside the text: null (char_at)
+def stop_offset($bnd; $pos; $st; $n):
+  if ([$bnd.offset, $pos.offset, $st.offset] | all(type == "number") | not) then null
+  elif $bnd.inode == $pos.inode then
+    (if $st.inode == $bnd.inode and $n == $pos.offset - $bnd.offset then $st.offset - $bnd.offset else null end)
+  elif $pos.offset > $n then null
+  elif $st.inode == $bnd.inode then
+    (if $st.offset - $bnd.offset <= $n - $pos.offset then $st.offset - $bnd.offset else null end)
+  elif $st.inode == $pos.inode then $n - ($pos.offset - $st.offset)
+  else null end;
+
 def ns_read($s):
   ([.scale_sets[]? | select(.name == $s)] | .[0]) as $x
   | $x != null and $x.ready == true and ($x.idle // 0) >= 1 and ($x.busy // 0) == 0
@@ -177,65 +226,75 @@ C::now_in("r1") as $now
     (if C::same_proc($facts.proc.before; $facts.proc.after) then $facts.proc.before else null end) as $owner
     | ($state.boundary.owner // null) as $prev
     | (C::same_proc($prev; $owner) and $facts.continuous == true) as $owned
-    # the updater's own restart (PLAN D6: its own switches leave no gap): the glue says it restarted runscaler from the
-    # state's boundary process to this pass's process in this interval. A restart fact that does not match both is
-    # a foreign restart: a gap like any other
+    # the updater's own restart (PLAN D6: its own switches leave no gap, and the text is owned by position): the glue
+    # stopped the state's boundary process P, captured `stopped` once P had exited, then started this pass's process
+    # Q. Text up to `stopped` is P's, after it Q's. One runscaler serves every family, so the restart is host-wide. A
+    # restart fact whose from/to do not match the process reads, or whose `stopped` cannot be placed between the
+    # boundary and `position`, is a foreign restart: a gap like any other
     | ($facts.restart // null) as $rs
-    | ((C::same_proc($prev; $owner) | not) and $rs != null and C::same_proc($rs.from; $prev)
-       and C::same_proc($rs.to; $owner)) as $own_restart
+    | (if (C::same_proc($prev; $owner) | not) and $rs != null and C::same_proc($rs.from; $prev)
+          and C::same_proc($rs.to; $owner) and $facts.continuous == true
+       then stop_offset($state.boundary.position; $facts.position; $rs.stopped; $log | utf8bytelength) as $b
+            | if $b == null then null else ($log | char_at($b)) end
+       else null end) as $split
+    | ($split != null) as $own_restart
     | ($facts.families // {}) as $fams
-    # each family with a candidate: its evidence (fresh for a new window), provenance now, counting this interval,
-    # or carried across the updater's own restart (the window stays open; the interval's text counts neither way)
+    # each family with a candidate: its evidence (fresh for a new window) and provenance now (this pass's process)
     | ($fams | with_entries(select(.value.candidate != null)
         | .key as $f | .value as $fam
         | ($state.families[$f] // null) as $old
         | (if C::same_window($old; $fam.candidate) then $old else fresh($fam.candidate) end) as $ev
-        | C::runs_candidate($owner; $facts.config; $fam) as $prov
-        | .value = {ev: $ev, prov: $prov, counting: ($ev.open and $owned and $prov),
-                    carried: ($ev.open and $own_restart and $prov), provider: $fam.provider, sets: $fam.sets})) as $obs
-    # an open window that neither counts this interval nor is carried across the updater's own restart: an evidence
-    # gap. It closes the window; the window that opens again starts its counts, NOT SERVING and the KEEP clock from zero
-    | ($obs | map_values(if .ev.open and (.counting | not) and (.carried | not) then .ev |= (.gaps += 1 | .open = false)
-                         else . end)) as $obs
-    # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
-    # (it may yet grow); once the log has been quiet for SETTLE it is read as it is. runscaler writes a record with one
-    # write, so a held text still partial then is a short write (a full disk): its partial record counts only as a
-    # proof of life (Codex r2 F2, Opus r2 F4: a partial line must not hold R1 for ever)
-    | (if $owned then
-         ($state.carry // "") as $c0
-         | if $log == "" and $c0 != "" and ($state.carry_at | type) == "number" and $now - $state.carry_at >= SETTLE
-           # read now, as of the pass that held it unchanged
-           then ($c0 | L::tokenize_final) + {carry_at: null, seen: $state.carry_at}
-           else ($c0 + $log | L::tokenize) as $t
-                | $t + {carry_at: (if $t.carry == "" then null elif $t.carry == $c0 then ($state.carry_at // $now)
-                                   else $now end), seen: $now}
-           end
-       else {records: [], carry: "", carry_at: null, seen: $now} end) as $tok
-    | (reduce $tok.records[] as $r ({obs: $obs, refused: (if $owned then ($state.refused // []) else [] end)};
-         ($r.t | lsec) as $sec
-         | .obs |= map_values(if .counting then .ev |= settle_log($sec) else . end)
-         | if $r.set == null then .
-           else
-             .refused as $refused
-             | reduce (.obs | to_entries[] | select(.value.counting and any(.value.sets[]; . == $r.set)) | .key) as $f (.;
-                 .obs[$f].provider as $prov
-                 # a partial record (a short write, read after SETTLE quiet) is only what a proof of life is; any
-                 # other truncated record is unknown text
-                 | ($r | classify($prov; $refused)
-                    | if $r.partial == true and (.k != "completed" and .k != "start" and .k != "unknown") then {k: "none"}
-                      else . end) as $ev
-                 | .obs[$f].ev |= apply($ev; $r.set; $r.t; $sec; $tok.seen)
-                 | if $ev.k == "refused" then .refused = (.refused + $ev.vms | unique)
-                   elif $ev.k == "paired" then .refused -= $ev.vms
-                   else . end)
-           end)) as $done
+        | .value = {ev: $ev, prov: C::runs_candidate($owner; $facts.config; $fam), provider: $fam.provider,
+                    sets: $fam.sets})) as $obs
+    | (if $own_restart then
+         # P's text: from the state's boundary to `stopped`, its held record first. P has exited, so it is all there:
+         # read it whole, once, for every family whose window was open at the boundary (P ran its candidate)
+         ((($state.carry // "") + $log[:$split]) | L::tokenize_final) as $tp
+         | ($log[$split:] | L::tokenize) as $tq
+         | {obs: ($obs | map_values(.p = .ev.open)), refused: ($state.refused // [])}
+         | read($tp.records; "p"; $now)
+         # at `stopped`: a window whose candidate Q does not run is judged on P's text and closes (a gap); a family
+         # whose candidate Q runs counts Q's text, in its open window or in one that opens here
+         | .obs |= map_values(if .ev.open and (.prov | not) then .ev |= (judge | .gaps += 1 | .open = false)
+                              elif (.ev.open | not) and .prov then .ev |= open_at($now)
+                              else . end
+                              | .q = .prov)
+         | read($tq.records; "q"; $now)
+         | {done: ., tok: {records: ($tp.records + $tq.records), carry: $tq.carry,
+                           carry_at: (if $tq.carry == "" then null else $now end)}}
+       else
+         # an open window that does not count this interval (the text is not its process's, or the process does not
+         # run its candidate): an evidence gap. It closes the window; the window that opens again starts its counts,
+         # NOT SERVING and the KEEP clock from zero
+         ($obs | map_values(.q = (.ev.open and $owned and .prov)
+                            | if .ev.open and (.q | not) then .ev |= (.gaps += 1 | .open = false) else . end)) as $obs
+         # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
+         # (it may yet grow); once the log has been quiet for SETTLE it is read as it is. runscaler writes a record
+         # with one write, so a held text still partial then is a short write (a full disk): its partial record counts
+         # only as a proof of life (Codex r2 F2, Opus r2 F4: a partial line must not hold R1 for ever)
+         | (if $owned then
+              ($state.carry // "") as $c0
+              | if $log == "" and $c0 != "" and ($state.carry_at | type) == "number" and $now - $state.carry_at >= SETTLE
+                # read now, as of the pass that held it unchanged
+                then ($c0 | L::tokenize_final) + {carry_at: null, seen: $state.carry_at}
+                else ($c0 + $log | L::tokenize) as $t
+                     | $t + {carry_at: (if $t.carry == "" then null elif $t.carry == $c0 then ($state.carry_at // $now)
+                                        else $now end), seen: $now}
+                end
+            else {records: [], carry: "", carry_at: null, seen: $now} end) as $tok
+         | {done: ({obs: $obs, refused: (if $owned then ($state.refused // []) else [] end)}
+                   | read($tok.records; "q"; $tok.seen)),
+            tok: $tok}
+       end) as $pass
+    | $pass.done as $done
+    | $pass.tok as $tok
     # the record still held may be a counted failure of a family set: R1 may still come with it (KEEP waits). A held
     # text that ends in a partial line may hold the start of one more record, on any set
     | ($tok.carry | if . == "" then [] else L::tokenize_final.records end) as $held
-    # the end of the pass: SETTLE by the clock when nothing is held, then R1 on the settled failures, then the
-    # failures a proof of life ended, then the run that may still reach R1
+    # the end of the pass, for every family that counts this pass's (last) text: SETTLE by the clock when nothing is
+    # held, then R1 on the settled failures, then what can no longer matter goes, then the run that may still reach R1
     | ($done.obs | map_values(
-        if .counting then
+        if .q then
           .provider as $prov | .sets as $fsets
           | (reduce ($held[] | select(.set as $hs | $hs != null and any($fsets[]; . == $hs))) as $r ({};
                ($r | classify($prov; $done.refused)) as $ev
@@ -246,10 +305,7 @@ C::now_in("r1") as $now
           | .ev |= ((if $tok.carry == "" then settle_quiet($now) else . end) | judge | prune | .pending = pending($pot))
         else . end)) as $obs0
     # windows that open at this boundary: the process runs the candidate (the KEEP clock starts now)
-    | ($obs0 | map_values(if (.ev.open | not) and .prov
-                          then .ev |= (.open = true | .since = $now | .sets = {} | .pending = null
-                                       | .succeeded = 0 | .failed = 0 | .canceled = 0 | .other = 0)
-                          else . end)) as $obs
+    | ($obs0 | map_values(if (.ev.open | not) and .prov then .ev |= open_at($now) else . end)) as $obs
     # NOT SERVING, from this pass's reads (each read at this pass's `now`), on the sets of an open window whose process
     # runs the candidate: at least 3 NOT SERVING reads whose first and last are NS_SECONDS or more apart, no other read
     # between them. The reads measure the 30 min, never the clock: a pass with no read adds nothing (Opus r1 F2)
@@ -290,7 +346,7 @@ C::now_in("r1") as $now
              pending: $ev.pending}
           end))) as $out
     | {verdict: "ok",
-       reason: "the log pass of \($tok.records | length) records\(if $owned then "" else " (the text before this boundary is UNKNOWN: it counts neither way)" end)",
+       reason: "the log pass of \($tok.records | length) records\(if $owned then "" elif $own_restart then " (the updater's own restart: P's text to `stopped`, then Q's)" else " (the text before this boundary is UNKNOWN: it counts neither way)" end)",
        lines: [$out | to_entries[] | select(.value.reason != "no candidate under observation") | "\(.key): \(.value.reason)"],
        families: $out,
        state: ($state + {boundary: {owner: $owner, position: $facts.position}, carry: $tok.carry,
