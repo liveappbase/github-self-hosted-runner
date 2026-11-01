@@ -3,6 +3,7 @@
 # Output: verdict ok | wait; families.F = {verdict: none | observe | accept | jobs-fail | no-evidence | held, reason,
 # since, keep_at, succeeded, completions, failed, canceled, other}. Rules: core/README.md, "KEEP".
 import "core" as C;
+import "stops" as S;
 
 def KEEP_SECONDS: 72 * 3600;
 
@@ -20,8 +21,13 @@ C::now_in("keep") as $now
         ($state.families[$f] // null) as $e0
         | (if C::same_window($e0; $fam.candidate) then $e0 else null end) as $e
         # a STOP the glue holds for the family, other than NO EVIDENCE (which heals itself): a person answers it
-        # (JOBS FAIL: `back` or `retry` to keep it), so it is never turned into ACCEPT here
-        | ([$held[] | select(.family == $f and .stop != "NO EVIDENCE")] | first) as $hs
+        # (JOBS FAIL: `back` or `retry` to keep it), so it is never turned into ACCEPT here. It holds THIS candidate
+        # when it is of the candidate's version (or names none), or when its D7 row says a newer release does NOT
+        # proceed alone: check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version closed that candidate,
+        # and the newer one proceeds alone (Opus r2 F2)
+        | ([$held[] | select(.family == $f and .stop != "NO EVIDENCE"
+                             and (.version == null or .version == $fam.candidate.version
+                                  or (S::newer_proceeds(.stop) | not)))] | first) as $hs
         | ($e.succeeded // 0) as $ok | ($e.failed // 0) as $bad | ($e.other // 0) as $oth | ($e.canceled // 0) as $can
         | ($ok + $bad + $oth) as $done
         | {since: ($e.since // null), succeeded: $ok, completions: $done, failed: $bad, canceled: $can, other: $oth}

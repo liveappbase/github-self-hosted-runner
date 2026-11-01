@@ -2,9 +2,11 @@
 does a newer release proceed alone?) and its line with the next step, for the STOPs the glue holds (facts.stops) and
 the ones the core's own state holds (r1.jq's SHIM REFUSED, PINNED RUNNER RETIRED); then the evidence lines (an R1
 rollback due, observing since, counted failures per set) and the date until which `back` restores the old image."""
+import os
+import re
 import unittest
 
-from tests.core.corejq import ok
+from tests.core.corejq import REPO, ok
 from tests.core.test_r1 import NOW, fam, facts
 
 # PLAN REV 11 D7: STOP -> (candidate closed?, version rejected?, a newer release proceeds alone?); None = the table's "—"
@@ -49,6 +51,20 @@ class Table(unittest.TestCase):
         s = status(self, [stop('ROLLED BACK', connect_only=True, failures=[])])['stops'][0]
         self.assertEqual(s['rejects'], 'after-retry')
         self.assertIn('one retry after 1 h', s['line'])
+
+    def test_the_stop_table_is_one_copy(self):
+        # status.jq and keep.jq read the STOP's properties from core/lib/stops.jq; no other core file holds a row
+        # (Opus r2 F2: keep.jq needs "a newer release proceeds alone?", never from a second copy)
+        core = os.path.join(REPO, 'core')
+        rows = []
+        for d, _, files in os.walk(core):
+            for fn in files:
+                if fn.endswith('.jq'):
+                    with open(os.path.join(d, fn), encoding='utf-8') as f:
+                        rows += [(os.path.relpath(os.path.join(d, fn), core), n, m) for n, l in enumerate(f, 1)
+                                 for m in re.findall(r'"(%s)"\s*:\s*\[' % '|'.join(map(re.escape, TABLE)), l)]
+        self.assertEqual(sorted({p for p, _, _ in rows}), ['lib/stops.jq'], rows)
+        self.assertEqual(sorted(m for _, _, m in rows), sorted(TABLE), rows)
 
     def test_control_an_unknown_stop_is_named_not_guessed(self):
         s = status(self, [stop('SOMETHING NEW')])['stops'][0]

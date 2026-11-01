@@ -1,27 +1,10 @@
-# core/status.jq — the STOP table (PLAN D7), ONE copy for both hosts. Inputs: facts (the STOPs the glue holds, the
+# core/status.jq — the STOP lines (PLAN D7), ONE program for both hosts. Inputs: facts (the STOPs the glue holds, the
 # families), state (r1.jq's evidence and its own STOPs), now. Output: verdict ok | wait; stops: one object per STOP
 # {family, stop, version, known, closes_candidate, rejects, newer_proceeds, line}; lines: the STOP lines, then the
-# evidence lines, then the dates until which `back` restores a family's previous image. Rules: core/README.md.
+# evidence lines, then the dates until which `back` restores a family's previous image. Rules: core/README.md. The
+# STOP table itself is core/lib/stops.jq (one copy; keep.jq reads it too).
 import "core" as C;
-
-# STOP -> [candidate closed?, version rejected?, a newer release proceeds alone?]; null = the plan's "—". SHIM REFUSED
-# is D6's ("STOP with the shim's reason"): D7 has no row for it, so its properties are this table's own.
-def table: {
-  "check failed": [true, false, true],
-  "ROLLED BACK": [true, true, true],
-  "PINNED RUNNER RETIRED": [true, true, true],
-  "JOBS FAIL ON THE NEW IMAGE": [false, false, false],
-  "ROLLBACK FAILED": [false, null, false],
-  "CI DISABLED": [false, null, false],
-  "POOL DOWN": [false, null, false],
-  "HAND CHANGE": [null, false, false],
-  "recipe changed": [null, false, false],
-  "NO BASELINE": [null, false, false],
-  "NO EVIDENCE": [false, false, false],
-  "NO IDLE": [false, false, false],
-  "untested jq": [null, false, false],
-  "SHIM REFUSED": [false, false, false]
-};
+import "stops" as S;
 
 def plural($n; $word): "\($n) \($word)\(if $n == 1 then "" else "s" end)";
 def as_user($u; $cmd): (if $u != null and $u != "" then "as \($u): " else "" end) + "`\($cmd)`";
@@ -31,11 +14,11 @@ def what($d): if ($d.text // "") != "" then ": \($d.text)" else "" end;
 def render:
   .family as $f | .stop as $n | (.detail // {}) as $d | .user as $u
   | ("\($f): STOP \($n)" + (if .version != null then " (runner \(.version))" else "" end)) as $head
-  | (table[$n] // null) as $p
+  | S::props($n) as $p
   | {family: $f, stop: $n, version: .version, known: ($p != null),
      closes_candidate: (if $p == null then null else $p[0] end),
      rejects: (if $p == null then null elif $n == "ROLLED BACK" and $d.connect_only == true then "after-retry" else $p[1] end),
-     newer_proceeds: (if $p == null then false else $p[2] end),
+     newer_proceeds: S::newer_proceeds($n),
      line: ($head + (
        if $n == "check failed" then
          what($d) + ". Next: "

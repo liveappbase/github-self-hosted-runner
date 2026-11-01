@@ -12,6 +12,7 @@ inputs: no clock (the glue passes `now`), no file, no network. The glue measures
 | `status.jq` | the STOP table: each STOP's line, next step and properties; the evidence lines |
 | `lib/logfmt.jq` | runscaler's log text (charm log v2, text format) into records; shared by the programs |
 | `lib/core.jq` | the formats, the state's shape, provenance and the time format; shared |
+| `lib/stops.jq` | the STOP table (PLAN D7), ONE copy: status.jq prints its properties, keep.jq reads it |
 
 The jq builds they are tested with: [TESTED_JQ](TESTED_JQ). The glue refuses new work under another jq ("untested
 jq", a STOP).
@@ -81,8 +82,8 @@ returned unchanged, rc 0.
                                         back_until = after an ACCEPT, the end of the 7 days `back` restores the
                                         previous image (status.jq only)
   "stops": [{"family": "F", "stop": "NAME", "version": "V", "user": "USER" | null, "detail": {...}}]
-                                        the STOPs the glue holds (status.jq, and keep.jq: any but NO EVIDENCE holds
-                                        the family's ACCEPT; not a list is rc != 0); detail, as the STOP needs it:
+                                        the STOPs the glue holds (status.jq, and keep.jq: see KEEP; not a list is
+                                        rc != 0); version: the release the STOP is of; detail, as the STOP needs it:
                                         text (the failing line or step), hand (the hand line), failures and
                                         connect_only (r1's), counts (keep's), step "build" and build_user (the Linux
                                         host's build), jq {version, path}, reason
@@ -158,7 +159,10 @@ starts the 30 min again.
 **KEEP.** 72 h after the evidence window opened: at least one `result=succeeded` → `accept`; completions (results
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose
 R1 verdict or STOP stands, r1's own or one the glue holds in `facts.stops`: `held` (a person answers it: JOBS FAIL's
-lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts. KEEP never
+lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts. A held
+STOP holds the candidate only when it is of the candidate's `version` (or names none), or when its D7 row says a newer
+release does NOT proceed alone (`lib/stops.jq`): check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version
+closed that version's candidate, and a newer release proceeds alone past them. KEEP never
 accepts while r1's `pending` stands (three counted failures, not all settled, the held record counted as one when it
 may be): `observe` until they settle.
 

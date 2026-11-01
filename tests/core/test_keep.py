@@ -70,6 +70,44 @@ class HeldStops(unittest.TestCase):
             self.assertIn('keep: facts.stops', err)
 
 
+class OlderVersionStops(unittest.TestCase):
+    """A held STOP holds the candidate's ACCEPT only when it is of the candidate's version, or its PLAN D7 row says a
+    newer release does NOT proceed alone (Opus r2 F2): check failed, ROLLED BACK and PINNED RUNNER RETIRED close THEIR
+    candidate and a newer release proceeds alone, so such a STOP of an older version, still held, does not hold the
+    newer candidate. keep.jq reads that property from the one STOP table (core/lib/stops.jq)."""
+
+    NEWER = {'fx': fam(version='2.340.0', image='img-newer')}
+    CLOSING = ('ROLLED BACK', 'check failed', 'PINNED RUNNER RETIRED')
+
+    def keep_newer(self, stop, version):
+        e = dict(ev(since=NOW - 73 * H, succeeded=5, version='2.340.0'), lines={'mac-a': 'img-newer'})
+        s = dict(held(stop), version=version)
+        return keep(self, e, NOW, families=self.NEWER, stops=[s])
+
+    def test_opus_f2_an_older_versions_closing_stop_does_not_hold_the_newer_candidate(self):
+        for name in self.CLOSING:
+            r = self.keep_newer(name, '2.339.0')
+            self.assertEqual(r['verdict'], 'accept', (name, r))
+
+    def test_control_the_same_stop_of_the_candidates_version_holds(self):
+        for name in self.CLOSING:
+            r = self.keep_newer(name, '2.340.0')
+            self.assertEqual(r['verdict'], 'held', (name, r))
+
+    def test_control_a_stop_whose_newer_release_does_not_proceed_alone_holds_whatever_its_version(self):
+        # JOBS FAIL ON THE NEW IMAGE of 2.339.0 (Opus r2 F2's control), every other D7 row whose newer release does not
+        # proceed alone, and a STOP this core does not know (its properties are never guessed)
+        for name in [n for n in PERSON_STOPS if n not in self.CLOSING]:
+            r = self.keep_newer(name, '2.339.0')
+            self.assertEqual(r['verdict'], 'held', (name, r))
+
+    def test_control_a_closing_stop_with_no_version_holds(self):
+        # not proven to be of another version
+        for name in self.CLOSING:
+            r = self.keep_newer(name, None)
+            self.assertEqual(r['verdict'], 'held', (name, r))
+
+
 class Keep(unittest.TestCase):
     def test_72h_with_a_success_accepts(self):
         r = keep(self, ev(succeeded=1, failed=3), NOW + KEEP)
