@@ -45,6 +45,14 @@
 #                  closes host_conf(). A block that differs from the one most readers carry, or a reader without a
 #                  complete block, is RED
 #   hash-literal   a literal hash (a NAME_SHA= line, an @sha256: digest, the manifest's digest) is not 64 lowercase hex
+#   jq-matrix      core/TESTED_JQ lists the jq builds the decision core and the watchdog are tested with, one row
+#                  VERSION AREAS WHERE (core/TESTED_JQ's header). A `local:PATH` row whose PATH prints exactly VERSION:
+#                  the tests of its areas (python3 -I -B -m unittest discover -s tests/AREA -t .) run in the checked tree
+#                  with JQ=PATH, and a failing one is RED. A `ci:IMAGE` row is the workflow job "jq VERSION (IMAGE)":
+#                  with --build its newest check run on the commit, read with `gh api` (read-only), must have passed. A
+#                  row that cannot run or be read: RED with --build; without --build it prints "jq VERSION (WHERE)
+#                  absent: not tested here". A tree with core/ and no core/TESTED_JQ, an empty list, or a row of
+#                  another shape: RED.
 #   home-generic   an RFC 1918 address, a MAC address, a GitHub token, a /Users/<name> path — in any file version or
 #                  commit message reachable from REV, and (--build) in the tag object: its tagger line and message.
 #                  Exempt from THESE rules only: /Users/ci and /Users/admin (the guest's user), a line that holds the
@@ -434,6 +442,73 @@ if [[ -f $man ]]; then
     w=(${=l})
     [[ ${w[3]-} =~ '^[0-9a-f]{64}$' ]] || RED hash-literal "setup/downloads.manifest line $n: the digest is not 64 lowercase hex"
   done
+fi
+
+# ---- jq-matrix: core/TESTED_JQ's rows (the header says what each kind needs)
+tj=$T/core/TESTED_JQ
+if [[ -d $T/core || -e $tj ]]; then
+  if [[ ! -f $tj || -L $tj ]]; then
+    RED jq-matrix "core/TESTED_JQ is absent or not a regular file: the core's jq builds were not checked"
+  else
+    jrows=0 jruns=
+    for l in "${(@f)$(<$tj)}"; do
+      l=${l%%#*}
+      jw=(${=l})
+      (( ${#jw} )) || continue
+      if (( ${#jw} != 3 )) || [[ ! $jw[1] =~ '^jq-[0-9][0-9A-Za-z.-]*$' || ! $jw[2] =~ '^(core|watchdog)(,(core|watchdog))*$' \
+           || ! $jw[3] =~ '^(local:/[^[:space:]]+|ci:[a-z0-9.-]+:[a-z0-9.-]+)$' ]]; then
+        RED jq-matrix "core/TESTED_JQ: a row is not VERSION AREAS WHERE: ${(j: :)jw}"; continue
+      fi
+      jrows=$(( jrows + 1 ))
+      jv=$jw[1] jwhere=$jw[3]
+      if [[ $jwhere == local:* ]]; then
+        jbin=${jwhere#local:}
+        if [[ -f $jbin && -x $jbin && $($jbin --version 2>/dev/null) == $jv ]]; then
+          for ja in ${(s:,:)jw[2]}; do
+            if [[ ! -d $T/tests/$ja ]]; then RED jq-matrix "$jv ($jbin): tests/$ja is absent"; continue; fi
+            if ( cd $T && JQ=$jbin python3 -I -B -m unittest discover -s tests/$ja -t . ) > $work/jq-tests 2>&1; then
+              print -r -- "release-check: jq $jv ($jbin): tests/$ja pass"
+            else
+              jl=(${(f)"$(<$work/jq-tests)"})
+              RED jq-matrix "$jv ($jbin): tests/$ja fail: ${jl[-1]:-no output}"
+            fi
+          done
+        elif [[ -n $tag ]]; then
+          RED jq-matrix "$jv ($jwhere) absent: not tested, and --build needs every row of core/TESTED_JQ"
+        else
+          print -r -- "release-check: jq $jv ($jwhere) absent: not tested here"
+        fi
+      else
+        jjob="jq $jv (${jwhere#ci:})"
+        if [[ -z $tag ]]; then
+          print -r -- "release-check: jq $jv ($jwhere) absent: not tested here (--build reads its CI job \"$jjob\")"
+        else
+          if [[ -z $jruns ]]; then
+            jruns=$(gh api --paginate "repos/$REPO_SLUG/commits/$commit/check-runs?per_page=100" \
+                      --jq '.check_runs[] | "\(.id)\t\(.status)\t\(.conclusion // "")\t\(.name)"' 2>/dev/null) || jruns=UNREADABLE
+            [[ -n $jruns ]] || jruns=NONE
+          fi
+          if [[ $jruns == UNREADABLE ]]; then
+            RED jq-matrix "$jjob: the check runs of ${commit[1,12]} cannot be read with gh: not tested"
+          else
+            jbest= jbid=-1
+            for jr in ${(f)jruns}; do
+              jf=("${(@ps:\t:)jr}")
+              [[ ${jf[4]-} == $jjob && $jf[1] == <-> ]] && (( jf[1] > jbid )) && { jbid=$jf[1]; jbest="$jf[2] $jf[3]" }
+            done
+            if [[ $jbest == 'completed success' ]]; then
+              print -r -- "release-check: jq $jv ($jwhere): its CI job \"$jjob\" passed on this commit"
+            elif [[ -z $jbest ]]; then
+              RED jq-matrix "$jjob: no check run of that name on ${commit[1,12]}: not tested"
+            else
+              RED jq-matrix "$jjob: its newest check run on ${commit[1,12]} is ${jbest% }, not a success"
+            fi
+          fi
+        fi
+      fi
+    done
+    (( jrows )) || RED jq-matrix "core/TESTED_JQ has no row"
+  fi
 fi
 
 # ---- home data: every file version and every commit message reachable from the commit
