@@ -3,9 +3,12 @@
 # release of this repository checked by its sha256, where bash, gh and jq exist. It READS GitHub (gh api: the newest
 # actions/runner release and its list; the jobs on main of the last 14 days in --repo; the head of a few job logs),
 # writes nothing there, and prints ONLY lines:
-#   open TOPIC TEXT      ask the owner:        liveapp ask-owner open TOPIC --need "TEXT"
-#   clear TOPIC          withdraw that ask:    liveapp ask-owner clear TOPIC
-# every `clear` before every `open` (a full ask cap frees first). The duty runs each line as printed.
+#   open TOPIC TEXT      ask the owner (TEXT: the rest of the line; it holds backticks and the host lines)
+#   clear TOPIC          withdraw that ask
+# every `clear` before every `open` (a full ask cap frees first). The duty pipes the lines, in order, into this ONE
+# consumer, which gives TEXT to liveapp as one argument, as data. Never paste TEXT into a command line: a shell would
+# run the commands in its backticks (`HOST runner-updater back FAMILY`), a rollback no person chose.
+#   consumer: while read -r verb topic text; do if [ "$verb" = open ]; then liveapp ask-owner open "$topic" --need "$text"; else liveapp ask-owner "$verb" "$topic"; fi; done
 #
 #   watchdog/run --repo OWNER/REPO --hz 'LINE' --studio 'LINE' --family NAME=HOST:LABEL[,LABEL...] ... [--now EPOCH]
 #
@@ -15,10 +18,11 @@
 # --now           the clock, UTC epoch seconds (default: now); for a test, or to read a past week
 #
 # The rules (watchdog.jq): STALE, FAILING; one topic per (rule, newest release), e.g. runner-stale-2-339-0, and
-# `clear` for the topics of every release before it in the list read and for a rule that finds nothing. NOT MEASURED (a label with
-# no job, a log with no version) never opens an ask alone: it rides in another ask's text. COULD-NOT-RUN (a jq that
-# core/TESTED_JQ does not list for the watchdog, a gh failure, a program error, a bad argument): that ONE line only,
-# `open runner-watchdog-could-not-run-<release> …` (no release suffix when the newest release cannot be read).
+# `clear` for the topics of every release before it in the list read and for a rule that finds nothing. NOT MEASURED
+# (a label with no job, a log with no version) never opens an ask alone: it rides in another ask's text.
+# COULD-NOT-RUN (a jq that core/TESTED_JQ does not list for the watchdog, a gh failure, a program error, a bad
+# argument): that ONE line only, `open runner-watchdog-could-not-run-<release> …` (no release suffix when the newest
+# release cannot be read).
 # Exit 0 whenever it printed its lines; it reads no environment variable of its own. bash 3.2 parses it (macOS).
 set -u -o pipefail
 export LC_ALL=C

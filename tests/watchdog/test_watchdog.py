@@ -7,12 +7,15 @@ output is only `open TOPIC TEXT` and `clear TOPIC` lines; gh is only read. fixtu
 actions/runner release list (2026-11-01, a prerelease among them); fixtures/job-log-head.txt the head of a real job
 log (its runner group renamed). Every trigger has a control that comes out the other way."""
 import calendar
+import json
 import os
 import re
+import subprocess
+import sys
 import time
 import unittest
 
-from tests.watchdog.wdrun import Sandbox, fixture, jq_version
+from tests.watchdog.wdrun import REPO, Sandbox, fixture, jq_version
 
 REPO_ARG = 'example-org/example'
 HOSTS = ['--hz', 'ssh scaler@hz.example', '--studio', 'ssh ci@studio.example']
@@ -216,6 +219,53 @@ class Topics(unittest.TestCase):
         lines = watch(self, w)
         kinds = [l.split(' ')[0] for l in lines]
         self.assertEqual(kinds, sorted(kinds))                     # every clear, then every open
+
+
+CONSUMER = re.compile(r'^#\s+consumer: (.+)$', re.M)
+STUB = '#!%(py)s -I\nimport json, sys\nwith open(%(log)r, "a") as f:\n    f.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+
+
+class Consumer(unittest.TestCase):
+    """The consumer line that watchdog/run's header documents — read from the file itself, never a copy — passes each
+    printed line's TEXT to `liveapp ask-owner` as data. Run under bash with stub `liveapp` and `ssh` first on PATH,
+    the way the duty runs it (the line, with TOPIC and TEXT standing for the printed line's own values where it names
+    them, the printed line on its stdin): ssh is never called, and --need gets TEXT byte for byte, backticks and all
+    (Opus r1 F7: the asks hold `HOST runner-updater back FAMILY`; pasted into a command, a shell runs it)."""
+
+    def documented(self):
+        with open(os.path.join(REPO, 'watchdog', 'run'), encoding='utf-8') as f:
+            found = CONSUMER.findall(f.read())
+        self.assertEqual(len(found), 1, 'watchdog/run documents ONE line "#   consumer: ..."')
+        return found[0]
+
+    def test_the_documented_consumer_passes_the_text_as_data(self):
+        w = failing_world()
+        w.job('linux-a', 0.05, version='2.338.0')                 # STALE too: both opens carry backticks
+        lines = watch(self, w)
+        opens = [l for l in lines if l.startswith('open ')]
+        self.assertEqual(len(opens), 2, lines)
+        self.assertTrue(any('`ssh scaler@hz.example runner-updater back hz-docker`' in l for l in opens), opens)
+        doc = self.documented()
+        sb = Sandbox(self)
+        calls, sshlog = os.path.join(sb.root, 'liveapp.log'), os.path.join(sb.root, 'ssh.log')
+        for name, log in (('liveapp', calls), ('ssh', sshlog)):
+            p = os.path.join(sb.stubs, name)
+            with open(p, 'w') as f:
+                f.write(STUB % {'py': sys.executable, 'log': log})
+            os.chmod(p, 0o755)
+        env = {'PATH': sb.stubs + ':/usr/bin:/bin', 'HOME': sb.root, 'TMPDIR': sb.root, 'LC_ALL': 'C'}
+        want = []
+        for l in lines:
+            verb, topic, text = (l.split(' ', 2) + [''])[:3]
+            want.append(['ask-owner', verb, topic] + (['--need', text] if verb == 'open' else []))
+            cmd = doc.replace('TOPIC', topic).replace('TEXT', text)
+            p = subprocess.run(['bash', '-c', cmd], input=l + '\n', capture_output=True, text=True, env=env, cwd=sb.root)
+            self.assertEqual(p.returncode, 0, (cmd, p.stderr))
+        self.assertFalse(os.path.exists(sshlog), 'the consumer ran a command of the ask text: %s' % (
+            open(sshlog).read() if os.path.exists(sshlog) else ''))
+        with open(calls) as f:
+            got = [json.loads(x) for x in f]
+        self.assertEqual(got, want)
 
 
 class NotMeasured(unittest.TestCase):
