@@ -28,8 +28,8 @@
 # running (orphans). The journal's gate-clone line names the clone: tart stop NAME, then tart delete NAME. Until then
 # the next golden-gate STOPs on it and prints those two lines.
 # Output: the gate's lines, then "golden-gate: GREEN IMAGE" (exit 0: golden-emudhra exit 0, its last line GATE GREEN),
-# "golden-gate: RED IMAGE" (exit 1: golden-emudhra exit 1, its last line GATE RED: the gate step ran to its end and
-# found a FAIL), or "golden-gate: STOP …" / "golden-gate: REFUSE …" (exit 2: it could not run; the gate did not
+# "golden-gate: RED IMAGE" (exit 1: golden-emudhra exit 1, its last line GATE RED: the gate step ended with exit 1,
+# normally after its FAIL lines; with no FAIL line, a RED proves nothing about the deny), or "golden-gate: STOP …" / "golden-gate: REFUSE …" (exit 2: it could not run; the gate did not
 # complete, as golden-emudhra's GATE STOP or any other end; or the clone may be left). A STOP never says the image is
 # bad: it was not checked.
 # The proof still owed (LIVE, on the Studio, in a stop an operator starts; the script that runs it is later work):

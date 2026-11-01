@@ -8,10 +8,12 @@
 # verify-cert non-zero for each excluded anchor, verify-cert 0 for each control root), then the cleanup: never the
 # probes, the fix or the census. It ends with one of:
 #   "golden-emudhra: GATE GREEN" (exit 0);
-#   "golden-emudhra: GATE RED" (exit 1): the gate step ran to its end and reported a FAIL (the FAIL lines are above);
+#   "golden-emudhra: GATE RED" (exit 1): the gate step ended with exit 1, normally after its FAIL lines (above). The
+#     exit alone decides: a guest shell error or a tart exec failure that also ends with 1 reads RED, with no FAIL
+#     line. So a RED proves the gate only together with its FAIL lines;
 #   "golden-emudhra: GATE STOP <why>" (exit 2): the save step did not complete, the gate step ended with an exit that
-#     is not 0 or 1 (a tool missing in the guest, save's records missing, a tart exec that failed), or the guest work
-#     folder could not be removed after a green gate. Its FAIL lines are above it. The image is NOT checked: never RED.
+#     is not 0 or 1 (a tool missing in the guest, save's records missing), or the guest work folder could not be
+#     removed after a green gate. Its FAIL lines are above it. The image is NOT checked: never RED.
 # A STOP before the start (exit 1, no GATE line) means it could not start.
 # The incident: eMudhra's intermediate keys were compromised. homebrew-core a2ee7ae08c6 excludes three root keys by the
 # SHA-256 of their public key (SPKI); EXCLUDED_SPKI in the guest part copies them with that commit's source line.
@@ -863,7 +865,7 @@ W=$(gexec /usr/bin/mktemp -d /private/tmp/golden-emudhra.XXXXXX) || { W=; die "m
 [[ $W =~ '^/private/tmp/golden-emudhra\.[A-Za-z0-9]+$' ]] || { W=; die "mktemp in the guest printed an unexpected path" }
 if [[ $mode == gate ]]; then   # save, then the gate step, then the cleanup: never the probes, the fix or the census
   say "start: the gate on $vm (a clone of a saved image); the order: save, the gate"
-  red=0 stops=()   # RED only when the gate step ran to its end and found a FAIL; anything incomplete is a STOP
+  red=0 stops=()   # RED only when the gate step exits 1 (its FAIL lines, see the header); anything incomplete is a STOP
   if phase save $W; then
     phase gate $W; r=$?
     if (( r == 1 )); then red=1
