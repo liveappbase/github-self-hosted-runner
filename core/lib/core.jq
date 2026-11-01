@@ -7,15 +7,27 @@ def facts_format: 1;
 # the program's inputs; one it needs and did not get is an error (rc != 0: could not decide)
 def need($prog; $name): $ARGS.named[$name] // error("\($prog): --\(if $name == "log" then "rawfile" elif $name == "now" then "arg" else "slurpfile" end) \($name) is required");
 
+# `now`: whole seconds since the epoch, in [2023-11-14, 2100-01-01): a clock in milliseconds, 1e999 (read as the
+# largest double) or a clock that never ran (1e9) is no `now` (Codex r1 F5, Opus r1 F4)
+def NOW_MIN: 1700000000;
+def NOW_END: 4102444800;
 def now_in($prog):
   need($prog; "now") as $n
   | ($n | tonumber? // null) as $v
-  | if $v != null and $v >= 0 and $v == ($v | floor) then $v else error("\($prog): now is not whole seconds: \($n)") end;
+  | if $v != null and $v == ($v | floor) and $v >= NOW_MIN and $v < NOW_END then $v
+    else error("\($prog): now is not whole epoch seconds in [\(NOW_MIN), \(NOW_END)): \($n)") end;
+
+# a process observation: null (no process), or {pid: a positive integer, start: a number}. Anything else proves
+# nothing and is refused (Codex r1 F4: a missing pid equals a missing pid; a string start compares below a number)
+def proc_ok: . == null or ((type == "object") and (.pid | type) == "number" and .pid >= 1 and .pid == (.pid | floor)
+                           and (.start | type) == "number");
 
 def facts_in($prog):
   need($prog; "facts") as $f
   | if ($f | length) == 1 and ($f[0] | type) == "object" and $f[0].format == facts_format then $f[0]
-    else error("\($prog): facts: not one JSON object of format \(facts_format)") end;
+    else error("\($prog): facts: not one JSON object of format \(facts_format)") end
+  | if .proc == null or ((.proc | type) == "object" and (.proc.before | proc_ok) and (.proc.after | proc_ok)) then .
+    else error("\($prog): facts: a proc read is not null or {pid: a positive integer, start: a number}: \(.proc | tojson)") end;
 
 # an EMPTY state file is a fresh state
 def state_in($prog):

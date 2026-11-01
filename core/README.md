@@ -25,8 +25,9 @@ jq -n -L <repo>/core/lib -f <repo>/core/<program>.jq \
 
 - Each program reads only the inputs it names below; the others may be passed and are ignored, so the glue may pass
   the same five to every program. An input a program needs and did not get: rc != 0.
-- `now`: the glue's UTC clock, whole seconds since the epoch. The core never compares a log time with it (the log's
-  times have no zone): log times are compared only with each other.
+- `now`: the glue's UTC clock, whole seconds since the epoch, in [1700000000, 4102444800); anything else (a clock in
+  milliseconds, 1e999, a clock that never ran) is rc != 0 on every program. The core never compares a log time with it
+  (the log's times have no zone): log times are compared only with each other, and `now` only with an earlier `now`.
 - `state`: the core's own state, the `state` member of the program's last output (an EMPTY file = a fresh state).
 - `facts`: what the glue measured or holds this pass (below). Its `format` must be 1, else rc != 0.
 - `log`: the log text from the state's boundary to this pass's captured position (no byte past it).
@@ -54,7 +55,9 @@ returned unchanged, rc 0.
   "sets": ["SET", ...],                 every set of the config runscaler runs (IDLE covers them all)
   "proc": {"before": {"pid": N, "start": EPOCH} | null,
            "after":  {"pid": N, "start": EPOCH} | null},
-                                        runscaler read before, and again after, the log position was captured
+                                        runscaler read before, and again after, the log position was captured;
+                                        a read that is not null and not {pid: a positive integer, start: a number}
+                                        is rc != 0 on every program (it would prove ownership it does not have)
   "position": {"inode": "...", "offset": N, "sha": "..."},
                                         the captured position (the sha of the 64 bytes before it)
   "continuous": true | false,           the glue read the log from the state's boundary to the position with no
