@@ -152,8 +152,8 @@ lines that read as a whole record, and it is read as one (a counted failure when
 | `Failed to start runner`: `did not connect to GitHub within` | yes, connect-class |
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
-| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later) |
-| `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set; that runner's failure is not counted and its `Runner started` is proof again |
+| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes within SETTLE before or after it (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
+| `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set; that runner's failure is not counted and its `Runner started` is proof again (it is not taken back) |
 | `Runner exited before job completion` alone | no (unknown) |
 
 Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner
@@ -192,7 +192,7 @@ never before that proof — and everything from its second on (the failures and 
 the newest proof before them, and the settled failures since that proof: at most two, a third is R1); the Tart starts of runners not yet removed (every runner leaves by a `Runner removed` line, also at
 runscaler's stop, `reason=shutdown`: at most the set's runners alive at once); the runs of three or more settled
 failures that only such a start keeps apart (R1 if it is taken back), each with the first proof after it; and the
-exited removals of the last SETTLE of log time. Everything else before that proof is settled and judged, and the proof
+exited removals and the unknown-runner lines of the last SETTLE of log time. Everything else before that proof is settled and judged, and the proof
 keeps it from every later failure. So a set's entries are bounded by what it logs in SETTLE (plus a pass's records not
 yet settled by the clock) and by its runners alive at once, never by the hours, and neither is a pass's time.
 

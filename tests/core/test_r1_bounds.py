@@ -16,7 +16,7 @@ import unittest
 
 from tests.core.test_r1 import DOCKER_CREATE, OTHER, Run, failed, fam, removed, scaling, started, tail, unknown
 
-LISTS = ('fails', 'proofs', 'starts', 'exits')
+LISTS = ('fails', 'proofs', 'starts', 'exits', 'unknowns')
 # the whole state's size for the 72 h of the flaky Tart and Docker sets, every field (compact JSON, sorted keys):
 # measured 1812-1820 bytes on every pass; with no prune (r2's code on this workload) 4726 at the first, +3670 a pass
 STATE_BYTES = 2048

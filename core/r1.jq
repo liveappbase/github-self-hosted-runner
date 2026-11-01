@@ -7,7 +7,8 @@
 # of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started` of a runner
 # not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of
 # log time, that a `Job started|completed for unknown runner` naming the runner still takes back; each holds the start
-# it took back, a proof for R1 until the exit is final), ns (NOT SERVING), completed.
+# it took back, a proof for R1 until the exit is final), unknowns (those unknown-runner lines, within SETTLE of log
+# time, that named no such removal yet: one may still come and is taken back at once), ns (NOT SERVING), completed.
 import "core" as C;
 import "logfmt" as L;
 
@@ -24,7 +25,7 @@ def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
                    gaps: 0, succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: [],
                    pending: null, newest: null};
-def set0: {fails: [], starts: [], proofs: [], exits: [], ns: null, completed: false};
+def set0: {fails: [], starts: [], proofs: [], exits: [], unknowns: [], ns: null, completed: false};
 
 # every value of the record's attributes, one text
 def rtext: [.attrs[]? | strings] | join("\n");
@@ -34,7 +35,8 @@ def first_line: split("\n")[0] | .[0:200];
 
 # the classification table (core/README.md, PLAN D6 with its AMENDMENT); $p = the family's provider, $refused = VMs
 # the shim refused. -> k: completed (proof of life; KEEP's counts) | exited (`Runner removed reason=exited` with no
-# jobId: a counted failure, unless an unknown-runner line naming that runner follows within SETTLE, see apply) |
+# jobId: a counted failure, unless an unknown-runner line naming that runner comes within SETTLE before or after it,
+# see apply) |
 # unknown (`Job started|completed for unknown runner`: proof of life for the set when it names such a runner) |
 # removed (confirms a Tart start) | start (Tart: proof unless taken back) | fail (c = connect-class) | retired | shim |
 # refused | paired | none
@@ -71,21 +73,28 @@ def apply($ev; $s; $t; $sec; $seen):
                  | .proofs += [$sec, ($st // empty)] | .starts |= map(select(.n != $ev.name)) | .completed = true)
     | if $ev.result == "succeeded" then .succeeded += 1 elif $ev.result == "failed" then .failed += 1
       elif $ev.result == "canceled" then .canceled += 1 else .other += 1 end
+  # the D6 AMENDMENT, both ways (Opus r4 F3): runscaler logs the removal only after RemoveInstance, so a job message for
+  # the dead runner can log its unknown-runner line first. One naming this runner less than SETTLE before (.unknowns
+  # holds only those: settle_log ends the others): the runner ran a job. The removal is no counted failure, the line
+  # is proof of life for the set, and the runner's start is a proof (not taken back)
   elif $ev.k == "exited" then
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
-                 | .fails += [{t: $t, s: $sec, c: false, x: "Runner removed reason=exited, no job: \($ev.name)",
-                               seen: $seen, settled: false, n: $ev.name}]
-                 | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st}]
+                 | ([.unknowns[]? | select(.n == $ev.name) | .s] | max) as $u
+                 | if $u != null then .proofs += [$u, ($st // empty)] | .unknowns |= map(select(.n != $ev.name))
+                   else .fails += [{t: $t, s: $sec, c: false, x: "Runner removed reason=exited, no job: \($ev.name)",
+                                    seen: $seen, settled: false, n: $ev.name}]
+                        | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st}]
+                   end
                  | .starts |= map(select(.n != $ev.name)))
   # the D6 AMENDMENT: a `Job started|completed for unknown runner` naming a runner removed `reason=exited` with no
   # jobId less than SETTLE before (.exits holds only those: settle_log and settle_quiet end the others): that runner
   # ran a job. Its exited failure is not counted, the line is proof of life for the set, and the runner's start is
-  # proof again
+  # proof again. A line that names no such removal waits in .unknowns for one that may still come (above)
   elif $ev.k == "unknown" then
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.exits[] | select($ev.name != "" and .n == $ev.name)] | first) as $x
-                 | if $x == null then .
+                 | if $x == null then (if $ev.name != "" then .unknowns += [{n: $ev.name, s: $sec}] else . end)
                    else .exits |= map(select(.n != $ev.name))
                         | .fails |= map(select((.n == $ev.name and .s == $x.s) | not))
                         | .proofs += [$sec, ($x.start // empty)]
@@ -102,10 +111,12 @@ def apply($ev; $s; $t; $sec; $seen):
   else . end;
 
 # SETTLE by the log: a record of log second $sec settles every failure SETTLE or more before it, and ends the exits
-# that no unknown-runner line took back in time; .newest = the newest log second read (. = family evidence)
+# that no unknown-runner line took back in time and the unknown-runner lines no exit came for in time; .newest = the
+# newest log second read (. = family evidence)
 def settle_log($sec):
   .sets |= map_values(.fails |= map(if .settled != true and $sec - .s >= SETTLE then .settled = true else . end)
-                      | .exits |= map(select($sec - .s < SETTLE)))
+                      | .exits |= map(select($sec - .s < SETTLE))
+                      | .unknowns = [.unknowns[]? | select($sec - .s < SETTLE)])
   | .newest = ([.newest, $sec] | max);
 
 # SETTLE by the clock, when the log is quiet (nothing held): a failure read SETTLE or more before `now`. (An exit

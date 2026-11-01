@@ -485,6 +485,83 @@ class TakeBackSettles(unittest.TestCase):
         self.assertEqual((out['verdict'], out['pending']), ('none', {'set': 'mac-a', 'failures': 3, 'settled': 3}))
 
 
+class UnknownRunnerLineFirst(unittest.TestCase):
+    """runscaler marks a dead runner unknown, logs `Runner exited before job completion`, runs RemoveInstance (Tart:
+    `tart stop`, `tart delete`) and only then logs `Runner removed reason=exited`: a job message for that runner in
+    between logs `Job started|completed for unknown runner (already removed?) runnerName=<it>` BEFORE the removal (Opus
+    r4 F3). The D6 AMENDMENT's window is both ways: such a line within SETTLE before the exited removal, as one within
+    SETTLE after it, means the runner ran a job: the removal is no counted failure, the line is proof of life for the
+    set, and the runner's Tart start is a proof (the removal does not take it back). Opus r4 F3's input: failures 10,
+    20; on Tart X started 25; X's WARN 29; the unknown-runner lines 30; X removed `reason=exited` with no jobId at 31."""
+
+    X = 'runner-0000beef'
+
+    def run_(self, provider, gap=1, name=None, split=False):
+        """the unknown-runner lines name NAME (X) at 30, the removal of X is GAP s after them; SPLIT: the lines are read
+        in one pass, the removal in the next. -> (the run, the last pass's out)"""
+        set_ = 'mac-a' if provider == 'tart' else 'linux-b'
+        err = OTHER if provider == 'tart' else DOCKER_CREATE
+        first = failed(10, err, set_) + failed(20, err, set_) + (started(25, self.X, set_) if provider == 'tart' else '')
+        first += (exited_warn(29, self.X, set_) + unknown(30, name or self.X, set_, 'started')
+                  + unknown(30, name or self.X, set_, 'completed'))
+        second = removed(30 + gap, self.X, 'exited', job=False, set_=set_) + tail(30 + gap + 300, set_)
+        r = Run(self, {'fx': fam(provider, (set_,))})
+        if split:
+            r.go(first + scaling(30, set_))             # the unknown-runner lines are read, the record after them held
+            return r, r.go(second)
+        return r, r.go(first + second)
+
+    def test_opus_r4_f3_the_unknown_runner_line_before_the_exited_removal_is_proof_of_life(self):
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    r, out = self.run_(provider, split=split)
+                    fx, set_ = out['families']['fx'], ('mac-a' if provider == 'tart' else 'linux-b')
+                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
+                    s = out['state']['families']['fx']['sets'][set_]
+                    self.assertEqual([f for f in s['fails'] if f.get('n') == self.X], [])   # the removal is not counted
+                    self.assertIn(sec(30), s['proofs'])
+                    self.assertEqual((s['starts'], s['exits'], s['unknowns']), ([], [], []))   # nothing left waiting
+            with self.subTest((provider, 'right after the removal')):
+                # .unknowns holds only lines that named no removal yet: the removal they took back ends them at once
+                set_ = 'mac-a' if provider == 'tart' else 'linux-b'
+                r = Run(self, {'fx': fam(provider, (set_,))})
+                out = r.go(exited_warn(29, self.X, set_) + unknown(30, self.X, set_, 'started')
+                           + unknown(30, self.X, set_, 'completed') + removed(31, self.X, 'exited', job=False, set_=set_)
+                           + scaling(32, set_) + scaling(33, set_))
+                s = out['state']['families']['fx']['sets'][set_]
+                self.assertEqual((s['fails'], s['exits'], s['unknowns'], s['proofs']), ([], [], [], [sec(30)]))
+
+    def test_opus_r4_f3_the_runners_tart_start_stays_a_proof_of_life(self):
+        # a failure at 27: X's start at 25 is the only proof of life between 20 and 27, so it must not be taken back
+        def log(name):
+            return (failed(10, OTHER) + failed(20, OTHER) + started(25, self.X) + failed(27, OTHER) + exited_warn(29, self.X)
+                    + unknown(30, name, 'mac-a', 'started') + unknown(30, name, 'mac-a', 'completed')
+                    + removed(31, self.X, 'exited', job=False) + tail(331))
+        self.assertEqual(Run(self).fx(log(self.X))['verdict'], 'none')
+        # control: the lines name another runner, X's start is taken back once the exit is final -> R1 on 10, 20, 27
+        fx = Run(self).fx(log('runner-0000feed'))
+        self.assertEqual([f['t'][-5:] for f in fx['failures']][:3], ['00:10', '00:20', '00:27'])
+
+    def test_control_the_line_settle_or_more_before_the_removal_is_no_proof(self):
+        # 119 s before: within SETTLE, no counted failure; 120 s and 121 s: the removal is counted -> R1 on 10, 20 and it
+        # (on Tart once the exit is final, X's start taken back), as for a line SETTLE or more AFTER it
+        for provider in ('tart', 'docker'):
+            with self.subTest((provider, 119)):
+                self.assertEqual(self.run_(provider, gap=119)[1]['families']['fx']['verdict'], 'none')
+            for gap in (120, 121):
+                with self.subTest((provider, gap)):
+                    fx = self.run_(provider, gap=gap)[1]['families']['fx']
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', t(30 + gap)[-5:]])
+
+    def test_control_a_line_naming_another_runner_is_no_proof(self):
+        for provider in ('tart', 'docker'):
+            for split in (False, True):
+                with self.subTest((provider, split)):
+                    fx = self.run_(provider, name='runner-0000feed', split=split)[1]['families']['fx']
+                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '00:31'])
+
+
 class Retired(unittest.TestCase):
     def test_deprecated_on_tart_stops_and_is_not_counted(self):
         r = Run(self).fx(three(lambda i: right_after('runner-0000000%d' % i, RETIRED)))
