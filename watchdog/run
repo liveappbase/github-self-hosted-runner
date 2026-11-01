@@ -14,7 +14,8 @@
 #
 # --hz, --studio  the line that runs a command on that host, as the updater's user, before the command: the asks say
 #                 `LINE runner-updater status` (no host value lives in this program)
-# --family        a family (PLAN §3), its host (hz or studio) and the job labels that run on its image
+# --family        a family (PLAN §3), its host (hz or studio) and the job labels that run on its image: labels of its
+#                 own (never `self-hosted`, none another family names; else COULD-NOT-RUN names the label)
 # --now           the clock, UTC epoch seconds (default: now); for a test, or to read a past week
 #
 # The rules (watchdog.jq): STALE, FAILING; one topic per (rule, newest release), e.g. runner-stale-2-339-0, and
@@ -63,6 +64,22 @@ done
 [ -n "$fams" ] || cnr "no --family"
 case $fams in *=hz:*) [ -n "$hz" ] || cnr "a family runs on hz, and --hz is missing" ;; esac
 case $fams in *=studio:*) [ -n "$studio" ] || cnr "a family runs on studio, and --studio is missing" ;; esac
+# a family's labels must be its own: `self-hosted` is on every self-hosted job, and a label two families name puts
+# one family's jobs in the other's rules (GitHub compares labels without case). The labels passed the regex above, so
+# they split on spaces and hold no glob character
+all=
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  mine=
+  for l in $(printf '%s' "${f#*:}" | tr ',' ' ' | tr 'A-Z' 'a-z'); do
+    [ "$l" = self-hosted ] && cnr "the family label self-hosted is on every self-hosted job (--family ${f%%=*}); name the family's own labels"
+    case " $all " in *" $l "*) cnr "the label $l is named by two families; each family needs labels of its own" ;; esac
+    mine="$mine $l"
+  done
+  all="$all$mine"          # after the family: a label twice in one family is not two families
+done <<EOF
+$fams
+EOF
 if [ -z "$now" ]; then now=$(date -u +%s) || cnr "date failed"; fi
 [[ $now =~ ^[0-9]+$ ]] || cnr "--now is not epoch seconds"
 

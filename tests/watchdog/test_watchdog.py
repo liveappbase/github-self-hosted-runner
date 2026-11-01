@@ -332,6 +332,27 @@ class CouldNotRun(unittest.TestCase):
                      ['--repo', REPO_ARG] + HOSTS + ['--family', 'bad'] + ['--now', str(NOW)]):
             self.one_line(watch(self, healthy(), args=args))
 
+    def test_a_generic_or_shared_family_label_cannot_run(self):
+        # Opus r1 F9: PLAN §3's label column passed as written puts every self-hosted job (and so the Linux host's) in
+        # linux-tart; a label two families name does the same. GitHub compares labels without case
+        cases = ((['hz-docker=hz:linux-a', 'linux-tart=studio:self-hosted,gate-x'], 'self-hosted'),
+                 (['hz-docker=hz:linux-a', 'linux-tart=studio:Self-Hosted,gate-x'], 'self-hosted'),
+                 (['hz-docker=hz:linux-a,linux-b', 'mac-golden=studio:mac-a,linux-b'], 'linux-b'),
+                 (['hz-docker=hz:linux-a', 'mac-golden=studio:LINUX-A'], 'linux-a'))
+        for fams, label in cases:
+            w = healthy()
+            w.job('linux-a', 0.1, version='2.338.0')               # the Linux host's newest job is behind
+            args = ['--repo', REPO_ARG] + HOSTS + sum((['--family', f] for f in fams), []) + ['--now', str(NOW)]
+            l = self.one_line(watch(self, w, args=args))
+            self.assertIn('label %s' % label, l, fams)
+
+    def test_control_distinct_labels_run_and_a_label_twice_in_one_family_is_one(self):
+        w = healthy()
+        w.job('linux-a', 0.1, version='2.338.0')
+        args = ['--repo', REPO_ARG] + HOSTS + ['--family', 'hz-docker=hz:linux-a,linux-b,linux-a',
+                                               '--family', 'mac-golden=studio:mac-a'] + ['--now', str(NOW)]
+        self.assertEqual(list(opened(watch(self, w, args=args))), ['runner-stale-2-338-2'])
+
 
 if __name__ == '__main__':
     unittest.main()
