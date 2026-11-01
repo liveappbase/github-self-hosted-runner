@@ -13,6 +13,8 @@ import unittest
 
 from tests.core.corejq import CORE, fixture, jq, tmpdir
 
+# hz-cut.log:3, a line of a Docker pull (another program's line in runscaler's log), here with no newline
+PULL_LINE = fixture('hz-cut.log').split('\n')[2]
 HEADER = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (DEBU|INFO|WARN|ERRO|FATA) ')
 
 
@@ -168,7 +170,7 @@ class Shapes(unittest.TestCase):
             self.assertEqual([r.get('partial') for r in tok(self, head + part + '\n', final=True)['records']],
                              [None, None], part)
         # a partial line of another program ends the record before it, which is whole
-        out = tok(self, head + 'localhost:5000/example-runner@sha256:00: Pulling from example-runner', final=True)
+        out = tok(self, head + PULL_LINE, final=True)
         self.assertEqual([r.get('partial') for r in out['records']], [None])
 
     def test_continuation_lines_with_no_record_before_them_are_ignored(self):

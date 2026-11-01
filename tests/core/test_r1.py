@@ -11,6 +11,8 @@ import unittest
 
 from tests.core.corejq import charm, fixture, ok, run
 
+# hz-cut.log:3, a line of a Docker pull (another program's line in runscaler's log), here with no newline
+PULL_LINE = fixture('hz-cut.log').split('\n')[2]
 NOW = 1793530800                                   # 2026-11-01 11:00:00 UTC (the glue's clock)
 P = {'pid': 4242, 'start': 1793520000}             # runscaler, started 08:00:00 UTC
 Q = {'pid': 5151, 'start': 1793525000}             # a later runscaler (09:23:20 UTC)
@@ -971,7 +973,7 @@ class PartialLine(unittest.TestCase):
         d = {'fx': fam('docker', ('linux-b',))}
         run3 = (failed(10, DOCKER_CREATE, 'linux-b') + failed(20, DOCKER_CREATE, 'linux-b')
                 + failed(30, DOCKER_CREATE, 'linux-b') + scaling(31, 'linux-a'))
-        for partial in ('2026-11-01 05:00:3', 'localhost:5000/example-runner@sha256:00: Pulling from example-runner'):
+        for partial in ('2026-11-01 05:00:3', PULL_LINE):
             r = Run(self, d)
             self.assertEqual(r.fx(run3 + partial)['verdict'], 'none', partial)
             self.assertEqual(self.quiet(r, 1, 4 * 3600), ['rollback'], partial)
