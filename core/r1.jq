@@ -61,8 +61,6 @@ def apply($ev; $s; $t):
   elif $ev.k == "shim" or $ev.k == "refused" then add_stop("SHIM REFUSED"; "set \($s): \($ev.reason)")
   else . end;
 
-# the counted failures of set data . since its newest proof of life (a proof in the same second is between)
-def run_of: (([.proof] + [.starts[].t]) | max) as $tp | [.fails[] | select($tp == null or .t > $tp)];
 
 def rollback($s; $run):
   {verdict: "rollback", set: $s, failures: $run, connect_only: all($run[]; .c)};
@@ -70,7 +68,7 @@ def rollback($s; $run):
 # R1 over every set of a family's evidence
 def judge:
   if .verdict != null then .
-  else (first(.sets | to_entries | sort_by(.key)[] | (.value | run_of) as $run | select(($run | length) >= 3)
+  else (first(.sets | to_entries | sort_by(.key)[] | (.value | C::run_of) as $run | select(($run | length) >= 3)
               | rollback(.key; $run)) // null) as $v
        | if $v != null then .verdict = $v else . end
   end;
@@ -135,7 +133,7 @@ C::now_in("r1") as $now
                       if ($rd | ns_read($s)) then .ns = ((.ns // {since: $now, reads: 0}) | .reads += 1) else .ns = null end))
                 | if .verdict == null and .sets[$s].ns != null and .sets[$s].ns.reads >= 3
                      and $now - .sets[$s].ns.since >= NS_SECONDS
-                  then .verdict = rollback($s; (.sets[$s] | run_of)
+                  then .verdict = rollback($s; (.sets[$s] | C::run_of)
                                            + [{t: "NOT SERVING", c: true, x: "set \($s) read ready, idle, not busy, assigned, for 30 min, no job completed"}])
                   else . end))
         else . end)

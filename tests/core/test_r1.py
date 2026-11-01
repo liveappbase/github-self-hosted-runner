@@ -8,9 +8,9 @@ import unittest
 
 from tests.core.corejq import charm, ok, run
 
-NOW = 1793530800                                   # 2026-11-01 07:00:00 UTC (the glue's clock)
-P = {'pid': 4242, 'start': 1793520000}             # runscaler, started 04:20:00
-Q = {'pid': 5151, 'start': 1793525000}             # a later runscaler
+NOW = 1793530800                                   # 2026-11-01 11:00:00 UTC (the glue's clock)
+P = {'pid': 4242, 'start': 1793520000}             # runscaler, started 08:00:00 UTC
+Q = {'pid': 5151, 'start': 1793525000}             # a later runscaler (09:23:20 UTC)
 INSTALLED = P['start'] - 60                        # the config was installed a minute before P started
 BASE = datetime.datetime(2026, 11, 1, 5, 0, 0)     # log times (no zone; never compared with NOW)
 

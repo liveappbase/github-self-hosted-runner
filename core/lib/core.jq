@@ -43,3 +43,6 @@ def runs_candidate($p; $config; $fam):
   $p != null and $fam.candidate != null and ($config.installed | type) == "number" and $config.installed < $p.start
   and ($fam.sets | length) > 0
   and all($fam.sets[]; . as $s | $config.lines[$s] != null and $config.lines[$s] == $fam.candidate.lines[$s]);
+
+# the counted failures of one set's evidence since its newest proof of life (a proof in the same second is between)
+def run_of: (([.proof] + [.starts[].t]) | max) as $tp | [.fails[] | select($tp == null or .t > $tp)];

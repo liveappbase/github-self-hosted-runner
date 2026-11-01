@@ -9,7 +9,7 @@ import unittest
 
 from tests.core.corejq import fixture, ok, run
 
-NOW = 1793530800          # 2026-11-01 07:00:00 UTC
+NOW = 1793530800          # 2026-11-01 11:00:00 UTC
 DAY = 86400
 
 
