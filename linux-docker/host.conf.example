@@ -1,0 +1,48 @@
+# host.conf — every value of ONE Linux Docker CI host. The scripts of linux-docker/ hold none of them.
+# Install it as /etc/liveapp-ci/host.conf, owned by root, mode 0644 (linux-docker/README.md, step 1): each script reads it
+# and REFUSES when it is absent, is not root's, is writable by another user, has a line that is not KEY=value, names a
+# key twice, or lacks a key that script needs. A value is one word of letters, digits and . _ : / - (no spaces, no
+# quotes). Lines that start with # are comments.
+
+# The host's public IPv4 address. 02-d1.sh checks that a runner container cannot reach it on the registry port.
+HOST_IP=203.0.113.10
+# A TCP port that answers on HOST_IP (sshd): 02-d1.sh's reach test needs one open port as its control.
+SSH_PORT=22
+
+# The two users 01-users.sh creates (their homes are /home/<name>). RUN_USER runs the rootless Docker daemon and the
+# local registry and holds no secret; RS_USER runs only runscaler and holds the token. RS_USER must sort before
+# RUN_USER (01-users.sh's group check compares a sorted list; see its header).
+RUN_USER=ci-run
+RS_USER=ci-rs
+
+# Ports on 127.0.0.1: the local registry (below the ephemeral range 32768-60999, so no client can hold it) and
+# runscaler's health port.
+REGISTRY_PORT=27500
+RS_HEALTH_PORT=27080
+# The runner image's name in the local registry.
+IMAGE_NAME=linux-runner
+
+# Where the scale sets register: an organization (https://github.com/ORG) or a repository (https://github.com/ORG/REPO).
+ORG_URL=https://github.com/your-org
+# The token: runscaler reads it from the variable TOKEN_ENV, which runner-start fills from the file TOKEN_FILE in
+# RS_USER's ~/.config/runner/ (0600). TOKEN_FILE is "token-" and the part of TOKEN_ENV after RUNNER_TOKEN_, lower case.
+TOKEN_ENV=RUNNER_TOKEN_OWNER
+TOKEN_FILE=token-owner
+
+# The runner group the sets join (an organization's runner group; it decides which repositories can send jobs). Create it on
+# GitHub first (linux-docker/README.md, Install step 7). For a repository URL, GROUP must be Default: a repository has no
+# other runner group.
+GROUP=linux-ci
+# 03-runscaler.sh real: the main set and the small lane (a set of one runner, so short jobs never wait behind long
+# ones). Each set's labels are self-hosted and its LABEL.
+MAIN_SET=linux-ci-main
+MAIN_LABEL=linux-ci
+SMALL_SET=linux-ci-small
+SMALL_LABEL=linux-ci-small
+# 03-runscaler.sh probe: one set, in GROUP, labels self-hosted and PROBE_LABEL (a first install proves the route with it).
+PROBE_SET=linux-ci-probe
+PROBE_LABEL=linux-ci-probe
+# 03-runscaler.sh c1: the main set and one more set of one runner in its own group C1_GROUP, label C1_LABEL only.
+C1_SET=linux-ci-c1probe
+C1_GROUP=linux-ci-probe
+C1_LABEL=linux-ci-probe

@@ -8,7 +8,7 @@
 # commit reachable from it (each version of each file, and each commit message with its author and committer). With
 # --build, and only after a GREEN check, it builds the four release assets from TAG into DIR (default: a new temporary
 # folder): the tarball (`git archive --prefix=<VERSION>/`), install-line.txt, root-line.txt and SHA256SUMS. It NEVER
-# executes a file of setup/ or a rendered line (`zsh -n` only parses).
+# executes a file of setup/ or a rendered line (`zsh -n`, `bash -n` and `sh -n` only parse).
 #
 # Output: one "RED <rule>: <what>" line per finding, then "release-check: GREEN" (exit 0) or "release-check: RED, N
 # finding(s)" (exit 1). A usage error: "release-check: usage: …" on stderr, exit 2. A check that could not run is
@@ -16,7 +16,13 @@
 # is public).
 #
 # Rules (the reasons: docs/design.md, "The release gate"):
-#   syntax         a zsh script fails `zsh -n` (a #!/bin/sh script: `sh -n`)
+#   syntax         a zsh script fails `zsh -n`; a bash script (a #! line that names bash) fails `bash -n`; any other #!
+#                  script fails `sh -n`. A bash script of linux-docker/ runs under the Linux host's bash 5, so it is
+#                  parsed with the first bash >= 5.2 on PATH, named in the output: an older bash (macOS's /bin/bash is
+#                  3.2) does not parse inside $(…) until it runs it, so it passes a syntax error there. With no such
+#                  bash, they are parsed with /bin/bash and the finding "syntax (linux-docker): partial, bash 3.2 only"
+#                  is RED: that check could not fully run. Any other bash script runs under macOS's /bin/bash: parsed
+#                  with it.
 #   plist          a .plist fails `plutil -lint`
 #   shim-frozen    bin/tart-shim is not the frozen file (FROZEN_SHIM_SHA)
 #   license        LICENSE is absent, not a regular file, or not the Apache-2.0 text byte for byte (LICENSE_SHA)
@@ -28,7 +34,16 @@
 #   stage-softnet  02-wall.sh's STAGE_SOFTNET is not the manifest's softnet DEST
 #   stage-shim     02-wall.sh's STAGE_SHIM is not /Users/ci/mac-runner/<VERSION>/bin/tart-shim
 #   tag            (--build) TAG is not an annotated tag named v<VERSION> or v<VERSION>-rc.<N>
-#   constants      a name in CONSTANT_NAMES has two values across the scripts
+#   constants      a name has two values across the scripts of ONE host shape: CONSTANT_NAMES across the Mac's scripts
+#                  (every script outside linux-docker/), CONSTANT_NAMES_LINUX across linux-docker/'s; the two shapes
+#                  share no constant, so a Mac RUNNER and a Linux RUNNER never collide
+#   pins           linux-docker/setup/pool-image.sh trusts each file its PINS name by sha256: a pinned file whose
+#                  sha256 is not its PIN (it changed without its PIN), or that is absent, or a PINS block that cannot
+#                  be read, is RED; so is a linux-docker/ without pool-image.sh (the pins were not checked)
+#   host-conf-block every script of linux-docker/ that reads the host config (a line that starts with host_conf)
+#                  carries the same reader block, byte for byte: from its "# THE HOST CONFIG:" line to the "}" that
+#                  closes host_conf(). A block that differs from the one most readers carry, or a reader without a
+#                  complete block, is RED
 #   hash-literal   a literal hash (a NAME_SHA= line, an @sha256: digest, the manifest's digest) is not 64 lowercase hex
 #   home-generic   an RFC 1918 address, a MAC address, a GitHub token, a /Users/<name> path — in any file version or
 #                  commit message reachable from REV, and (--build) in the tag object: its tagger line and message.
@@ -49,7 +64,8 @@ LIVE_SOFTNET_SHA=e5e35d61a6dd7e35a3134732e766c897b7cb6f097080ff00e1e75adeab0471c
 LIVE_SOFTNET_TARBALL_SHA=8ff8ff099c2b5ac1b1128e7999c4a730ac85f486c8a4cb0239eb98432859a0f7
 LICENSE_SHA=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30   # apache.org/licenses/LICENSE-2.0.txt, fetched 2026-10-22
 REPO_SLUG=liveappbase/mac-github-self-hosted-runner
-CONSTANT_NAMES=(REAL SHIM FLAG STAMP LOCK RUNNER SOFTNET CONFIG LOGDIR STATEDIR REALRUN)
+CONSTANT_NAMES=(REAL SHIM FLAG STAMP LOCK RUNNER SOFTNET CONFIG LOGDIR STATEDIR REALRUN)   # the Mac's scripts
+CONSTANT_NAMES_LINUX=(HOST_CONF MARK)                                     # linux-docker/'s scripts
 ALLOW='# release-check: allow'
 RE_RFC1918='(^|[^0-9.])(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})([^0-9]|$)'
 RE_MAC='(^|[^0-9A-Fa-f:-])([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}([^0-9A-Fa-f:-]|$)'
@@ -117,6 +133,16 @@ T=$work/tree
 
 # ---- syntax, plist
 errl() { local -a e; e=("${(@f)$(<$work/err)}"); REPLY=${e[1]#$T/} }   # the first line zsh/sh wrote, without the temp path
+# linux-docker/'s bash: the first bash >= 5.2 on PATH (the header says why); none: /bin/bash, and a RED "partial"
+lbash= lbash_v= lpart=0
+for b in ${(f)"$(whence -ap bash)"}; do
+  [[ -n $b ]] || continue
+  bv=$($b -c 'echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] )) ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}' 2>/dev/null) || continue
+  [[ $bv =~ '^([0-9]+) ([0-9.]+)$' ]] && (( match[1] >= 502 )) || continue
+  lbash=$b lbash_v=$match[2]; break
+done
+if [[ -n $lbash ]]; then print -r -- "release-check: linux-docker/'s bash scripts: parsed with $lbash (bash $lbash_v)"
+else lbash_v=$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}' 2>/dev/null); fi
 scripts=()
 for f in $files; do
   p=$T/$f
@@ -126,10 +152,18 @@ for f in $files; do
   case $first in
     ('#!'*zsh*) scripts+=($f)
                 /bin/zsh -f -n $p 2> $work/err || { errl; RED syntax "$f: zsh -n fails: $REPLY" } ;;
+    ('#!'*bash*) scripts+=($f)
+                if [[ $f == linux-docker/* && -n $lbash ]]; then
+                  $lbash -n $p 2> $work/err || { errl; RED syntax "$f: bash $lbash_v -n fails: $REPLY" }
+                else
+                  [[ $f == linux-docker/* ]] && lpart=1
+                  /bin/bash -n $p 2> $work/err || { errl; RED syntax "$f: bash -n fails: $REPLY" }
+                fi ;;
     ('#!'*)     scripts+=($f)
                 /bin/sh -n $p 2> $work/err || { errl; RED syntax "$f: sh -n fails: $REPLY" } ;;
   esac
 done
+(( lpart )) && RED "syntax (linux-docker)" "partial, bash ${lbash_v:-?} only: no bash >= 5.2 on PATH, so a syntax error inside \$(…) of a linux-docker/ script is not seen. Put one on PATH (brew install bash) and run again"
 for f in ${(M)files:#*.plist}; do
   /usr/bin/plutil -lint -s $T/$f > /dev/null 2>&1 || RED plist "$f: plutil -lint fails"
 done
@@ -290,23 +324,90 @@ if [[ -n $tag ]]; then
   fi
 fi
 
-# ---- one value per constant name across the scripts (a `NAME=value` line at column 0)
+# ---- one value per constant name across the scripts of one host shape (a `NAME=value` line at column 0)
 typeset -A cval
-for n in $CONSTANT_NAMES; do cval[$n]=; done
-for f in $scripts; do
-  for l in ${(M)${(f)"$(<$T/$f)"}:#[A-Z]*=*}; do
-    n=${l%%=*}
-    (( ${+cval[$n]} )) || continue
-    val=${${l#*=}%%[[:space:]]*}
-    cval[$n]+="$val	$f"$'\n'
+for shape in mac linux; do
+  if [[ $shape == mac ]]; then names=($CONSTANT_NAMES) sel=(${scripts:#linux-docker/*})
+  else names=($CONSTANT_NAMES_LINUX) sel=(${(M)scripts:#linux-docker/*}); fi
+  cval=()
+  for n in $names; do cval[$n]=; done
+  for f in $sel; do
+    for l in ${(M)${(f)"$(<$T/$f)"}:#[A-Z]*=*}; do
+      n=${l%%=*}
+      (( ${+cval[$n]} )) || continue
+      val=${${l#*=}%%[[:space:]]*}
+      cval[$n]+="$val	$f"$'\n'
+    done
+  done
+  for n in $names; do
+    vals=(${(u)${${(f)cval[$n]}%%	*}})
+    if (( ${#vals} > 1 )); then
+      RED constants "$n has ${#vals} values across the $shape scripts: ${(j:; :)${(f)cval[$n]//	/ in }}"
+    fi
   done
 done
-for n in $CONSTANT_NAMES; do
-  vals=(${(u)${${(f)cval[$n]}%%	*}})
-  if (( ${#vals} > 1 )); then
-    RED constants "$n has ${#vals} values: ${(j:; :)${(f)cval[$n]//	/ in }}"
-  fi
+
+# ---- pins: pool-image.sh's PINS (`$S03=HEX` or `$B/PATH=HEX`, one per line; $B is linux-docker/ on the host) name
+# the files it trusts by sha256: a file that changed without its PIN, an absent one, or a PINS block not of that shape
+pimg=linux-docker/setup/pool-image.sh
+if [[ -f $T/$pimg && ! -L $T/$pimg ]]; then
+  s03= s03n=0 pin_in=0 pin_n=0 pin_end=0
+  for l in "${(@f)$(<$T/$pimg)}"; do
+    [[ $l =~ '^S03=\$B/([^[:space:]]+)$' ]] && { s03=$match[1]; s03n=$(( s03n + 1 )) }
+  done
+  (( s03n == 1 )) || s03=
+  for l in "${(@f)$(<$T/$pimg)}"; do
+    if (( ! pin_in )); then
+      [[ $l == 'PINS="'* ]] || continue
+      pin_in=1 l=${l#PINS=\"}
+    fi
+    [[ $l == *\" ]] && pin_end=1
+    e=${l%\"}
+    if [[ $e =~ '^(\$S03|\$B/([A-Za-z0-9._/-]+))=([0-9a-f]{64})$' ]]; then
+      pk=$match[1] pr=$match[2] pw=$match[3]
+      pin_n=$(( pin_n + 1 ))
+      [[ $pk == '$S03' ]] && pr=$s03
+      if [[ -z $pr ]]; then
+        RED pins "$pimg pins \$S03, but has no single S03=\$B/PATH line"
+      elif [[ $pr == *..* || ! -f $T/linux-docker/$pr || -L $T/linux-docker/$pr ]] || ! sha $T/linux-docker/$pr; then
+        RED pins "$pimg pins linux-docker/$pr, which is absent or not a regular file"
+      elif [[ $REPLY != $pw ]]; then
+        RED pins "linux-docker/$pr changed without its PIN in $pimg (its sha256 ${REPLY[1,12]}…, the PIN ${pw[1,12]}…)"
+      fi
+    else
+      RED pins "$pimg: a PINS line is not \$S03=HEX or \$B/PATH=HEX (64 lowercase hex)"
+    fi
+    (( pin_end )) && break
+  done
+  (( pin_n && pin_end )) || RED pins "$pimg has no complete PINS=\"…\" block: the pins were not checked"
+elif ldf=(${(M)files:#linux-docker/*}); (( ${#ldf} )); then   # (a nested ${#${(M)…}} reads 0 inside (( )))
+  RED pins "$pimg is absent or not a regular file: the pins were not checked (not run)"
+fi
+
+# ---- host-conf-block: the host-config readers of linux-docker/ carry ONE block, byte for byte (the header says which
+# lines); the block most readers carry is the reference, and each reader that differs from it is named
+hb_f=() hb_s=()
+typeset -A hb_n
+for f in ${(M)scripts:#linux-docker/*}; do
+  [[ $(<$T/$f) == *$'\n'host_conf[\ \(]* ]] || continue
+  hin=0 hdone=0 hblk=
+  for l in "${(@f)$(<$T/$f)}"; do
+    if (( ! hin )); then [[ $l == '# THE HOST CONFIG:'* ]] || continue; hin=1; fi
+    hblk+=$l$'\n'
+    [[ $l == '}' ]] && { hdone=1; break }
+  done
+  if (( ! hdone )); then RED host-conf-block "$f reads the host config but has no complete block (# THE HOST CONFIG: … })"; continue; fi
+  print -rn -- $hblk > $work/hblk
+  sha $work/hblk || { RED host-conf-block "$f: its block cannot be hashed"; continue }
+  hb_f+=($f) hb_s+=($REPLY); hb_n[$REPLY]=$(( ${hb_n[$REPLY]:-0} + 1 ))
 done
+if (( ${#hb_s} )); then
+  hb_ref= hb_max=0
+  for hs in $hb_s; do (( hb_n[$hs] > hb_max )) && { hb_ref=$hs; hb_max=$hb_n[$hs] }; done
+  for i in {1..${#hb_s}}; do
+    [[ $hb_s[i] == $hb_ref ]] || RED host-conf-block "$hb_f[i]: its host-config block (sha256 ${hb_s[i][1,12]}…) is not the one $hb_max of the ${#hb_s} readers carry (${hb_ref[1,12]}…)"
+  done
+fi
 
 # ---- literal hashes: 64 lowercase hex
 for f in $files; do

@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# pool-ready NAME... — as RS_USER: is runscaler serving EXACTLY these scale sets, each ready? /healthz always answers
+# 200 and /readyz counts only the sets already registered, so a set that never registered does not make either one
+# fail. This reads /healthz's `scale_sets` and exits 0 only when the named sets, and no others, are listed, each with
+# `ready: true`. It prints each set's line.
+set -uo pipefail
+# THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
+# this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
+# is not KEY=value, any key twice (read or not) or a key missing: REFUSE on stderr, exit 1, before anything else runs.
+HOST_CONF=/etc/liveapp-ci/host.conf
+host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF sets that variable
+  local me=$1 l k o seen=" "; shift
+  o=$(stat -c '%a %U' "$HOST_CONF" 2>/dev/null) || { echo "$me: REFUSE no host config $HOST_CONF (linux-docker/README.md)" >&2; exit 1; }
+  [[ $o =~ ^[0-7][0145][0145]\ root$ ]] || { echo "$me: REFUSE $HOST_CONF must be root's and writable by root only: [$o]" >&2; exit 1; }
+  while IFS= read -r l || [ -n "$l" ]; do
+    case $l in ''|'#'*) continue ;; esac
+    [[ $l =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9][A-Za-z0-9._:/-]*)$ ]] || { echo "$me: REFUSE $HOST_CONF: want KEY=value, got [$l]" >&2; exit 1; }
+    k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
+    seen="$seen$k "; [[ " $* " == *" $k "* ]] || continue
+    printf -v "$k" %s "${BASH_REMATCH[2]}"
+  done < "$HOST_CONF"
+  for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
+}
+host_conf pool-ready RS_HEALTH_PORT
+[ $# -gt 0 ] || { echo "usage: pool-ready NAME..."; exit 2; }
+j=$(curl -fs -m 5 http://127.0.0.1:${RS_HEALTH_PORT}/healthz) || { echo "NOT READY: /healthz on 127.0.0.1:${RS_HEALTH_PORT} does not answer"; exit 1; }
+printf '%s' "$j" | python3 -c '
+import json, sys
+want = set(sys.argv[1:])
+try:
+    sets = {s["name"]: s for s in json.load(sys.stdin).get("scale_sets") or []}
+except (ValueError, KeyError, TypeError, AttributeError) as e:
+    sys.exit(f"NOT READY: /healthz is not the JSON this reads ({e})")
+for n in sorted(want | set(sets)):
+    s = sets.get(n)
+    line = "NOT LISTED" if s is None else "ready=%s idle=%s busy=%s last_error=%r" % (
+        s.get("ready"), s.get("idle"), s.get("busy"), s.get("last_error", ""))
+    print("%s: %s%s" % (n, line, "" if n in want else "  (NOT EXPECTED)"))
+ok = set(sets) == want and all(sets[n].get("ready") is True for n in want)
+print("READY" if ok else "NOT READY")
+sys.exit(0 if ok else 1)
+' "$@"

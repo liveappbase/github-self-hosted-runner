@@ -1,0 +1,18 @@
+# systemd USER unit of RS_USER: 03-runscaler.sh installs it as ~/.config/systemd/user/runscaler.service (%h is RS_USER's
+# home). linger keeps the user manager, and so this unit, up from boot. D1 is ANOTHER user's daemon (RUN_USER), so this
+# unit cannot order itself after it: it retries instead (a start error — D1 or the registry not up yet — is fatal to
+# runscaler, so Restart=always + no start limit is the ordering).
+[Unit]
+Description=runscaler - the liveapp Linux CI runner pool
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/bin/runner-start run
+Restart=always
+RestartSec=30s
+# SIGTERM = drain: no new jobs, wait for the running ones (drain-timeout 70m in config.toml) + 60 s.
+TimeoutStopSec=4260
+
+[Install]
+WantedBy=default.target
