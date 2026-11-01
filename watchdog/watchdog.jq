@@ -38,7 +38,9 @@ def rules($now; $release):
   ([$ARGS.named.releases[0][] | select(.draft != true and .prerelease != true and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
     | {v: .tag_name[1:], at: (.published_at | fromdateiso8601)}] | sort_by(.v | vnum)) as $rels
   | ([$rels[] | select(.at <= $now - 7 * DAY)] | last) as $r7
-  | ([$rels[] | select((.v | vnum) < ($release | vnum))] | .[-3:] | map(.v)) as $before
+  # every release in the list read that the newest supersedes: an ask of an old release never holds a slot, also after
+  # missed weekly runs (Codex r1 F9)
+  | ([$rels[] | select((.v | vnum) < ($release | vnum))] | map(.v)) as $before
   | [measured($now)
      | . as $m
      | version_of($m.newest) as $vnew | version_of($m.old) as $vold

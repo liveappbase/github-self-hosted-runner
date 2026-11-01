@@ -15,7 +15,7 @@
 # --now           the clock, UTC epoch seconds (default: now); for a test, or to read a past week
 #
 # The rules (watchdog.jq): STALE, FAILING; one topic per (rule, newest release), e.g. runner-stale-2-339-0, and
-# `clear` for the topics of the three releases before it and for a rule that finds nothing. NOT MEASURED (a label with
+# `clear` for the topics of every release before it in the list read and for a rule that finds nothing. NOT MEASURED (a label with
 # no job, a log with no version) never opens an ask alone: it rides in another ask's text. COULD-NOT-RUN (a jq that
 # core/TESTED_JQ does not list for the watchdog, a gh failure, a program error, a bad argument): that ONE line only,
 # `open runner-watchdog-could-not-run-<release> …` (no release suffix when the newest release cannot be read).

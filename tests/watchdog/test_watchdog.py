@@ -29,8 +29,9 @@ def iso(epoch):
 class World:
     """Jobs on main: one run per job. job(label, days_ago, ...) adds one; install() answers every gh call."""
 
-    def __init__(self, now=NOW):
-        self.now, self.jobs, self.next_id = now, [], 1000
+    def __init__(self, now=NOW, releases=None):
+        """releases: [(version, days_ago)], newest first, all final (default: the real list, newest 2.338.2)."""
+        self.now, self.jobs, self.next_id, self.releases = now, [], 1000, releases
 
     def job(self, label, days_ago, conclusion='success', version='2.338.2'):
         self.next_id += 1
@@ -48,8 +49,14 @@ class World:
         return self
 
     def install(self, sb):
-        sb.answer('repos/actions/runner/releases/latest', 'v2.338.2\n', jq_expr='.tag_name')
-        sb.answer('repos/actions/runner/releases?per_page=30', fixture('releases.json'))
+        if self.releases is None:
+            sb.answer('repos/actions/runner/releases/latest', 'v2.338.2\n', jq_expr='.tag_name')
+            sb.answer('repos/actions/runner/releases?per_page=30', fixture('releases.json'))
+        else:
+            sb.answer('repos/actions/runner/releases/latest', 'v%s\n' % self.releases[0][0], jq_expr='.tag_name')
+            sb.answer('repos/actions/runner/releases?per_page=30',
+                      [{'tag_name': 'v' + v, 'name': 'v' + v, 'draft': False, 'prerelease': False,
+                        'published_at': iso(self.now - int(days * DAY))} for v, days in self.releases])
         since = time.strftime('%Y-%m-%d', time.gmtime(self.now - 14 * DAY))
         runs = [{'id': j['run_id'], 'head_branch': 'main'} for j in self.jobs]
         sb.answer('repos/%s/actions/runs?branch=main&created=>=%s&per_page=100' % (REPO_ARG, since),
@@ -100,13 +107,25 @@ class Healthy(unittest.TestCase):
                   'runner-watchdog-could-not-run'):
             self.assertIn('clear ' + t, lines)
 
-    def test_the_topics_of_the_releases_before_the_newest_are_cleared_prereleases_skipped(self):
+    def test_the_topics_of_every_release_before_the_newest_are_cleared_prereleases_skipped(self):
         lines = watch(self, healthy())
-        for v in ('2-338-0', '2-337-0', '2-336-0'):
+        for v in ('2-338-0', '2-337-0', '2-336-0', '2-335-1', '2-335-0', '2-334-0', '2-333-1', '2-333-0', '2-332-0',
+                  '2-331-0'):
             for rule in ('runner-stale-', 'runner-failing-', 'runner-watchdog-could-not-run-'):
                 self.assertIn('clear ' + rule + v, lines)
         self.assertFalse(any('2-338-1' in l for l in lines))       # v2.338.1 is a prerelease
-        self.assertFalse(any('2-335-1' in l for l in lines))       # only the three before the newest
+
+    def test_codex_f9_a_topic_four_or_more_releases_back_is_cleared(self):
+        # 2.330.0 ... 2.335.0, the newest 2.335.0: an ask of 2.330.0 (missed weekly runs) must not hold a slot
+        rels = [('2.335.0', 30), ('2.334.0', 60), ('2.333.0', 90), ('2.332.0', 120), ('2.331.0', 150), ('2.330.0', 180)]
+        w = World(releases=rels).daily('linux-a', '2.335.0').daily('linux-b', '2.335.0').daily('mac-a', '2.335.0')
+        lines = watch(self, w)
+        self.assertEqual(opened(lines), {})
+        for v in ('2-330-0', '2-331-0', '2-332-0', '2-333-0', '2-334-0'):
+            for rule in ('runner-stale-', 'runner-failing-', 'runner-watchdog-could-not-run-'):
+                self.assertIn('clear ' + rule + v, lines)
+        # control: the newest release's topics are cleared by their rules, not as superseded; nothing newer exists
+        self.assertFalse(any('2-336' in l for l in lines))
 
     def test_the_jq_under_test_is_a_tested_watchdog_row(self):
         rows = [l.split() for l in open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
