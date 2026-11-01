@@ -187,8 +187,14 @@ that reads it; the other failures go), and every log time it keeps (the newest r
 starts from the new times. A record whose header the pass holds (its time is whole) is read first by the next pass, so
 a step back it shows is judged the same way at the end of the pass that holds it. A record ORDER or less out of order
 is no gap. A clock that steps forward is no gap: the first record after it settles the failures before it, as any
-later record does. SETTLE is not disorder: it is how long a later proof may take to arrive. The glue should run
-runscaler with `TZ=UTC`: then its log times never step back with summer time.
+later record does. SETTLE is not disorder: it is how long a later proof may take to arrive.
+
+The glue MUST run runscaler with `TZ=UTC` (on Linux in the service unit's `Environment=`, on macOS in the launchd
+plist's `EnvironmentVariables` or the script it starts): then its log times never step back with summer time. The core
+turns a step back that it sees into a gap, but it cannot see every step. An idle runscaler writes about one record an
+hour (the Linux host: every 58 to 60.5 min), so a one-hour step back in an idle hour can show as ORDER or less back, or
+not at all; the records on the two sides of it are then read as one stretch of time, and failures from both sides can
+meet in one run (a false R1).
 
 **R1.** Three SETTLED counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A
 proof in the same second as a failure counts as between them; a proof after the run does not take it back.
