@@ -17,6 +17,10 @@ def NS_SECONDS: 1800;
 # this far past it in log time, or the log is quiet (nothing held) and a later pass's `now` is this far past the `now`
 # of the pass that read it. The same quiet reads a held record (the glue's clock, the text unchanged).
 def SETTLE: 120;
+# the Tart starts a set keeps of runners not yet removed (Apple allows 2 macOS VMs per host): a runner whose
+# RemoveInstance fails is never removed, so beyond this the oldest start is read as confirmed, a proof of life (Opus r4
+# F6). That loses only a take-back, which can only delay R1
+def STARTS_MAX: 16;
 
 # a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone: a
 # clock that steps back more than SETTLE is an evidence gap, see read)
@@ -103,7 +107,12 @@ def apply($ev; $s; $t; $sec; $seen):
     .sets[$s] = ((.sets[$s] // set0)
                  | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
                  | if $st != null then .proofs += [$st] | .starts |= map(select(.n != $ev.name)) else . end)
-  elif $ev.k == "start" then .sets[$s] = ((.sets[$s] // set0) | .starts += [{n: $ev.name, t: $t, s: $sec}])
+  # a start beyond STARTS_MAX: the oldest is read as confirmed (a proof), as a removal would
+  elif $ev.k == "start" then
+    .sets[$s] = ((.sets[$s] // set0) | .starts += [{n: $ev.name, t: $t, s: $sec}]
+                 | if (.starts | length) > STARTS_MAX then (.starts | sort_by(.s)) as $all
+                     | .proofs += [$all[:-STARTS_MAX][].s] | .starts = $all[-STARTS_MAX:]
+                   else . end)
   elif $ev.k == "fail" then
     .sets[$s] = ((.sets[$s] // set0) | .fails += [{t: $t, s: $sec, c: $ev.c, x: $ev.x, seen: $seen, settled: false}])
   elif $ev.k == "retired" then add_stop("PINNED RUNNER RETIRED"; "set \($s): \($ev.x)")

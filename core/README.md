@@ -193,12 +193,15 @@ that is not settled yet is `pending` (r1's output and state): R1 may still come.
 before the oldest failure not settled yet (any, when every failure is settled) and SETTLE or more before the newest log
 time read — a record may be written up to SETTLE out of order (what SETTLE rests on), so a failure still to come is
 never before that proof — and everything from its second on (the failures and proofs of the last SETTLE of log time,
-the newest proof before them, and the settled failures since that proof: at most two, a third is R1); the Tart starts of runners not yet removed (every runner leaves by a `Runner removed` line, also at
-runscaler's stop, `reason=shutdown`: at most the set's runners alive at once); the runs of three or more settled
-failures that only such a start keeps apart (R1 if it is taken back), each with the first proof after it; and the
-exited removals and the unknown-runner lines of the last SETTLE of log time. Everything else before that proof is settled and judged, and the proof
-keeps it from every later failure. So a set's entries are bounded by what it logs in SETTLE (plus a pass's records not
-yet settled by the clock) and by its runners alive at once, never by the hours, and neither is a pass's time.
+the newest proof before them, and the settled failures since that proof: at most two, a third is R1); the Tart starts
+of runners not yet removed, at most 16 (a runner leaves by a `Runner removed` line, also at runscaler's stop,
+`reason=shutdown`, but one whose RemoveInstance fails never does: beyond 16, the oldest start is read as confirmed, a
+proof of life, which loses only a take-back and so can only delay R1; Apple allows 2 macOS VMs per host); the
+runs of three or more settled failures that only such a start keeps apart (R1 if it is taken back), each with the
+first proof after it; and the exited removals and the unknown-runner lines of the last SETTLE of log time. Everything
+else before that proof is settled and judged, and the proof keeps it from every later failure. So a set's entries are
+bounded by what it logs in SETTLE (plus a pass's records not yet settled by the clock) and by 16 starts, never by the
+hours, and neither is a pass's time.
 
 **NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min, with no
 job completed on it: it counts as the set's third failure, connect-class. The reads measure the 30 min, never the

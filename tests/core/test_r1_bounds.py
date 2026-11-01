@@ -14,12 +14,15 @@ bound for the 72 h (no clock is read: a machine that slows between two timings i
 import json
 import unittest
 
-from tests.core.test_r1 import DOCKER_CREATE, OTHER, Run, failed, fam, removed, scaling, started, tail, unknown
+from tests.core.test_r1 import (DOCKER_CREATE, OTHER, Run, exited_warn, failed, fam, removed, scaling, started, tail,
+                                 unknown)
 
 LISTS = ('fails', 'proofs', 'starts', 'exits', 'unknowns')
 # the whole state's size for the 72 h of the flaky Tart and Docker sets, every field (compact JSON, sorted keys):
 # measured 1812-1820 bytes on every pass; with no prune (r2's code on this workload) 4726 at the first, +3670 a pass
 STATE_BYTES = 2048
+# a set keeps at most this many Tart starts of runners not yet removed (core/README.md, "The state stays bounded")
+STARTS_MAX = 16
 
 
 def flaky(base, set_):
@@ -125,8 +128,51 @@ class Bounded(unittest.TestCase):
         for f, _, _ in gens:
             self.assertEqual(at[(f, 19)], at[(f, 39)], f)
 
+    def test_opus_r4_f6_starts_whose_runner_is_never_removed_stay_under_the_cap(self):
+        # Opus r4 F6: when RemoveInstance fails runscaler writes no `Runner removed` line, so a Tart start is never
+        # removed. Tart, 40 passes: each pass a runner starts, another completes a job, and the first one exits (its
+        # WARN) with its cleanup failed (no removal line). The starts kept grow to STARTS_MAX and stop there, the
+        # oldest going first
+        r = Run(self)
+        names = []
+        for k in range(40):
+            base = 1000 + 600 * k
+            names.append('runner-%08x' % (0xb000 + k))
+            out = r.go(started(base, names[-1]) + removed(base + 20, 'runner-%08x' % (0xc000 + k), 'job-completed')
+                       + exited_warn(base + 300, names[-1]) + scaling(base + 500))
+            self.assertEqual(len(out['state']['families']['fx']['sets']['mac-a']['starts']), min(k + 1, STARTS_MAX), k)
+            self.assertEqual(out['families']['fx']['verdict'], 'none', k)
+        self.assertEqual(sorted(s['n'] for s in out['state']['families']['fx']['sets']['mac-a']['starts']),
+                         names[-STARTS_MAX:])
+        # control: the cleanup works (each runner is removed `reason=exited`): no start is kept
+        r = Run(self)
+        for k in range(20):
+            base, nm = 1000 + 600 * k, 'runner-%08x' % (0xb000 + k)
+            out = r.go(started(base, nm) + removed(base + 20, 'runner-%08x' % (0xc000 + k), 'job-completed')
+                       + exited_warn(base + 300, nm) + removed(base + 301, nm, 'exited', job=False) + scaling(base + 500))
+            self.assertEqual((len(out['state']['families']['fx']['sets']['mac-a']['starts']),
+                              out['families']['fx']['verdict']), (0, 'none'), k)
+
 
 class StillDecides(unittest.TestCase):
+    def test_a_start_beyond_the_cap_is_read_as_confirmed_the_oldest_first(self):
+        # Tart: failures 10, 20; runner R0 started 25; a failure 30; then N more starts (40, 41, ...), none removed; the
+        # log moves on; then R0 is removed `reason=exited` with no jobId (that takes its start back) and the exit is
+        # final. With STARTS_MAX more starts R0's is the oldest beyond the cap: it is read as confirmed, a proof of life
+        # between 20 and 30 -> no R1 (only a take-back is lost, which delays R1). With one fewer it is still a start:
+        # the exit takes it back -> R1 on 10, 20, 30. The oldest by log time: also when R0's start is written late (less
+        # than SETTLE out of order) and read after the others
+        def last(n, late):
+            r0, more = started(25, 'runner-00000000'), ''.join(started(40 + i, 'runner-%08x' % (i + 1)) for i in range(n))
+            r = Run(self)
+            r.go(failed(10, OTHER) + failed(20, OTHER) + (failed(30, OTHER) + more + r0 if late else r0 + failed(30, OTHER) + more)
+                 + tail(300))
+            return r.fx(removed(400, 'runner-00000000', 'exited', job=False) + tail(600))
+        for late in (False, True):
+            with self.subTest(late=late):
+                self.assertEqual(last(STARTS_MAX, late)['verdict'], 'none')
+                self.assertEqual([f['t'][-2:] for f in last(STARTS_MAX - 1, late)['failures']][:3], ['10', '20', '30'])
+
     def test_a_same_second_proof_at_the_pruned_edge_is_between(self):
         r = Run(self)
         r.go(failed(10, OTHER) + removed(100, 'runner-0000beef', 'job-completed') + failed(100, OTHER) + tail(300))

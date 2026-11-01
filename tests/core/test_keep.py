@@ -72,8 +72,8 @@ class HeldStops(unittest.TestCase):
 
 class StopWithNoFamily(unittest.TestCase):
     """A held STOP that names no family (no `family`, "", or one that is not a family's name) holds every family's
-    ACCEPT: fail closed, as a STOP with no version already does (Opus r3 F6, r4 F5: it held none). Two families fx and fy, candidate
-    2.340.0 each, 73 h, 5 succeeded: ACCEPT unless a STOP holds them."""
+    ACCEPT: fail closed, as a STOP with no version already does (Opus r3 F6, r4 F5: it held none). Two families fx and
+    fy, candidate 2.340.0 each, 73 h, 5 succeeded: ACCEPT unless a STOP holds them."""
 
     def verdicts(self, stops):
         fams = {'fx': fam(version='2.340.0', image='img-newer'),
