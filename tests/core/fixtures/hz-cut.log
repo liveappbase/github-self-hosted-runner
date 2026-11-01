@@ -1,0 +1,115 @@
+2026-10-22 15:35:22 INFO Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs serviceManager=systemd drainTimeout=1h10m0s action="runner service uninstall, then runner service install"
+2026-10-22 15:35:22 INFO Pulling runner image image=localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50 platform=""
+localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50: Pulling from example-runner
+Digest: sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+Status: Image is up to date for localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+2026-10-22 15:35:22 INFO Health check server started address=127.0.0.1 port=8080
+2026-10-22 15:35:22 INFO Disk guard enabled min_free=10% target_free=20% interval=1h0m0s max_tier=3 stores=3
+2026-10-22 15:35:22 INFO Starting scale sets count=1 concurrent=3
+2026-10-22 15:35:22 INFO linux-p: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-22 15:35:22 INFO linux-p: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-22 15:35:23 INFO linux-p: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-22 15:35:24 INFO linux-p: Scale set created scaleSetID=2 name=linux-p
+2026-10-22 15:35:24 INFO linux-p: Listening for jobs maxRunners=3 minRunners=0
+2026-10-22 15:35:24 INFO linux-p: Handling initial session statistics totalAssignedJobs=0
+2026-10-22 15:35:52 INFO linux-p: Draining runners busy=0
+2026-10-22 15:35:52 ERRO linux-p: request failed error="Get \"https://broker.actions.githubusercontent.com/scalesets/message\": context canceled" method=GET url=https://broker.actions.githubusercontent.com/scalesets/message
+2026-10-22 15:35:53 INFO linux-p: Shutting down runners
+2026-10-22 15:39:24 INFO Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs serviceManager=systemd drainTimeout=1h10m0s action="runner service uninstall, then runner service install"
+2026-10-22 15:39:24 INFO Pulling runner image image=localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50 platform=""
+localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50: Pulling from example-runner
+Digest: sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+Status: Image is up to date for localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+2026-10-22 15:39:25 INFO Health check server started address=127.0.0.1 port=8080
+2026-10-22 15:39:25 INFO Disk guard enabled min_free=10% target_free=20% interval=1h0m0s max_tier=3 stores=3
+2026-10-22 15:39:25 INFO Starting scale sets count=1 concurrent=3
+2026-10-22 15:39:25 INFO linux-p: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-22 15:39:25 INFO linux-p: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-22 15:39:25 INFO linux-p: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-22 15:39:26 INFO linux-p: Scale set reused scaleSetID=2 name=linux-p
+2026-10-22 15:39:26 INFO linux-p: Listening for jobs maxRunners=3 minRunners=0
+2026-10-25 19:37:03 INFO linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-25 19:37:03 INFO linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-25 19:37:03 INFO linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-25 19:37:04 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-25 19:37:04 INFO linux-a: Runner removed name=runner-8b9b64ca instanceID=83dafc48f06300def867a2ec646706471919d09e0c2adc3daff363a7771169d1 reason=job-completed jobId=2ce18645-b726-290f-1564-ea0902058718 repo=example-org/example workflowRunId=15885850636 job="build (9150)" result=failed
+2026-10-25 19:37:05 INFO linux-a: Runner started name=runner-1d1af85d instanceID=5869c40ebfde32e17ad9799d5b287c5170d517260be9646c39fb3ffa06c3d300 startupTime=1.394100808s
+2026-10-25 20:04:01 INFO linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-25 20:04:01 INFO linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-25 20:04:01 INFO linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-25 20:04:01 INFO linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-25 20:04:01 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-25 20:04:01 INFO linux-a: Runner removed name=runner-1d1af85d instanceID=5869c40ebfde32e17ad9799d5b287c5170d517260be9646c39fb3ffa06c3d300 reason=job-completed jobId=3247e383-0f16-cfaf-b270-199a67527096 repo=example-org/example workflowRunId=82593050714 job="build (9150)" result=succeeded
+2026-10-25 20:04:02 INFO linux-a: Runner started name=runner-2f4af1f2 instanceID=2820738787a80b6cc91e4b5fe96095bacb4889385f433895835afa9336a40b6f startupTime=1.309319425s
+2026-10-25 20:04:17 INFO linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-25 20:04:17 INFO linux-a: Runner removed name=runner-2f4af1f2 instanceID=2820738787a80b6cc91e4b5fe96095bacb4889385f433895835afa9336a40b6f reason=job-completed jobId=fbd1769f-6a80-1db0-03a7-d11d87fa8d82 repo=example-org/example workflowRunId=57446793030 job="build (9d8b)" result=failed
+2026-10-25 20:04:19 INFO linux-a: Runner started name=runner-074736c0 instanceID=aef18ad1440ec19415f72e5ab89086c86a66aeb22f67015a0180c0f165e93110 startupTime=2.188831526s
+2026-10-26 01:07:33 INFO linux-b: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 01:07:33 INFO linux-b: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 01:07:34 INFO linux-b: Runner started name=runner-65c339bd instanceID=0147b1d1f23a9291a0b325a961ff86271914366653a57f90e7fc98b36c673dcf startupTime=1.784870423s
+2026-10-26 01:08:22 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 01:08:22 INFO linux-b: Runner removed name=runner-65c339bd instanceID=0147b1d1f23a9291a0b325a961ff86271914366653a57f90e7fc98b36c673dcf reason=job-completed jobId=b8903e67-8894-1831-886a-838c290dec8d repo=example-org/example workflowRunId=83507689465 job="build (d41c)" result=succeeded
+2026-10-26 01:08:23 INFO linux-b: Runner started name=runner-43718191 instanceID=570a2aa251208bb86fa790f1a186d1821b3e2c49c99849735eba10c25fac715e startupTime=864.122928ms
+2026-10-26 01:09:19 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 01:09:20 INFO linux-b: Runner removed name=runner-43718191 instanceID=570a2aa251208bb86fa790f1a186d1821b3e2c49c99849735eba10c25fac715e reason=job-completed jobId=5a253bed-5e56-92cf-71c3-0f73f4491ba1 repo=example-org/example workflowRunId=11000564700 job="build (d41c)" result=succeeded
+2026-10-26 01:09:21 INFO linux-b: Runner started name=runner-58c119b8 instanceID=8d7e62734f7c1f4cdbc7d1ac0c8485d0d063c58230f9995ec4125851c6f297d1 startupTime=845.855254ms
+2026-10-26 01:10:12 WARN linux-b: Runner exited before job completion; removing stale capacity name=runner-58c119b8
+2026-10-26 01:10:13 INFO linux-b: Runner removed name=runner-58c119b8 instanceID=8d7e62734f7c1f4cdbc7d1ac0c8485d0d063c58230f9995ec4125851c6f297d1 reason=exited
+2026-10-26 01:10:26 WARN linux-b: Job started for unknown runner (already removed?) runnerName=runner-58c119b8
+2026-10-26 01:10:26 WARN linux-b: Job completed for unknown runner (already removed?) runnerName=runner-58c119b8
+2026-10-26 01:10:30 INFO linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 01:10:30 INFO linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 01:10:30 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 15:33:07 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 15:33:08 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 15:33:08 INFO linux-a: Runner started name=runner-0e53f78a instanceID=18c88306da90da7acc7ab5a8776a70d72af3d66621b6e7b9f11b91303313527a startupTime=1.490275735s
+2026-10-26 15:33:09 INFO linux-b: Runner started name=runner-c622c2ba instanceID=da2cc08f1fb608cb45ba563fddc33feeb37256b1b06984324659f3609e36f2a5 startupTime=940.128545ms
+2026-10-26 15:33:15 INFO linux-b: Runner removed name=runner-c622c2ba instanceID=da2cc08f1fb608cb45ba563fddc33feeb37256b1b06984324659f3609e36f2a5 reason=drain
+2026-10-26 15:33:15 INFO linux-b: Draining runners busy=0
+2026-10-26 15:33:15 ERRO linux-b: request failed error="Get \"https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001\": context canceled" method=GET url="https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001"
+2026-10-26 15:33:15 INFO linux-a: Runner removed name=runner-0e53f78a instanceID=18c88306da90da7acc7ab5a8776a70d72af3d66621b6e7b9f11b91303313527a reason=drain
+2026-10-26 15:33:15 INFO linux-a: Draining runners busy=0
+2026-10-26 15:33:15 ERRO linux-a: request failed error="Get \"https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001\": context canceled" method=GET url="https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001"
+2026-10-26 15:33:15 INFO linux-b: Shutting down runners
+2026-10-26 15:33:15 INFO linux-a: Shutting down runners
+2026-10-26 15:33:15 INFO Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs serviceManager=systemd drainTimeout=1h10m0s action="runner service uninstall, then runner service install"
+2026-10-26 15:33:15 INFO Pulling runner image image=localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50 platform=""
+localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50: Pulling from example-runner
+Digest: sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+Status: Image is up to date for localhost:5000/example-runner@sha256:6349838b876d55e0b1ee0a83b8ee4eebda3df9e2ee3c201d02afa1c99fc67e50
+2026-10-26 15:33:15 INFO Health check server started address=127.0.0.1 port=8080
+2026-10-26 15:33:15 INFO Disk guard enabled min_free=10% target_free=20% interval=1h0m0s max_tier=3 stores=3
+2026-10-26 15:33:15 INFO Starting scale sets count=2 concurrent=3
+2026-10-26 15:33:15 INFO linux-b: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 15:33:15 INFO linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 15:33:15 INFO linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 15:33:15 INFO linux-b: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 15:33:16 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 15:33:16 INFO linux-b: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 16:40:14 INFO linux-b: Runner started name=runner-9b020c8b instanceID=a59a5ae381ff707739d1bbc7b5d02faf58d2de546e1fdf33fb3fdec0c8607b07 startupTime=984.473177ms
+2026-10-26 16:41:02 INFO linux-b: Runner removed name=runner-9b020c8b instanceID=a59a5ae381ff707739d1bbc7b5d02faf58d2de546e1fdf33fb3fdec0c8607b07 reason=job-completed jobId=008293c9-4a0e-79bc-7053-c79eee3240d0 repo=example-org/example workflowRunId=65291388079 job="build (d41c)" result=succeeded
+2026-10-26 16:46:27 WARN linux-a: Runner exited before job completion; removing stale capacity name=runner-fdd754bf
+2026-10-26 16:46:28 INFO linux-a: Runner removed name=runner-fdd754bf instanceID=2c98418136a9b466c0d0092c44a9b10fad3567e1d7256ac825110b5ff692d85c reason=exited jobId=ebc82f2d-7769-4e32-fa56-2ef64ed7c45a repo=example-org/example workflowRunId=75556423636 job="build (9150)"
+2026-10-26 16:46:29 WARN linux-a: Job completed for unknown runner (already removed?) runnerName=runner-fdd754bf
+2026-10-26 17:16:11 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 17:16:11 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 17:16:12 INFO linux-b: Runner removed name=runner-2380f7e8 instanceID=c1eb20b35c08e0e459e02a74970f9598dd858e3b6f42b6a6f9ad26a1bc1af010 reason=job-completed jobId=bbd8b9ae-2cdb-583c-f910-1aa05698c8d3 repo=example-org/example workflowRunId=54765324946 job="build (d41c)" result=succeeded
+2026-10-26 17:16:13 INFO linux-b: Runner started name=runner-9324217c instanceID=880750590c6a14833616d3687429ed01166812baaf8afb66686c70128a5b6dec startupTime=740.383634ms
+2026-10-26 17:17:12 INFO linux-b: Runner removed name=runner-9324217c instanceID=880750590c6a14833616d3687429ed01166812baaf8afb66686c70128a5b6dec reason=job-completed jobId=f636f13f-1ba0-21ce-dffb-6cb917d09f9e repo=example-org/example workflowRunId=92253212364 job="build (d41c)" result=succeeded
+2026-10-26 17:28:52 WARN linux-a: Runner exited before job completion; removing stale capacity name=runner-d918e626
+2026-10-26 17:28:52 INFO linux-a: Runner removed name=runner-d918e626 instanceID=b760c75764c8536e403123bb5b49a6f74fe2f3f284cc1410092289a9bf58736a reason=exited jobId=71b8dd53-bc35-2651-26dd-49db6338b265 repo=example-org/example workflowRunId=54765324946 job="build (9150)"
+2026-10-26 17:28:54 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 17:28:54 INFO linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 17:28:54 INFO linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 17:28:55 INFO linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 17:28:55 INFO linux-b: Runner started name=runner-4f153569 instanceID=673d8112de4700c34ca422f6807a88327136496a661fc13c6be29530c824b489 startupTime=1.451794125s
+2026-10-26 17:28:55 INFO linux-a: Runner started name=runner-c2eb9098 instanceID=5fbe6ac65a907e9a104fab93d95fc055e27b880ab67b3a59ed07f987e7aaa08f startupTime=1.199437127s
+2026-10-26 17:29:43 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 17:29:43 INFO linux-b: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 17:29:43 INFO linux-b: Runner removed name=runner-4f153569 instanceID=673d8112de4700c34ca422f6807a88327136496a661fc13c6be29530c824b489 reason=job-completed jobId=205c7c43-a006-00c3-f62c-5b5a97fe7112 repo=example-org/example workflowRunId=75362508581 job="build (d41c)" result=succeeded
+2026-10-26 17:29:44 INFO linux-b: Runner started name=runner-a45ea1c0 instanceID=d2d195ccba96dbf41e1e5d8a0f81101caa89cece94d2e547508036c0fc21c480 startupTime=673.236597ms
+2026-10-26 17:30:03 WARN linux-b: Runner exited before job completion; removing stale capacity name=runner-a45ea1c0
+2026-10-26 17:30:03 INFO linux-b: Runner removed name=runner-a45ea1c0 instanceID=d2d195ccba96dbf41e1e5d8a0f81101caa89cece94d2e547508036c0fc21c480 reason=exited
+2026-10-26 17:30:03 WARN linux-b: Job started for unknown runner (already removed?) runnerName=runner-a45ea1c0
+2026-10-26 17:30:03 WARN linux-b: Job completed for unknown runner (already removed?) runnerName=runner-a45ea1c0
+2026-10-30 22:45:14 ERRO linux-b: request failed error="Get \"https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001\": read tcp 192.0.2.10:40000->192.0.2.10:40000: read: connection timed out" method=GET url="https://broker.actions.githubusercontent.com/scalesets/message?lastMessageId=100000001"

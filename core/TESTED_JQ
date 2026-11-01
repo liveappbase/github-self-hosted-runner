@@ -1,0 +1,13 @@
+# core/TESTED_JQ — the jq builds the decision core (core/) and the watchdog (watchdog/) are tested with. ONE copy:
+# tests/core, tests/watchdog, watchdog/run, the updater's glue and tools/release-check read it, and the jq-linux jobs
+# of .github/workflows/release-check.yml name its ci rows (tests/core/test_workflow.py pins the two equal).
+# A row: VERSION (the exact `jq --version` output)  AREAS (core, watchdog)  WHERE it is tested:
+#   local:PATH   on the maintainer's Mac, at release time (tools/release-check), and in the hosted macOS job
+#   ci:IMAGE     the workflow job "jq VERSION (IMAGE)": the image's own jq package, in a container
+# Measured 2026-11-01: ubuntu:24.04's package (1.7.1-3ubuntu0.24.04.2) prints "jq-1.7"; ubuntu:26.04's (1.8.1-4ubuntu2)
+# "jq-1.8.1"; debian:bookworm-slim's (1.6-2.1+deb12u3) "jq-1.6". The core does not run under jq-1.6 (only the watchdog
+# does, in the liveapp container until its Ubuntu 24.04 rebuild).
+jq-1.7.1-apple  core,watchdog  local:/usr/bin/jq
+jq-1.8.1        core,watchdog  ci:ubuntu:26.04
+jq-1.7          core,watchdog  ci:ubuntu:24.04
+jq-1.6          watchdog       ci:debian:bookworm-slim

@@ -1,0 +1,65 @@
+2026-10-24 18:01:27 INFO Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs serviceManager=launchd drainTimeout=1h0m0s action="runner service uninstall, then runner service install"
+2026-10-24 18:01:27 INFO Tart provider enabled
+2026-10-24 18:01:29 INFO Health check server started address=127.0.0.1 port=8080
+2026-10-24 18:01:29 INFO Tart cache cleanup enabled home="" max_age=168h0m0s space_budget_gb=60 interval=24h0m0s
+2026-10-24 18:01:29 INFO Disk guard enabled min_free=10% target_free=20% interval=1h0m0s max_tier=3 stores=1
+2026-10-24 18:01:29 INFO Starting scale sets count=1 concurrent=2
+2026-10-24 18:01:29 INFO mac-s: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-24 18:01:29 INFO mac-s: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-24 18:01:30 INFO mac-s: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-24 18:01:30 INFO Pruning Tart cache home="" older_than_days=7 space_budget_gb=60
+2026-10-24 18:01:31 INFO mac-s: Scale set created scaleSetID=4 name=mac-s
+2026-10-24 18:01:31 INFO mac-s: Listening for jobs maxRunners=2 minRunners=0
+2026-10-24 18:01:31 INFO mac-s: Handling initial session statistics totalAssignedJobs=0
+2026-10-24 18:02:56 INFO mac-s: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:03:19 INFO mac-s: Runner started name=runner-5aa59aff instanceID=runner-5aa59aff startupTime=22.025867833s
+2026-10-24 18:03:37 INFO mac-s: Runner removed name=runner-5aa59aff instanceID=runner-5aa59aff reason=job-completed jobId=5f8432ad-50ed-b843-40be-f42f87083258 repo=example-org/example workflowRunId=39746588064 job="build (fef2)" result=succeeded
+2026-10-24 18:04:31 INFO mac-s: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:04:56 INFO mac-s: Runner started name=runner-93996c2f instanceID=runner-93996c2f startupTime=24.759157292s
+2026-10-24 18:05:39 INFO mac-s: Runner removed name=runner-93996c2f instanceID=runner-93996c2f reason=job-completed jobId=4f7858fe-275c-0c55-2ab1-2276fd5ea3a0 repo=example-org/example workflowRunId=38565332037 job="build (2bc1)" result=succeeded
+2026-10-24 18:06:05 INFO mac-s: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:06:27 INFO mac-s: Runner started name=runner-7b3ec1d1 instanceID=runner-7b3ec1d1 startupTime=22.427325s
+2026-10-24 18:21:27 INFO mac-s: Runner removed name=runner-7b3ec1d1 instanceID=runner-7b3ec1d1 reason=job-completed jobId=51ea9df7-db01-96d3-4af5-837cba67da63 repo=example-org/example workflowRunId=76822578172 job="build (a12b)" result=failed
+2026-10-26 21:01:16 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:01:38 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:01:38 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:02:28 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:03:18 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:04:08 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:04:59 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:05:48 WARN mac-a: Job completed for unknown runner (already removed?) runnerName=""
+2026-10-26 21:05:48 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:06:38 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:07:28 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:08:18 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:09:08 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:09:58 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:10:24 INFO tart-linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 21:10:24 INFO tart-linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 21:10:24 INFO tart-linux-a: Runner removed name=runner-e972601b instanceID=runner-e972601b reason=job-completed jobId=b4e5ce77-2218-2d95-bfd0-4e917decd99c repo=example-org/example workflowRunId=11474701147 job="build (9150)" result=succeeded
+2026-10-26 21:10:24 INFO mac-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 21:10:24 INFO tart-linux-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-26 21:10:24 INFO mac-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 21:10:24 INFO mac-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-e2ddacdc right after connecting to GitHub; runner log:
+  │ √ Connected to GitHub
+  │ 
+  │ Current runner version: '2.338.0'
+  │ 2026-10-26 21:10:46Z: Listening for Jobs
+  │ The runner no longer exists on the server. Cleaning up local configuration.
+  │ √ Removed .credentials
+  │ √ Removed .runner
+  │ Runner listener exit with 0 return code, stop the service, no retry needed.
+  │ Exiting runner...
+2026-10-26 21:10:53 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:10:53 INFO tart-linux-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-26 21:10:53 INFO tart-linux-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-26 21:10:54 INFO tart-linux-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-26 21:10:58 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2
+2026-10-26 21:11:09 INFO tart-linux-a: Runner started name=runner-d5741c95 instanceID=runner-d5741c95 startupTime=15.36329625s
+2026-10-26 21:11:24 INFO mac-a: Scaling up runner currentCount=0 desiredCount=2
+2026-10-26 21:11:24 INFO mac-a: Runner removed name=runner-321e4b40 instanceID=runner-321e4b40 reason=job-completed jobId=5318c20c-b460-ae66-1adc-338dd54ba018 repo=example-org/example workflowRunId=92465818831 job="build (a12b)" result=succeeded
+2026-10-26 21:11:48 INFO mac-a: Runner started name=runner-9f9d2ea7 instanceID=runner-9f9d2ea7 startupTime=23.512047375s
+2026-10-26 21:11:48 INFO mac-a: Scaling up runner currentCount=1 desiredCount=2

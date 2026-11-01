@@ -1,0 +1,84 @@
+# core/lib/logfmt.jq — runscaler's log text into records. Shared by the core's programs (core/README.md, "The log").
+#
+# The format is charm log v2's text formatter (runscaler's default `log-format = "text"`), one Write per record:
+#   YYYY-MM-DD HH:MM:SS LEVEL [SET: ]MESSAGE key=value key="quoted \"value\""
+#   a multi-line value as a line "  key=" and then one line "  │ TEXT" per value line; after it, more keys on a line
+#   " key=value", or another "  key=" (a blank line may come between)
+# Lines of other programs (a Docker pull writes "…: Pulling from …", "Digest: …") are no record and end the record
+# before them; continuation lines with no record before them (the tail of an earlier interval's record) are ignored.
+#
+# tokenize: the log text -> {"records": [RECORD], "carry": TEXT}. RECORD = {"t", "lvl", "set" (null for a global
+# record), "msg", "attrs" (top-level keys only; quoted values unquoted, multi-line values joined with "\n"), "text" (the
+# record's lines as written)}. carry = the last record when it may be incomplete (the text does not end with a newline,
+# or it ends on a "  key=" line): the caller prepends it to the next interval's text.
+
+def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
+def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
+
+# runscaler's messages the core reads, matched EXACTLY: the message, then the end or " key=" (so "Runner started
+# (cold)", a Tart debug line, is not "Runner started")
+def known_messages: [
+  "Failed to start runner, will retry",
+  "Runner exited before job completion; removing stale capacity",
+  "Runner removed",
+  "Runner started",
+  "VM exited unexpectedly"
+];
+
+def _kind:
+  if test(_hdr_re) then "h"
+  elif startswith("  │") then "v"
+  elif test("^  " + _key_re + "=$") then "k"
+  elif test("^ " + _key_re + "=") then "a"
+  elif . == "" then "e"
+  else "f" end;
+
+def _unquote:
+  if length >= 2 and startswith("\"") and endswith("\"") then .[1:-1] | gsub("\\\\\""; "\"") else . end;
+
+def _attrs:
+  [match("(?<k>" + _key_re + ")=(?<v>\"(?:[^\"\\\\]|\\\\.)*\"|[^ ]*)"; "g")
+   | {(.captures[0].string): (.captures[1].string | _unquote)}] | add // {};
+
+def _split_message:
+  . as $r
+  | ([known_messages[] | . as $m
+      | select($r == $m or (($r | startswith($m + " ")) and ($r[($m | length):] | test("^ " + _key_re + "="))))]
+     | .[0]) as $k
+  | if $k != null then {msg: $k, attrs: $r[($k | length):]}
+    else $r | capture("^(?<msg>.*?)(?<attrs>( " + _key_re + "=.*)?)$") end;
+
+def _header:
+  capture("^(?<t>[0-9-]{10} [0-9:]{8}) (?<lvl>[A-Z]{4}) (?<rest>.*)$") as $h
+  | (($h.rest | capture("^(?<set>[A-Za-z0-9][A-Za-z0-9._-]*): (?<r>.*)$")) // {set: null, r: $h.rest}) as $p
+  | ($p.r | _split_message) as $m
+  | {t: $h.t, lvl: $h.lvl, set: $p.set, msg: $m.msg, attrs: ($m.attrs | _attrs), text: .};
+
+def tokenize:
+  . as $text
+  | ($text | endswith("\n")) as $complete
+  | ($text | split("\n")) as $all
+  | (if $complete then $all[:-1] else $all end) as $ls
+  | [$ls[] | _kind] as $kinds
+  | ([range(0; $kinds | length) | select($kinds[.] == "h")] | last) as $last_h
+  | (if ($ls | length) == 0 then 0
+     elif ($complete | not) then ($last_h // (($ls | length) - 1))
+     elif $kinds[-1] == "k" and $last_h != null then $last_h
+     else ($ls | length) end) as $cut
+  | {records:
+      (reduce range(0; $cut) as $i ({recs: [], cur: null, key: null};
+         $ls[$i] as $l | $kinds[$i] as $k
+         | if $k == "h" then (if .cur != null then .recs += [.cur] else . end) | .cur = ($l | _header) | .key = null
+           elif .cur == null then .
+           elif $k == "k" then ($l | ltrimstr("  ") | rtrimstr("=")) as $key
+             | .key = $key | .cur.attrs[$key] = [] | .cur.text += "\n" + $l
+           elif $k == "v" then
+             (if .key != null then .key as $key | .cur.attrs[$key] += [$l | sub("^  │ ?"; "")] else . end)
+             | .cur.text += "\n" + $l
+           elif $k == "a" then .cur.attrs += ($l | _attrs) | .key = null | .cur.text += "\n" + $l
+           elif $k == "e" then .
+           else .recs += [.cur] | .cur = null | .key = null end)
+       | (if .cur != null then .recs + [.cur] else .recs end)
+       | map(.attrs |= with_entries(if (.value | type) == "array" then .value |= join("\n") else . end))),
+     carry: (if $cut < ($ls | length) then ($ls[$cut:] | join("\n")) + (if $complete then "\n" else "" end)
+             else "" end)};
