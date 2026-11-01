@@ -145,6 +145,22 @@ class OlderVersionStops(unittest.TestCase):
             r = self.keep_newer(name, None)
             self.assertEqual(r['verdict'], 'held', (name, r))
 
+    def test_opus_r5_f4_a_closing_stop_whose_version_is_empty_or_not_a_string_holds(self):
+        # a glue's unset variable expands to "" (Opus r4 F5's reason, on `version`), and a number is no version: not
+        # proven to be of another version, so it holds, as one with no version does (Opus r5 F4: it read as an older
+        # version's STOP, and the candidate was accepted). Two families: the STOP holds its own family only
+        fams = {'fx': fam(version='2.340.0', image='img-newer'), 'fy': fam(sets=('mac-b',), version='2.340.0', image='img-y')}
+        e = ev(since=NOW - 73 * H, succeeded=5, version='2.340.0')
+        st = {'format': 1, 'families': {'fx': dict(e, lines={'mac-a': 'img-newer'}), 'fy': dict(e, lines={'mac-b': 'img-y'})}}
+        for name in self.CLOSING:
+            for version, want in (('', 'held'), (2340, 'held'), (2.34, 'held'), (['2.339.0'], 'held'), ({}, 'held'),
+                                  (True, 'held'), ('2.339.0', 'accept')):     # control: an older version's: accept
+                with self.subTest((name, version)):
+                    f = facts(fams)
+                    f['stops'] = [dict(held(name), version=version)]
+                    out = ok(self, 'keep', state=st, facts=f, now=NOW)['families']
+                    self.assertEqual({k: v['verdict'] for k, v in out.items()}, {'fx': want, 'fy': 'accept'})
+
 
 class Keep(unittest.TestCase):
     def test_72h_with_a_success_accepts(self):

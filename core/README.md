@@ -223,7 +223,8 @@ R1 verdict or STOP stands, r1's own or one the glue holds in `facts.stops`: `hel
 lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts. A held
 STOP holds every family when it names none (no `family`, `""`, or one that is not a name: fail closed, as for
 `version`).
-It holds the candidate only when it is of the candidate's `version` (or names none), or when its D7 row says a newer
+It holds the candidate only when it is of the candidate's `version` (or names none: no `version`, `""`, or one that is
+not a string), or when its D7 row says a newer
 release does NOT proceed alone (`lib/stops.jq`): check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version
 closed that version's candidate, and a newer release proceeds alone past them. KEEP never
 accepts while r1's `pending` stands (three counted failures, not all settled, the held record counted as one when it
