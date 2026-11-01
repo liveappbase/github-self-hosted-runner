@@ -1,5 +1,8 @@
 #!/bin/zsh -f
-# runner-start run|validate — the one way runscaler starts; the LaunchAgent sh.liveapp.mac-runner runs `runner-start run`.
+# runner-start run | runner-start validate [CONFIG] — the one way runscaler starts; the LaunchAgent sh.liveapp.mac-runner
+# runs `runner-start run`. `validate CONFIG` checks and validates CONFIG (an absolute path to a regular file) in place of
+# the configured one, with the same checks: the updater validates a temporary copy of its target config that way while
+# runscaler runs. `run` takes no CONFIG.
 # Design: docs/design.md ("The service"). Refuses (and never starts runscaler) when a token file the config names
 # (env:RUNNER_TOKEN_X -> token-x; a comment line names none) is missing, empty or not 0600; when `tart` on its PATH is
 # not the shim; or when a configured runner-image is not on this host. `run` also refuses when the wall stamp's macOS
@@ -26,8 +29,18 @@ stamp_macos() { # -> 0 when the wall stamp's macos line is this Mac's build; els
   REPLY="the wall was proven on macOS build ${p:-(none in the stamp)}; this Mac runs ${b:-(sw_vers gave nothing)}"
   return 1
 }
+usage='usage: runner-start run | runner-start validate [CONFIG]'
 mode=${1-}
-[[ $mode == (run|validate) ]] || die "usage: runner-start run|validate"
+case $mode in
+  (run) (( $# == 1 )) || die $usage ;;
+  (validate)
+    (( $# <= 2 )) || die $usage
+    if (( $# == 2 )); then
+      [[ $2 == /* && -f $2 && ! -L $2 ]] || die "CONFIG must be an absolute path to a regular file: '$2'"
+      CONFIG=$2
+    fi ;;
+  (*) die $usage ;;
+esac
 [[ -r $CONFIG ]] || die "no config: $CONFIG"
 for log in $ERRLOG $OUTLOG; do
   if [[ -f $log ]] && (( $(stat -f %z $log) > 10485760 )); then : > $log; fi
