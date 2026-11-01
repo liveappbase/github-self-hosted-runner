@@ -1,0 +1,45 @@
+{
+  "status": "ok",
+  "version": "0.9.5",
+  "uptime": "121h58m29s",
+  "scale_sets": [
+    {
+      "name": "linux-a",
+      "ready": true,
+      "last_connected": "2026-10-27T10:33:51Z",
+      "idle": 0,
+      "busy": 2,
+      "metrics": {
+        "jobs_started": 98,
+        "jobs_completed": 96,
+        "desired_runners": 2,
+        "assigned_jobs": 2,
+        "running_jobs": 2
+      }
+    },
+    {
+      "name": "linux-b",
+      "ready": true,
+      "last_connected": "2026-10-27T10:33:52Z",
+      "idle": 0,
+      "busy": 0,
+      "metrics": {
+        "jobs_started": 290,
+        "jobs_completed": 290,
+        "desired_runners": 0
+      }
+    }
+  ],
+  "disk": [
+    {
+      "filesystem": "/var/lib/docker",
+      "free_percent": 82.72552398131776,
+      "free_bytes": 133122809856,
+      "total_bytes": 160921083904
+    }
+  ],
+  "capacity": {
+    "limit": 3,
+    "in_use": 2
+  }
+}
