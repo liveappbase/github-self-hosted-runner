@@ -1,13 +1,19 @@
 #!/bin/zsh -f
 # golden-prune CONFIGURED [NAME...] — which golden images may go? Prints, one per line in name order, every
-# liveapp-mac-golden-<yyyymmdd> among NAMEs except CONFIGURED (the image config.toml names) and the newest other
-# generation (the way back). Pure: it reads only its arguments and deletes nothing; the live prune deletes exactly
-# what it prints. "Newest" is the date in the name, never a file time. Only a REAL date counts (20261332 or 20260230
-# is not golden); a name outside the pattern is never printed. Refuses (exit 1, nothing on stdout) when CONFIGURED
-# is not a golden name or not among NAMEs, or a golden name repeats.
+# liveapp-mac-golden-<yyyymmdd> among NAMEs except CONFIGURED (the image config.toml names), the newest other
+# generation (the way back) and every name in the updater's protected list. It reads its arguments and one fixed
+# file, PROTECTED (below: the updater writes it, one image name per line); it deletes nothing; the live prune deletes
+# exactly what it prints. "Newest" is the date in the name, never a file time. Only a REAL date counts (20261332 or
+# 20260230 is not golden); a name outside the pattern is never printed. Refuses (exit 1, nothing on stdout) when
+# CONFIGURED is not a golden name or not among NAMEs, or a golden name repeats.
+# The protected list: no STATEDIR means no updater on this host, and nothing is protected. STATEDIR without PROTECTED,
+# a PROTECTED that is not a readable regular file (a symlink is not), or a line that is not an image name
+# ([A-Za-z0-9][A-Za-z0-9._-]*): REFUSE. An empty PROTECTED protects nothing.
 # Design: docs/operations.md ("Rebuilding the image").
 set -u
 export LC_ALL=C
+STATEDIR=/Users/ci/.local/state/runner-updater
+PROTECTED=$STATEDIR/protected
 refuse() { print -u2 -r -- "golden-prune: REFUSE $*"; exit 1 }
 pat='^liveapp-mac-golden-[0-9]{8}$'
 (( $# >= 1 )) || refuse "usage: golden-prune CONFIGURED [NAME...]"
@@ -20,6 +26,21 @@ golden=()
 for n in "$@"; do isgolden $n && golden+=($n); done
 (( ${#${(@u)golden}} == ${#golden} )) || refuse "a golden name appears twice"
 (( ${golden[(Ie)$configured]} )) || refuse "configured image not present: '$configured'"
+protected=()
+if [[ -e $STATEDIR || -L $STATEDIR ]]; then
+  [[ -e $PROTECTED || -L $PROTECTED ]] || refuse "the updater's $STATEDIR has no protected list $PROTECTED"
+  [[ -f $PROTECTED && ! -L $PROTECTED && -r $PROTECTED ]] || refuse "$PROTECTED is not a readable regular file"
+  c=$(/bin/cat -- $PROTECTED && print -rn -- .) || refuse "cannot read the protected list $PROTECTED"
+  c=${c%.}
+  if [[ -n $c ]]; then
+    for l in "${(@f)${c%$'\n'}}"; do   # the compare catches what the regex cannot see (a NUL)
+      [[ $l =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' && $l == "$MATCH" ]] \
+        || refuse "the protected list $PROTECTED holds a line that is not an image name"
+      protected+=($l)
+    done
+  fi
+fi
 others=(${(o)golden:#$configured})
 (( ${#others} <= 1 )) && exit 0
-print -rl -- ${others[1,-2]}
+prune=(${others[1,-2]:|protected})
+(( ${#prune} == 0 )) || print -rl -- $prune
