@@ -22,7 +22,7 @@
 set -euo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
-# is not KEY=value, a key twice or a key missing: REFUSE on stderr, exit 1, before anything else runs.
+# is not KEY=value, any key twice (read or not) or a key missing: REFUSE on stderr, exit 1, before anything else runs.
 HOST_CONF=/etc/liveapp-ci/host.conf
 host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF sets that variable
   local me=$1 l k o seen=" "; shift
@@ -31,9 +31,9 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   while IFS= read -r l || [ -n "$l" ]; do
     case $l in ''|'#'*) continue ;; esac
     [[ $l =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9][A-Za-z0-9._:/-]*)$ ]] || { echo "$me: REFUSE $HOST_CONF: want KEY=value, got [$l]" >&2; exit 1; }
-    k=${BASH_REMATCH[1]}; [[ " $* " == *" $k "* ]] || continue
-    [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
-    printf -v "$k" %s "${BASH_REMATCH[2]}"; seen="$seen$k "
+    k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
+    seen="$seen$k "; [[ " $* " == *" $k "* ]] || continue
+    printf -v "$k" %s "${BASH_REMATCH[2]}"
   done < "$HOST_CONF"
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }

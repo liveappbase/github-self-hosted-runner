@@ -31,7 +31,7 @@
 set -uo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
-# is not KEY=value, a key twice or a key missing: REFUSE on stderr, exit 1, before anything else runs.
+# is not KEY=value, any key twice (read or not) or a key missing: REFUSE on stderr, exit 1, before anything else runs.
 HOST_CONF=/etc/liveapp-ci/host.conf
 host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF sets that variable
   local me=$1 l k o seen=" "; shift
@@ -40,9 +40,9 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   while IFS= read -r l || [ -n "$l" ]; do
     case $l in ''|'#'*) continue ;; esac
     [[ $l =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9][A-Za-z0-9._:/-]*)$ ]] || { echo "$me: REFUSE $HOST_CONF: want KEY=value, got [$l]" >&2; exit 1; }
-    k=${BASH_REMATCH[1]}; [[ " $* " == *" $k "* ]] || continue
-    [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
-    printf -v "$k" %s "${BASH_REMATCH[2]}"; seen="$seen$k "
+    k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
+    seen="$seen$k "; [[ " $* " == *" $k "* ]] || continue
+    printf -v "$k" %s "${BASH_REMATCH[2]}"
   done < "$HOST_CONF"
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
@@ -58,9 +58,9 @@ R=$HOME/.config/runner; CFG=$R/config.toml; KEEPC=$R/config.toml.pre-image; POOL
 REF=/home/${RUN_USER}/run/image.ref; REG=http://127.0.0.1:${REGISTRY_PORT}; D1=unix:///home/${RUN_USER}/run/docker.sock; B=$HOME/build
 S03=$B/setup/03-runscaler.sh
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=6d3edcbc5be39df84d1547b973df79ff332a39ac894d6c3f94928cc7506a27b4
-$B/bin/runner-start=93a6651fb810dd1906e876ab8124a8e07f9e92405bded6a1e77cfc34b7b65864
-$B/bin/pool-ready=8c07e682d7c94a1ee102f6b6f6372b24ce967cf37294227a12889be0d0768947
+PINS="$S03=5cb54f4eb1e81d90744f3f483a8c5cb4e0ffdfc0368c95d302bfc8cdb0ca363a
+$B/bin/runner-start=698d52799fc20feff260fcec82d3aa49f66aa535547368b17d27226941306107
+$B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/config/runscaler.service=b84e46b1b9d4391258a6a6161b55f6c96fe625aec4eec8251c0f8dd562c530be"
 SETS="${MAIN_SET} ${SMALL_SET}"
 IMGRE='^localhost:'"${REGISTRY_PORT}"'/'"${IMAGE_NAME}"'@sha256:[0-9a-f]{64}$'   # 03's own rule for image.ref
