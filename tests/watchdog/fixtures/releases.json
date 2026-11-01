@@ -1,0 +1,110 @@
+[
+  {
+    "tag_name": "v2.338.2",
+    "name": "v2.338.2",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-26T14:25:14Z",
+    "published_at": "2026-10-26T14:45:12Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.338.2"
+  },
+  {
+    "tag_name": "v2.338.1",
+    "name": "v2.338.1",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-10-22T14:10:39Z",
+    "published_at": "2026-10-22T14:14:46Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.338.1"
+  },
+  {
+    "tag_name": "v2.338.0",
+    "name": "v2.338.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-10-06T13:51:36Z",
+    "published_at": "2026-10-06T13:55:11Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.338.0"
+  },
+  {
+    "tag_name": "v2.337.0",
+    "name": "v2.337.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-08-26T14:29:20Z",
+    "published_at": "2026-08-26T14:33:29Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.337.0"
+  },
+  {
+    "tag_name": "v2.336.0",
+    "name": "v2.336.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-07-20T17:42:20Z",
+    "published_at": "2026-07-20T17:45:55Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.336.0"
+  },
+  {
+    "tag_name": "v2.335.1",
+    "name": "v2.335.1",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-06-09T01:28:02Z",
+    "published_at": "2026-06-09T01:32:05Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.335.1"
+  },
+  {
+    "tag_name": "v2.335.0",
+    "name": "v2.335.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-06-08T17:04:53Z",
+    "published_at": "2026-06-08T17:08:55Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.335.0"
+  },
+  {
+    "tag_name": "v2.334.0",
+    "name": "v2.334.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-04-21T18:49:15Z",
+    "published_at": "2026-04-21T18:54:03Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.334.0"
+  },
+  {
+    "tag_name": "v2.333.1",
+    "name": "v2.333.1",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-03-27T16:55:20Z",
+    "published_at": "2026-03-27T17:01:07Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.333.1"
+  },
+  {
+    "tag_name": "v2.333.0",
+    "name": "v2.333.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-03-18T17:26:07Z",
+    "published_at": "2026-03-18T17:30:37Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.333.0"
+  },
+  {
+    "tag_name": "v2.332.0",
+    "name": "v2.332.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-02-25T13:46:12Z",
+    "published_at": "2026-02-25T13:52:08Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.332.0"
+  },
+  {
+    "tag_name": "v2.331.0",
+    "name": "v2.331.0",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-01-09T17:22:08Z",
+    "published_at": "2026-01-09T17:26:04Z",
+    "html_url": "https://github.com/actions/runner/releases/tag/v2.331.0"
+  }
+]

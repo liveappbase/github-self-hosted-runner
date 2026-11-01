@@ -1,7 +1,9 @@
 # release-check — the repository's own check, on a GitHub-hosted Mac. It runs tools/release-check with the GENERIC
 # rules only: the maintainers' private list never leaves their machines (docs/operations.md, "Releasing"). Then the
 # tests under tests/ (stdlib unittest): they run copies of the tools against stubs in a temporary folder, never a
-# host path.
+# host path; the decision core and the watchdog under /usr/bin/jq (core/TESTED_JQ's local row). The jq-linux jobs run
+# the core's and the watchdog's tests once per ci row of core/TESTED_JQ, in that image with its own jq package;
+# tools/release-check --build reads their results on the tagged commit by their names, "jq VERSION (IMAGE)".
 # No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
 # home-data rules read every reachable commit). Never pull_request_target; the token can only read.
 name: release-check
@@ -30,4 +32,36 @@ jobs:
         run: /bin/zsh -f tools/release-check
       - name: tests
         working-directory: src
+        env:
+          JQ: /usr/bin/jq
         run: python3 -I -m unittest discover -s tests -t . -v
+  jq-linux:
+    name: jq ${{ matrix.jq }} (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {jq: jq-1.8.1, image: "ubuntu:26.04", areas: "core watchdog"}
+          - {jq: jq-1.7, image: "ubuntu:24.04", areas: "core watchdog"}
+          - {jq: jq-1.6, image: "debian:bookworm-slim", areas: "watchdog"}
+    steps:
+      - name: git, python3 and the image's own jq package
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates git jq python3
+      - name: Fetch the commit
+        run: |
+          git init -q src
+          git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          git -C src fetch -q --no-tags --depth 1 origin "$GITHUB_SHA"
+          git -C src checkout -q --detach FETCH_HEAD
+      - name: the image's jq is the row's
+        run: test "$(/usr/bin/jq --version)" = "${{ matrix.jq }}"
+      - name: the core's and the watchdog's tests
+        working-directory: src
+        env:
+          JQ: /usr/bin/jq
+        run: for a in ${{ matrix.areas }}; do python3 -I -m unittest discover -s tests/$a -t . -v || exit 1; done

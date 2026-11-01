@@ -1,0 +1,12 @@
+﻿2026-11-01T09:03:21.4767706Z Current runner version: '2.338.2'
+2026-11-01T09:03:21.4776121Z Runner name: 'runner-69e7ccce'
+2026-11-01T09:03:21.4777027Z Runner group name: 'example-group'
+2026-11-01T09:03:21.4777990Z Machine name: 'acfc2eb80e01'
+2026-11-01T09:03:21.4781175Z ##[group]GITHUB_TOKEN Permissions
+2026-11-01T09:03:21.4783836Z Contents: read
+2026-11-01T09:03:21.4784374Z Metadata: read
+2026-11-01T09:03:21.4784866Z Packages: read
+2026-11-01T09:03:21.4785545Z ##[endgroup]
+2026-11-01T09:03:21.4788422Z Secret source: Actions
+2026-11-01T09:03:21.4789278Z Cache mode: write
+2026-11-01T09:03:21.4789923Z Prepare workflow directory
