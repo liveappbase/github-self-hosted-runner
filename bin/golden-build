@@ -5,8 +5,9 @@
 # The date is --date (a real date), else today's, read from the clock ONCE. The runner version and its sha256 come
 # from the host pin $PINDIR/mac-golden when that exists (the updater writes it; a person normally never does), else
 # from the release literals RUNNER_VERSION and RUNNER_SHA. A pin is a regular file, not a symlink, of exactly one
-# line `VERSION SHA256`: any other pin STOPS the build and --print-runner, and never falls back to the literals. The
-# download URL comes from the version through one template (runner_url), for the literal and a pin alike. All three
+# line `VERSION SHA256`: any other pin STOPS the build and --print-runner, and never falls back to the literals; so
+# does a STATEDIR or PINDIR it cannot search (a pin behind it would look absent). The download URL comes from the
+# version through one template (runner_url), for the literal and a pin alike. All three
 # are resolved once, before the agent check; the step under the lock gets them as arguments and reads neither the
 # pin nor the clock, so a build across midnight still uses one date for every name and both logs.
 # --print-runner prints `host pin V (release literal L)` or `release literal L (no host pin)`. It takes no lock,
@@ -48,7 +49,11 @@ isdate() { # a real date: YYYYMMDD that date reads back as the same date (as gol
 isversion() { [[ $1 =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && $1 == "$MATCH" ]] }
 issha() { [[ $1 =~ '^[0-9a-f]{64}$' && $1 == "$MATCH" ]] }
 pin() { # -> 0 and reply=(VERSION SHA) for a good host pin; 1 when there is none; a bad pin STOPS
-  local f=$PINDIR/mac-golden c
+  local f=$PINDIR/mac-golden c d
+  for d in $STATEDIR $PINDIR; do   # behind a folder it cannot search, a pin would look absent
+    [[ ! -e $d && ! -L $d ]] || [[ -d $d && -x $d ]] \
+      || die "host pin $f is not one line 'VERSION SHA256' ($d cannot be searched)"
+  done
   [[ -e $f || -L $f ]] || return 1
   [[ -f $f && ! -L $f && -r $f ]] || die "host pin $f is not one line 'VERSION SHA256'"
   c=$(/bin/cat -- $f && print -rn -- .) || die "host pin $f is not one line 'VERSION SHA256'"

@@ -315,6 +315,24 @@ class TestPin(unittest.TestCase):
         res = r.run('--print-runner')
         self.assertEqual((res.returncode, res.stdout), (0, 'host pin %s (release literal %s)\n' % (PIN_V, LIT_V)))
 
+    def test_e_pin_in_a_folder_that_cannot_be_searched_stops(self):
+        # stat cannot tell "absent" from "behind a closed folder": a closed folder must not read as "no pin"
+        for folder in ('pin', ''):
+            with self.subTest(folder=folder or 'state'):
+                r = Rig(self)
+                r.write_pin(GOOD_PIN)
+                os.chmod(r.sb.path('state', folder) if folder else r.sb.path('state'), 0o600)
+                res = r.run('--print-runner')
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertTrue(res.stdout.startswith("golden-build: STOP host pin %s is not one line 'VERSION SHA256'"
+                                                      % r.pin), res.stdout)
+        r = Rig(self)   # the control: the same folders, searchable
+        r.write_pin(GOOD_PIN)
+        os.chmod(r.sb.path('state', 'pin'), 0o700)
+        os.chmod(r.sb.path('state'), 0o700)
+        res = r.run('--print-runner')
+        self.assertEqual((res.returncode, res.stdout), (0, 'host pin %s (release literal %s)\n' % (PIN_V, LIT_V)))
+
     def test_e_control_flag_and_lock_are_live(self):
         r = Rig(self)
         r.write_pin(GOOD_PIN)
