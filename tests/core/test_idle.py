@@ -163,5 +163,32 @@ class Formats(unittest.TestCase):
         self.assertIn('idle: --slurpfile healthz is required', err)
 
 
+class NeverVacuous(unittest.TestCase):
+    """IDLE is never said of nothing (Codex r1 F7, Opus r1 F5): with no set to check, or a read that lists no set."""
+
+    def test_facts_with_no_sets_cannot_decide(self):
+        for f in ({'format': 1, 'host': 'hz'}, {'format': 1}, {'format': 1, 'host': 'hz', 'sets': []},
+                  {'format': 1, 'host': 'hz', 'sets': None}, {'format': 1, 'host': 'hz', 'sets': 'linux-a'},
+                  {'format': 1, 'host': 'hz', 'sets': ['linux-a', 7]}, {'format': 1, 'host': 'hz', 'sets': ['']}):
+            # Opus r1 F5's reads (runscaler before any set registers) and Codex r1 F7's empty documents
+            for reads in ([{'status': 'ok', 'scale_sets': []}] * 2, [{}, {}]):
+                rc, out, err = run(self, 'idle', healthz=reads, facts=f, state=[], now=NOW)
+                self.assertNotEqual(rc, 0, (f, reads, out))
+                self.assertIn('idle: facts.sets', err, f)
+
+    def test_a_configured_set_that_a_read_does_not_list_is_not_idle(self):
+        for reads in ([{'status': 'ok', 'scale_sets': []}] * 2, [{}, {}], [quiet(), {'status': 'ok', 'scale_sets': []}]):
+            out = idle(self, reads, f=facts(['linux-a']))
+            self.assertEqual(out['verdict'], 'not-idle', reads)
+            self.assertIn('linux-a: absent from /healthz', out['lines'])
+
+    def test_control_real_sets_with_omitted_zero_counts_are_idle(self):
+        r = quiet()
+        for s in r['scale_sets']:
+            for k in ('idle', 'busy', 'provisioning', 'removing'):
+                s.pop(k, None)                     # omitempty: a zero count is absent
+        self.assertEqual(idle(self, [r, r], f=facts(['linux-a']))['verdict'], 'idle')
+
+
 if __name__ == '__main__':
     unittest.main()

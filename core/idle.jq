@@ -23,9 +23,14 @@ C::now_in("idle") as $now
 | C::facts_in("idle") as $facts
 | C::need("idle"; "healthz") as $reads
 | C::state_in("idle") as $state
+# IDLE is never said of nothing: the glue must name every set of the config (a /healthz read lists no set before they
+# register, so the reads alone cannot be the inventory)
+| if ($facts.sets | type) == "array" and ($facts.sets | length) > 0
+     and all($facts.sets[]; type == "string" and length > 0) then .
+  else error("idle: facts.sets is not a non-empty list of set names: \($facts.sets | tojson)") end
 | if ($state | C::state_known | not) then C::wait_output("idle"; $state)
   else
-    ((($facts.sets // []) + [$reads[-2:][]?.scale_sets[]?.name]) | unique) as $sets
+    (($facts.sets + [$reads[-2:][]?.scale_sets[]?.name]) | unique) as $sets
     | (reduce $reads[] as $r ($state.not_ready_since // {};
          reduce ($r.scale_sets // [])[] as $s (.;
            if $s.ready == true then del(.[$s.name]) elif has($s.name) then . else .[$s.name] = $now end))

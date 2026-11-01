@@ -52,7 +52,8 @@ returned unchanged, rc 0.
 {
   "format": 1,
   "host": "studio" | "hz",
-  "sets": ["SET", ...],                 every set of the config runscaler runs (IDLE covers them all)
+  "sets": ["SET", ...],                 every set of the config runscaler runs (IDLE covers them all); idle.jq:
+                                        missing, empty or not a list of names is rc != 0
   "proc": {"before": {"pid": N, "start": EPOCH} | null,
            "after":  {"pid": N, "start": EPOCH} | null},
                                         runscaler read before, and again after, the log position was captured;
@@ -129,9 +130,11 @@ that (not ready included), a job completed on the set, or a gap starts the 30 mi
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose
 R1 verdict or STOP stands: `held`. NO EVIDENCE heals itself: a later success accepts.
 
-**IDLE.** Over every set in `facts.sets` and every set the reads list: two reads; each set present with `metrics` on
-both, `ready` on both (a set read not ready for 24 h is excused from READINESS only), and idle, busy, provisioning,
-removing, available, assigned, running and desired all 0 on both (an absent key reads 0).
+**IDLE.** Over every set in `facts.sets` (required: IDLE is never said of nothing) and every set the reads list: two
+reads; each set present with `metrics` on both (a read that does not list a set of `facts.sets` is not idle:
+runscaler lists no set before they register), `ready` on both (a set read not ready for 24 h is excused from READINESS
+only), and idle, busy, provisioning, removing, available, assigned, running and desired all 0 on both (an absent key
+reads 0).
 
 ## The programs' outputs
 
