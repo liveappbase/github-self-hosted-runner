@@ -1,5 +1,6 @@
 """runner-start validate [CONFIG]: with CONFIG, the token-file, shim and image checks read CONFIG and the runner
-validates CONFIG; without it, the constant config. `run` takes no CONFIG. Every REFUSE is on stderr.
+validates CONFIG; without it, the constant config. `run` takes no CONFIG. Every REFUSE is on stderr. Only `run` cuts a
+log over 10 MB.
 
 A copy runs with its host paths rewritten into a sandbox. Its PATH starts with a folder whose `tart` stub IS the
 rewritten SHIM path; that stub lists the images of a scenario file. The RUNNER stub logs its argv.
@@ -102,6 +103,37 @@ class TestValidateConfig(unittest.TestCase):
                 self.assertEqual((res.returncode, res.stdout), (1, ''))
                 self.assertTrue(res.stderr.startswith('runner-start: REFUSE '), res.stderr)
                 self.assertEqual(r.runner(), [])
+
+
+class TestLogBound(unittest.TestCase):
+    """The 10 MB bound on the LaunchAgent's two logs cuts only in `run` (runscaler's start): `validate` never cuts one,
+    because the updater validates while runscaler writes to runscaler.log."""
+
+    BIG = 10485760 + 1
+
+    def logs(self, r):
+        d = r.sb.path('logdir')
+        out, err = os.path.join(d, 'runscaler.log'), os.path.join(d, 'runner-start.err')
+        for p in (out, err):
+            with open(p, 'wb') as f:
+                f.truncate(self.BIG)   # sparse: over 10 MB on disk costs nothing
+        return out, err
+
+    def test_validate_never_cuts_a_log(self):
+        for args in (['validate'], ['validate', None]):
+            with self.subTest('validate CONFIG' if len(args) == 2 else 'validate'):
+                r = Rig(self)
+                out, err = self.logs(r)
+                res = r.run(*[a if a else r.temp_config(config(HAVE)) for a in args])
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual((os.path.getsize(out), os.path.getsize(err)), (self.BIG, self.BIG))
+
+    def test_control_run_cuts_both_logs(self):
+        r = Rig(self)
+        out, err = self.logs(r)
+        res = r.run('run')
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual((os.path.getsize(out), os.path.getsize(err)), (0, 0))
 
 
 class TestRun(unittest.TestCase):

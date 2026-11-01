@@ -8,7 +8,9 @@
 # not the shim; or when a configured runner-image is not on this host. `run` also refuses when the wall stamp's macOS
 # build is not this Mac's (sw_vers -buildVersion): the frozen shim never compares it, so a build change while the
 # agent is enabled (a security response, an update) stops here at runscaler's next start, until wall-check proves the
-# wall again; launchd retries every 300 s (ThrottleInterval). Bounds the LaunchAgent's two log files at 10 MB.
+# wall again; launchd retries every 300 s (ThrottleInterval). `run` bounds the LaunchAgent's two log files at 10 MB
+# (a file over it is cut to empty as runscaler starts). `validate` never cuts a log: the updater validates while
+# runscaler runs and writes to runscaler.log.
 umask 077
 RUNNER=/Users/ci/bin/runner
 CONFIG=/Users/ci/.config/runner/config.toml
@@ -42,9 +44,11 @@ case $mode in
   (*) die $usage ;;
 esac
 [[ -r $CONFIG ]] || die "no config: $CONFIG"
-for log in $ERRLOG $OUTLOG; do
-  if [[ -f $log ]] && (( $(stat -f %z $log) > 10485760 )); then : > $log; fi
-done
+if [[ $mode == run ]]; then   # only as runscaler starts: never under a running runscaler (validate)
+  for log in $ERRLOG $OUTLOG; do
+    if [[ -f $log ]] && (( $(stat -f %z $log) > 10485760 )); then : > $log; fi
+  done
+fi
 if [[ $mode == run ]] && ! stamp_macos; then
   die "$REPLY: runscaler does not start. Run /Users/ci/bin/runner-disable, then /Users/ci/bin/wall-check, then /Users/ci/bin/runner-enable"
 fi
