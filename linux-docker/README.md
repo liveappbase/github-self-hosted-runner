@@ -60,11 +60,16 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
    ```
    ssh <RS_USER>@<host> 'install -d -m 700 ~/.config/runner && umask 077 && printf "CONCURRENT=3\nCPU=4\nMEMORY=4096\nMAX=2\nSMALL_CPU=2\nSMALL_MEMORY=2048\n" > ~/.config/runner/pool.env'
    ```
-7. **The token (RS_USER).** Create it as the Mac README says ([../README.md](../README.md), Install step 15). Put it into the file the host config's `TOKEN_FILE` names, from a hidden prompt:
+7. **The runner group (on GitHub).** The sets join the runner group the host config's `GROUP` names, and runscaler refuses a set whose group does not exist. The group decides which repositories can send jobs to this host. Create it: Organization → Settings → Actions → Runner groups → New runner group, named as `GROUP`, Repository access "Selected repositories" (pick them), "Allow public repositories" off (where your GitHub plan allows more groups; else set `GROUP` to `Default`). Or with gh, as an organization owner (`<ORG>` is the organization of `ORG_URL`), then pick its repositories on that page:
+   ```
+   gh api -X POST orgs/<ORG>/actions/runner-groups -f name=<GROUP> -f visibility=selected -F allows_public_repositories=false
+   ```
+   For a repository URL there is no group to create: `GROUP` must be `Default`.
+8. **The token (RS_USER).** Create it as the Mac README says ([../README.md](../README.md), Install step 15). Put it into the file the host config's `TOKEN_FILE` names, from a hidden prompt:
    ```
    read -rs "t?GitHub token: " && print -rn -- "$t" | ssh <RS_USER>@<host> 'umask 077 && cat > ~/.config/runner/<TOKEN_FILE>'; unset t
    ```
-8. **runscaler (RS_USER).** It must end with `03 DONE (real)`:
+9. **runscaler (RS_USER).** It must end with `03 DONE (real)`:
    ```
    ssh <RS_USER>@<host> 'bash -s -- real' < linux-docker/setup/03-runscaler.sh
    ```
@@ -75,7 +80,7 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
 
 ## A new runner release
 
-1. A release of this repository puts the new runner image's digest into `image/Dockerfile`. Check it out, then do Install step 3 for both users (pool-image.sh refuses a `~/build` whose pinned files are not its own release's).
+1. A release of this repository puts the new runner image's digest into `image/Dockerfile`. Check it out, then do Install step 3 for both users (pool-image.sh refuses a `~/build` whose pinned files are not its own release's), then Install step 4: step 3 moves the old `~/build` aside with runscaler's download in it, and 03 checks that download first.
 2. As RUN_USER, Install step 5 again: it builds and checks the new image, and only then writes its digest to `~/run/image.ref`.
 3. As RS_USER, at a quiet time (it waits for the pool to be idle before it restarts runscaler):
    ```
@@ -85,11 +90,16 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
 
 ## A host that already runs these scripts from a hand copy
 
-Until you do this, the host keeps running the files it has. The scripts of this folder refuse to run without the host config, so it comes first:
+Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, and nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
 
 1. Install step 1 (the host config, with the values the host uses today).
 2. Install step 3 for both users, then Install step 4.
-3. The 03 line of Install step 8. With the same `pool.env` and `~/run/image.ref` it renders the config runscaler already runs, so it installs it with the pool running and restarts nothing. The new `runner-start` reads the host config from runscaler's next start on.
+3. Check the host config against the running pool, read only. This release's `pool-ready` takes the health port from the host config; give it the set names from the host config. It must end with `READY`:
+   ```
+   ssh <RS_USER>@<host> 'bash ~/build/bin/pool-ready <MAIN_SET> <SMALL_SET>'
+   ```
+
+Do not run 03-runscaler.sh by hand on the running pool: it installs config.toml again, with a new time, and then the next `pool-image.sh up` (and the `accept` of an open release) refuses until runscaler restarts. The next runner release's `up` runs 03 itself ("A new runner release", step 3): it installs this release's `runner-start`, `pool-ready` and unit, renders config.toml from the host config, and restarts runscaler when the pool is idle. If a value of the host config is not the one the pool runs, that `up` stops with config.toml as it was, and nothing restarts. If a release is still open (its `up` ran, and neither its `accept` nor its `back`), close it first with one of them ("A new runner release", step 4).
 
 ## Uninstall
 

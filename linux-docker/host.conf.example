@@ -29,7 +29,9 @@ ORG_URL=https://github.com/your-org
 TOKEN_ENV=RUNNER_TOKEN_OWNER
 TOKEN_FILE=token-owner
 
-# The runner group the sets join (an organization's runner group; it decides which repositories can send jobs).
+# The runner group the sets join (an organization's runner group; it decides which repositories can send jobs). Create it on
+# GitHub first (linux-docker/README.md, Install step 7). For a repository URL, GROUP must be Default: a repository has no
+# other runner group.
 GROUP=linux-ci
 # 03-runscaler.sh real: the main set and the small lane (a set of one runner, so short jobs never wait behind long
 # ones). Each set's labels are self-hosted and its LABEL.
