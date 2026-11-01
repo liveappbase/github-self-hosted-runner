@@ -159,5 +159,145 @@ class HostNodeDiff(unittest.TestCase):
         self.assertEqual(steps, ['save', 'probe', 'fix', 'probe', 'census', 'report'])
 
 
+class GateHost(unittest.TestCase):
+    """golden-emudhra --gate VM: the guest steps save and gate only, then the cleanup; GATE GREEN (0) or GATE RED (1)."""
+
+    VM = 's1-gate-20261101120000'
+
+    def setUp(self):
+        self.d = tmpdir(self)
+        self.tool = emudhra_copy(self, self.d, named_src=fx('named.node-diff'))
+        scenario(self.d, 'save', out='1. save\n')
+        scenario(self.d, 'gate', out='the gate\ncensus: control USERTrust RSA: verify-cert exits 0 (pass)\n')
+
+    def gate(self, *args):
+        r = run([ZSH, '-f', self.tool, *(args or ('--gate', self.VM))], env={'HOME': self.d}, cwd=self.d)
+        self.assertFalse(os.path.exists(os.path.join(self.d, 'unexpected')))
+        return r, r.stdout.splitlines()
+
+    def steps(self):
+        return [c.split('|')[0] for c in lines(os.path.join(self.d, 'calls')) if not c.startswith('rm ')]
+
+    def test_gate_green(self):
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(out[-1], 'golden-emudhra: GATE GREEN')
+        self.assertEqual(self.steps(), ['save', 'gate'])   # never probe, fix, census or report
+        self.assertEqual(set(lines(os.path.join(self.d, 'exec-vms'))), {self.VM})
+        self.assertIn('rm -rf -- ' + GUEST_W, lines(os.path.join(self.d, 'calls')))   # the cleanup ran
+
+    def test_gate_red(self):
+        scenario(self.d, 'gate', out='FAIL census: AAA Certificate Services (SHA-1 X): no deny in the admin trust settings (none)\n', rc=1)
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')
+        self.assertIn('golden-emudhra: FAIL census: AAA Certificate Services (SHA-1 X): no deny in the admin trust settings (none)', out)
+        self.assertIn('golden-emudhra: FAIL the gate found a FAIL (above)', out)
+        self.assertEqual(self.steps(), ['save', 'gate'])
+
+    def test_a_save_that_did_not_complete_is_red(self):
+        scenario(self.d, 'save', out='STOP missing in the guest: /opt/homebrew/bin/node\n', rc=2)
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')
+        self.assertEqual(self.steps(), ['save'])   # the gate did not run on an incomplete save
+
+    def test_a_gate_step_that_did_not_complete_is_red(self):
+        scenario(self.d, 'gate', out='STOP missing in the guest: /opt/homebrew/bin/gtimeout\n', rc=2)
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(out[-1], 'golden-emudhra: GATE RED')
+
+    def test_the_vm_must_be_an_s1_clone(self):
+        for bad in ('gold-20261101', 'runner-x', 'n1-x', 's1-', 's1-a b', '-s1-x'):
+            r, out = self.gate('--gate', bad)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertTrue(out and out[-1].startswith('golden-emudhra: STOP'), bad + r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(self.d, 'exec-vms')), bad)   # no tart call
+        r, out = self.gate('--gate', self.VM, 'extra')
+        self.assertTrue(out[-1].startswith('golden-emudhra: STOP usage'), r.stdout)
+        r, out = self.gate('--gate', 's1-x')   # control
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+
+class GuestGate(unittest.TestCase):
+    """The guest step `gate`: census_deny alone on a saved image. Exit 1 on any FAIL, else 0; it never writes a deny."""
+
+    SHA1 = 'D1EB23A46D17D68FD92564C2F1F1601764D8E349'
+    CONTROLS = ('e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2',
+                '4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a',
+                '96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6')
+
+    def setUp(self):
+        import plistlib
+        self.d = tmpdir(self)
+        gt = stub(os.path.join(self.d, 'stub', 'gtimeout'), 'shift 3\nexec "$@"\n')
+        self.sec = os.path.join(self.d, 'sec')
+        os.makedirs(self.sec)
+        sec = stub(os.path.join(self.d, 'stub', 'security'), r"""S=%s
+print -r -- "$*" >> $S/calls
+case $1 in
+  (trust-settings-export)
+    [[ -f $S/ts.plist ]] || { print -r -- "SecTrustSettingsCreateExternalRepresentation: No Trust Settings were found."; exit 1 }
+    /bin/cp $S/ts.plist $3; exit 0 ;;
+  (verify-cert)
+    rc=1; [[ -f $S/rc.${3:t} ]] && rc=$(<$S/rc.${3:t})
+    print -r -- "...certificate verification $rc"; exit $rc ;;
+  (*) print -r -- "stub security: unexpected $1" >> $S/unexpected; exit 1 ;;
+esac
+""" % self.sec)
+        self.guest, self.w = guest_copy(self, self.d, [
+            ('T=/opt/homebrew/bin/gtimeout', 'T=' + gt), ('SEC=/usr/bin/security', 'SEC=' + sec)])
+        excl = write(os.path.join(self.w, 'excl', 'x.pem'), 'PEM\n')
+        write(os.path.join(self.w, 'excluded.tsv'),
+              '%s\t%s\t%s\tAAA Certificate Services\tkc\t%s\n' % (self.SHA1, 'a' * 64, 'b' * 64, excl))
+        ctl = ''
+        for h in self.CONTROLS:
+            ctl += '%s\tcontrol %s\t%s\n' % (h, h[:6], write(os.path.join(self.w, 'ctl', h + '.pem'), 'PEM\n'))
+            write(os.path.join(self.sec, 'rc.%s.pem' % h), '0\n')   # a control root stays trusted
+        write(os.path.join(self.w, 'controls.tsv'), ctl)
+        write(os.path.join(self.w, 'fail.txt'), '')
+        with open(os.path.join(self.sec, 'ts.plist'), 'wb') as f:   # the admin trust settings: a deny (result 3)
+            plistlib.dump({'trustList': {self.SHA1: {'trustSettings': [{'kSecTrustSettingsResult': 3}]}}}, f)
+
+    def gate(self):
+        r = run([ZSH, '-f', self.guest, 'gate', self.w], cwd=self.d)
+        self.assertFalse(os.path.exists(os.path.join(self.sec, 'unexpected')), 'the gate called security for more than reading')
+        return r, r.stdout.splitlines()
+
+    def test_deny_present_and_controls_trusted_pass(self):
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertFalse([l for l in out if l.startswith('FAIL')], r.stdout)
+
+    def test_no_deny_fails(self):
+        os.remove(os.path.join(self.sec, 'ts.plist'))
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(any(l.startswith('FAIL census: AAA Certificate Services') and 'no deny' in l for l in out), r.stdout)
+
+    def test_an_excluded_anchor_still_trusted_fails(self):
+        write(os.path.join(self.sec, 'rc.x.pem'), '0\n')
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(any('verify-cert exits 0: Apple still trusts it' in l for l in out), r.stdout)
+
+    def test_a_control_root_not_trusted_fails(self):
+        write(os.path.join(self.sec, 'rc.%s.pem' % self.CONTROLS[2]), '1\n')
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(any('a control root must stay trusted' in l for l in out), r.stdout)
+
+    def test_no_records_from_save_fails(self):
+        os.remove(os.path.join(self.w, 'excluded.tsv'))
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_a_fail_left_by_an_earlier_step_does_not_count(self):
+        write(os.path.join(self.w, 'fail.txt'), 'an earlier FAIL\n')
+        r, out = self.gate()
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()

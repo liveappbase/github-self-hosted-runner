@@ -1,6 +1,12 @@
 #!/bin/zsh -f
 # golden-emudhra VM RUNNER_TARBALL RUNNER_SHA256 — the eMudhra stage: golden-build's last step before `tart stop`.
+# golden-emudhra --gate VM — the gate on a SAVED image (the same guest part: one copy of the checks).
 # Design: docs/design.md ("The eMudhra stage"). golden-build runs it as ci while it holds the runner lock.
+# --gate: VM is a running s1-* clone of a saved image (bin/golden-gate makes it and holds the lock). It runs only the
+# guest steps save (it writes only inside the guest work folder) and gate (census_deny: a deny and verify-cert non-zero
+# for each excluded anchor, verify-cert 0 for each control root), then the cleanup: never the probes, the fix or the
+# census. It ends "golden-emudhra: GATE GREEN" (exit 0) or "golden-emudhra: GATE RED" (exit 1, the FAIL lines above
+# it); a step that did not complete is RED too. A STOP (exit 1, no GATE line) means it could not start.
 # The incident: eMudhra's intermediate keys were compromised. homebrew-core a2ee7ae08c6 excludes three root keys by the
 # SHA-256 of their public key (SPKI); EXCLUDED_SPKI in the guest part copies them with that commit's source line.
 # VM is a RUNNING gold-* build VM that answers `tart exec`. The stage drives the guest ONLY through `tart exec`, as the
@@ -33,11 +39,17 @@ NODEDIFF=${0:A:h:h}/setup/emudhra.node-diff
 
 die() { print -r -- "golden-emudhra: STOP $*"; exit 1 }
 say() { print -r -- "golden-emudhra: $*" }
-(( $# == 3 )) || die "usage: golden-emudhra VM RUNNER_TARBALL RUNNER_SHA256 (see the header of this file)"
-vm=$1 tgz=$2 tsha=$3
-[[ $vm =~ '^gold-[0-9A-Za-z][-0-9A-Za-z]{0,40}$' ]] || die "VM must be a gold-* build VM: '$vm'"
-[[ $tgz =~ '^/[A-Za-z0-9/._-]+$' ]] || die "RUNNER_TARBALL must be an absolute path in the guest: '$tgz'"
-[[ $tsha =~ '^[0-9a-f]{64}$' ]] || die "RUNNER_SHA256 must be 64 lowercase hex: '$tsha'"
+if [[ ${1-} == --gate ]]; then
+  (( $# == 2 )) || die "usage: golden-emudhra --gate VM (see the header of this file)"
+  mode=gate vm=$2 tgz= tsha=
+  [[ $vm =~ '^s1-[0-9A-Za-z][-0-9A-Za-z]{0,40}$' ]] || die "VM must be an s1-* clone of a saved image: '$vm'"
+else
+  (( $# == 3 )) || die "usage: golden-emudhra VM RUNNER_TARBALL RUNNER_SHA256 (see the header of this file)"
+  mode=build vm=$1 tgz=$2 tsha=$3
+  [[ $vm =~ '^gold-[0-9A-Za-z][-0-9A-Za-z]{0,40}$' ]] || die "VM must be a gold-* build VM: '$vm'"
+  [[ $tgz =~ '^/[A-Za-z0-9/._-]+$' ]] || die "RUNNER_TARBALL must be an absolute path in the guest: '$tgz'"
+  [[ $tsha =~ '^[0-9a-f]{64}$' ]] || die "RUNNER_SHA256 must be 64 lowercase hex: '$tsha'"
+fi
 tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
 gexec() { tart exec $vm "$@" }
 
@@ -202,7 +214,8 @@ print_source() { # LABEL NAME PATH VERSION
   done
   return 0
 }
-save() {
+save() { # it writes only inside the work folder W (its records, the saved copies, $WT): it changes nothing else, so
+  # golden-emudhra --gate runs it on a clone of a saved image
   local p real n=0 l x s pem o sha1 spki label form ok; local -a reals q drop
   typeset -A xsrc xfile xform xsub
   need $T $O $NODE $SEC $PLUTIL /usr/bin/nscurl /usr/bin/curl /usr/bin/git /usr/bin/python3 /usr/bin/awk
@@ -644,6 +657,17 @@ census_deny() {
     else fail "census: control $q[2]: verify-cert exits $rc: $REPLY (a control root must stay trusted)"; fi
   done
 }
+gate() { # the gate on a SAVED image (golden-emudhra --gate, after save): census_deny alone, the census's own check — a
+  # deny and verify-cert non-zero for each excluded anchor, verify-cert 0 for each control root. It writes only inside W
+  # (ts.plist); exit 1 on any FAIL of its own, else 0
+  need $T $SEC $PLUTIL
+  say "the gate (offline; it changes nothing): a deny and verify-cert for each excluded anchor, the control roots trusted"
+  : > $W/fail.txt
+  [[ -f $W/excluded.tsv && -f $W/controls.tsv ]] || { fail "gate: the save step left no excluded.tsv or controls.tsv"; exit 1 }
+  census_deny
+  [[ -s $W/fail.txt ]] && exit 1
+  say "gate: no FAIL"
+}
 census_env() {
   local f=$RUNNER_DIR/.env; local -a want
   want=(NODE_OPTIONS=--use-openssl-ca SSL_CERT_FILE=${BREW_BUNDLE:A})
@@ -792,6 +816,7 @@ case ${1-} in
   (probe) probe ${3-} ;;
   (fix) fix ;;
   (census) census "${3-}" "${4-}" ;;
+  (gate) gate ;;
   (report) report ${3-0} || exit 1 ;;
   (*) say "STOP unknown step '${1-}'"; exit 2 ;;
 esac
@@ -819,11 +844,30 @@ cleanup() { # remove the host's census file, and the guest work folder (it holds
   W=
 }
 trap cleanup EXIT
-raw=$(/usr/bin/mktemp ${TMPDIR:-/tmp}/golden-emudhra-census.XXXXXX) || { raw=; die "mktemp on the host failed" }   # not -t: it ignores TMPDIR (measured)
+if [[ $mode == build ]]; then   # not mktemp -t: it ignores TMPDIR (measured)
+  raw=$(/usr/bin/mktemp ${TMPDIR:-/tmp}/golden-emudhra-census.XXXXXX) || { raw=; die "mktemp on the host failed" }
+fi
 
 gexec /usr/bin/true > /dev/null 2>&1 || die "$vm does not answer tart exec"
 W=$(gexec /usr/bin/mktemp -d /private/tmp/golden-emudhra.XXXXXX) || { W=; die "mktemp in the guest failed" }
 [[ $W =~ '^/private/tmp/golden-emudhra\.[A-Za-z0-9]+$' ]] || { W=; die "mktemp in the guest printed an unexpected path" }
+if [[ $mode == gate ]]; then   # save, then the gate step, then the cleanup: never the probes, the fix or the census
+  say "start: the gate on $vm (a clone of a saved image); the order: save, the gate"
+  problems=()
+  if phase save $W; then
+    phase gate $W; r=$?
+    if (( r == 1 )); then problems+=("the gate found a FAIL (above)")
+    elif (( r != 0 )); then problems+=("the gate step did not complete (exit $r)"); fi
+  else
+    problems+=("the save step did not complete: the gate did not run")
+  fi
+  cleanup || problems+=("the guest work folder was not removed")
+  trap - EXIT
+  for m in $problems; do say "FAIL $m"; done
+  (( ${#problems} == 0 )) || { say "GATE RED"; exit 1 }
+  say "GATE GREEN"
+  exit 0
+fi
 say "start: $vm; the order: save, pre-fix probes, the fix, post-fix probes, census, verdicts"
 problems=()
 phase save $W || die "step 1 (save) did not complete: nothing was changed"
