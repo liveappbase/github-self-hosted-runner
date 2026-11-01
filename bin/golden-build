@@ -90,7 +90,7 @@ if [[ ${1-} != --locked ]]; then
   log=$LOGDIR/golden-$date.log
   /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked $date $ver $sha $src 2>&1 | /usr/bin/tee -i -a $log
   rc=$pipestatus[1]
-  (( rc != 75 )) || die "the runner lock is held: runscaler, an install, wall-check or another golden-build is running"
+  (( rc != 75 )) || die "the runner lock is held: runscaler, an install, wall-check, golden-gate or another golden-build is running"
   print -r -- "golden-build: this output is also in $log"
   exit $rc
 fi

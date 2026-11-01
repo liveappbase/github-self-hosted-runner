@@ -96,10 +96,10 @@ else
 fi
 [[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
 if [[ ${1-} != --locked ]]; then
-  lf=$($here/bin/runner-lock-free) || stop "runner-lock-free says '$lf': runscaler, wall-check or golden-build is running"
+  lf=$($here/bin/runner-lock-free) || stop "runner-lock-free says '$lf': runscaler, wall-check, golden-build or golden-gate is running"
   /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked
   rc=$?
-  (( rc != 75 )) || stop "the runner lock is held: runscaler, wall-check, golden-build or another install is running"
+  (( rc != 75 )) || stop "the runner lock is held: runscaler, wall-check, golden-build, golden-gate or another install is running"
   exit $rc
 fi
 # under the lock: the agent may have been enabled between the first check and the lock

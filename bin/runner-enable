@@ -9,7 +9,7 @@
 #     PASS of wall-check ran): a changed tool needs a new proof;
 #   - the LaunchAgent is loaded in ci's GUI session;
 #   - no VM other than runscaler's runner-<8 hex> is running;
-#   - the runner lock is free (no runscaler, no install, no wall-check or golden-build is running).
+#   - the runner lock is free (no runscaler, no install, no wall-check, golden-build or golden-gate is running).
 # FLAG is written while it holds the runner lock, so an install or a proof cannot start in between.
 # --check runs the same checks in the same order, except the lock: it never asks runner-lock-free, never takes the
 # lock and never writes FLAG, so it can run while runscaler runs. It ends with `runner-enable: check passed (…)`.
@@ -61,7 +61,7 @@ if (( check )); then
   print -r -- "runner-enable: check passed ($out)"
   exit 0
 fi
-lf=$($LOCKFREE) || die "the runner lock is not free ($lf): runscaler, an install, wall-check or golden-build is running"
+lf=$($LOCKFREE) || die "the runner lock is not free ($lf): runscaler, an install, wall-check, golden-build or golden-gate is running"
 /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f -c 'umask 077; : > $1' runner-enable $FLAG \
   || die "cannot write $FLAG under the runner lock (did something take the lock just now?)"
 print -r -- "runner-enable: enabled ($out)"

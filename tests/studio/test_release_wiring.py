@@ -1,6 +1,7 @@
-"""The release's wiring for golden-gate: install links it (TOOLS), and release-check holds its REALRUN constant to one
-value across the scripts (CONSTANT_NAMES). release-check runs on a temporary git repository with only the files
-the constants rule reads; it downloads nothing there (no manifest, no 02-wall.sh).
+"""The release's wiring for golden-gate: install links it (TOOLS); release-check holds the constants that two scripts set
+to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-gate) and STATEDIR (golden-build,
+golden-prune). release-check runs on a temporary git repository with only the files the constants rule reads; it
+downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
 import re
@@ -26,8 +27,13 @@ class InstallTools(unittest.TestCase):
             self.assertTrue(os.path.isfile(os.path.join(REPO, 'bin', t)), t)
 
 
-class ReleaseCheckRealrun(unittest.TestCase):
-    def check(self, realrun_in_gate):
+class ReleaseCheckConstants(unittest.TestCase):
+    # NAME: (its line in each script, the script whose value the test changes, the other script that sets it)
+    WIRING = {'REALRUN': ('/Users/ci/bin/real-run', 'golden-gate', 'golden-build'),
+              'STATEDIR': ('/Users/ci/.local/state/runner-updater', 'golden-prune', 'golden-build')}
+
+    def check(self, name, value):
+        line, changed, other = self.WIRING[name]
         d = tmpdir(self)
         env = dict(GIT_ENV, HOME=d)
         rc_text = read(os.path.join(REPO, 'tools', 'release-check'))
@@ -35,24 +41,51 @@ class ReleaseCheckRealrun(unittest.TestCase):
         assert_no_ci(self, rc_text, ('/Users/ci/mac-runner', '/Users/ci and /Users/admin', '/Users/ci or /Users/admin'),
                      'tools/release-check')
         write(os.path.join(d, 'tools', 'release-check'), rc_text, 0o755)
-        for f in ('golden-build', 'golden-gate'):   # data for release-check: read, never run
-            write(os.path.join(d, 'bin', f), read(os.path.join(REPO, 'bin', f)), 0o755)
-        gate = os.path.join(d, 'bin', 'golden-gate')
-        text = read(gate)
-        self.assertEqual(text.count('\nREALRUN=/Users/ci/bin/real-run\n'), 1)
-        write(gate, text.replace('\nREALRUN=/Users/ci/bin/real-run\n', '\nREALRUN=%s\n' % realrun_in_gate), 0o755)
+        for f in (changed, other):   # data for release-check: read, never run
+            text = read(os.path.join(REPO, 'bin', f))
+            self.assertEqual(text.count('\n%s=%s\n' % (name, line)), 1, f)
+            if f == changed:
+                text = text.replace('\n%s=%s\n' % (name, line), '\n%s=%s\n' % (name, value))
+            write(os.path.join(d, 'bin', f), text, 0o755)
         for argv in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'wiring test']):
             r = run(['/usr/bin/git'] + argv, env=env, cwd=d)
             self.assertEqual(r.returncode, 0, r.stderr)
         return run([ZSH, '-f', os.path.join(d, 'tools', 'release-check')], env=env, cwd=d)
 
-    def test_two_values_of_realrun_are_red(self):
-        r = self.check('/Users/ci/bin/real-run-other')
-        self.assertTrue(any(l.startswith('RED constants: REALRUN has 2 values') for l in r.stdout.splitlines()), r.stdout)
-        # control: the same value in both scripts gives no REALRUN finding
-        r = self.check('/Users/ci/bin/real-run')
-        self.assertFalse(any('REALRUN' in l for l in r.stdout.splitlines()), r.stdout)
+    def two_values_are_red(self, name):
+        line = self.WIRING[name][0]
+        r = self.check(name, line + '-other')
+        self.assertTrue(any(l.startswith('RED constants: %s has 2 values' % name) for l in r.stdout.splitlines()), r.stdout)
+        # control: the same value in both scripts gives no finding for NAME
+        r = self.check(name, line)
+        self.assertFalse(any(name in l for l in r.stdout.splitlines()), r.stdout)
         self.assertIn('release-check: checking HEAD', r.stdout)   # it ran
+
+    def test_two_values_of_realrun_are_red(self):
+        self.two_values_are_red('REALRUN')
+
+    def test_two_values_of_statedir_are_red(self):
+        self.two_values_are_red('STATEDIR')
+
+
+class LockHolderMessages(unittest.TestCase):
+    """A message that lists who may hold the runner lock names golden-gate too (it holds the lock for its whole run).
+    wall-check and real-run are left out: they are wall-proof tools, and a changed byte in them needs a new wall-check
+    on every host (runner-enable compares their sha256 with the wall proof)."""
+
+    PROOF_TOOLS = ('wall-check', 'real-run')
+
+    def test_every_lock_holder_list_names_golden_gate(self):
+        files = [os.path.join('bin', f) for f in sorted(os.listdir(os.path.join(REPO, 'bin')))] + ['install']
+        found = []
+        for rel in files:
+            if os.path.basename(rel) in self.PROOF_TOOLS:
+                continue
+            for n, l in enumerate(read(os.path.join(REPO, rel)).splitlines(), 1):
+                if 'golden-build' in l and 'runscaler' in l and 'is running' in l:   # a list of lock holders
+                    found.append((rel, n, l))
+        self.assertGreaterEqual(len(found), 6, found)   # golden-build, runner-enable (2), install (2), golden-gate
+        self.assertEqual([(rel, n) for rel, n, l in found if 'golden-gate' not in l], [])
 
 
 if __name__ == '__main__':
