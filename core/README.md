@@ -153,6 +153,16 @@ window is the candidate's version, lines AND `closed_at`: a retry that switches 
 (a new `closed_at`) starts fresh evidence, with no verdict (r1 and keep alike). A run of three
 that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
+**The state stays bounded.** Per set, r1 keeps only what can still matter: the newest proof of life at or before the
+oldest failure that is not settled yet (the newest of all when every failure is settled) and everything from its second
+on (the failures and proofs of the last SETTLE of log time, and the settled failures since that proof: at most two, a
+third is R1); the Tart starts of runners not yet removed (every runner leaves by a `Runner removed` line, also at
+runscaler's stop, `reason=shutdown`: at most the set's runners alive at once); the runs of three or more settled
+failures that only such a start keeps apart (R1 if it is taken back), each with the first proof after it; and the
+exited removals of the last SETTLE of log time. Everything else before that proof is settled and judged, and the proof
+keeps it from every later failure. So a set's entries are bounded by what it logs in SETTLE (plus a pass's records not
+yet settled by the clock) and by its runners alive at once, never by the hours, and neither is a pass's time.
+
 **NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min, with no
 job completed on it: it counts as the set's third failure, connect-class. The reads measure the 30 min, never the
 clock: at least 3 such reads (each at its pass's `now`) whose first and last are 30 min or more apart; a pass with no

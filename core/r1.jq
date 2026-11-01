@@ -4,9 +4,10 @@
 # the held record, the refused VMs, each observed family's evidence). Rules: core/README.md, "The rules".
 #
 # A family's evidence per set: fails (counted failures: t, s = its log second, c = connect-class, x, seen = the `now`
-# of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started`: a proof
-# until that runner is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of log time, that
-# a `Job started|completed for unknown runner` naming the runner still takes back), ns (NOT SERVING), completed.
+# of the pass that read it, settled), proofs (log seconds of proofs of life), starts (Tart `Runner started` of a runner
+# not yet removed: a proof unless it is removed `reason=exited` with no jobId), exits (those removals, within SETTLE of
+# log time, that a `Job started|completed for unknown runner` naming the runner still takes back), ns (NOT SERVING),
+# completed.
 import "core" as C;
 import "logfmt" as L;
 
@@ -61,8 +62,12 @@ def add_stop($name; $reason): if any(.stops[]; .stop == $name) then . else .stop
 
 # . = family evidence; one classified event of set $s at log time $t (log second $sec), read by the pass of $seen
 def apply($ev; $s; $t; $sec; $seen):
+  # a removal of a runner other than `reason=exited` with no jobId confirms its Tart start: the start is a proof, and
+  # leaves .starts (which so holds only runners not yet removed)
   if $ev.k == "completed" then
-    .sets[$s] = ((.sets[$s] // set0) | .proofs += [$sec] | .completed = true)
+    .sets[$s] = ((.sets[$s] // set0)
+                 | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
+                 | .proofs += [$sec, ($st // empty)] | .starts |= map(select(.n != $ev.name)) | .completed = true)
     | if $ev.result == "succeeded" then .succeeded += 1 elif $ev.result == "failed" then .failed += 1
       elif $ev.result == "canceled" then .canceled += 1 else .other += 1 end
   elif $ev.k == "exited" then
@@ -127,12 +132,26 @@ def judge:
        | if $v != null then .verdict = $v else . end
   end;
 
-# a confirmed proof of life ends the failures before it once they are all settled (they were judged)
+# what can still matter (Codex r2 F4, Opus r2 F3, F5): $c = the newest proof (in .proofs, a Tart start not taken back
+# excluded) at or before the oldest failure that is not settled yet (any, when all are). Every failure before $c is
+# settled and judged, and $c keeps it from every later one: it goes, unless a Tart start that may still be taken back
+# is all that keeps it from R1 — a run of three or more with only Tart starts between them stays, with the first
+# proof after it. A Tart start stays until its runner is removed. Proofs before $c go; $c's own second stays (same
+# second = between)
 def prune:
-  .sets |= map_values(([.proofs[]] | max) as $p
-    | if $p != null and all(.fails[]; .s > $p or .settled) then
-        .fails |= map(select(.s > $p)) | .starts |= map(select(.s > $p)) | .proofs = [$p]
-      else . end);
+  .sets |= map_values(
+    ([.fails[] | select(.settled != true) | .s] | min) as $u
+    | ([.proofs[] | select($u == null or . <= $u)] | max) as $c
+    | if $c == null then .
+      else .proofs as $b
+        | ([.fails[] | select(.s < $c)] | sort_by(.s)
+           | reduce .[] as $f ([]; (if length > 0 then .[-1][-1].s else null end) as $p
+                                 | if $p != null and (any($b[]; . >= $p and . <= $f.s) | not) then .[-1] += [$f]
+                                   else . + [[$f]] end)
+           | map(select(length >= 3))) as $kept
+        | .fails = ([$kept[][]] + [.fails[] | select(.s >= $c)])
+        | .proofs = ([$kept[] | .[-1].s as $l | [$b[] | select(. >= $l)] | min] + [$b[] | select(. >= $c)] | unique)
+      end);
 
 # a run that can still reach R1 (KEEP waits for it): three counted failures, settled or not, with no proof of life
 # between them, with $pot = {SET: [failures the held record may be]}
