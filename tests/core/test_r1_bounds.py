@@ -6,18 +6,20 @@ failures such a start alone keeps apart (they are R1 if it is taken back). Every
 and judged. So the entries per set are bounded by what the set logs in SETTLE and by its runners alive at once, never
 by the hours, and a pass's time does not grow with them. Controls: a same-second proof at the pruned edge, a genuine
 run of three after hours of pruned history, a Tart start taken back many passes later, the D6 AMENDMENT's late
-unknown-runner line (test_r1.py's Settle cells)."""
+unknown-runner line (test_r1.py's Settle cells).
+
+A pass's time does not grow either: r1's time is a function of its inputs, the state and a pass's text (the same size
+every pass here), so the deterministic form of that invariant is the whole state's size, every field, under a stated
+bound for the 72 h (no clock is read: a machine that slows between two timings is no defect; Codex r3 F2, Opus r3 F4)."""
 import json
-import os
-import subprocess
-import time
 import unittest
 
-from tests.core.corejq import CORE, jq, tmpdir
-from tests.core.test_r1 import (DOCKER_CREATE, OTHER, Run, facts, failed, fam, removed, scaling, started, tail,
-                                unknown)
+from tests.core.test_r1 import DOCKER_CREATE, OTHER, Run, failed, fam, removed, scaling, started, tail, unknown
 
 LISTS = ('fails', 'proofs', 'starts', 'exits')
+# the whole state's size for the 72 h of the flaky Tart and Docker sets, every field (compact JSON, sorted keys):
+# measured 1812-1820 bytes on every pass; with no prune (r2's code on this workload) 4726 at the first, +3670 a pass
+STATE_BYTES = 2048
 
 
 def flaky(base, set_):
@@ -62,49 +64,28 @@ def sizes(out, fam_, set_):
     return {k: len(s.get(k, [])) for k in LISTS}
 
 
-def timed(test, r, log, fams):
-    """The best of three r1 calls on the same inputs (a pure function of them): its seconds."""
-    d = tmpdir(test)
-    paths = {}
-    for name, text in (('state', json.dumps(r.state)), ('log', log), ('healthz', ''),
-                       ('facts', json.dumps(facts(fams)))):
-        paths[name] = os.path.join(d, name)
-        with open(paths[name], 'w', encoding='utf-8') as f:
-            f.write(text)
-    argv = [jq(), '-n', '-L', os.path.join(CORE, 'lib'), '-f', os.path.join(CORE, 'r1.jq'),
-            '--slurpfile', 'state', paths['state'], '--rawfile', 'log', paths['log'],
-            '--slurpfile', 'healthz', paths['healthz'], '--slurpfile', 'facts', paths['facts'], '--arg', 'now', str(r.now + 600)]
-    best = None
-    for _ in range(3):
-        t0 = time.monotonic()
-        p = subprocess.run(argv, capture_output=True, text=True)
-        dt = time.monotonic() - t0
-        test.assertEqual(p.returncode, 0, p.stderr)
-        best = dt if best is None else min(best, dt)
-    return best
+def state_bytes(state):
+    """The whole state's size, every field: compact JSON with sorted keys (one spelling whatever jq printed)."""
+    return len(json.dumps(state, sort_keys=True, separators=(',', ':')).encode('utf-8'))
 
 
 class Bounded(unittest.TestCase):
-    def test_opus_r2_f3_the_flaky_sets_stay_bounded_for_72_h_and_a_pass_does_not_slow(self):
+    def test_opus_r2_f3_the_flaky_sets_stay_bounded_for_72_h_and_the_whole_state_stays_under_its_bound(self):
         # Tart and Docker, one pass per 600 s of the glue's clock and of log time, 432 passes. The bound: what a set logs
         # in SETTLE (two failures and two proofs here) plus the held record's second, the newest proof before them and
-        # the settled failures since it: at most 4 failures and 4 proofs (today's code: 10 more of each per pass)
+        # the settled failures since it: at most 4 failures and 4 proofs (r2's code: 10 more of each per pass). And the
+        # whole state, every field, under STATE_BYTES on every pass: a pass's time does not grow (the module's header)
         fams = {'fx': fam('tart', ('mac-a',)), 'fy': fam('docker', ('linux-b',), image='img-y')}
         r = Run(self, fams)
-        t1 = None
         for k in range(432):
-            log = text(flaky(1000 + 600 * k, 'mac-a'), flaky(1000 + 600 * k, 'linux-b'))
-            if k == 6:
-                t1 = timed(self, r, log, fams)                  # the pass of the first hour
-            out = r.go(log)
+            out = r.go(text(flaky(1000 + 600 * k, 'mac-a'), flaky(1000 + 600 * k, 'linux-b')))
+            self.assertLessEqual(state_bytes(out['state']), STATE_BYTES, k)
             for f, s in (('fx', 'mac-a'), ('fy', 'linux-b')):
                 n = sizes(out, f, s)
                 self.assertLessEqual(n['fails'], 4, (k, f, n))
                 self.assertLessEqual(n['proofs'], 4, (k, f, n))
                 self.assertEqual((n['starts'], n['exits']), (0, 0), (k, f, n))
                 self.assertEqual(out['families'][f]['verdict'], 'none', (k, f))
-        t72 = timed(self, r, text(flaky(1000 + 600 * 432, 'mac-a'), flaky(1000 + 600 * 432, 'linux-b')), fams)
-        self.assertLessEqual(t72, 2 * t1 + 0.25, 'a pass at 72 h takes %.3f s, at 1 h %.3f s' % (t72, t1))
 
     def test_codex_r2_f4_a_busy_set_stays_bounded(self):
         # every 10 s a counted failure and, 1 s later, a job completed; 30 pairs and a scaling record per pass. The
