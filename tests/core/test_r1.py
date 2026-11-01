@@ -1191,6 +1191,122 @@ class ContinuationCut(unittest.TestCase):
                     self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'])
 
 
+class ClockStepBack(unittest.TestCase):
+    """runscaler stamps its records with local time and no zone, so on a host whose zone has summer time its log times
+    step back one hour once a year (or when the clock is set back). A record whose log time is more than SETTLE (120 s)
+    before the newest log time read is no out-of-order write (SETTLE rests on those being less): the times before it
+    and after it cannot be compared, so it is an evidence gap (Opus r4 F2). What is settled before it is judged first;
+    then the window starts again at it, as after UNKNOWN text: its counts, NOT SERVING and KEEP clock from zero, and
+    every log time (the newest read, the settle and prune points) from the new times. A record SETTLE or less out of
+    order is no gap; a forward jump is no gap (it settles what is before it, as any later record does)."""
+
+    def docker(self):
+        return {'fx': fam('docker', ('linux-b',))}
+
+    def f(self, s):
+        return failed(s, DOCKER_CREATE, 'linux-b')
+
+    def j(self, s, k=0xcafe):
+        return removed(s, 'runner-%08x' % k, 'job-completed', set_='linux-b')
+
+    def s(self, s):
+        return scaling(s, 'linux-b')
+
+    def opus_r4_f2(self, step, third=True):
+        """Opus r4 F2 (its probe_stepback.py), Docker fx on linux-b, one pass every 600 s of the glue's clock: a job
+        completed every 60 s for 130 min, failures at 05:59:50 and 05:59:55; at 3600 s the log clock steps back 1 h
+        (step) or not; at 7195 s one more failure, its log time 05:59:55 again with the step. -> the run, each pass's fx"""
+        ev = [(real, self.j(real - 3600 if step and real >= 3600 else real, k))
+              for k, real in enumerate(range(0, 7800, 60), 1)]
+        ev += [(3590, self.f(3590)), (3595, self.f(3595))]
+        if third:
+            ev.append((7195, self.f(7195 - 3600 if step else 7195)))
+        ev.sort(key=lambda e: e[0])
+        r = Run(self, self.docker(), opened=False)
+        r.go('', now=NOW)                               # the window opens
+        outs, i = [], 0
+        for p in range(600, 8400, 600):
+            j = i
+            while j < len(ev) and ev[j][0] <= p:
+                j += 1
+            outs.append(r.fx(''.join(e[1] for e in ev[i:j]), now=NOW + p))
+            i = j
+        outs.append(r.fx('', now=NOW + 9000))           # quiet: the held record is read, everything settles
+        return r, outs
+
+    def test_opus_r4_f2_a_step_back_of_an_hour_is_a_gap_and_no_rollback(self):
+        r, outs = self.opus_r4_f2(step=True)
+        self.assertEqual([o['verdict'] for o in outs], ['none'] * len(outs))
+        ev = r.state['families']['fx']
+        # one gap; the KEEP clock starts again at the pass that read the first record of the new times (05:00:00,
+        # written at 3600 s, the last record of that pass: held, and read by the pass of 4200 s)
+        self.assertEqual((ev['gaps'], ev['since'], ev['open']), (1, NOW + 4200, True))
+        # the counts start again there: the jobs completed from 05:00:00 of the new times on
+        self.assertEqual(ev['succeeded'], len(range(3600, 7800, 60)))
+
+    def test_the_keep_clock_starts_again_at_the_pass_that_reads_the_step(self):
+        # the record of the new times is the held one, read once the log has been quiet for SETTLE: the KEEP clock starts
+        # again at the pass that reads it, not at the earlier pass that held it
+        r = Run(self, self.docker())
+        r.go(self.s(4000) + self.s(4001))
+        r.go(self.j(10))
+        held_at = r.now
+        out = r.go('', now=held_at + 600)
+        ev = out['state']['families']['fx']
+        self.assertEqual((ev['gaps'], ev['since'], ev['succeeded'], out['state']['carry']), (1, held_at + 600, 1, ''))
+
+    def test_control_the_same_log_with_no_step_is_no_gap(self):
+        for third in (True, False):
+            r, outs = self.opus_r4_f2(step=False, third=third)
+            self.assertEqual([o['verdict'] for o in outs], ['none'] * len(outs), third)
+            ev = r.state['families']['fx']
+            self.assertEqual((ev['gaps'], ev['since'], ev['succeeded']), (0, NOW, 130), third)
+
+    def test_control_a_record_settle_or_less_out_of_order_is_no_gap(self):
+        # failures 10, 20; a record of 30 + d is read, then the failure of 30, d s out of order -> R1 on 10, 20, 30
+        for d in (60, 120):
+            with self.subTest(d):
+                out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.s(30 + d) + self.f(30) + self.s(300)
+                                                  + self.s(301))
+                self.assertEqual(([f['t'][-2:] for f in out['families']['fx']['failures']],
+                                  out['state']['families']['fx']['gaps']), (['10', '20', '30'], 0))
+        # 121 s is a step back: a gap. 10 and 20 are settled at it and judged (no R1: two), then the window starts again
+        out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.s(151) + self.f(30) + self.s(300) + self.s(301))
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('none', 1))
+
+    def test_a_run_settled_before_the_step_is_judged_before_the_gap(self):
+        # failures 10, 20, 30, settled by a record of 200; then, in the same pass, the clock steps back an hour -> R1 on
+        # 10, 20, 30: the gap drops only what could not be judged
+        r = Run(self, self.docker())
+        out = r.go(self.f(10) + self.f(20) + self.f(30) + self.s(200) + self.s(200 - 3600) + self.s(201 - 3600))
+        self.assertEqual(([f['t'][-5:] for f in out['families']['fx']['failures']], out['state']['families']['fx']['gaps']),
+                         (['00:10', '00:20', '00:30'], 1))
+        # control: not settled at the step (the newest record read is of 100): the run goes with the gap, and the
+        # failures of the new times start a run of their own
+        r = Run(self, self.docker())
+        out = r.go(self.f(10) + self.f(20) + self.f(30) + self.s(100) + self.s(100 - 3600) + self.f(110 - 3600)
+                   + self.s(300 - 3600) + self.s(301 - 3600))
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps'], counted(out, 'linux-b')),
+                         ('none', 1, 1))
+
+    def test_after_the_step_the_settle_and_prune_points_are_the_new_times(self):
+        # Opus r3 F3 in the new times: the log was at 06:06:40 (4000 s) and steps back to 05:00:10. Failures 10, 20, the
+        # log moves on (150 settles them), a job completed at 160, a record of 160; the failure of 159 is written out of
+        # order and read in the next pass -> R1 on 10, 20, 159, as with no step (test_r1_bounds.py's round-3 cell)
+        r = Run(self, self.docker())
+        r.go(self.s(4000) + self.s(4001))
+        self.assertEqual(r.fx(self.f(10) + self.f(20) + self.s(150) + self.j(160) + self.s(160))['verdict'], 'none')
+        out = r.go(self.f(159) + tail(400, 'linux-b'))
+        ev = out['state']['families']['fx']
+        self.assertEqual(([f['t'][-5:] for f in out['families']['fx']['failures']], ev['gaps'], ev['newest']),
+                         (['00:10', '00:20', '02:39'], 1, sec(400)))
+
+    def test_control_a_forward_jump_is_no_gap(self):
+        # the clock steps forward an hour after failures 10, 20, 30: the record after the jump settles them -> R1
+        out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.f(30) + self.s(3630) + self.s(3631))
+        self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('rollback', 0))
+
+
 def hz(ready=True, idle=1, busy=0, assigned=1, set_='linux-a'):
     m = {'jobs_started': 5, 'jobs_completed': 4, 'desired_runners': 1}
     if assigned:

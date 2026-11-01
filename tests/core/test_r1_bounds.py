@@ -180,7 +180,8 @@ class StillDecides(unittest.TestCase):
         self.assertEqual(r.fx(F(10) + F(20) + S(150) + J(160) + S(278) + S(279))['verdict'], 'none')
         self.assertEqual([f['t'][-5:] for f in r.fx(F(159) + tail(400, 'linux-b'))['failures']], ['00:10', '00:20', '02:39'])
         # control: once a record of 280 is read (SETTLE past the proof of 160), what is before that proof goes: a
-        # failure of 159 read now would be more than SETTLE out of order, which SETTLE rests on never happening
+        # failure of 159 read now would be more than SETTLE out of order, which SETTLE rests on never happening (read so,
+        # it is a log clock that stepped back: an evidence gap, test_r1.py ClockStepBack)
         r = Run(self, d)
         r.fx(F(10) + F(20) + S(150) + J(160) + S(280) + S(281))
         self.assertEqual(len(r.state['families']['fx']['sets']['linux-b']['fails']), 0)

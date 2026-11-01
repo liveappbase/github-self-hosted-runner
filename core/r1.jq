@@ -17,7 +17,8 @@ def NS_SECONDS: 1800;
 # of the pass that read it. The same quiet reads a held record (the glue's clock, the text unchanged).
 def SETTLE: 120;
 
-# a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone)
+# a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone: a
+# clock that steps back more than SETTLE is an evidence gap, see read)
 def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 
 def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
@@ -177,16 +178,23 @@ def pending($pot):
              | {set: $s, failures: length, settled: ([.[] | select(.settled == true)] | length)}) // null
   end;
 
-# . = family evidence: a window opens (the KEEP clock starts at $now; counts and NOT SERVING start from zero)
+# . = family evidence: a window opens (the KEEP clock starts at $now; counts, NOT SERVING and the log times read start
+# from zero)
 def open_at($now): .open = true | .since = $now | .sets = {} | .pending = null | .succeeded = 0 | .failed = 0
-                   | .canceled = 0 | .other = 0;
+                   | .canceled = 0 | .other = 0 | .newest = null;
 
-# . = {obs, refused}: records $recs read for every family whose .[$flag] is true, by the pass of $seen. Each record
-# settles by its log time; a partial record (a short write, read after SETTLE quiet or at P's exit) is only what a
-# proof of life is, any other truncated record is unknown text
-def read($recs; $flag; $seen):
+# . = {obs, refused}: records $recs read for every family whose .[$flag] is true, by the pass of $seen ($now: this
+# pass's). Each record settles by its log time; a partial record (a short write, read after SETTLE quiet or at P's exit)
+# is only what a proof of life is, any other truncated record is unknown text. A record more than SETTLE before the
+# newest log time read is no out-of-order write (SETTLE rests on those being less): the log's clock stepped back (it
+# has no zone: summer time, or a clock set back), and the times before it cannot be compared with the times after it.
+# It is an evidence gap (Opus r4 F2): what is settled is judged, then the window starts again at it, as after UNKNOWN
+# text (counts, NOT SERVING, the KEEP clock), its log times (newest, the settle and prune points) from the new times
+def read($recs; $flag; $seen; $now):
   reduce $recs[] as $r (.;
     ($r.t | lsec) as $sec
+    | .obs |= map_values(if .[$flag] and .ev.newest != null and $sec < .ev.newest - SETTLE
+                         then .ev |= (judge | .gaps += 1 | open_at($now)) else . end)
     | .obs |= map_values(if .[$flag] then .ev |= settle_log($sec) else . end)
     | if $r.set == null then .
       else
@@ -267,14 +275,14 @@ C::now_in("r1") as $now
          ((($state.carry // "") + $log[:$split]) | L::tokenize_final) as $tp
          | ($log[$split:] | L::tokenize) as $tq
          | {obs: ($obs | map_values(.p = .ev.open)), refused: ($state.refused // [])}
-         | read($tp.records; "p"; $now)
+         | read($tp.records; "p"; $now; $now)
          # at `stopped`: a window whose candidate Q does not run is judged on P's text and closes (a gap); a family
          # whose candidate Q runs counts Q's text, in its open window or in one that opens here
          | .obs |= map_values(if .ev.open and (.prov | not) then .ev |= (judge | .gaps += 1 | .open = false)
                               elif (.ev.open | not) and .prov then .ev |= open_at($now)
                               else . end
                               | .q = .prov)
-         | read($tq.records; "q"; $now)
+         | read($tq.records; "q"; $now; $now)
          | {done: ., tok: {records: ($tp.records + $tq.records), carry: $tq.carry,
                            carry_at: (if $tq.carry == "" then null else $now end)}}
        else
@@ -298,7 +306,7 @@ C::now_in("r1") as $now
                 end
             else {records: [], carry: "", carry_at: null, seen: $now} end) as $tok
          | {done: ({obs: $obs, refused: (if $owned then ($state.refused // []) else [] end)}
-                   | read($tok.records; "q"; $tok.seen)),
+                   | read($tok.records; "q"; $tok.seen; $now)),
             tok: $tok}
        end) as $pass
     | $pass.done as $done

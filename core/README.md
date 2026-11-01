@@ -167,6 +167,16 @@ the start as taken back (KEEP waits for the removal to be final).
 is 120 s of log time past it, or the log is quiet (no record held) and this pass's `now` is 120 s or more past the
 `now` of the pass that read it. A failure that is not settled waits; nothing is judged from a partial second.
 
+**The log's clock.** runscaler stamps its records with local time and no zone. The glue should run runscaler with
+`TZ=UTC`: then its log times never step back with summer time. A record whose log time is more than SETTLE before the
+newest log time read is no out-of-order write (SETTLE rests on those being less): the clock stepped back (summer time
+ended, or the clock was set back), and the times before it cannot be compared with the times after it. A step back
+costs an EVIDENCE GAP: the failures settled before it are judged (R1 may come), then the window starts again at it, as
+after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass that reads it; failures not
+settled yet go), and every log time it keeps (the newest read, the settle and prune points) starts from the new times.
+A record SETTLE or less out of order is no gap. A clock that steps forward is no gap: the first record after it settles
+the failures before it, as any later record does.
+
 **R1.** Three SETTLED counted failures on one set with no proof of life on it between them → ROLLBACK of the family. A
 proof in the same second as a failure counts as between them; a proof after the run does not take it back.
 `connect_only` is true when every counted failure of that run is connect-class (CONNECT-ONLY: the glue retries once
