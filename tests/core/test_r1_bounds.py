@@ -171,6 +171,40 @@ class StillDecides(unittest.TestCase):
              + scaling(41))
         self.assertEqual(r.fx(failed(25, OTHER) + tail(300))['verdict'], 'none')
 
+    def docker_f3(self):
+        d = {'fx': fam('docker', ('linux-b',))}
+        return (d, lambda s: failed(s, DOCKER_CREATE, 'linux-b'),
+                lambda s: removed(s, 'runner-0000cafe', 'job-completed', set_='linux-b'), lambda s: scaling(s, 'linux-b'))
+
+    def test_opus_r3_f3_a_failure_written_out_of_order_joins_its_run(self):
+        # Docker fx on linux-b: failures 10, 20; the log moves on (150 settles them); a job completed at 160; a record of
+        # 160. The failure of 159 is written less than SETTLE out of order, after the job completed of 160, and read in
+        # the next pass: a record a pass reads may be up to SETTLE older than the newest one read, so nothing that a
+        # failure still to come could join goes. The same R1 as the records in order, or in one pass
+        d, F, J, S = self.docker_f3()
+        for name, p1, p2 in (('in order', F(10) + F(20) + S(150) + F(159) + J(160) + S(160) + S(161), tail(400, 'linux-b')),
+                             ('out of order', F(10) + F(20) + S(150) + J(160) + S(160), F(159) + tail(400, 'linux-b')),
+                             ('out of order, a record later', F(10) + F(20) + S(150) + J(160) + S(160) + S(161),
+                              F(159) + tail(400, 'linux-b')),
+                             ('one pass', F(10) + F(20) + S(150) + J(160) + S(160) + F(159) + S(161), tail(400, 'linux-b'))):
+            with self.subTest(name):
+                r = Run(self, d)
+                self.assertEqual(r.fx(p1)['verdict'], 'none')
+                self.assertEqual([f['t'][-5:] for f in r.fx(p2)['failures']], ['00:10', '00:20', '02:39'])
+
+    def test_the_prune_point_is_settle_behind_the_newest_record_read(self):
+        # the edge: the newest record read is of 278, so a failure of 159 may still come (119 s out of order) -> R1
+        d, F, J, S = self.docker_f3()
+        r = Run(self, d)
+        self.assertEqual(r.fx(F(10) + F(20) + S(150) + J(160) + S(278) + S(279))['verdict'], 'none')
+        self.assertEqual([f['t'][-5:] for f in r.fx(F(159) + tail(400, 'linux-b'))['failures']], ['00:10', '00:20', '02:39'])
+        # control: once a record of 280 is read (SETTLE past the proof of 160), what is before that proof goes: a
+        # failure of 159 read now would be more than SETTLE out of order, which SETTLE rests on never happening
+        r = Run(self, d)
+        r.fx(F(10) + F(20) + S(150) + J(160) + S(280) + S(281))
+        self.assertEqual(len(r.state['families']['fx']['sets']['linux-b']['fails']), 0)
+        self.assertEqual(r.fx(F(159) + tail(400, 'linux-b'))['verdict'], 'none')
+
     def test_two_runs_a_tart_start_keeps_apart_stay_apart_from_each_other(self):
         # Tart: failures 10, 15, runner A started 20, a failure 22, a job completed 25; failures 30, 35, runner B started
         # 40, a failure 42, a job completed 45. Both runs stay (a start may yet be taken back), and so does the proof

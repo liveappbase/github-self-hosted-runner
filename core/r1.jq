@@ -22,7 +22,7 @@ def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 
 def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
                    gaps: 0, succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: [],
-                   pending: null};
+                   pending: null, newest: null};
 def set0: {fails: [], starts: [], proofs: [], exits: [], ns: null, completed: false};
 
 # every value of the record's attributes, one text
@@ -101,10 +101,11 @@ def apply($ev; $s; $t; $sec; $seen):
   else . end;
 
 # SETTLE by the log: a record of log second $sec settles every failure SETTLE or more before it, and ends the exits
-# that no unknown-runner line took back in time (. = family evidence)
+# that no unknown-runner line took back in time; .newest = the newest log second read (. = family evidence)
 def settle_log($sec):
   .sets |= map_values(.fails |= map(if .settled != true and $sec - .s >= SETTLE then .settled = true else . end)
-                      | .exits |= map(select($sec - .s < SETTLE)));
+                      | .exits |= map(select($sec - .s < SETTLE)))
+  | .newest = ([.newest, $sec] | max);
 
 # SETTLE by the clock, when the log is quiet (nothing held): a failure read SETTLE or more before `now`. (An exit
 # ends only by the log: a later unknown-runner line inside its SETTLE of log time still takes the failure back.)
@@ -145,15 +146,17 @@ def judge:
   end;
 
 # what can still matter (Codex r2 F4, Opus r2 F3, F5): $c = the newest proof (in .proofs, a Tart start not taken back
-# excluded) at or before the oldest failure that is not settled yet (any, when all are). Every failure before $c is
-# settled and judged, and $c keeps it from every later one: it goes, unless a Tart start that may still be taken back
-# is all that keeps it from R1 — a run of three or more with only Tart starts between them stays, with the first
-# proof after it. A Tart start stays until its runner is removed. Proofs before $c go; $c's own second stays (same
-# second = between)
+# excluded) at or before the oldest failure that is not settled yet (any, when all are), and SETTLE or more before the
+# newest log second read: a record still to come may be written up to SETTLE out of order (what SETTLE rests on), so
+# a failure still to come is never before $c (Opus r3 F3). Every failure before $c is settled and judged, and $c keeps
+# it from every later one: it goes, unless a Tart start that may still be taken back is all that keeps it from R1 — a
+# run of three or more with only Tart starts between them stays, with the first proof after it. A Tart start stays
+# until its runner is removed. Proofs before $c go; $c's own second stays (same second = between)
 def prune:
-  .sets |= map_values(
+  .newest as $n
+  | .sets |= map_values(
     ([.fails[] | select(.settled != true) | .s] | min) as $u
-    | ([.proofs[] | select($u == null or . <= $u)] | max) as $c
+    | ([.proofs[] | select($n != null and . <= $n - SETTLE and ($u == null or . <= $u))] | max) as $c
     | if $c == null then .
       else .proofs as $b
         | ([.fails[] | select(.s < $c)] | sort_by(.s)

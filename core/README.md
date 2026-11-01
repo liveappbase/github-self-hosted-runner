@@ -173,10 +173,11 @@ window is the candidate's version, lines AND `closed_at`: a retry that switches 
 (a new `closed_at`) starts fresh evidence, with no verdict (r1 and keep alike). A run of three
 that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
-**The state stays bounded.** Per set, r1 keeps only what can still matter: the newest proof of life at or before the
-oldest failure that is not settled yet (the newest of all when every failure is settled) and everything from its second
-on (the failures and proofs of the last SETTLE of log time, and the settled failures since that proof: at most two, a
-third is R1); the Tart starts of runners not yet removed (every runner leaves by a `Runner removed` line, also at
+**The state stays bounded.** Per set, r1 keeps only what can still matter: the newest proof of life that is at or
+before the oldest failure not settled yet (any, when every failure is settled) and SETTLE or more before the newest log
+time read — a record may be written up to SETTLE out of order (what SETTLE rests on), so a failure still to come is
+never before that proof — and everything from its second on (the failures and proofs of the last SETTLE of log time,
+the newest proof before them, and the settled failures since that proof: at most two, a third is R1); the Tart starts of runners not yet removed (every runner leaves by a `Runner removed` line, also at
 runscaler's stop, `reason=shutdown`: at most the set's runners alive at once); the runs of three or more settled
 failures that only such a start keeps apart (R1 if it is taken back), each with the first proof after it; and the
 exited removals of the last SETTLE of log time. Everything else before that proof is settled and judged, and the proof
