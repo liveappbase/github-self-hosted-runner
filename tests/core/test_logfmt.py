@@ -217,6 +217,29 @@ class Shapes(unittest.TestCase):
                 out = tok(self, head + whole + part, final=True)
                 self.assertEqual([r.get('partial') for r in out['records']], [None, True])
 
+    def test_tokenize_final_a_one_space_key_line_is_a_continuation_only_right_after_a_value_line(self):
+        # Codex r5 F3, Opus r5 F1: charm writes ` key=value` only right after a multi-line value's last value line, so a
+        # partial last line that starts with one space and a key and `=` (the tokenizer's attribute shape) is foreign
+        # text after any other line, as a partial ` key` already is: the record before it is whole. After a record
+        # header, after a ` key=value` line, after a `  key=` line
+        head = '2026-10-26 21:10:52 INFO mac-a: Scaling up runner currentCount=1\n'
+        rec = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n  │ one\n  │ two\n name=runner-x\n'
+        one = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry error="one" name=runner-x\n'
+        key = '2026-10-26 21:10:53 ERRO mac-a: Failed to start runner, will retry\n  error=\n'
+        for whole in (one, rec, key):
+            for part in (' name=', ' name=x', ' FOO=bar', ' FOO=', ' nam=x'):
+                with self.subTest((whole.count('\n'), part)):
+                    out = tok(self, head + whole + part, final=True)
+                    self.assertEqual([r.get('partial') for r in out['records']], [None, None])
+                    self.assertEqual(out['records'][1]['text'] + '\n', whole)
+        # control: the same lines right after a value line can still become a continuation: the record is partial
+        upto = rec[:rec.index(' name=')]
+        for part in (' name=', ' name=x', ' FOO=bar', ' FOO=', ' nam=x'):
+            with self.subTest('control ' + repr(part)):
+                out = tok(self, head + upto + part, final=True)
+                self.assertEqual([r.get('partial') for r in out['records']], [None, True])
+                self.assertEqual(out['records'][1]['text'], upto + part)
+
     def test_continuation_lines_with_no_record_before_them_are_ignored(self):
         out = tok(self, '  │ tail of a record of an earlier interval\n'
                         '2026-10-26 21:10:54 INFO mac-a: Scaling up runner currentCount=1\n', final=True)

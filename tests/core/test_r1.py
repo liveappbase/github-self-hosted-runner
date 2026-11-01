@@ -1391,6 +1391,25 @@ class ContinuationCut(unittest.TestCase):
                     self.assertEqual(vs[-1], 'rollback')
                     self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'])
 
+    def test_codex_r5_f3_opus_r5_f1_a_one_space_key_line_after_a_single_line_failure_leaves_it_whole(self):
+        # Codex r5 F3, Opus r5 F1: charm writes ` key=value` only right after a multi-line value's last value line, so
+        # an unterminated ` name=`, ` name=x`, ` FOO=bar` or ` FOO=` after a single-line third failure is another
+        # program's text: the third failure is whole and counted -> R1 on 10, 20, 30, through a quiet pass and the
+        # own-restart flush (in the text P held, or in P's tail). Control: the same line right after the multi-line
+        # third failure's last value line can still become its continuation: that failure is partial, never counted
+        single = failed(30, OTHER)
+        multi = failed(30, right_after('runner-00000003', 'An error occurred: Access denied.'))
+        for part in (' name=', ' name=x', ' FOO=bar', ' FOO='):
+            for name, how in (('quiet', self.quiet), ('restart', self.restart),
+                              ("restart, in P's tail", lambda x: self.restart(x, in_tail=True))):
+                with self.subTest((name, part)):
+                    r, vs = how(single + part)
+                    self.assertEqual(vs[-1], 'rollback')
+                    self.assertEqual([f['t'][-2:] for f in r.go('')['families']['fx']['failures']], ['10', '20', '30'])
+                with self.subTest(('control', name, part)):
+                    r, vs = how(multi + part)
+                    self.assertEqual((vs, self.fails(r)), (['none'] * len(vs), 2))
+
 
 class ClockStepBack(unittest.TestCase):
     """runscaler stamps its records with local time and no zone, so on a host whose zone has summer time its log times

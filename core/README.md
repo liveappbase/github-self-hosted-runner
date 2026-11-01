@@ -133,8 +133,9 @@ clock with the text unchanged, `state.carry_at`). runscaler writes each record w
 still ends in a partial line then is a short write (a full disk): the record that line belongs to is read only as what
 a proof of life is (a job completed, a Tart start, an unknown-runner line); any other truncated record is unknown text,
 never a counted failure or a STOP. A partial line that can still become a continuation line is one cut short (` `,
-`  `, `  err`, `  ` and a cut `│`, and right after a value line ` nam`) and belongs to the record before it; a cut
-header or another program's line, also one that starts with a space (` ---> Running in …`), leaves the record before
+`  `, `  err`, `  ` and a cut `│`, and right after a value line ` nam` or ` name=x`) and belongs to the record before
+it; a cut header or another program's line, also one that starts with a space (` ---> Running in …`, or ` name=x`
+after a line that is no value line: charm writes ` key=value` only right after a value line), leaves the record before
 it whole (it was written with its newline). So a partial line never holds R1: the failures before it
 settle. A short write that ends exactly at a newline leaves no partial line: the lines before it are read as a whole
 record (a counted failure when they say one). The cuts the text cannot show end right after a value line (`  │ …`)

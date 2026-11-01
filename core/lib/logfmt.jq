@@ -15,9 +15,10 @@
 # record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE, and P's text at the updater's
 # own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true. A
 # partial last line that can still become a continuation line belongs to the record before it: it is one cut short
-# (" ", "  ", "  err", "  " and a cut "│", and right after a value line " nam": a short write that ended at the start of
-# a key, value or attribute line). A partial last line of another shape (a cut header, another program's line, also one
-# that starts with a space, such as " ---> Running in …") leaves the record before it whole.
+# (" ", "  ", "  err", "  " and a cut "│", and right after a value line " nam" or " name=x": a short write that ended at
+# the start of a key, value or attribute line). A partial last line of another shape (a cut header, another program's
+# line, also one that starts with a space, such as " ---> Running in …", or " name=x" after a line that is no value
+# line) leaves the record before it whole.
 
 def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
@@ -76,10 +77,15 @@ def _tokenize($final):
   | (if $complete then $all[:-1] else $all end) as $ls
   | [$ls[] | _kind] as $kinds0
   # tokenize_final of a text that ends in a partial line that can still become a continuation line: one cut short, of
-  # the record before it ("c"), not another program's line (Codex r3 F1, Opus r3 F2, Codex r4 F1)
-  | (if $final and ($complete | not) and ($kinds0 | length) > 0 and $kinds0[-1] == "f"
-        and ($ls[-1] | _continues(if ($kinds0 | length) > 1 then $kinds0[-2] else null end))
-     then $kinds0[:-1] + ["c"] else $kinds0 end) as $kinds
+  # the record before it ("c"), not another program's line (Codex r3 F1, Opus r3 F2, Codex r4 F1). A partial
+  # ` key=…` line (kind "a") is one only right after a value line, as a partial ` key` is; after any other line it is
+  # another program's line ("f"), which leaves the record before it whole (Codex r5 F3, Opus r5 F1)
+  | (if ($kinds0 | length) > 1 then $kinds0[-2] else null end) as $prev
+  | (if $final and ($complete | not) and ($kinds0 | length) > 0 then
+       (if $kinds0[-1] == "f" and ($ls[-1] | _continues($prev)) then $kinds0[:-1] + ["c"]
+        elif $kinds0[-1] == "a" and $prev != "v" then $kinds0[:-1] + ["f"]
+        else $kinds0 end)
+     else $kinds0 end) as $kinds
   | ([range(0; $kinds | length) | select($kinds[.] == "h")] | last) as $last_h
   | (if ($ls | length) == 0 then 0
      elif $final then ($ls | length)
