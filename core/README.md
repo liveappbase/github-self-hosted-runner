@@ -73,7 +73,8 @@ returned unchanged, rc 0.
                                         back_until = after an ACCEPT, the end of the 7 days `back` restores the
                                         previous image (status.jq only)
   "stops": [{"family": "F", "stop": "NAME", "version": "V", "user": "USER" | null, "detail": {...}}]
-                                        the STOPs the glue holds (status.jq only); detail, as the STOP needs it:
+                                        the STOPs the glue holds (status.jq, and keep.jq: any but NO EVIDENCE holds
+                                        the family's ACCEPT; not a list is rc != 0); detail, as the STOP needs it:
                                         text (the failing line or step), hand (the hand line), failures and
                                         connect_only (r1's), counts (keep's), step "build" and build_user (the Linux
                                         host's build), jq {version, path}, reason
@@ -128,7 +129,8 @@ that (not ready included), a job completed on the set, or a gap starts the 30 mi
 
 **KEEP.** 72 h after the evidence window opened: at least one `result=succeeded` → `accept`; completions (results
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose
-R1 verdict or STOP stands: `held`. NO EVIDENCE heals itself: a later success accepts.
+R1 verdict or STOP stands, r1's own or one the glue holds in `facts.stops`: `held` (a person answers it: JOBS FAIL's
+lines are `back` or `retry` to keep it). Only NO EVIDENCE heals itself: held or not, a later success accepts.
 
 **IDLE.** Over every set in `facts.sets` (required: IDLE is never said of nothing) and every set the reads list: two
 reads; each set present with `metrics` on both (a read that does not list a set of `facts.sets` is not idle:

@@ -1,10 +1,11 @@
 """core/keep.jq — KEEP (PLAN D6): 72 h after the evidence window opened (the switch, or the last gap), at least one job
 completed `result=succeeded` with provenance and no verdict -> accept; completions but none succeeded -> jobs-fail
 (JOBS FAIL ON THE NEW IMAGE); none -> no-evidence, which heals itself when a job succeeds; a standing R1 verdict or
-STOP -> held. The end-to-end cells feed r1.jq's own state into keep.jq. Every trigger has a control."""
+STOP -> held, r1's own or one the glue holds in facts.stops (any but NO EVIDENCE). The end-to-end cells feed r1.jq's
+own state into keep.jq. Every trigger has a control."""
 import unittest
 
-from tests.core.corejq import ok
+from tests.core.corejq import ok, run
 from tests.core.test_r1 import NOW, P, Run, fam, facts, removed, scaling
 
 H = 3600
@@ -17,9 +18,55 @@ def ev(since=NOW, open_=True, succeeded=0, failed=0, canceled=0, other=0, verdic
             'verdict': verdict, 'stops': list(stops)}
 
 
-def keep(test, e, now, families=None):
+def keep(test, e, now, families=None, stops=None):
     st = {'format': 1, 'families': {'fx': e} if e is not None else {}}
-    return ok(test, 'keep', state=st, facts=facts(families or {'fx': fam()}), now=now)['families']['fx']
+    f = facts(families or {'fx': fam()})
+    if stops is not None:
+        f['stops'] = stops
+    return ok(test, 'keep', state=st, facts=f, now=now)['families']['fx']
+
+
+def held(name, family='fx'):
+    return {'family': family, 'stop': name, 'version': '2.339.0', 'user': 'ci', 'detail': {}}
+
+
+# PLAN D7's STOPs that a person must answer: every STOP but NO EVIDENCE, which heals itself
+PERSON_STOPS = ('check failed', 'ROLLED BACK', 'PINNED RUNNER RETIRED', 'JOBS FAIL ON THE NEW IMAGE', 'ROLLBACK FAILED',
+                'CI DISABLED', 'POOL DOWN', 'HAND CHANGE', 'recipe changed', 'NO BASELINE', 'NO IDLE', 'untested jq',
+                'SHIM REFUSED', 'A STOP THIS CORE DOES NOT KNOW')
+
+
+class HeldStops(unittest.TestCase):
+    """A STOP the glue holds for the family (facts.stops) means no ACCEPT; only NO EVIDENCE heals itself (PLAN D6, D7:
+    JOBS FAIL's lines are `back` or `retry` to keep it; Codex r1 F6, Opus r1 F1)."""
+
+    def test_opus_f1_a_held_jobs_fail_and_a_later_success_is_not_accept(self):
+        # 73 h, 1 success, 3 failed, JOBS FAIL ON THE NEW IMAGE held by the glue
+        r = keep(self, ev(since=NOW - 73 * H, succeeded=1, failed=3), NOW, stops=[held('JOBS FAIL ON THE NEW IMAGE')])
+        self.assertEqual(r['verdict'], 'held', r)
+        self.assertIn('JOBS FAIL ON THE NEW IMAGE', r['reason'])
+
+    def test_every_stop_but_no_evidence_holds(self):
+        for name in PERSON_STOPS:
+            r = keep(self, ev(succeeded=2), NOW + KEEP, stops=[held('NO EVIDENCE'), held(name)])
+            self.assertNotEqual(r['verdict'], 'accept', name)
+            self.assertEqual(r['verdict'], 'held', name)
+
+    def test_control_a_held_no_evidence_heals_with_a_success(self):
+        r = keep(self, ev(succeeded=1), NOW + KEEP, stops=[held('NO EVIDENCE')])
+        self.assertEqual(r['verdict'], 'accept', r)
+
+    def test_control_another_familys_stop_does_not_hold_this_one(self):
+        r = keep(self, ev(succeeded=1), NOW + KEEP, stops=[held('JOBS FAIL ON THE NEW IMAGE', family='fy')])
+        self.assertEqual(r['verdict'], 'accept', r)
+
+    def test_stops_that_are_not_a_list_cannot_decide(self):
+        for bad in ({'family': 'fx', 'stop': 'HAND CHANGE'}, 'HAND CHANGE', 7):
+            f = facts({'fx': fam()})
+            f['stops'] = bad
+            rc, _, err = run(self, 'keep', state={'format': 1, 'families': {'fx': ev(succeeded=1)}}, facts=f, now=NOW + KEEP)
+            self.assertNotEqual(rc, 0, bad)
+            self.assertIn('keep: facts.stops', err)
 
 
 class Keep(unittest.TestCase):
