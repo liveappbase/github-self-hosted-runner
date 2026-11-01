@@ -217,7 +217,9 @@ C::now_in("r1") as $now
                           then .ev |= (.open = true | .since = $now | .sets = {} | .pending = null
                                        | .succeeded = 0 | .failed = 0 | .canceled = 0 | .other = 0)
                           else . end)) as $obs
-    # NOT SERVING, from this pass's reads, on the sets of an open window whose process runs the candidate
+    # NOT SERVING, from this pass's reads (each read at this pass's `now`), on the sets of an open window whose process
+    # runs the candidate: at least 3 NOT SERVING reads whose first and last are NS_SECONDS or more apart, no other read
+    # between them. The reads measure the 30 min, never the clock: a pass with no read adds nothing (Opus r1 F2)
     | ($obs | map_values(
         if .ev.open and .prov then
           .sets as $sets
@@ -225,9 +227,10 @@ C::now_in("r1") as $now
                 .sets[$s] = ((.sets[$s] // set0)
                   | (if .completed then .ns = null else . end)
                   | reduce $reads[] as $rd (.;
-                      if ($rd | ns_read($s)) then .ns = ((.ns // {since: $now, reads: 0}) | .reads += 1) else .ns = null end))
+                      if ($rd | ns_read($s)) then .ns = ((.ns // {first: $now, reads: 0}) | .reads += 1 | .last = $now)
+                      else .ns = null end))
                 | if .verdict == null and .sets[$s].ns != null and .sets[$s].ns.reads >= 3
-                     and $now - .sets[$s].ns.since >= NS_SECONDS
+                     and .sets[$s].ns.last - .sets[$s].ns.first >= NS_SECONDS
                   then .verdict = rollback($s; (.sets[$s] | C::run_of)
                                            + [{t: "NOT SERVING", c: true, x: "set \($s) read ready, idle, not busy, assigned, for 30 min, no job completed"}])
                   else . end))

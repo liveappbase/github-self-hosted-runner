@@ -132,9 +132,11 @@ proof in the same second as a failure counts as between them; a proof after the 
 after 1 h before it rejects the version). The verdict holds for the candidate; no STOP takes it back. A run of three
 that is not settled yet is `pending` (r1's output and state): R1 may still come.
 
-**NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min (≥ 3
-reads), with no job completed on it: it counts as the set's third failure, connect-class. A read that is not like
-that (not ready included), a job completed on the set, or a gap starts the 30 min again.
+**NOT SERVING.** A family set that reads ready, idle ≥ 1, busy 0 and assigned ≥ 1 on every read for 30 min, with no
+job completed on it: it counts as the set's third failure, connect-class. The reads measure the 30 min, never the
+clock: at least 3 such reads (each at its pass's `now`) whose first and last are 30 min or more apart; a pass with no
+`/healthz` read adds nothing. A read that is not like that (not ready included), a job completed on the set, or a gap
+starts the 30 min again.
 
 **KEEP.** 72 h after the evidence window opened: at least one `result=succeeded` → `accept`; completions (results
 other than `canceled`) but none succeeded → `jobs-fail`; none → `no-evidence`. Before 72 h: `observe`. A family whose

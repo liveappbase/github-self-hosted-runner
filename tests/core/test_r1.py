@@ -673,6 +673,28 @@ class NotServing(unittest.TestCase):
         out = self.reads(r, 4)
         self.assertEqual((out['verdict'], out['connect_only']), ('rollback', False))
 
+    # the 30 min are measured by the reads (the first and the last NOT SERVING read 30 min or more apart), not by the
+    # clock: a pass with no /healthz read adds nothing (Opus r1 F2)
+    def test_opus_f2_n1_passes_with_no_read_add_nothing(self):
+        r = Run(self, self.fams)
+        r.go('', healthz=[hz(), hz()])                  # +0 min: two NOT SERVING reads
+        r.go('', healthz=[hz(), hz()])                  # +10 min: two more
+        r.go('', healthz=[])                            # +20 min: the read failed
+        self.assertEqual(r.go('', healthz=[])['families']['fx']['verdict'], 'none')   # +30 min: no read
+
+    def test_opus_f2_n2_three_reads_in_one_pass_then_a_pass_with_none_30_min_later(self):
+        r = Run(self, self.fams)
+        r.go('', healthz=[hz(), hz(), hz()])
+        self.assertEqual(r.go('', healthz=[], now=r.now + 1800)['families']['fx']['verdict'], 'none')
+
+    def test_control_reads_at_0_15_and_30_minutes_are_the_third_failure(self):
+        r = Run(self, self.fams)
+        r.go('', healthz=[hz()])
+        self.assertEqual(r.go('', healthz=[hz()], now=r.now + 900)['families']['fx']['verdict'], 'none')
+        out = r.go('', healthz=[hz()], now=r.now + 900)['families']['fx']
+        self.assertEqual((out['verdict'], out['connect_only']), ('rollback', True))
+        self.assertEqual(out['failures'][-1]['t'], 'NOT SERVING')
+
 
 class Sticky(unittest.TestCase):
     def test_a_rollback_verdict_holds_for_the_candidate(self):
