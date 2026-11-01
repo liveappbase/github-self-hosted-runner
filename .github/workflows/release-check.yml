@@ -19,6 +19,10 @@ jobs:
           git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
           git -C src fetch -q --no-tags origin "$GITHUB_SHA"
           git -C src checkout -q --detach FETCH_HEAD
+      - name: A bash 5.2 or newer on PATH (release-check parses linux-docker/'s scripts with it; Homebrew's, if the image has none)
+        run: |
+          for b in $(which -a bash); do "$b" -c '(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 502 ))' && exit 0; done
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install bash
       - name: tools/release-check
         working-directory: src
         run: /bin/zsh -f tools/release-check
