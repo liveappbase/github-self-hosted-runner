@@ -10,7 +10,8 @@
 # agent is enabled (a security response, an update) stops here at runscaler's next start, until wall-check proves the
 # wall again; launchd retries every 300 s (ThrottleInterval). `run` bounds the LaunchAgent's two log files at 10 MB
 # (a file over it is cut to empty as runscaler starts). `validate` never cuts a log: the updater validates while
-# runscaler runs and writes to runscaler.log.
+# runscaler runs and writes to runscaler.log. Both run runscaler with TZ=UTC, whatever zone the Mac has: runscaler
+# stamps its log in local time with no zone, and the updater's core reads those times as UTC (core/README.md).
 umask 077
 RUNNER=/Users/ci/bin/runner
 CONFIG=/Users/ci/.config/runner/config.toml
@@ -22,6 +23,7 @@ SHIM=/usr/local/libexec/liveapp-ci/tart
 STAMP=/Users/ci/.config/runner/wall-stamp
 export PATH=/usr/local/libexec/liveapp-ci:/Users/ci/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 export LC_ALL=C
+export TZ=UTC   # runscaler stamps local time with no zone; the updater's core requires UTC (core/README.md, TZ)
 die() { print -u2 -r -- "runner-start: REFUSE $*"; exit 1 }
 stamp_macos() { # -> 0 when the wall stamp's macos line is this Mac's build; else REPLY = what differs (as runner-enable)
   local b p

@@ -136,6 +136,33 @@ class TestLogBound(unittest.TestCase):
         self.assertEqual((os.path.getsize(out), os.path.getsize(err)), (0, 0))
 
 
+class TestTimeZone(unittest.TestCase):
+    """runscaler stamps its log in local time with no zone; the updater's core reads those times as UTC (core/README.md,
+    the TZ section). So runner-start runs runscaler with TZ=UTC, for `run` and for `validate`, whatever TZ it was given
+    (the Studio's zone is Europe/London)."""
+
+    def rig(self):
+        r = Rig(self)
+        r.sb.stub('runner', 'print -r -- "TZ=${TZ-unset}"', folder=r.sb.path('fake'))
+        return r
+
+    def test_runscaler_runs_with_tz_utc(self):
+        for args in (['run'], ['validate'], ['validate', None]):
+            for given in ({'TZ': 'Europe/London'}, {}):
+                with self.subTest(args=args, given=given):
+                    r = self.rig()
+                    argv = [a if a else r.temp_config(config(HAVE)) for a in args]
+                    res = r.sb.run(['/bin/zsh', '-f', r.script] + argv, extra_env=given)
+                    self.assertEqual((res.returncode, res.stdout), (0, 'TZ=UTC\n'), res.stderr)
+
+    def test_control_the_stub_prints_the_tz_it_is_given(self):
+        # the harness: the stub runner, run straight, prints the TZ of its environment (and "unset" without one)
+        r = self.rig()
+        stub = r.sb.path('fake', 'runner')
+        self.assertEqual(r.sb.run([stub], extra_env={'TZ': 'Europe/London'}).stdout, 'TZ=Europe/London\n')
+        self.assertEqual(r.sb.run([stub]).stdout, 'TZ=unset\n')
+
+
 class TestRun(unittest.TestCase):
     def test_run_takes_no_config(self):
         r = Rig(self)
