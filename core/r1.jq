@@ -28,10 +28,12 @@ def ORDER: 10;
 # F6). That loses only a take-back, which can only delay R1
 def STARTS_MAX: 16;
 
-# the D6 AMENDMENT's window: an exited removal and an unknown-runner line naming its runner less than SETTLE of log time
-# apart, either way round. A removal or a line inside it can still be read up to ORDER after a record SETTLE past its
-# partner, so each waits for the other SETTLE + ORDER of log time (settle_log), and they match by their own log times
-def in_window($a; $b): $a - $b < SETTLE and $b - $a < SETTLE;
+# the D6 AMENDMENT's window: an exited removal and an unknown-runner line naming its runner less than SETTLE - ORDER
+# (110 s) of log time apart, either way round, by their own log times. A partner inside it, written at most ORDER late,
+# is read before any record SETTLE past the other one, so before any failure the pair could separate settles (Codex r6
+# F1, Opus r6 F1: a partner 110-119 s away, read late, came after such a failure had settled). Measured: the Linux host's
+# lines came 0-16 s after their removal. Each waits for the other SETTLE + ORDER of log time (settle_log)
+def in_window($a; $b): $a - $b < SETTLE - ORDER and $b - $a < SETTLE - ORDER;
 
 # . = a counted failure: a record of log second $sec settles it. An exited removal waits ORDER more: a line inside its
 # window may still be read ORDER late, and take it back
@@ -54,8 +56,8 @@ def first_line: split("\n")[0] | .[0:200];
 
 # the classification table (core/README.md, PLAN D6 with its AMENDMENT); $p = the family's provider, $refused = VMs
 # the shim refused. -> k: completed (proof of life; KEEP's counts) | exited (`Runner removed reason=exited` with no
-# jobId: a counted failure, unless an unknown-runner line naming that runner comes within SETTLE before or after it,
-# see apply) |
+# jobId: a counted failure, unless an unknown-runner line naming that runner comes within SETTLE - ORDER before or after
+# it, see apply) |
 # unknown (`Job started|completed for unknown runner`: proof of life for the set when it names such a runner) |
 # removed (confirms a Tart start) | start (Tart: proof unless taken back) | fail (c = connect-class) | retired | shim |
 # refused | paired | none

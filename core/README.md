@@ -157,14 +157,15 @@ line always follows one).
 | `Failed to start runner`: `did not connect to GitHub within` | yes, connect-class |
 | `Failed to start runner`: `failed to create / start runner container` | yes |
 | any other `Failed to start runner` | yes |
-| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes less than SETTLE before or after it, by their own log times (each waits SETTLE + ORDER of log time for the other: a record may be read up to ORDER late) (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
+| `Runner removed reason=exited` with no `jobId` | yes (and, once it is final, it takes back that runner's `Runner started`), unless a `Job started\|completed for unknown runner (already removed?) runnerName=<that runner>` comes less than SETTLE - ORDER (110 s) before or after it, by their own log times: such a partner, written at most ORDER late, is read before any record SETTLE past the other one, so before any failure the pair could separate settles, and where a pass ends changes no verdict; one 110 s away or more is no partner (each waits SETTLE + ORDER of log time for the other) (PLAN D6 AMENDMENT, both providers: on the Linux host all 8 such removals were followed by it, 0-16 s later; runscaler logs the removal only after RemoveInstance, so a job message in between logs the line first) |
 | `Job started\|completed for unknown runner (already removed?)` naming a runner removed so | no: proof of life for the set, each such line at its own log time, before or after the removal (a job's started and completed lines can lie apart); that runner's failure is not counted and its `Runner started` is proof again (it is not taken back) |
 | `Runner exited before job completion` alone | no (unknown) |
 
 Proof of life on a set: `Runner removed reason=job-completed`; the unknown-runner line above; on Tart also `Runner
 started`, unless that runner is later removed `reason=exited` with no `jobId` and no unknown-runner line takes that
 back. The removal takes the start back only when it is final, by the same rule as its own failure: no such line comes
-before its failure settles (by the log SETTLE + ORDER past it, or by the clock). Until then the start is still a proof of life for R1,
+less than SETTLE - ORDER (110 s) after it before its failure settles (by the log SETTLE + ORDER past it, or by the
+clock); a line inside that window, written at most ORDER late, is always read before then. Until then the start is still a proof of life for R1,
 so where a pass's capture falls between the removal and the unknown-runner line changes no verdict; `pending` counts
 the start as taken back (KEEP waits for the removal to be final).
 

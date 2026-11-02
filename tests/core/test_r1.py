@@ -217,7 +217,7 @@ class ProofOfLife(unittest.TestCase):
         self.assertEqual(Run(self).fx(log)['verdict'], 'none')
 
     def test_a_start_taken_back_by_exited_without_a_job(self):
-        # the log moves SETTLE + ORDER past the removal (its window ends: TheWindowWaitsForOrder)
+        # the log moves SETTLE + ORDER past the removal (its exit is final: TheWindowIsSettleMinusOrder)
         log = (failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER)
                + removed(35, 'runner-0000beef', 'exited', job=False) + tail(200))
         r = Run(self).fx(log)
@@ -377,8 +377,9 @@ class Settle(unittest.TestCase):
         log = '\n'.join(sum((shifted(real_seq(), k, rename='runner-0000feed') for k in range(3)), [])) + '\n' + REAL_TAIL
         self.assertEqual(Run(self, self.docker()).fx(log)['verdict'], 'rollback')
 
-    def test_control_an_unknown_runner_line_settle_or_later_is_no_proof(self):
-        log = '\n'.join(sum((shifted(real_seq(), k, unknown_delay=120) for k in range(3)), [])) + '\n' + REAL_TAIL
+    def test_control_an_unknown_runner_line_settle_minus_order_or_later_is_no_proof(self):
+        # the real lines come 13 s after the removal; 97 s later still is 110 s after it: outside the window
+        log = '\n'.join(sum((shifted(real_seq(), k, unknown_delay=97) for k in range(3)), [])) + '\n' + REAL_TAIL
         self.assertEqual(Run(self, self.docker()).fx(log)['verdict'], 'rollback')
 
     def test_on_tart_too(self):
@@ -427,8 +428,8 @@ class Settle(unittest.TestCase):
 
 class TakeBackSettles(unittest.TestCase):
     """An exited removal with no jobId takes a Tart `Runner started` back only when no `Job started|completed for
-    unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE: the rule the D6 AMENDMENT gives
-    the exited removal itself (Opus r3 F1). Until the exit is final (its failure settles: by the log, or by the clock
+    unknown runner (already removed?) runnerName=<that runner>` follows within SETTLE - ORDER: the rule the D6
+    AMENDMENT gives the exited removal itself (Opus r3 F1). Until the exit is final (its failure settles: by the log, or by the clock
     when the log is quiet) the start stays a proof of life for R1, so where the capture falls between the removal and
     the unknown-runner line changes no verdict. `pending` counts the start as taken back: KEEP waits for the exit.
     Opus r3 F1's inputs, Tart fx on mac-a: failures 90, 95, runner X started 100, a failure 105 (all settled), with a
@@ -492,10 +493,11 @@ class UnknownRunnerLineFirst(unittest.TestCase):
     """runscaler marks a dead runner unknown, logs `Runner exited before job completion`, runs RemoveInstance (Tart:
     `tart stop`, `tart delete`) and only then logs `Runner removed reason=exited`: a job message for that runner in
     between logs `Job started|completed for unknown runner (already removed?) runnerName=<it>` BEFORE the removal (Opus
-    r4 F3). The D6 AMENDMENT's window is both ways: such a line within SETTLE before the exited removal, as one within
-    SETTLE after it, means the runner ran a job: the removal is no counted failure, the line is proof of life for the
-    set, and the runner's Tart start is a proof (the removal does not take it back). Opus r4 F3's input: failures 10,
-    20; on Tart X started 25; X's WARN 29; the unknown-runner lines 30; X removed `reason=exited` with no jobId at 31."""
+    r4 F3). The D6 AMENDMENT's window is both ways: such a line within SETTLE - ORDER before the exited removal, as one
+    within SETTLE - ORDER after it, means the runner ran a job: the removal is no counted failure, the line is proof of
+    life for the set, and the runner's Tart start is a proof (the removal does not take it back). Opus r4 F3's input:
+    failures 10, 20; on Tart X started 25; X's WARN 29; the unknown-runner lines 30; X removed `reason=exited` with no
+    jobId at 31."""
 
     X = 'runner-0000beef'
 
@@ -548,13 +550,14 @@ class UnknownRunnerLineFirst(unittest.TestCase):
         fx = Run(self).fx(log('runner-0000feed'))
         self.assertEqual([f['t'][-5:] for f in fx['failures']][:3], ['00:10', '00:20', '00:27'])
 
-    def test_control_the_line_settle_or_more_before_the_removal_is_no_proof(self):
-        # 119 s before: within SETTLE, no counted failure; 120 s and 121 s: the removal is counted -> R1 on 10, 20 and it
-        # (on Tart once the exit is final, X's start taken back), as for a line SETTLE or more AFTER it
+    def test_control_the_line_settle_minus_order_or_more_before_the_removal_is_no_proof(self):
+        # 109 s before: within SETTLE - ORDER (TheWindowIsSettleMinusOrder), no counted failure; 110 s and 111 s: the
+        # removal is counted -> R1 on 10, 20 and it (on Tart once the exit is final, X's start taken back), as for a line
+        # SETTLE - ORDER or more AFTER it
         for provider in ('tart', 'docker'):
-            with self.subTest((provider, 119)):
-                self.assertEqual(self.run_(provider, gap=119)[1]['families']['fx']['verdict'], 'none')
-            for gap in (120, 121):
+            with self.subTest((provider, 109)):
+                self.assertEqual(self.run_(provider, gap=109)[1]['families']['fx']['verdict'], 'none')
+            for gap in (110, 111):
                 with self.subTest((provider, gap)):
                     fx = self.run_(provider, gap=gap)[1]['families']['fx']
                     self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', t(30 + gap)[-5:]])
@@ -568,8 +571,8 @@ class UnknownRunnerLineFirst(unittest.TestCase):
 
 
 class EveryUnknownRunnerLine(unittest.TestCase):
-    """Every `Job started|completed for unknown runner (already removed?) runnerName=<X>` line within SETTLE of X's
-    exited removal, before or after it, is a proof of life for the set at its OWN log time, not only one of them (Codex
+    """Every `Job started|completed for unknown runner (already removed?) runnerName=<X>` line within SETTLE - ORDER of
+    X's exited removal, before or after it, is a proof of life for the set at its OWN log time, not only one of them (Codex
     r5 F1): a job's started and completed lines can lie seconds apart, with a counted failure between them. Lines before
     the removal (the removal finds them all), after it (the first takes the removal back, the later ones are proofs
     too), and on both sides of it. One pass, and split: the first part read in one pass, the rest in the next."""
@@ -632,58 +635,99 @@ class EveryUnknownRunnerLine(unittest.TestCase):
                         self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:35', '00:38', '00:45'])
 
 
-class TheWindowWaitsForOrder(unittest.TestCase):
-    """The D6 AMENDMENT's window is SETTLE (120 s) of log time between an exited removal and an unknown-runner line naming
-    its runner, before or after it. Records are out of order by up to ORDER (10 s), so a removal or a line inside the
-    window can still be read up to ORDER after a record SETTLE past its partner: the core keeps a line waiting for its
-    removal, and a removal waiting for its line, SETTLE + ORDER of log time, matches them by their own log times
-    (less than SETTLE apart), and settles an exited failure only SETTLE + ORDER after it (Codex r5 F2's requirement,
-    for the disorder the core reads). Failures 10, 20; a record of 152; one partner 7 s out of order, read after it."""
+class TheWindowIsSettleMinusOrder(unittest.TestCase):
+    """The D6 AMENDMENT's window is SETTLE - ORDER (110 s) of log time between an exited removal and an unknown-runner
+    line naming its runner, before or after it, by their own log times. A partner less than 110 s away, written at most
+    ORDER (10 s) late, is read before any record 120 s past the line (or past the removal): before any failure that the
+    pair could separate settles (Codex r6 F1, Opus r6 F1). A partner 110 s away or more is no partner, so where a pass
+    ends changes no verdict. Measured: on the Linux host 8 of 8 lines came 0-16 s AFTER their removal, none first.
+    Layouts: ONE pass of every record; HELD: the pass ends with the partner held (the glue captured right after it),
+    the next pass reads it and the rest; EACH: a pass per record. Two quiet passes after each."""
 
-    X = 'runner-0000beef'
+    X, Y = 'runner-0000beef', 'runner-0000feed'
 
-    def last(self, provider, shape, partner_at, split):
-        """SHAPE before: X's line at PARTNER_AT, the record of 152 | X removed reason=exited, no jobId, at 145 (7 s late);
-        after: X removed at 30, the record of 152 | X's line at PARTNER_AT, read after 152. SPLIT at |: the first part and
-        a record of 153 (held) in one pass, the rest in the next. -> the last pass's fx"""
+    def layouts(self, provider, recs, partner):
+        """RECS = [record text, ...] in write order; PARTNER = the index of the late partner. -> {layout: (every
+        pass's verdict, the last pass's fx)}"""
+        set_ = 'mac-a' if provider == 'tart' else 'linux-b'
+        out = {}
+        for name, cuts in (('one', []), ('held', [partner + 1]), ('each', list(range(1, len(recs))))):
+            r = Run(self, {'fx': fam(provider, (set_,))})
+            vs, prev = [], 0
+            for c in cuts + [len(recs)]:
+                vs.append(r.fx(''.join(recs[prev:c]))['verdict'])
+                prev = c
+            for _ in range(2):
+                fx = r.fx('')
+                vs.append(fx['verdict'])
+            out[name] = (vs, fx)
+        return out
+
+    def recs(self, provider):
         set_, err = ('mac-a', OTHER) if provider == 'tart' else ('linux-b', DOCKER_CREATE)
-        U = unknown(partner_at, self.X, set_, 'completed')
-        first = failed(10, err, set_) + failed(20, err, set_)
-        if shape == 'before':
-            first += U + scaling(152, set_)
-            second = removed(145, self.X, 'exited', job=False, set_=set_)
-        else:
-            first += removed(30, self.X, 'exited', job=False, set_=set_) + scaling(152, set_)
-            second = U
-        second += scaling(300, set_) + scaling(301, set_)
-        r = Run(self, {'fx': fam(provider, (set_,))})
-        if split:
-            r.go(first + scaling(153, set_))
-            return r.fx(second)
-        return r.fx(first + second)
+        return (lambda s: failed(s, err, set_), lambda s, n=None: unknown(s, n or self.X, set_, 'started'),
+                lambda s: removed(s, self.X, 'exited', job=False, set_=set_), lambda s: scaling(s, set_))
 
-    def test_a_removal_written_late_finds_its_line_less_than_settle_before_it(self):
-        # the line at 30, the removal at 145 (115 s after it), read after a record of 152 (122 s after the line)
-        for provider in ('tart', 'docker'):
-            for split in (False, True):
-                with self.subTest((provider, split)):
-                    fx = self.last(provider, 'before', 30, split)
-                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
-                with self.subTest((provider, split, 'control: the line at 25, SETTLE before the removal')):
-                    fx = self.last(provider, 'before', 25, split)
-                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '02:25'])
+    def assert_rollback(self, out, failures):
+        # the run's first three failures (one pass may judge the removal in the same run: four)
+        for name, (vs, fx) in out.items():
+            self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']][:3]), ('rollback', failures), name)
 
-    def test_a_line_written_late_takes_back_its_removal_less_than_settle_before_it(self):
-        # the removal at 30, the line at 145 (115 s after it), read after a record of 152 (122 s after the removal):
-        # the exited failure is not settled by 152 either, so no pass judges it before the line is read
+    def assert_none(self, out):
+        for name, (vs, fx) in out.items():
+            self.assertEqual((vs, fx['pending']), (['none'] * len(vs), None), name)
+
+    def test_codex_r6_f1_a_removal_119_s_after_its_line_is_no_partner_in_any_layout(self):
+        # Codex r6 F1: failures 10, 20; X's line 30; a failure 35; records of 155, 156; X removed reason=exited with no
+        # jobId at 149 (7 s out of order: read after 156); the log moves on. 119 s apart: no partner -> R1 on 10, 20, 35
+        # in every layout (round 5 gave none in one pass and R1 in a pass that ended before the removal)
         for provider in ('tart', 'docker'):
-            for split in (False, True):
-                with self.subTest((provider, split)):
-                    fx = self.last(provider, 'after', 145, split)
-                    self.assertEqual((fx['verdict'], fx['pending']), ('none', None))
-                with self.subTest((provider, split, 'control: the line at 150, SETTLE after the removal')):
-                    fx = self.last(provider, 'after', 150, split)
-                    self.assertEqual([f['t'][-5:] for f in fx['failures']], ['00:10', '00:20', '00:30'])
+            with self.subTest(provider):
+                F, U, Xr, S = self.recs(provider)
+                recs = [F(10), F(20), U(30), F(35), S(155), S(156), Xr(149), S(300), S(301)]
+                self.assert_rollback(self.layouts(provider, recs, 6), ['00:10', '00:20', '00:35'])
+
+    def test_opus_r6_f1_a_removal_119_s_after_its_line_written_late_is_no_partner_in_any_layout(self):
+        # Opus r6 F1: failures 10, 20; X's line 30; a failure 31; records of 60, 151 (it settles 31), 152; X removed at
+        # 149, written 3 s late (after 152); the log moves on. 119 s apart: no partner -> R1 on 10, 20, 31 in every layout
+        for provider in ('tart', 'docker'):
+            with self.subTest(provider):
+                F, U, Xr, S = self.recs(provider)
+                recs = [F(10), F(20), U(30), F(31), S(60), S(151), S(152), Xr(149), S(300), S(301)]
+                self.assert_rollback(self.layouts(provider, recs, 7), ['00:10', '00:20', '00:31'])
+
+    def test_the_band_the_line_first(self):
+        # failures 10, 20; X's line 30; a failure 31 (the line lies between 20 and 31); a record of 60; X removed D s after
+        # the line, written L s late (after a record of 30 + D + L); the log moves on. D 109: a partner, none in every
+        # layout; D 110: no partner, R1 on 10, 20, 31 in every layout
+        for provider in ('tart', 'docker'):
+            F, U, Xr, S = self.recs(provider)
+            for d in (109, 110):
+                for late in (0, 10):
+                    with self.subTest((provider, d, late)):
+                        x = 30 + d
+                        out = self.layouts(provider, [F(10), F(20), U(30), F(31), S(60), S(x + late), Xr(x), S(x + 200),
+                                                      S(x + 201)], 6)
+                        if d == 109:
+                            self.assert_none(out)
+                        else:
+                            self.assert_rollback(out, ['00:10', '00:20', '00:31'])
+
+    def test_the_band_the_removal_first(self):
+        # failures 10, 20; X removed reason=exited, no jobId, at 30; X's line D s after it, written L s late (after a
+        # record of 30 + D + L); the log moves on. D 109: the line takes the removal back, none in every layout; D 110:
+        # no partner, R1 on 10, 20, 30 in every layout
+        for provider in ('tart', 'docker'):
+            F, U, Xr, S = self.recs(provider)
+            for d in (109, 110):
+                for late in (0, 10):
+                    with self.subTest((provider, d, late)):
+                        u = 30 + d
+                        out = self.layouts(provider, [F(10), F(20), Xr(30), S(u + late), U(u), S(u + 200), S(u + 201)], 4)
+                        if d == 109:
+                            self.assert_none(out)
+                        else:
+                            self.assert_rollback(out, ['00:10', '00:20', '00:30'])
 
 
 class Retired(unittest.TestCase):
