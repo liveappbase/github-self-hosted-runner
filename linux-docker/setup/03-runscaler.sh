@@ -93,7 +93,7 @@ ver=$("$HOME/bin/runner" version 2>&1) || die "runner version: $ver"; ok "${ver%
 
 say "render config.$MODE.new.toml"
 header() { cat <<T
-# runscaler v0.9.5 config, MODE $MODE, rendered by 03-runscaler.sh (plan PLAN-2026-10-21-linux-runscaler §2.3). 0600.
+# runscaler v0.9.5 config, MODE $MODE, rendered by 03-runscaler.sh. 0600.
 # Numbers from $src.
 log-level = "info"
 concurrent = $N_CONCURRENT

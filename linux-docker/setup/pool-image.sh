@@ -58,7 +58,7 @@ R=$HOME/.config/runner; CFG=$R/config.toml; KEEPC=$R/config.toml.pre-image; POOL
 REF=/home/${RUN_USER}/run/image.ref; REG=http://127.0.0.1:${REGISTRY_PORT}; D1=unix:///home/${RUN_USER}/run/docker.sock; B=$HOME/build
 S03=$B/setup/03-runscaler.sh
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=5cb54f4eb1e81d90744f3f483a8c5cb4e0ffdfc0368c95d302bfc8cdb0ca363a
+PINS="$S03=c4eabf128d1dd89142fd5eda1ca5708b38d3b0d9f2b7a26814d2a005404bc95e
 $B/bin/runner-start=698d52799fc20feff260fcec82d3aa49f66aa535547368b17d27226941306107
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/config/runscaler.service=b84e46b1b9d4391258a6a6161b55f6c96fe625aec4eec8251c0f8dd562c530be"

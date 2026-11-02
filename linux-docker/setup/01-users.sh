@@ -76,7 +76,7 @@ case " $marked " in
   *" ${RS_USER} "*)
     # `x`: never AGED away by the host's `q /tmp … 10d` clean while a long-running runscaler holds it (systemd 259
     # accepts f + x on one path: measured by a dry run)
-    [ -e "$TMPFILES" ] || printf '# runscaler lock (plan PLAN-2026-10-21-linux-runscaler §2.3): exists from boot, owned by '"${RS_USER}"', never aged\nf /tmp/runner.lock 0600 '"${RS_USER}"' '"${RS_USER}"' -\nx /tmp/runner.lock\n' > "$TMPFILES"
+    [ -e "$TMPFILES" ] || printf '# runscaler lock: exists from boot, owned by '"${RS_USER}"', never aged\nf /tmp/runner.lock 0600 '"${RS_USER}"' '"${RS_USER}"' -\nx /tmp/runner.lock\n' > "$TMPFILES"
     systemd-tmpfiles --create "$TMPFILES" || bad "systemd-tmpfiles --create $TMPFILES" ;;
   *) bad "${RS_USER} does not exist: no lock rule written" ;;
 esac
