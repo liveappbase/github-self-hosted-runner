@@ -203,11 +203,15 @@ after the gap) and the newest log time read before the gap (a later gap before t
 gap drops the window's evidence, and with it the half of a pair read before it (a proof between failures read after
 it; an exited removal whose unknown-runner line comes after it; a line whose removal comes after it, Opus r6 F2).
 Everything it drops is stamped at most the newest log time read before it, and a partner lies less than 110 s from it,
-so every failure it could join wrongly lies in the pause, however late the gap's record was written. A step back of D s
-so pauses D + 130 s of the new clock (TZ=UTC, below, leaves only a clock set back). Everything else still applies in
-the pause: proofs, completions, STOPs, Tart starts, the pairing lists, NOT SERVING. The pause is in the state (one value
-per family), so it holds across passes. A real run still rolls back once the pause ends; gaps that keep coming hold R1
-off while they last (the plan's O7 residual; status shows the gap count).
+so every failure read after the gap that it could join wrongly lies in the pause: under a broken log, the gap never
+makes an R1 from a failure it reads after the gap. The bound: a proof of life, or a pair partner, written more than
+ORDER late can arrive after the failures it separates were judged (a pass that ends before it is written judges them),
+which gives an R1 the true order does not give, and no bounded wait prevents it; it starts at 12 s late (Opus r7 F1:
+an exited removal 109 s after its line, written 12 s late). Measured: 0 of 4,455 records out of order on the Linux
+host. A step back of D s pauses D + 130 s of the new clock (TZ=UTC, below, leaves only a clock set back). Everything
+else still applies in the pause: proofs, completions, STOPs, Tart starts, the pairing lists, NOT SERVING. The pause is
+in the state (one value per family), so it holds across passes. A real run still rolls back once the pause ends; gaps
+that keep coming hold R1 off while they last (the plan's O7 residual; status shows the gap count).
 
 The glue MUST run runscaler with `TZ=UTC` (on Linux in the service unit's `Environment=`, on macOS in the launchd
 plist's `EnvironmentVariables` or the script it starts): then its log times never step back with summer time. The core

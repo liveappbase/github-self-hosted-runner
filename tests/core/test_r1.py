@@ -1611,7 +1611,9 @@ class Order(unittest.TestCase):
     """ORDER (10 s of log time): runscaler stamps a record when it logs it and writes it under one lock, so records are
     out of order by goroutine scheduling only (the Linux host's real log: 0 records out of order in 4,455). The core
     claims no more: a record more than ORDER before the newest log time read is outside what it reads, an evidence gap
-    (counts and the KEEP clock start again), never a verdict. SETTLE stays 120 s: it is how long a LATER proof may take
+    (counts and the KEEP clock start again, and counting pauses: GapPausesCounting); a proof written that late can still
+    come after a run was judged (the stated bound: GapPausesCounting test_opus_r7_f1_c_...). SETTLE stays 120 s: it is
+    how long a LATER proof may take
     to arrive (the unknown-runner line, up to 16 s after its removal), which is not disorder. At such a step back, what
     is settled is judged first only when the step's own record does not contradict that: the failure lies more than
     ORDER after it (the old times, settled by records of the same times), or the step's record itself is SETTLE past
@@ -1728,10 +1730,11 @@ class GapPausesCounting(unittest.TestCase):
     failure, an exited removal) stamped less than SETTLE + ORDER (130 s) after the pause's anchor is not counted. The
     anchor is the later of the gap's record (the first record the window reads after the gap) and the newest log time
     read before the gap (fix round 6b): everything the gap drops is stamped at most that newest time, and its partner
-    lies less than 110 s from it, so every failure it could affect lies inside the pause, however late the gap's record
-    was written. A step back of D s so pauses D + 130 s of the new clock. A gap drops the window's evidence, and with it
-    the half of a pair that
-    was read before it: a proof read before it that lay between failures read after it (K2), an exited removal whose
+    lies less than 110 s from it, so every failure read after the gap that it could affect lies inside the pause. The
+    bound (Opus r7 F1): a proof of life or a pair partner written more than ORDER late can arrive after the failures it
+    separates were judged, an R1 the true order does not give (test_opus_r7_f1_c_...). A step back of D s pauses D + 130
+    s of the new clock. A gap drops the window's evidence, and with it the half of a pair that was read before it: a
+    proof read before it that lay between failures read after it (K2), an exited removal whose
     unknown-runner line comes after it (K1), a line whose removal comes after it (K1'), so for 130 s of log time the
     failures read after it could join a run they do not belong to (Opus r6 F2; fuzz O2L seeds 8044, 8168, 8518, 8628,
     O2-VISIBLE 3512, 4073). Everything else still applies: proofs, completions, STOPs, starts, the pairing lists. The
@@ -1897,6 +1900,32 @@ class GapPausesCounting(unittest.TestCase):
         out = r.go(failed(4140, OTHER) + failed(4150, OTHER) + failed(4160, OTHER) + tail(4300))
         self.assertEqual((v, [f['t'][-8:] for f in out['families']['fx']['failures']], out['families']['fx']['gaps']),
                          ('none', ['06:09:00', '06:09:10', '06:09:20'], 2))
+
+    def test_opus_r7_f1_c_a_partner_written_more_than_order_late_can_come_after_the_run_was_judged(self):
+        # the stated bound, pinned as it is (no bounded wait prevents it): failures 10, 20; X's unknown-runner line 30; a
+        # failure 30 (the line's own second: between 20 and 30); records every second 131..151; X removed reason=exited,
+        # no jobId, stamped 139 (109 s after its line: a partner) and written 12 s late (after 151); the log moves on. A
+        # pass per record: the pass that reads 150 settles 30 and judges before the removal is written -> R1 on 10, 20,
+        # 30, one gap. One pass reads the removal as a gap before it judges -> none, one gap. The same records in true
+        # order give none. Controls: the removal 10 s late (inside ORDER) -> none in both layouts, no gap; the line names
+        # another runner -> R1 on 10, 20, 30 a pass per record (the run is real)
+        for provider in ('tart', 'docker'):
+            _, F, U, Xr, S, J = self.recs(provider)
+
+            def recs(late, name=None):
+                return ([F(10), F(20), U(30, name), F(30)] + [S(s) for s in range(131, 139 + late + 1)]
+                        + [Xr(139), S(400), S(401)])
+            for each, want in ((True, ('rollback', ['00:10', '00:20', '00:30'], 1)), (False, ('none', [], 1))):
+                with self.subTest((provider, each)):
+                    vs, fx, gaps = self.passes(provider, recs(12), each)
+                    self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']][:3], gaps), want)
+                with self.subTest((provider, each, 'control: the removal 10 s late')):
+                    vs, fx, gaps = self.passes(provider, recs(10), each)
+                    self.assertEqual((vs, gaps), (['none'] * len(vs), 0))
+            with self.subTest((provider, 'control: the line names another runner')):
+                vs, fx, gaps = self.passes(provider, recs(12, self.Y), True)
+                self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']][:3]),
+                                 ('rollback', ['00:10', '00:20', '00:30']))
 
     def test_unknown_text_and_a_foreign_restart_pause_counting_from_the_first_record_read_after_them(self):
         # pass 1 is read (the newest log time read: 25); pass 2 is a gap (UNKNOWN text: the glue lost the position; or a

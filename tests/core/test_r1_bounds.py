@@ -224,7 +224,8 @@ class StillDecides(unittest.TestCase):
         # failures 10, 20 (settled by 150), a job completed at 160: while the newest record read is less than SETTLE past
         # the proof of 160 (278), nothing before that proof goes; once it is SETTLE past it (280), what is before it goes.
         # The point stays SETTLE behind although a record still to come is at most ORDER (10 s) out of order: one more
-        # is an evidence gap (test_r1.py Order), so a failure of 159 read after either is a gap, never a verdict
+        # is an evidence gap (test_r1.py Order), so a failure of 159 read after either is a gap, and not counted (the
+        # pause after it: test_r1.py GapPausesCounting)
         d, F, J, S = self.docker_f3()
         for last, kept in ((278, 2), (280, 0)):
             with self.subTest(last):

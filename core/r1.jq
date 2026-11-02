@@ -45,10 +45,13 @@ def settled_by($sec): $sec - .s >= (if .n != null then SETTLE + ORDER else SETTL
 # after it, an exited removal or an unknown-runner line whose partner comes after it: Opus r6 F2), so a failure stamped
 # less than SETTLE + ORDER after the pause's anchor is not counted. The anchor is the later of the gap's record (the
 # first record the window reads after the gap) and the newest log time read before the gap (fix round 6b): what the gap
-# drops is stamped at most that newest time and its partner lies less than SETTLE - ORDER from it, so every failure it
-# could affect lies in the pause, however late the gap's record was written; a step back of D s pauses D + 130 s of the
-# new clock. Until the window reads a record the pause is {from: that newest time} (kept by a later gap: the newest
-# read before the first), then the anchor (read). One value per family, in the state, so it holds across passes
+# drops is stamped at most that newest time and its partner lies less than SETTLE - ORDER from it, so every failure read
+# after the gap that it could affect lies in the pause; a step back of D s pauses D + 130 s of the new clock. The bound
+# (Opus r7 F1): a proof of life or a pair partner written more than ORDER late can arrive after the failures it
+# separates were judged (a pass that ends before it is written judges them): an R1 the true order does not give, which
+# no bounded wait prevents (from 12 s late; the Linux host: 0 of 4,455 records out of order). Until the window reads a
+# record the pause is {from: that newest time} (kept by a later gap: the newest read before the first), then the anchor
+# (read). One value per family, in the state, so it holds across passes
 def gap: .gaps += 1 | .pause = {from: ([(.pause | if type == "object" then .from else . end), .newest] | max)};
 
 # . = family evidence: a failure of log second $sec counts (it is not in the pause after a gap)
