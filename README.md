@@ -92,7 +92,7 @@ Copy the two lines only from the assets of the release you chose — never from 
    gh release download <tag> -R liveappbase/mac-github-self-hosted-runner -p install-line.txt -p root-line.txt -p SHA256SUMS && for f in install-line.txt root-line.txt; do [[ "$(shasum -a 256 < $f)" == "$(awk -v f=$f '$2 == f {print $1}' SHA256SUMS)  -" ]] && echo "$f matches SHA256SUMS" || echo "$f DIFFERS — do not run it"; done
    ```
    This compares the files only with another asset of the same release.
-2. Check them against the release's attestation. This needs gh 2.81.0 or newer: `gh --version` shows yours; `brew upgrade gh` updates it.
+2. Check them against the release's attestation. This needs gh 2.102.0 or newer: `gh --version` shows yours; `brew upgrade gh` updates it. An older gh may not read this repository's attestations, and gh 2.92.0 or older also sends your GitHub token to another host while it checks (GitHub advisory GHSA-8xvp-7hj6-mcj9).
    ```
    gh release verify <tag> -R liveappbase/mac-github-self-hosted-runner
    ```

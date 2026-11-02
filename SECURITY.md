@@ -39,7 +39,7 @@ wall-check does not probe the rest. The IPv6 drop is softnet's code, multicast i
 ## The trust chain of a release
 
 - The trust root is **the named human maintainers** of this repository. No bot user and no GitHub App has write access.
-- A release is immutable: its tag and its four assets (`…tar.gz`, `install-line.txt`, `root-line.txt`, `SHA256SUMS`) cannot change after publishing. Copy the two lines **only from the assets of the release you chose** — never from the release notes and never from the Mac. The README's "Check a release" compares them with `SHA256SUMS` and, with gh 2.81.0 or newer, checks them against the release's attestation (`gh release verify`, `gh release verify-asset`).
+- A release is immutable: its tag and its four assets (`…tar.gz`, `install-line.txt`, `root-line.txt`, `SHA256SUMS`) cannot change after publishing. Copy the two lines **only from the assets of the release you chose** — never from the release notes and never from the Mac. The README's "Check a release" compares them with `SHA256SUMS` and, with gh 2.102.0 or newer, checks them against the release's attestation (`gh release verify`, `gh release verify-asset`).
 - The root line checks the sha256 of its own root-owned copy of `02-wall.sh` before it runs it. A compromised `ci` can change the staged files in ci's home; the root line then refuses, and nothing runs as root.
 
 ## Which repositories to serve
