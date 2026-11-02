@@ -1555,27 +1555,34 @@ class ClockStepBack(unittest.TestCase):
         self.assertEqual(([f['t'][-5:] for f in out['families']['fx']['failures']], out['state']['families']['fx']['gaps']),
                          (['00:10', '00:20', '00:30'], 1))
         # control: not settled at the step (the newest record read is of 100): the run goes with the gap, and the
-        # failures of the new times start a run of their own once the pause ends (130 s after the step's record: the
-        # failure 10 s after it is not counted, the one 130 s after it is; GapPausesCounting)
+        # failures of the new times start a run of their own once the pause ends. A step back of D s pauses D + 130 s
+        # (the pause runs from the newest log time read before the gap, 100: GapPausesCounting): failures 10 s and 130 s
+        # after the step's record are not counted, one stamped 230 (130 s after 100) is
         r = Run(self, self.docker())
         out = r.go(self.f(10) + self.f(20) + self.f(30) + self.s(100) + self.s(100 - 3600) + self.f(110 - 3600)
-                   + self.f(230 - 3600) + self.s(300 - 3600) + self.s(301 - 3600))
+                   + self.f(230 - 3600) + self.f(230) + self.s(300) + self.s(301))
         self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps'], counted(out, 'linux-b')),
                          ('none', 1, 1))
 
     def test_after_the_step_the_settle_and_prune_points_are_the_new_times(self):
-        # Opus r3 F3 in the new times: the log was at 06:06:40 (4000 s) and steps back to 05:00:00 (counting pauses
-        # 130 s from there: GapPausesCounting). Failures 140, 150, the log moves on (280 settles them), a job completed
-        # at 290, a record of 290; the failure of 289 is written out of order and read in the next pass -> R1 on 140,
-        # 150, 289, as with no step (test_r1_bounds.py's round-3 cell)
+        # the log was at 06:06:40 (4000 s) and steps back to 05:00:00. The newest log time and so the settle and prune
+        # points are the new times: the records of the new times are no further gap, and the newest read is 530, not
+        # 4001. A step back of D s pauses D + 130 s (GapPausesCounting): the new times' failures 140, 150, 289 are not
+        # counted. Once the new clock is 130 s past 4001, Opus r3 F3's shape (failures, the log moves on, a job
+        # completed, the failure before it written out of order and read in the next pass) -> R1 on 4140, 4150, 4289,
+        # as with no step (test_r1_bounds.py's round-3 cell)
         r = Run(self, self.docker())
         r.go(self.s(4000) + self.s(4001))
-        self.assertEqual(r.fx(self.s(0) + self.f(140) + self.f(150) + self.s(280) + self.j(290) + self.s(290))['verdict'],
-                         'none')
+        r.go(self.s(0) + self.f(140) + self.f(150) + self.s(280) + self.j(290) + self.s(290))
         out = r.go(self.f(289) + tail(530, 'linux-b'))
         ev = out['state']['families']['fx']
-        self.assertEqual(([f['t'][-5:] for f in out['families']['fx']['failures']], ev['gaps'], ev['newest']),
-                         (['02:20', '02:30', '04:49'], 1, sec(530)))
+        self.assertEqual((out['families']['fx']['verdict'], counted(out, 'linux-b'), ev['gaps'], ev['newest']),
+                         ('none', 0, 1, sec(530)))
+        self.assertEqual(r.fx(self.f(4140) + self.f(4150) + self.s(4280) + self.j(4290) + self.s(4290))['verdict'],
+                         'none')
+        out = r.go(self.f(4289) + tail(4530, 'linux-b'))
+        self.assertEqual(([f['t'][-8:] for f in out['families']['fx']['failures']], out['state']['families']['fx']['gaps']),
+                         (['06:09:00', '06:09:10', '06:11:29'], 1))
 
     def test_control_a_forward_jump_is_no_gap(self):
         # the clock steps forward an hour after failures 10, 20, 30: the record after the jump settles them -> R1
@@ -1718,8 +1725,12 @@ class Order(unittest.TestCase):
 class GapPausesCounting(unittest.TestCase):
     """An evidence gap (a record more than ORDER before the newest log time read: written that late, or the log's clock
     stepped back; UNKNOWN text; a foreign restart) pauses counting (operator decision O8): a counted failure (a start
-    failure, an exited removal) stamped less than SETTLE + ORDER (130 s) after the gap's record (the first record the
-    window reads after the gap) is not counted. A gap drops the window's evidence, and with it the half of a pair that
+    failure, an exited removal) stamped less than SETTLE + ORDER (130 s) after the pause's anchor is not counted. The
+    anchor is the later of the gap's record (the first record the window reads after the gap) and the newest log time
+    read before the gap (fix round 6b): everything the gap drops is stamped at most that newest time, and its partner
+    lies less than 110 s from it, so every failure it could affect lies inside the pause, however late the gap's record
+    was written. A step back of D s so pauses D + 130 s of the new clock. A gap drops the window's evidence, and with it
+    the half of a pair that
     was read before it: a proof read before it that lay between failures read after it (K2), an exited removal whose
     unknown-runner line comes after it (K1), a line whose removal comes after it (K1'), so for 130 s of log time the
     failures read after it could join a run they do not belong to (Opus r6 F2; fuzz O2L seeds 8044, 8168, 8518, 8628,
@@ -1792,14 +1803,15 @@ class GapPausesCounting(unittest.TestCase):
                 self.assertEqual((vs, gaps), (['none'] * len(vs), 0))
 
     def test_a_real_run_that_continues_past_the_pause_rolls_back(self):
-        # failures every 30 s from the gap's record on, for 400 s: R1 on the first three stamped 130 s or more after it.
-        # LATE: records of 30, 60, then the failure of 40 written 20 s late (the gap's record) -> R1 on 190, 220, 250;
-        # STEP: records of 30, 300, then the clock steps back: the failure of 31 is the gap's record -> R1 on 181, 211,
-        # 241
+        # failures every 30 s from the gap's record on, for 400 s: R1 on the first three stamped 130 s or more after the
+        # anchor, the later of the gap's record and the newest log time read before it (100). LATE: records of 30, 100,
+        # then the failure of 40 written 60 s late (the gap's record) -> R1 on 250, 280, 310; STEP: records of 30, 100,
+        # then the clock steps back 69 s: the failure of 31 is the gap's record -> R1 on 241, 271, 301 (a step back of D
+        # pauses D + 130 s)
         for provider in ('tart', 'docker'):
             _, F, U, Xr, S, J = self.recs(provider)
-            for kind, before, g, first in (('late', 60, 40, ['03:10', '03:40', '04:10']),
-                                           ('step', 300, 31, ['03:01', '03:31', '04:01'])):
+            for kind, before, g, first in (('late', 100, 40, ['04:10', '04:40', '05:10']),
+                                           ('step', 100, 31, ['04:01', '04:31', '05:01'])):
                 recs = [S(30), S(before)] + [F(g + 30 * i) for i in range(14)] + [S(g + 700), S(g + 701)]
                 for each in (False, True):
                     with self.subTest((provider, kind, each)):
@@ -1807,23 +1819,91 @@ class GapPausesCounting(unittest.TestCase):
                         self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']][:3], gaps),
                                          ('rollback', first, 1))
 
-    def test_a_failure_stamped_exactly_130_s_after_the_gaps_record_is_counted(self):
-        # the gap's record: a record of 40 written 20 s late (after 60). Failures 170, 171, 172 -> R1 on them; control:
-        # 169 instead of 170 is not counted -> no R1
+    def test_a_failure_stamped_exactly_130_s_after_the_anchor_is_counted(self):
+        # the gap's record: a record of 40 written 20 s late (after 60): the anchor is 60, the later of the two. Failures
+        # 190, 191, 192 -> R1 on them; control: 189 instead of 190 is not counted -> no R1
         for provider in ('tart', 'docker'):
             _, F, U, Xr, S, J = self.recs(provider)
             with self.subTest(provider):
-                vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), F(170), F(171), F(172), S(400), S(401)], False)
+                vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), F(190), F(191), F(192), S(400), S(401)], False)
                 self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']], gaps),
-                                 ('rollback', ['02:50', '02:51', '02:52'], 1))
+                                 ('rollback', ['03:10', '03:11', '03:12'], 1))
             with self.subTest((provider, 'control: 129 s after it')):
-                vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), F(169), F(171), F(172), S(400), S(401)], False)
+                vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), F(189), F(191), F(192), S(400), S(401)], False)
                 self.assertEqual((vs, gaps), (['none'] * len(vs), 1))
 
+    def test_a_record_written_late_pauses_from_the_newest_log_time_read_before_it(self):
+        # fix round 6b (probe_hole): the gap's record, a record of 40, is written LATE s late, after a record of
+        # 40 + LATE (the newest read); X's unknown-runner line is read just before it (at 39 + LATE), X removed
+        # reason=exited, no jobId, 105 s after the line (a partner), failures 3 s and 8 s after the removal. The pause
+        # runs from 40 + LATE: the removal and the failures lie in it -> no R1, for any LATE (6e7b3ea's pause ran from 40:
+        # LATE 30, 60, 115 rolled back). Controls: the same records in true order -> none, no gap
+        for provider in ('tart', 'docker'):
+            _, F, U, Xr, S, J = self.recs(provider)
+            for late in (15, 20, 25, 30, 60, 115):
+                newest = 40 + late
+                rem = newest - 1 + 105
+                tail_ = [Xr(rem), F(rem + 3), F(rem + 8), S(rem + 300), S(rem + 301)]
+                for each in (False, True):
+                    with self.subTest((provider, late, each)):
+                        vs, fx, gaps = self.passes(provider, [S(30), U(newest - 1), S(newest), S(40)] + tail_, each)
+                        self.assertEqual((vs, fx['pending'], gaps), (['none'] * len(vs), None, 1))
+                    with self.subTest((provider, late, each, 'control: true order')):
+                        vs, fx, gaps = self.passes(provider, [S(30), S(40), U(newest - 1), S(newest)] + tail_, each)
+                        self.assertEqual((vs, gaps), (['none'] * len(vs), 0))
+
+    def test_k2_a_proof_lost_to_a_record_more_than_130_s_late(self):
+        # a job completed at 200 and a record of 205 are read; the failure of 60 is written 145 s late (the gap's record);
+        # failures 195, 210, 220 follow: the proof at 200 lay between 195 and 210, and the gap dropped it. The pause runs
+        # from 205: no R1 (6e7b3ea's from 60: R1 on 195, 210, 220). Control: true order -> none, no gap
+        for provider in ('tart', 'docker'):
+            _, F, U, Xr, S, J = self.recs(provider)
+            end = [S(500), S(501)]
+            for each in (False, True):
+                with self.subTest((provider, each)):
+                    vs, fx, gaps = self.passes(provider, [S(30), J(200), S(205), F(60), F(195), F(210), F(220)] + end,
+                                               each)
+                    self.assertEqual((vs, fx['pending'], gaps), (['none'] * len(vs), None, 1))
+                with self.subTest((provider, each, 'control: true order')):
+                    vs, fx, gaps = self.passes(provider, [S(30), F(60), F(195), J(200), S(205), F(210), F(220)] + end,
+                                               each)
+                    self.assertEqual((vs, gaps), (['none'] * len(vs), 0))
+
+    def test_gaps_before_the_first_record_keep_the_newest_log_time_read_before_them(self):
+        # the window reads a record of 200 (the newest read), then two passes of UNKNOWN text, then a record of 50 and
+        # failures 190, 200, 210: the anchor stays 200 (the later of 200 and 50), so they are not counted; failures 330,
+        # 340, 350 -> R1 on them
+        r = Run(self)
+        r.go(scaling(200) + scaling(201))
+        r.go(failed(210, OTHER) + scaling(220), continuous=False)
+        r.go(failed(230, OTHER) + scaling(240), continuous=False)
+        held = (r.state['families']['fx']['pause'], r.state['families']['fx']['gaps'])
+        v4 = r.fx(scaling(50) + failed(190, OTHER) + failed(200, OTHER) + failed(210, OTHER) + scaling(220))['verdict']
+        read = r.state['families']['fx']['pause']
+        out = r.go(failed(330, OTHER) + failed(340, OTHER) + failed(350, OTHER) + tail(600))
+        self.assertEqual((v4, [f['t'][-5:] for f in out['families']['fx']['failures']]),
+                         ('none', ['05:30', '05:40', '05:50']))
+        self.assertEqual((held, read), (({'from': sec(200)}, 2), sec(200)))
+
+    def test_a_second_gap_does_not_shorten_the_pause_of_the_first(self):
+        # the log was at 4000 and steps back an hour to 0: the pause runs to 4130 of the new clock. The new clock reaches
+        # 300, then a pass of UNKNOWN text (a second gap), then a record of 400 and failures 540, 550, 560: still in the
+        # first pause, not counted (a second gap keeps the later anchor); failures 4140, 4150, 4160 -> R1 on them
+        r = Run(self)
+        r.go(scaling(4000) + scaling(4001))
+        r.go(scaling(0) + scaling(300) + scaling(301))
+        r.go(failed(310, OTHER) + scaling(320), continuous=False)
+        v = r.fx(scaling(400) + failed(540, OTHER) + failed(550, OTHER) + failed(560, OTHER) + tail(700))['verdict']
+        out = r.go(failed(4140, OTHER) + failed(4150, OTHER) + failed(4160, OTHER) + tail(4300))
+        self.assertEqual((v, [f['t'][-8:] for f in out['families']['fx']['failures']], out['families']['fx']['gaps']),
+                         ('none', ['06:09:00', '06:09:10', '06:09:20'], 2))
+
     def test_unknown_text_and_a_foreign_restart_pause_counting_from_the_first_record_read_after_them(self):
-        # pass 1 is read; pass 2 is a gap (UNKNOWN text: the glue lost the position; or a foreign restart); pass 3 reads
-        # a record of 50 (the gap's record) and failures 60, 70, 80: not counted; pass 4: failures 180, 190, 200 -> R1 on
-        # them (the pause holds across passes and ends 130 s after 50). Control: pass 2 read (no gap) -> R1 on 60, 70, 80
+        # pass 1 is read (the newest log time read: 25); pass 2 is a gap (UNKNOWN text: the glue lost the position; or a
+        # foreign restart); pass 3 reads a record of 50 (the gap's record, later than 25: the anchor) and failures 60,
+        # 70, 80: not counted; pass 4: failures 160, 170 (130 s after 25, not after 50: not counted), 180, 190, 200 -> R1
+        # on 180, 190, 200 (the pause holds across passes, in the state: {from: 25}, then 50; keep.jq and status.jq read
+        # that state). Control: pass 2 read (no gap) -> R1 on 60, 70, 80
         for kind in ('unknown text', 'a foreign restart', 'control: no gap'):
             with self.subTest(kind):
                 r = Run(self)
@@ -1835,8 +1915,13 @@ class GapPausesCounting(unittest.TestCase):
                 else:
                     r.go(scaling(30) + scaling(40))
                 kw = {'before': Q} if kind == 'a foreign restart' else {}
+                held = r.state['families']['fx'].get('pause')
+                for prog in ('keep', 'status'):
+                    ok(self, prog, state=r.state, facts=facts(r.families, **kw), now=r.now)
                 out3 = r.fx(scaling(50) + failed(60, OTHER) + failed(70, OTHER) + failed(80, OTHER) + scaling(90), **kw)
-                out4 = r.go(failed(180, OTHER) + failed(190, OTHER) + failed(200, OTHER) + tail(400), **kw)
+                read = r.state['families']['fx'].get('pause')
+                out4 = r.go(failed(160, OTHER) + failed(170, OTHER) + failed(180, OTHER) + failed(190, OTHER)
+                            + failed(200, OTHER) + tail(400), **kw)
                 fx = out4['families']['fx']
                 if kind == 'control: no gap':
                     self.assertEqual((out3['verdict'], [f['t'][-5:] for f in fx['failures']][:3]),
@@ -1844,21 +1929,22 @@ class GapPausesCounting(unittest.TestCase):
                 else:
                     self.assertEqual((out3['verdict'], [f['t'][-5:] for f in fx['failures']],
                                       out4['state']['families']['fx']['gaps']), ('none', ['03:00', '03:10', '03:20'], 1))
+                    self.assertEqual((held, read), ({'from': sec(25)}, sec(50)))
 
     def test_the_pairing_lists_still_apply_during_the_pause(self):
-        # the gap's record: a record of 40 written 20 s late. X removed reason=exited, no jobId, at 140 (in the pause:
-        # not counted, but it waits for its line); failures 180, 190; X's line at 195 (55 s after the removal: it takes
-        # the removal back, a proof); a failure 200 -> no R1. Control: the line names another runner -> R1 on 180, 190,
-        # 200
+        # the gap's record: a record of 40 written 20 s late (the anchor: 60). X removed reason=exited, no jobId, at 140
+        # (in the pause: not counted, but it waits for its line); failures 200, 210; X's line at 215 (75 s after the
+        # removal: it takes the removal back, a proof); a failure 220 -> no R1. Control: the line names another runner ->
+        # R1 on 200, 210, 220
         for provider in ('tart', 'docker'):
             _, F, U, Xr, S, J = self.recs(provider)
             for name, verdict in ((self.X, 'none'), (self.Y, 'rollback')):
                 with self.subTest((provider, name)):
-                    vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), Xr(140), F(180), F(190), U(195, name),
-                                                          F(200), S(400), S(401)], False)
+                    vs, fx, gaps = self.passes(provider, [S(30), S(60), S(40), Xr(140), F(200), F(210), U(215, name),
+                                                          F(220), S(400), S(401)], False)
                     self.assertEqual((fx['verdict'], gaps), (verdict, 1))
                     if verdict == 'rollback':
-                        self.assertEqual([f['t'][-5:] for f in fx['failures']], ['03:00', '03:10', '03:20'])
+                        self.assertEqual([f['t'][-5:] for f in fx['failures']], ['03:20', '03:30', '03:40'])
 
     def own_restart_fams(self, fx_lines):
         fams = {'fx': fam(sets=('mac-a',)), 'fy': fam(sets=('mac-b',), image='img-y')}

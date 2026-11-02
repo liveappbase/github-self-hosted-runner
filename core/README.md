@@ -197,18 +197,17 @@ a later proof may take to arrive.
 **Evidence gaps.** A gap is a record more than ORDER before the newest log time read, UNKNOWN text (a foreign restart
 included), or a window the updater's own restart closes; the window's first opening and the own restart are none. A
 gap judges what settled before it (above), then the window starts again and counting pauses for SETTLE + ORDER (130 s)
-of log time: a counted failure (a start failure, an exited removal) stamped less than 130 s after the gap's record (the
-first record the window reads after the gap) is not counted (operator decision O8). Why: the gap drops the window's
-evidence, and with it the half of a pair read before it (a proof between failures read after it; an exited removal
-whose unknown-runner line comes after it; a line whose removal comes after it), so for that long the failures read
-after it could join a run they do not belong to (Opus r6 F2). Everything else still applies in the pause: proofs,
-completions, STOPs, Tart starts, the pairing lists, NOT SERVING. The pause is in the state (one value per family), so
-it holds across passes. A real run still rolls back once the pause ends, at most 130 s of log time later; gaps that keep
-coming hold R1 off while they last (the plan's O7 residual; status shows the gap count). The pause covers what a step
-back, UNKNOWN text or a record at most 2 x ORDER (20 s) late can drop. A record written more than 20 s late can drop the
-first half of a pair whose second half comes 130 s or more after the gap's record (an exited removal is then counted
-although its line was read before the gap, or a line is no proof because its removal was): outside what the core reads
-(0 of 4,455 records out of order on the Linux host).
+of log time from an anchor: a counted failure (a start failure, an exited removal) stamped less than 130 s after it is
+not counted (operator decision O8). The anchor is the later of the gap's record (the first record the window reads
+after the gap) and the newest log time read before the gap (a later gap before that keeps the later anchor). Why: the
+gap drops the window's evidence, and with it the half of a pair read before it (a proof between failures read after
+it; an exited removal whose unknown-runner line comes after it; a line whose removal comes after it, Opus r6 F2).
+Everything it drops is stamped at most the newest log time read before it, and a partner lies less than 110 s from it,
+so every failure it could join wrongly lies in the pause, however late the gap's record was written. A step back of D s
+so pauses D + 130 s of the new clock (TZ=UTC, below, leaves only a clock set back). Everything else still applies in
+the pause: proofs, completions, STOPs, Tart starts, the pairing lists, NOT SERVING. The pause is in the state (one value
+per family), so it holds across passes. A real run still rolls back once the pause ends; gaps that keep coming hold R1
+off while they last (the plan's O7 residual; status shows the gap count).
 
 The glue MUST run runscaler with `TZ=UTC` (on Linux in the service unit's `Environment=`, on macOS in the launchd
 plist's `EnvironmentVariables` or the script it starts): then its log times never step back with summer time. The core

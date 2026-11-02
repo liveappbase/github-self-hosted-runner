@@ -43,9 +43,13 @@ def settled_by($sec): $sec - .s >= (if .n != null then SETTLE + ORDER else SETTL
 # the own restart closes; not the window's first opening, not the own restart) pauses counting (operator decision O8):
 # the gap drops the window's evidence, and with it the half of a pair read before it (a proof between failures read
 # after it, an exited removal or an unknown-runner line whose partner comes after it: Opus r6 F2), so a failure stamped
-# less than SETTLE + ORDER after the gap's record is not counted. The gap's record is the first record the window reads
-# after the gap ("next" until then, read); the pause is one value per family, in the state, so it holds across passes
-def gap: .gaps += 1 | .pause = "next";
+# less than SETTLE + ORDER after the pause's anchor is not counted. The anchor is the later of the gap's record (the
+# first record the window reads after the gap) and the newest log time read before the gap (fix round 6b): what the gap
+# drops is stamped at most that newest time and its partner lies less than SETTLE - ORDER from it, so every failure it
+# could affect lies in the pause, however late the gap's record was written; a step back of D s pauses D + 130 s of the
+# new clock. Until the window reads a record the pause is {from: that newest time} (kept by a later gap: the newest
+# read before the first), then the anchor (read). One value per family, in the state, so it holds across passes
+def gap: .gaps += 1 | .pause = {from: ([(.pause | if type == "object" then .from else . end), .newest] | max)};
 
 # . = family evidence: a failure of log second $sec counts (it is not in the pause after a gap)
 def counts($sec): .pause == null or ((.pause | type) == "number" and $sec - .pause >= SETTLE + ORDER);
@@ -258,14 +262,16 @@ def open_at($now): .open = true | .since = $now | .sets = {} | .pending = null |
 # stepped back (it has no zone: summer time, or a clock set back), or a record was written far out of order, and the
 # times before it cannot be compared with the times after it. It is an evidence gap (Opus r4 F2, Codex r5 F2, Opus r5
 # F2): what is settled is judged (only what the record does not contradict, unsettle_near), then the window starts
-# again at it, as after UNKNOWN text (counts, NOT SERVING, the KEEP clock; counting pauses from it, gap), its log times
+# again at it, as after UNKNOWN text (counts, NOT SERVING, the KEEP clock; counting pauses, gap), its log times
 # (newest, the settle and prune points) from the new times
 def read($recs; $flag; $seen; $now):
   reduce $recs[] as $r (.;
     ($r.t | lsec) as $sec
     | .obs |= map_values(if .[$flag] and .ev.newest != null and $sec < .ev.newest - ORDER
                          then .ev |= (unsettle_near($sec) | judge | gap | open_at($now)) else . end)
-    | .obs |= map_values(if .[$flag] then .ev |= ((if .pause == "next" then .pause = $sec else . end) | settle_log($sec))
+    | .obs |= map_values(if .[$flag]
+                         then .ev |= ((if (.pause | type) == "object" then .pause = ([.pause.from, $sec] | max) else . end)
+                                      | settle_log($sec))
                          else . end)
     | if $r.set == null then .
       else
@@ -359,7 +365,7 @@ C::now_in("r1") as $now
        else
          # an open window that does not count this interval (the text is not its process's, or the process does not
          # run its candidate): an evidence gap. It closes the window; the window that opens again starts its counts,
-         # NOT SERVING and the KEEP clock from zero, and counting pauses from the first record it reads (gap)
+         # NOT SERVING and the KEEP clock from zero, and counting pauses (gap)
          ($obs | map_values(.q = (.ev.open and $owned and .prov)
                             | if .ev.open and (.q | not) then .ev |= (gap | .open = false) else . end)) as $obs
          # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
