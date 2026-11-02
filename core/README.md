@@ -101,7 +101,8 @@ returned unchanged, rc 0.
 the same P (pid and start), else it is ambiguous. The text between the state's boundary and this one belongs to P
 when both boundaries are P's and `continuous` is true; across the updater's own restart it is P's up to `stopped` and
 Q's after it (below); otherwise it is UNKNOWN: it counts neither way, and it is an EVIDENCE GAP for every family under
-observation (its R1 counts, NOT SERVING and the KEEP clock restart; the shim's unpaired refusals are dropped).
+observation (its R1 counts, NOT SERVING and the KEEP clock restart, and counting pauses: **Evidence gaps**; the shim's
+unpaired refusals are dropped).
 
 **The updater's own restart is no gap, and nothing in it is dropped** (PLAN D6: its own switches leave no gap; another
 family's window does not end X's evidence). When `facts.restart` says the glue restarted runscaler from P to Q in this
@@ -177,18 +178,34 @@ ORDER late), or the log is quiet (no record held) and this pass's `now` is 120 s
 **ORDER and the log's clock.** runscaler stamps a record when it logs it and writes it under one lock, so records
 reach the log out of order only by goroutine scheduling: well under a second (the Linux host's real log: 0 records out
 of order in 4,455). The core claims no more than ORDER = 10 s of log time: a record more than ORDER before the newest
-log time read is outside what it reads, an EVIDENCE GAP, never a verdict. That is a record written far out of order,
-or a log clock that stepped back (runscaler stamps local time with no zone: summer time ended, or the clock was set
-back), and the times before it cannot be compared with the times after it. The gap: the failures settled before it
-are judged first (R1 may come), but only those whose settlement the step's record does not contradict (the failure
-lies more than ORDER after it, in the clock's old times, or the step's record is itself SETTLE past it; a failure near
-it was settled only by a record it contradicts, such as one stamped before a step back and written after it); then the
-window starts again at it, as after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass
-that reads it; the other failures go), and every log time it keeps (the newest read, the settle and prune points)
+log time read is outside what it reads, an EVIDENCE GAP (below). That is a record written far out of order, or a log
+clock that stepped back (runscaler stamps local time with no zone: summer time ended, or the clock was set back), and
+the times before it cannot be compared with the times after it. The gap: the failures settled before it are judged
+first (R1 may come), but only those whose settlement the step's record does not contradict (the failure lies more than
+ORDER after it, in the clock's old times, or the step's record is itself SETTLE past it; a failure near it was settled
+only by a record it contradicts, such as one stamped before a step back and written after it); then the window starts
+again at it, as after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass that reads it;
+the other failures go; counting pauses), and every log time it keeps (the newest read, the settle and prune points)
 starts from the new times. A record whose header the pass holds (its time is whole) is read first by the next pass, so
 a step back it shows is judged the same way at the end of the pass that holds it. A record ORDER or less out of order
 is no gap. A clock that steps forward is no gap: the first record after it settles the failures before it, as any
 later record does. SETTLE is not disorder: it is how long a later proof may take to arrive.
+
+**Evidence gaps.** A gap is a record more than ORDER before the newest log time read, UNKNOWN text (a foreign restart
+included), or a window the updater's own restart closes; the window's first opening and the own restart are none. A
+gap judges what settled before it (above), then the window starts again and counting pauses for SETTLE + ORDER (130 s)
+of log time: a counted failure (a start failure, an exited removal) stamped less than 130 s after the gap's record (the
+first record the window reads after the gap) is not counted (operator decision O8). Why: the gap drops the window's
+evidence, and with it the half of a pair read before it (a proof between failures read after it; an exited removal
+whose unknown-runner line comes after it; a line whose removal comes after it), so for that long the failures read
+after it could join a run they do not belong to (Opus r6 F2). Everything else still applies in the pause: proofs,
+completions, STOPs, Tart starts, the pairing lists, NOT SERVING. The pause is in the state (one value per family), so
+it holds across passes. A real run still rolls back once the pause ends, at most 130 s of log time later; gaps that keep
+coming hold R1 off while they last (the plan's O7 residual; status shows the gap count). The pause covers what a step
+back, UNKNOWN text or a record at most 2 x ORDER (20 s) late can drop. A record written more than 20 s late can drop the
+first half of a pair whose second half comes 130 s or more after the gap's record (an exited removal is then counted
+although its line was read before the gap, or a line is no proof because its removal was): outside what the core reads
+(0 of 4,455 records out of order on the Linux host).
 
 The glue MUST run runscaler with `TZ=UTC` (on Linux in the service unit's `Environment=`, on macOS in the launchd
 plist's `EnvironmentVariables` or the script it starts): then its log times never step back with summer time. The core

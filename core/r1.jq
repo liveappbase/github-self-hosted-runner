@@ -20,8 +20,8 @@ def NS_SECONDS: 1800;
 def SETTLE: 120;
 # ORDER: how far out of order records may be written, in log time. runscaler stamps a record when it logs it and writes
 # it under one lock, so only goroutine scheduling reorders them (the Linux host's real log: 0 records out of order in
-# 4,455). A record more than ORDER before the newest log time read is outside what the core reads: an evidence gap,
-# never a verdict (read). SETTLE is not disorder: it is how long a LATER proof may take to arrive
+# 4,455). A record more than ORDER before the newest log time read is outside what the core reads: an evidence gap
+# (read, gap). SETTLE is not disorder: it is how long a LATER proof may take to arrive
 def ORDER: 10;
 # the Tart starts a set keeps of runners not yet removed (Apple allows 2 macOS VMs per host): a runner whose
 # RemoveInstance fails is never removed, so beyond this the oldest start is read as confirmed, a proof of life (Opus r4
@@ -39,13 +39,24 @@ def in_window($a; $b): $a - $b < SETTLE - ORDER and $b - $a < SETTLE - ORDER;
 # window may still be read ORDER late, and take it back
 def settled_by($sec): $sec - .s >= (if .n != null then SETTLE + ORDER else SETTLE end);
 
+# an evidence gap (a record more than ORDER before the newest log time read, UNKNOWN text, a foreign restart, a window
+# the own restart closes; not the window's first opening, not the own restart) pauses counting (operator decision O8):
+# the gap drops the window's evidence, and with it the half of a pair read before it (a proof between failures read
+# after it, an exited removal or an unknown-runner line whose partner comes after it: Opus r6 F2), so a failure stamped
+# less than SETTLE + ORDER after the gap's record is not counted. The gap's record is the first record the window reads
+# after the gap ("next" until then, read); the pause is one value per family, in the state, so it holds across passes
+def gap: .gaps += 1 | .pause = "next";
+
+# . = family evidence: a failure of log second $sec counts (it is not in the pause after a gap)
+def counts($sec): .pause == null or ((.pause | type) == "number" and $sec - .pause >= SETTLE + ORDER);
+
 # a log time "YYYY-MM-DD HH:MM:SS" -> seconds, compared only with other log times (the log's times have no zone: a
 # record more than ORDER before the newest one read is an evidence gap, see read)
 def lsec: strptime("%Y-%m-%d %H:%M:%S") | mktime;
 
 def fresh($cand): {version: $cand.version, lines: $cand.lines, closed_at: $cand.closed_at, open: false, since: null,
                    gaps: 0, succeeded: 0, failed: 0, canceled: 0, other: 0, sets: {}, verdict: null, stops: [],
-                   pending: null, newest: null};
+                   pending: null, newest: null, pause: null};
 def set0: {fails: [], starts: [], proofs: [], exits: [], unknowns: [], ns: null, completed: false};
 
 # every value of the record's attributes, one text
@@ -101,14 +112,16 @@ def apply($ev; $s; $t; $sec; $seen):
   # with a failure between them), and the runner's start is a proof (not taken back). The removal stays in .exits,
   # taken, so a line naming its runner after it is a proof too
   elif $ev.k == "exited" then
-    .sets[$s] = ((.sets[$s] // set0)
+    counts($sec) as $counts
+    | .sets[$s] = ((.sets[$s] // set0)
                  | ([.starts[] | select(.n == $ev.name) | .s] | max) as $st
                  | ([.unknowns[]? | select(.n == $ev.name and in_window(.s; $sec)) | .s] | unique) as $us
                  | if ($us | length) > 0 then .proofs += $us + [($st // empty)]
                         | .unknowns |= map(select((.n == $ev.name and in_window(.s; $sec)) | not))
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st, taken: true}]
-                   else .fails += [{t: $t, s: $sec, c: false, x: "Runner removed reason=exited, no job: \($ev.name)",
-                                    seen: $seen, settled: false, n: $ev.name}]
+                   else (if $counts then .fails += [{t: $t, s: $sec, c: false,
+                                                    x: "Runner removed reason=exited, no job: \($ev.name)", seen: $seen,
+                                                    settled: false, n: $ev.name}] else . end)
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st}]
                    end
                  | .starts |= map(select(.n != $ev.name)))
@@ -138,7 +151,10 @@ def apply($ev; $s; $t; $sec; $seen):
                      | .proofs += [$all[:-STARTS_MAX][].s] | .starts = $all[-STARTS_MAX:]
                    else . end)
   elif $ev.k == "fail" then
-    .sets[$s] = ((.sets[$s] // set0) | .fails += [{t: $t, s: $sec, c: $ev.c, x: $ev.x, seen: $seen, settled: false}])
+    counts($sec) as $counts
+    | .sets[$s] = ((.sets[$s] // set0)
+                   | if $counts then .fails += [{t: $t, s: $sec, c: $ev.c, x: $ev.x, seen: $seen, settled: false}]
+                     else . end)
   elif $ev.k == "retired" then add_stop("PINNED RUNNER RETIRED"; "set \($s): \($ev.x)")
   elif $ev.k == "shim" or $ev.k == "refused" then add_stop("SHIM REFUSED"; "set \($s): \($ev.reason)")
   else . end;
@@ -242,14 +258,15 @@ def open_at($now): .open = true | .since = $now | .sets = {} | .pending = null |
 # stepped back (it has no zone: summer time, or a clock set back), or a record was written far out of order, and the
 # times before it cannot be compared with the times after it. It is an evidence gap (Opus r4 F2, Codex r5 F2, Opus r5
 # F2): what is settled is judged (only what the record does not contradict, unsettle_near), then the window starts
-# again at it, as after UNKNOWN text (counts, NOT SERVING, the KEEP clock), its log times (newest, the settle and prune
-# points) from the new times
+# again at it, as after UNKNOWN text (counts, NOT SERVING, the KEEP clock; counting pauses from it, gap), its log times
+# (newest, the settle and prune points) from the new times
 def read($recs; $flag; $seen; $now):
   reduce $recs[] as $r (.;
     ($r.t | lsec) as $sec
     | .obs |= map_values(if .[$flag] and .ev.newest != null and $sec < .ev.newest - ORDER
-                         then .ev |= (unsettle_near($sec) | judge | .gaps += 1 | open_at($now)) else . end)
-    | .obs |= map_values(if .[$flag] then .ev |= settle_log($sec) else . end)
+                         then .ev |= (unsettle_near($sec) | judge | gap | open_at($now)) else . end)
+    | .obs |= map_values(if .[$flag] then .ev |= ((if .pause == "next" then .pause = $sec else . end) | settle_log($sec))
+                         else . end)
     | if $r.set == null then .
       else
         .refused as $refused
@@ -332,7 +349,7 @@ C::now_in("r1") as $now
          | read($tp.records; "p"; $now; $now)
          # at `stopped`: a window whose candidate Q does not run is judged on P's text and closes (a gap); a family
          # whose candidate Q runs counts Q's text, in its open window or in one that opens here
-         | .obs |= map_values(if .ev.open and (.prov | not) then .ev |= (judge | .gaps += 1 | .open = false)
+         | .obs |= map_values(if .ev.open and (.prov | not) then .ev |= (judge | gap | .open = false)
                               elif (.ev.open | not) and .prov then .ev |= open_at($now)
                               else . end
                               | .q = .prov)
@@ -342,9 +359,9 @@ C::now_in("r1") as $now
        else
          # an open window that does not count this interval (the text is not its process's, or the process does not
          # run its candidate): an evidence gap. It closes the window; the window that opens again starts its counts,
-         # NOT SERVING and the KEEP clock from zero
+         # NOT SERVING and the KEEP clock from zero, and counting pauses from the first record it reads (gap)
          ($obs | map_values(.q = (.ev.open and $owned and .prov)
-                            | if .ev.open and (.q | not) then .ev |= (.gaps += 1 | .open = false) else . end)) as $obs
+                            | if .ev.open and (.q | not) then .ev |= (gap | .open = false) else . end)) as $obs
          # the text: the record held at the last pass, then this interval's. The last record is held to the next pass
          # (it may yet grow); once the log has been quiet for SETTLE it is read as it is. runscaler writes a record
          # with one write, so a held text still partial then is a short write (a full disk): its partial record counts
