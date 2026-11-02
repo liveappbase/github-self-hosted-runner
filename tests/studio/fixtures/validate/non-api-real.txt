@@ -1,0 +1,15 @@
+  ✗ scaleset[0] "mac-ci-example": runner-image is required
+Error: validation failed
+Usage:
+  runner validate [flags]
+
+Examples:
+  runner validate --config config.toml
+
+Flags:
+  -h, --help   help for validate
+
+Global Flags:
+      --config string   Path to config file (TOML)
+
+validation failed
