@@ -1582,6 +1582,23 @@ class ClockStepBack(unittest.TestCase):
         out = Run(self, self.docker()).go(self.f(10) + self.f(20) + self.f(30) + self.s(3630) + self.s(3631))
         self.assertEqual((out['families']['fx']['verdict'], out['state']['families']['fx']['gaps']), ('rollback', 0))
 
+    def test_opus_r6_f3_a_run_settled_only_in_the_pass_that_reads_a_step_back_may_be_dropped(self):
+        # Opus r6 F3, pinned as it is: failures 10, 20, 30, records 150 (it settles 30) and 151, then the clock steps back
+        # 60 s (the next record is stamped 92), the log moves on. One pass reads the step with the record that settled
+        # the run: the step's record contradicts it (unsettle_near), so the run goes with the gap -> none. A pass per
+        # record judges the run at the end of the pass that reads 150 (it holds 151: no step yet) -> R1 on 10, 20, 30.
+        # The safe direction (a real R1 lost, never a false one); TZ=UTC removes the step. One gap either way
+        recs = [self.f(10), self.f(20), self.f(30), self.s(150), self.s(151), self.s(92), self.s(340), self.s(341)]
+        for each, want in ((False, ('none', [])), (True, ('rollback', ['00:10', '00:20', '00:30']))):
+            with self.subTest(each=each):
+                r = Run(self, self.docker())
+                for x in (recs if each else [''.join(recs)]):
+                    r.fx(x)
+                for _ in range(2):
+                    fx = r.fx('')
+                self.assertEqual((fx['verdict'], [f['t'][-5:] for f in fx['failures']][:3],
+                                  r.state['families']['fx']['gaps']), want + (1,))
+
 
 class Order(unittest.TestCase):
     """ORDER (10 s of log time): runscaler stamps a record when it logs it and writes it under one lock, so records are

@@ -187,9 +187,12 @@ only by a record it contradicts, such as one stamped before a step back and writ
 again at it, as after UNKNOWN text (its counts, NOT SERVING and the KEEP clock from zero, at the pass that reads it;
 the other failures go; counting pauses), and every log time it keeps (the newest read, the settle and prune points)
 starts from the new times. A record whose header the pass holds (its time is whole) is read first by the next pass, so
-a step back it shows is judged the same way at the end of the pass that holds it. A record ORDER or less out of order
-is no gap. A clock that steps forward is no gap: the first record after it settles the failures before it, as any
-later record does. SETTLE is not disorder: it is how long a later proof may take to arrive.
+a step back it shows is judged at the end of the pass that holds it as that step will judge it. That is all a held
+step changes: a run whose last failure is settled only in the pass that reads a step back may be dropped there, where a
+capture that ended before the step judged it (Opus r6 F3: the safe direction, a real R1 lost, never a false one;
+TZ=UTC removes the step). A record ORDER or less out of order is no gap. A clock that steps forward is no gap: the
+first record after it settles the failures before it, as any later record does. SETTLE is not disorder: it is how long
+a later proof may take to arrive.
 
 **Evidence gaps.** A gap is a record more than ORDER before the newest log time read, UNKNOWN text (a foreign restart
 included), or a window the updater's own restart closes; the window's first opening and the own restart are none. A
