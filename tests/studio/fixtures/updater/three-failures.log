@@ -1,0 +1,17 @@
+2026-11-01 05:00:10 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000001 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:00:20 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000002 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:00:30 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000003 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:02:30 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1
+2026-11-01 05:02:31 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1

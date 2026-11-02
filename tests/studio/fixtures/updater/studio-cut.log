@@ -1,0 +1,15 @@
+2026-10-24 18:01:29 INFO mac-a: refreshing token githubConfigUrl=https://github.com/example-org
+2026-10-24 18:01:29 INFO mac-a: getting runner registration token registrationTokenURL=https://api.github.com/orgs/example-org/actions/runners/registration-token
+2026-10-24 18:01:30 INFO mac-a: getting Actions tenant URL and JWT registrationURL=https://api.github.com/actions/runner-registration
+2026-10-24 18:01:30 INFO Pruning Tart cache home="" older_than_days=7 space_budget_gb=60
+2026-10-24 18:01:31 INFO mac-a: Scale set created scaleSetID=4 name=mac-a
+2026-10-24 18:01:31 INFO mac-a: Listening for jobs maxRunners=2 minRunners=0
+2026-10-24 18:01:31 INFO mac-a: Handling initial session statistics totalAssignedJobs=0
+2026-10-24 18:02:56 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:03:19 INFO mac-a: Runner started name=runner-0000aa01 instanceID=runner-0000aa01 startupTime=22.025867833s
+2026-10-24 18:03:37 INFO mac-a: Runner removed name=runner-0000aa01 instanceID=runner-0000aa01 reason=job-completed jobId=5f8432ad-50ed-b843-40be-f42f87083258 repo=example-org/example workflowRunId=39746588064 job="build (fef2)" result=succeeded
+2026-10-24 18:04:31 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:04:56 INFO mac-a: Runner started name=runner-0000aa02 instanceID=runner-0000aa02 startupTime=24.759157292s
+2026-10-24 18:05:39 INFO mac-a: Runner removed name=runner-0000aa02 instanceID=runner-0000aa02 reason=job-completed jobId=4f7858fe-275c-0c55-2ab1-2276fd5ea3a0 repo=example-org/example workflowRunId=38565332037 job="build (2bc1)" result=succeeded
+2026-10-24 18:06:05 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1
+2026-10-24 18:06:27 INFO mac-a: Runner started name=runner-0000aa03 instanceID=runner-0000aa03 startupTime=22.427325s

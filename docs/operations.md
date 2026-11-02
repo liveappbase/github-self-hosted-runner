@@ -156,7 +156,23 @@ What ends QUEUED (a monitor that watches queue age sees it): a retired runner, a
 
 ## Disk
 
-The growers are bounded: runscaler's log and runner-start's log (10 MB each, cut when runscaler starts), Tart's image cache (`cache-budget` in config.toml), the golden images (the configured one and the newest other generation), and the jobs' VMs (deleted after each job). golden-build's two logs per build (`golden-<yyyymmdd>.log` and `golden-<yyyymmdd>-vm.log`) and golden-gate's two logs per run (`s1-gate-<yyyymmddHHMMSS>-vm.log` and `s1-gate-<yyyymmddHHMMSS>-gate.log`) are small and are not removed: delete old ones by hand. The shim refuses a VM start below 100 GiB free; golden-build refuses below 200 GiB free. Both leave jobs queued.
+The growers are bounded: runscaler's log and runner-start's log (10 MB each, cut when runscaler starts), runscaler's own `runner.log` beside `config.toml` (runscaler renames it to `runner.log.1` at 10 MiB and starts a new one; it keeps one backup), Tart's image cache (`cache-budget` in config.toml), the golden images (the configured one and the newest other generation), and the jobs' VMs (deleted after each job). golden-build's two logs per build (`golden-<yyyymmdd>.log` and `golden-<yyyymmdd>-vm.log`) and golden-gate's two logs per run (`s1-gate-<yyyymmddHHMMSS>-vm.log` and `s1-gate-<yyyymmddHHMMSS>-gate.log`) are small and are not removed: delete old ones by hand. The shim refuses a VM start below 100 GiB free; golden-build refuses below 200 GiB free. Both leave jobs queued.
+
+## The updater's report mode (no action)
+
+The runner-image updater is not complete yet. This release has one command of it, which only looks: as ci, `/Users/ci/mac-runner/current/bin/runner-updater report`. It makes one pass and prints what the updater's decision core (`core/`) says about it. It stops, starts, edits, pins, deletes and enables nothing.
+
+What it reads:
+
+- the runscaler process (its process id and start time, from `ps`), before and after it notes how far runscaler's own log, `/Users/ci/.config/runner/runner.log`, has come;
+- the text that log gained since the last report (it follows one rotation to `runner.log.1`; after more, it says the text is not continuous, and the core counts that as a gap in its evidence);
+- `/Users/ci/.config/runner/config.toml`: its change time, each scale set's name and its `runner-image` line, and the health address and port;
+- the families file `/Users/ci/.config/runner-updater/families`, one line per family: `FAMILY tart SET [SET ...]` (no file: no family);
+- two `/healthz` reads, 3 s apart.
+
+It prints each decision (idle, the log pass, keep, status) and then the status lines. `report --observe FAMILY` takes that family's current images as the ones under observation, from that pass on, until `report --observe-clear FAMILY`: the log pass then counts their failures as the updater will. Nothing acts on what it prints.
+
+Its state is in `/Users/ci/.local/state/runner-updater/report/`, never in the updater's own state: `state.json` (the core's state, written only when all four decisions were made), `observe.json`, and `pass/` (the last pass's facts, log text, `/healthz` reads and each decision). A second report waits for the first (the updater lock, `/Users/ci/.local/state/runner-updater/lock`). It refuses to run the core under a jq that `core/TESTED_JQ` does not list (`STOP untested jq`, exit 3), and it prints a `REFUSE` line, and runs nothing more, when it cannot read a fact. On a host where `/Users/ci/.local/state/runner-updater` does not exist yet, it creates it with an empty protected list, so golden-prune keeps printing what it printed before.
 
 ## Moving a host onto a release
 

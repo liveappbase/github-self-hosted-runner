@@ -1,0 +1,18 @@
+2026-11-01 05:00:10 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000001 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:00:20 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000002 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:00:25 INFO mac-a: Runner removed name=runner-0000beef instanceID=runner-0000beef reason=job-completed jobId=2ce18645-b726-290f-1564-ea0902058718 repo=example-org/example workflowRunId=15885850636 job="build (9150)" result=succeeded
+2026-11-01 05:00:30 ERRO mac-a: Failed to start runner, will retry
+  error=
+  │ failed to start runner: runner process exited on runner-00000003 before connecting to GitHub; runner log:
+  │ Starting Runner listener with startup type: service
+  │ An error occurred: Not configured.
+2026-11-01 05:02:30 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1
+2026-11-01 05:02:31 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1

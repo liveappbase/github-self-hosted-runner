@@ -1,0 +1,145 @@
+#!/bin/zsh -f
+# runner-updater report [--observe FAMILY]... [--observe-clear FAMILY]... — the runner-image updater on the Studio, as
+# ci. This release has one command, `report`: ONE pass that measures, asks the decision core (core/) and prints. It
+# TAKES NO ACTION: it stops, starts, edits, pins, deletes and enables nothing, and it runs none of runner-disable,
+# runner-enable, golden-build, golden-gate, tart, launchctl or kill. Design: docs/operations.md ("The updater's report
+# mode (no action)"); the core's contract: core/README.md.
+# The pass, in order:
+#   1. The updater lock, LOCKFILE (zsh's zsystem flock, held by this process until it exits). A second report WAITS
+#      for it (a command waits; only a timer pass, later work, exits).
+#   2. The jq it runs (JQ) must print a `jq --version` that core/TESTED_JQ lists for the area `core`. Else the STOP
+#      "untested jq" and exit 3: no core program runs.
+#   3. now = the UTC clock (date -u +%s). The facts (bin/runner-updater-lib, ru_collect: its header says what each
+#      fact is and the order they are read in) go into the pass folder REPORT/pass: facts.json, log.txt, healthz.json.
+#      A fact it cannot read: a REFUSE line, exit 1, no core program runs.
+#   4. idle.jq, r1.jq, keep.jq and status.jq run with the same five inputs (state, facts, log, healthz, --arg now). The
+#      state is the pass's copy, REPORT/pass/state.json, written back by rename after idle and after r1, so a later
+#      program reads it. Only when all four decided is it renamed to REPORT/state.json, the report's state; a program
+#      that exits non-zero, or prints no JSON object with a verdict: "runner-updater: core could not decide
+#      (PROGRAM)", exit 1, and REPORT/state.json stays as it was (the pass did nothing). Each program's output stays in
+#      REPORT/pass/PROGRAM.json.
+#   5. It prints each program's verdict and reason (r1 and keep: each family's too), then status.jq's lines.
+# --observe FAMILY: from this pass on, FAMILY's CURRENT config lines are its candidate (version "observed", closed_at =
+# this pass's now), in REPORT/observe.json, until `report --observe-clear FAMILY`. A family already observed keeps its
+# record. Repeat the option for more families.
+# REPORT is never the real updater state (later work adds that). When STATEDIR does not exist, report creates it with
+# an EMPTY (0-byte) protected list in it: golden-prune reads an existing STATEDIR as "the updater is on this host" and
+# refuses without a protected list, and an empty list protects nothing, so golden-prune prints what it printed before.
+# Exit: 0 the pass ran; 1 a REFUSE (a fact it cannot read, an --observe it cannot do) or the core could not decide;
+# 2 usage; 3 STOP untested jq.
+# Constants:
+#   RUNNER       runscaler, as runner-start execs it ("RUNNER run --config CONFIG" is the process it looks for)
+#   CONFIG       runscaler's config; RUNLOG, runscaler's own log, is runner.log beside it (runscaler 0.9.5 writes it
+#                there when the config sets no log-file; at 10 MiB it renames it to runner.log.1, one backup)
+#   STATEDIR     the updater's state folder; REPORT = STATEDIR/report (this command's own state and pass folder),
+#                LOCKFILE = STATEDIR/lock (the updater lock), PROTECTED = STATEDIR/protected (golden-prune reads it)
+#   FAMILIES     the host's families file (bin/runner-updater-lib, ru_families)
+#   JQ PS CURL   the tools it runs (each by its absolute path); CORE, the release's core/ beside this file's bin/
+#   HEALTHZ_GAP  seconds between the two /healthz reads
+set -u
+export LC_ALL=C
+export TZ=UTC   # ps prints start times in TZ, and the lib reads them back in it; the core's clock is UTC
+umask 077
+RUNNER=/Users/ci/bin/runner
+CONFIG=/Users/ci/.config/runner/config.toml
+STATEDIR=/Users/ci/.local/state/runner-updater
+FAMILIES=/Users/ci/.config/runner-updater/families
+JQ=/usr/bin/jq
+PS=/bin/ps
+CURL=/usr/bin/curl
+HEALTHZ_GAP=3
+CORE=${0:A:h:h}/core
+RUNLOG=${CONFIG:h}/runner.log
+REPORT=$STATEDIR/report
+LOCKFILE=$STATEDIR/lock
+PROTECTED=$STATEDIR/protected
+
+say() { print -r -- "runner-updater: $*" }
+refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
+usage() {
+  print -u2 -r -- "runner-updater: usage: runner-updater report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
+  exit 2
+}
+
+# ---- arguments
+(( $# >= 1 )) && [[ $1 == report ]] || usage "this release has one command: report"
+shift
+ru_observe_add=() ru_observe_clear=()
+while (( $# )); do
+  case $1 in
+    (--observe|--observe-clear)
+      (( $# >= 2 )) || usage "$1 needs a FAMILY"
+      [[ $2 =~ '^[a-z][a-z0-9-]{0,40}$' ]] || usage "not a family name: '$2'"
+      if [[ $1 == --observe ]]; then ru_observe_add+=($2); else ru_observe_clear+=($2); fi
+      shift 2 ;;
+    (*) usage "unknown argument '$1'" ;;
+  esac
+done
+for f in $ru_observe_add; do (( ${ru_observe_clear[(Ie)$f]} == 0 )) || usage "--observe and --observe-clear of $f"; done
+ru_observe_add=(${(u)ru_observe_add}) ru_observe_clear=(${(u)ru_observe_clear})
+
+# ---- the state folder (see the header: an empty protected list keeps golden-prune as it was)
+if [[ ! -e $STATEDIR && ! -L $STATEDIR ]]; then
+  /bin/mkdir -p -m 700 $STATEDIR || refuse "cannot create $STATEDIR"
+  : > $PROTECTED || refuse "cannot create the empty protected list $PROTECTED"
+  say "created $STATEDIR, with an empty protected list $PROTECTED (it protects nothing)"
+fi
+[[ -d $STATEDIR && ! -L $STATEDIR ]] || refuse "$STATEDIR is not a folder"
+[[ -d $REPORT ]] || /bin/mkdir -m 700 $REPORT || refuse "cannot create $REPORT"
+
+# ---- 1. the updater lock, held by THIS process until it exits: never redirect to LOCKFILE or print to its fd here
+zmodload zsh/system || refuse "zsh/system cannot be loaded: the lock cannot be taken"
+[[ -e $LOCKFILE ]] || ( : >> $LOCKFILE ) || refuse "cannot create the lock file $LOCKFILE"
+zsystem flock -f lockfd $LOCKFILE || refuse "cannot take the updater lock $LOCKFILE"
+
+# ---- 2. the jq
+jqv=$($JQ --version 2>/dev/null) || jqv='(no version)'
+tested=0
+if [[ -f $CORE/TESTED_JQ && -r $CORE/TESTED_JQ ]]; then
+  for l in "${(@f)$(<$CORE/TESTED_JQ)}"; do
+    [[ $l =~ '^([^#[:space:]]+)[[:space:]]+([a-z,]+)[[:space:]]+([^[:space:]]+)[[:space:]]*$' ]] || continue
+    [[ $match[1] == "$jqv" && ,$match[2], == *,core,* ]] && tested=1
+  done
+fi
+if (( ! tested )); then
+  print -r -- "runner-updater: STOP untested jq: $JQ prints '$jqv', which core/TESTED_JQ does not list for the core; no new work starts. Next, in the repository: \`JQ=$JQ python3 -I -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass"
+  exit 3
+fi
+
+# ---- 3. the facts
+source ${0:A:h}/runner-updater-lib || refuse "cannot load ${0:A:h}/runner-updater-lib"
+now=$(/bin/date -u +%s)
+[[ $now =~ '^[0-9]+$' ]] || refuse "the clock gave '$now'"
+pass=$REPORT/pass
+[[ -d $pass ]] || /bin/mkdir -m 700 $pass || refuse "cannot create $pass"
+[[ -e $REPORT/state.json ]] || : > $REPORT/state.json || refuse "cannot create $REPORT/state.json"
+/bin/cp -f -- $REPORT/state.json $pass/state.json || refuse "cannot copy the state into $pass"
+/bin/rm -f -- $pass/{idle,r1,keep,status}.json
+say "report: one pass at $(strftime '%Y-%m-%d %H:%M:%S UTC' $now) ($now); it takes no action"
+ru_collect $pass $REPORT/state.json $REPORT/observe.json $now || refuse "no facts: $REPLY"
+
+# ---- 4, 5. the core
+for prog in idle r1 keep status; do
+  $JQ -n -L $CORE/lib -f $CORE/$prog.jq --slurpfile state $pass/state.json --slurpfile facts $pass/facts.json \
+      --rawfile log $pass/log.txt --slurpfile healthz $pass/healthz.json --arg now $now > $pass/$prog.json 2> $pass/$prog.err
+  rc=$?
+  if (( rc != 0 )) || ! $JQ -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].verdict | type) == "string"
+                                   and (.[0].lines | type) == "array"' $pass/$prog.json > /dev/null 2>&1; then
+    say "core could not decide ($prog): exit $rc${$(/usr/bin/head -n 1 $pass/$prog.err 2>/dev/null):+: $(/usr/bin/head -n 1 $pass/$prog.err)}"
+    say "the pass did nothing: $REPORT/state.json is as it was"
+    exit 1
+  fi
+  if [[ $prog == (idle|r1) ]]; then   # the new state, for the next program of this pass: by rename
+    $JQ -e '.state | if type == "object" then . else error("no state") end' $pass/$prog.json > $pass/state.json.new \
+      && /bin/mv -f -- $pass/state.json.new $pass/state.json \
+      || { say "core could not decide ($prog): its output has no state"; say "the pass did nothing: $REPORT/state.json is as it was"; exit 1 }
+  fi
+  if [[ $prog == status ]]; then
+    $JQ -r '"status: \(.verdict) (\(.reason))", .lines[]' $pass/$prog.json
+  else
+    $JQ -r --arg p $prog '"\($p): \(.verdict) (\(.reason))",
+        ((.families // {}) | to_entries[] | "\($p) \(.key): \(.value.verdict) (\(.value.reason))")' $pass/$prog.json
+  fi
+done
+/bin/mv -f -- $pass/state.json $REPORT/state.json || refuse "cannot write $REPORT/state.json"
+exit 0
