@@ -940,29 +940,53 @@ class TestLock(unittest.TestCase):
 
 
 class TestStateDir(unittest.TestCase):
-    """A report on a host with no STATEDIR creates it with an EMPTY protected list, so golden-prune (which reads an
-    existing STATEDIR as "the updater is here" and then needs the list) prints what it printed before."""
+    """STATEDIR and its EMPTY protected list come into being in ONE step, so golden-prune (which reads an existing
+    STATEDIR as "the updater is here" and then needs the list) prints what it printed before, at every point of a
+    report, also one killed. A STATEDIR without its list is refused, with what to do.
+    The kill cells stop a copy with kill -9 before each command of its state-folder block in turn: zsh's DEBUG trap
+    runs before each command, and counts only in the main shell (a $(...) runs the trap too, on a copy of the count)."""
 
     NAMES = ['liveapp-mac-golden-20261001', 'liveapp-mac-golden-20261001', 'liveapp-mac-golden-20260915',
              'liveapp-mac-golden-20260901', 'liveapp-mac-golden-20260815']
+    AS_BEFORE = 'liveapp-mac-golden-20260815\nliveapp-mac-golden-20260901\n'   # golden-prune with no updater
+    BLOCK = 'if [[ ! -e $STATEDIR && ! -L $STATEDIR ]]; then\n'                 # the state-folder block, from here
+    AFTER = '[[ -d $STATEDIR && ! -L $STATEDIR ]] || refuse "$STATEDIR is not a folder"\n'   # to here
+    PAUSE = ': > %(d)s/paused.$$; until [[ -e %(d)s/go.$$ ]]; do /bin/sleep 0.05; done\n'
 
     def prune(self, sb, statedir):
         script = sb.copy_script('bin/golden-prune', [('STATEDIR=/Users/ci/.local/state/runner-updater',
                                                       'STATEDIR=' + statedir)], dest=sb.path('prune', 'golden-prune'))
         return sb.run(['/bin/zsh', '-f', script] + self.NAMES)
 
+    def assert_prune_as_before(self, r):
+        p = self.prune(r.sb, r.statedir)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, self.AS_BEFORE, ''))
+
+    def assert_made_by_report(self, r):
+        """STATEDIR (0700) holds its empty list (0600) and the report's own files; no temporary folder is left"""
+        protected = os.path.join(r.statedir, 'protected')
+        self.assertTrue(os.path.isfile(protected) and not os.path.islink(protected))
+        self.assertEqual(os.path.getsize(protected), 0)
+        self.assertEqual(os.stat(r.statedir).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(protected).st_mode & 0o777, 0o600)
+        self.assertEqual(sorted(os.listdir(r.statedir)), ['lock', 'protected', 'report'])
+        self.assertEqual(os.listdir(os.path.dirname(r.statedir)), ['runner-updater'])
+
+    def kill_at(self, n):
+        trap = "ru_k=0; trap '(( ! ZSH_SUBSHELL && ++ru_k == %d )) && kill -9 $$' DEBUG\n" % n
+        return [(self.BLOCK, trap + self.BLOCK), (self.AFTER, 'trap - DEBUG\n' + self.AFTER)]
+
+    def created(self, r):
+        return 'runner-updater: created %s, with an empty protected list %s (it protects nothing)\n' % (
+            r.statedir, os.path.join(r.statedir, 'protected'))
+
     def test_a_new_statedir_has_an_empty_protected_list(self):
         r = Rig(self, statedir=False)
         res = r.report()
-        protected = os.path.join(r.statedir, 'protected')
-        self.assertIn('runner-updater: created %s, with an empty protected list %s (it protects nothing)\n'
-                      % (r.statedir, protected), res.stdout)
-        self.assertEqual(os.path.getsize(protected), 0)
-        self.assertEqual(os.stat(r.statedir).st_mode & 0o777, 0o700)
-        with_it = self.prune(r.sb, r.statedir)
-        without = self.prune(r.sb, r.sb.path('no-such-statedir'))
-        self.assertEqual((with_it.returncode, with_it.stdout), (0, without.stdout))
-        self.assertEqual(without.stdout, 'liveapp-mac-golden-20260815\nliveapp-mac-golden-20260901\n')
+        self.assertIn(self.created(r), res.stdout)
+        self.assert_made_by_report(r)
+        self.assert_prune_as_before(r)
+        self.assertEqual(self.prune(r.sb, r.sb.path('no-such-statedir')).stdout, self.AS_BEFORE)
 
     def test_control_a_statedir_without_the_list_makes_golden_prune_refuse(self):
         sb = Sandbox(self)
@@ -971,10 +995,171 @@ class TestStateDir(unittest.TestCase):
         self.assertEqual((res.returncode, res.stdout), (1, ''))
         self.assertIn('has no protected list', res.stderr)
 
-    def test_an_existing_statedir_is_not_given_a_list(self):
+    def test_a_kill_at_any_point_leaves_no_statedir_or_statedir_with_its_list(self):
+        seen = {'no STATEDIR': 0, 'STATEDIR with its list': 0}
+        for n in range(1, 80):
+            r = Rig(self, statedir=False, extra_rewrites=self.kill_at(n))
+            res = r.report(ok=False)
+            if res.returncode == 0:      # the block has fewer than n commands: no kill
+                break
+            with self.subTest(killed_before_command=n):
+                self.assertEqual(res.returncode, -9, res.stdout + res.stderr)
+                protected = os.path.join(r.statedir, 'protected')
+                if os.path.lexists(r.statedir):
+                    seen['STATEDIR with its list'] += 1
+                    self.assertTrue(os.path.isfile(protected) and not os.path.islink(protected), os.listdir(r.statedir))
+                else:
+                    seen['no STATEDIR'] += 1
+                self.assert_prune_as_before(r)
+                nxt = r.sb.run(['/bin/zsh', '-f', r.copy('runner-updater-next'), 'report'])   # unchanged
+                self.assertEqual(nxt.returncode, 0, nxt.stdout + nxt.stderr)
+                self.assertTrue(os.path.isfile(protected))
+                self.assert_prune_as_before(r)
+        else:
+            self.fail('every run was killed: the trap never ran out of commands')
+        # the harness: kills fell before the folder came into being, and after
+        self.assertGreater(seen['no STATEDIR'], 0, seen)
+        self.assertGreater(seen['STATEDIR with its list'], 0, seen)
+
+    def test_control_the_same_trap_with_no_kill(self):
+        r = Rig(self, statedir=False, extra_rewrites=self.kill_at(0))
+        res = r.report()
+        self.assertIn(self.created(r), res.stdout)
+        self.assert_made_by_report(r)
+        self.assert_prune_as_before(r)
+
+    def paused(self, r):
+        """a copy of the rig's report that stops at the start of its state-folder block (it found no STATEDIR) and
+        writes pause/paused.PID, until pause/go.PID exists"""
+        d = r.sb.mkdir('pause')
+        return d, r.copy('runner-updater-paused', [(self.BLOCK, self.BLOCK + self.PAUSE % {'d': d})])
+
+    def start_paused(self, r, d, script, name):
+        p = r.sb.start(['/bin/zsh', '-f', script, 'report'], name=name)
+        r.sb.wait_for(lambda: p.poll() is not None or os.path.exists(os.path.join(d, 'paused.%d' % p.pid)),
+                      'report %s at the state folder' % name)
+        self.assertIsNone(p.poll(), r.sb.output(name))
+        return p
+
+    def lock_holders(self, r):
+        out = subprocess.run(['/usr/sbin/lsof', '-t', '--', os.path.join(r.statedir, 'lock')],
+                             capture_output=True, text=True).stdout
+        return [int(x) for x in out.split()]
+
+    def test_two_first_reports_race_and_both_end_well(self):
+        r = Rig(self, statedir=False)
+        d, script = self.paused(r)
+        a = self.start_paused(r, d, script, 'a')
+        b = self.start_paused(r, d, script, 'b')          # both found no STATEDIR
+        r.sb.write(os.path.join(r.curld, 'block'), '')    # a report holds the lock in its /healthz read
+        r.sb.write(os.path.join(d, 'go.%d' % b.pid), '')
+        r.sb.wait_for(lambda: b.poll() is not None or len(r.curl_calls()) == 1, 'report b in its /healthz read')
+        # b made STATEDIR and holds the lock in it. A list with a name in it (a later updater writes one) must stay
+        protected = os.path.join(r.statedir, 'protected')
+        r.sb.write(protected, 'liveapp-mac-golden-20260815\n', 0o600)
+        r.sb.write(os.path.join(d, 'go.%d' % a.pid), '')
+        r.sb.wait_for(lambda: a.poll() is not None or a.pid in self.lock_holders(r), 'report a at the lock b holds')
+        self.assertIsNone(a.poll(), r.sb.output('a'))
+        r.sb.write(os.path.join(r.curld, 'go'), '')
+        self.assertEqual(b.wait(timeout=60), 0, r.sb.output('b'))
+        self.assertEqual(a.wait(timeout=60), 0, r.sb.output('a'))
+        self.assertEqual(r.ps_calls(), 4)                 # two passes ran
+        self.assertEqual((self.created(r) in r.sb.output('a')[0], self.created(r) in r.sb.output('b')[0]),
+                         (False, True))
+        self.assertEqual(read_text(protected), 'liveapp-mac-golden-20260815\n')
+        self.assertEqual(sorted(os.listdir(r.statedir)), ['lock', 'protected', 'report'])   # nothing nested in it
+        self.assertEqual(os.listdir(os.path.dirname(r.statedir)), ['runner-updater'])        # nothing left beside it
+        p = self.prune(r.sb, r.statedir)
+        self.assertEqual((p.returncode, p.stdout), (0, 'liveapp-mac-golden-20260901\n'))
+
+    def test_a_statedir_another_hand_makes_in_the_gap_is_left_as_it_is(self):
+        # an EMPTY STATEDIR appears after the report found none: report does not put its list into it (it cannot tell
+        # it from a folder whose list was lost), and refuses
+        r = Rig(self, statedir=False)
+        d, script = self.paused(r)
+        a = self.start_paused(r, d, script, 'a')
+        os.makedirs(r.statedir, 0o700)
+        r.sb.write(os.path.join(d, 'go.%d' % a.pid), '')
+        self.assertEqual(a.wait(timeout=60), 1, r.sb.output('a'))
+        out = r.sb.output('a')[0]
+        self.assertNotIn(self.created(r), out)
+        self.assertIn('runner-updater: REFUSE %s has no protected list' % r.statedir, out)
+        self.assertEqual(os.listdir(r.statedir), [])
+        self.assertEqual(os.listdir(os.path.dirname(r.statedir)), ['runner-updater'])
+        self.assertEqual(r.ps_calls(), 0)
+
+    REPORT_LINE = '[[ -d $REPORT ]] || /bin/mkdir -m 700 $REPORT ||'
+    PAUSE2 = '[[ -d $REPORT ]] || { : > %(d)s/paused2.$$; until [[ -e %(d)s/go2.$$ ]]; do /bin/sleep 0.05; done; ' \
+             '/bin/mkdir -m 700 $REPORT } ||'
+
+    def test_two_reports_that_find_no_report_folder_both_end_well(self):
+        # REPORT is made under the lock. Each copy stops after it found no REPORT, until go2.PID: report a stops
+        # there first; report b then waits at the lock a holds (or, with REPORT made before the lock, makes REPORT)
+        r = Rig(self)
+        d = r.sb.mkdir('pause')
+        script = r.copy('runner-updater-paused2', [(self.REPORT_LINE, self.PAUSE2 % {'d': d})])
+        argv = ['/bin/zsh', '-f', script, 'report']
+        a = r.sb.start(argv, name='a')
+        r.sb.wait_for(lambda: a.poll() is not None or os.path.exists(os.path.join(d, 'paused2.%d' % a.pid)),
+                      'report a, which found no REPORT')
+        b = r.sb.start(argv, name='b')
+        r.sb.write(os.path.join(d, 'go2.%d' % b.pid), '')
+        r.sb.wait_for(lambda: b.poll() is not None or os.path.isdir(r.report_dir) or b.pid in self.lock_holders(r),
+                      'report b at the lock, or past the REPORT line')
+        r.sb.write(os.path.join(d, 'go2.%d' % a.pid), '')
+        self.assertEqual(a.wait(timeout=60), 0, r.sb.output('a'))
+        self.assertEqual(b.wait(timeout=60), 0, r.sb.output('b'))
+        self.assertEqual(r.ps_calls(), 4)
+
+    def test_control_a_paused_report_alone_makes_statedir(self):
+        r = Rig(self, statedir=False)
+        d, script = self.paused(r)
+        a = self.start_paused(r, d, script, 'a')
+        r.sb.write(os.path.join(d, 'go.%d' % a.pid), '')
+        self.assertEqual(a.wait(timeout=60), 0, r.sb.output('a'))
+        self.assertIn(self.created(r), r.sb.output('a')[0])
+        self.assert_made_by_report(r)
+        self.assert_prune_as_before(r)
+
+    def test_a_statedir_without_its_list_is_refused_with_what_to_do(self):
         r = Rig(self, protected=False)
+        protected = os.path.join(r.statedir, 'protected')
+        res = r.report(ok=False)
+        self.assertEqual((res.returncode, res.stdout), (1, (
+            'runner-updater: REFUSE %s has no protected list %s, and golden-prune refuses until it has one. Nothing '
+            'in this release writes an image name into it, so create it empty: `/usr/bin/touch %s; /bin/chmod 600 '
+            '%s`, then run report again\n') % (r.statedir, protected, protected, protected)), res.stderr)
+        self.assertEqual(r.ps_calls(), 0)
+        self.assertEqual(os.listdir(r.statedir), [])
+        # what it says to do
+        subprocess.run(['/bin/zsh', '-fc', '/usr/bin/touch %s; /bin/chmod 600 %s' % (protected, protected)], check=True)
         r.report()
-        self.assertFalse(os.path.exists(os.path.join(r.statedir, 'protected')))
+        self.assert_prune_as_before(r)
+
+    def test_a_list_that_is_not_a_readable_regular_file_is_refused(self):
+        for kind in ('symlink', 'folder', 'unreadable'):
+            with self.subTest(kind=kind):
+                r = Rig(self, protected=False)
+                protected = os.path.join(r.statedir, 'protected')
+                if kind == 'symlink':
+                    os.symlink(r.sb.write(r.sb.path('elsewhere'), ''), protected)
+                elif kind == 'folder':
+                    os.mkdir(protected)
+                else:
+                    r.sb.write(protected, '', 0o000)
+                res = r.report(ok=False)
+                self.assertEqual((res.returncode, res.stdout), (1, (
+                    'runner-updater: REFUSE %s is not a readable regular file, and golden-prune refuses it too: look at '
+                    'what it is, then make it an empty regular file (0600) and run report again\n') % protected),
+                    res.stderr)
+                self.assertEqual(r.ps_calls(), 0)
+
+    def test_control_a_statedir_with_its_list(self):
+        r = Rig(self)
+        res = r.report()
+        self.assertNotIn('created', res.stdout)
+        self.assertEqual(sorted(os.listdir(r.statedir)), ['lock', 'protected', 'report'])
+        self.assert_prune_as_before(r)
 
 
 class TestUsage(unittest.TestCase):
