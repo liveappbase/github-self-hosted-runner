@@ -96,7 +96,7 @@ class Rig:
         self.jqd = sb.mkdir('jqwrap')
         if jq_wrap:   # logs each call; --version from jqwrap/version when it exists; jqwrap/fail names a program to fail
             self.jq = sb.stub('jq', JQ_WRAP % {'d': self.jqd, 'jq': self.jq}, folder=self.jqd)
-        rewrites = [
+        self.rewrites = [
             ('RUNNER=/Users/ci/bin/runner', 'RUNNER=' + self.runner),
             ('CONFIG=/Users/ci/.config/runner/config.toml', 'CONFIG=' + self.config),
             ('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + self.statedir),
@@ -106,8 +106,8 @@ class Rig:
             ('CURL=/usr/bin/curl', 'CURL=' + sb.path('tools-curl', 'curl')),
             ('HEALTHZ_GAP=3', 'HEALTHZ_GAP=' + gap),
             ('CORE=${0:A:h:h}/core', 'CORE=' + os.path.join(REPO, 'core')),
-        ] + list(extra_rewrites)
-        self.script = sb.copy_script('bin/runner-updater', rewrites)
+        ]
+        self.script = self.copy('runner-updater', extra_rewrites)
         self.lib = sb.copy_script('bin/runner-updater-lib', [])
         sb.write(self.config, cfg if cfg is not None else config())
         os.utime(self.config, (INSTALLED, INSTALLED))
@@ -116,6 +116,11 @@ class Rig:
         self.set_ps([proc_line(*P)])
         self.set_curl(json.dumps(HEALTHZ))
         self.write_log(fixture('studio-cut.log'))
+
+    def copy(self, name, extra_rewrites=()):
+        """one more copy of runner-updater, beside the lib, with the rig's rewrites and then EXTRA_REWRITES"""
+        return self.sb.copy_script('bin/runner-updater', self.rewrites + list(extra_rewrites),
+                                   dest=self.sb.path('tools', name))
 
     # scenario
     def set_ps(self, lines, call=None):
@@ -127,6 +132,10 @@ class Rig:
     def ps_append(self, call, text):
         """the ps stub's call number CALL appends TEXT to runner.log after it prints (1: before the capture, 2: after)"""
         self.sb.write(os.path.join(self.psd, 'append.%d' % call), text)
+
+    def ps_rotate(self, call):
+        """the ps stub's call number CALL rotates runner.log after it prints, as runscaler does (see rotate)"""
+        self.sb.write(os.path.join(self.psd, 'rotate.%d' % call), '')
 
     def set_curl(self, body, call=None):
         self.sb.write(os.path.join(self.curld, 'out' if call is None else 'out.%d' % call), body)
@@ -198,6 +207,7 @@ f=$d/out; [[ -f $d/out.$n ]] && f=$d/out.$n
 /bin/cat $f
 [[ -f $d/append.$n ]] && /bin/cat $d/append.$n >> %(log)s
 [[ -f $d/mtime.$n ]] && /usr/bin/touch -t $(<$d/mtime.$n) %(config)s
+[[ -f $d/rotate.$n ]] && { /bin/rm -f %(log)s.1; /bin/mv %(log)s %(log)s.1; : > %(log)s }
 exit 0
 '''
 
@@ -280,6 +290,32 @@ class TestPosition(unittest.TestCase):
         self.assertEqual(r.text(), early.encode())
         self.assertEqual(r.facts()['position']['offset'], len(before) + len(early))
 
+    def rotation_after_the_capture(self, rotate):
+        r = Rig(self)
+        r.report()
+        before = r.log_bytes()
+        r.append_log(TestContinuity.NEW)
+        if rotate:
+            r.ps_rotate(4)            # this pass's second ps call (calls 3 and 4): after the capture
+        r.report()
+        self.assertEqual(r.ps_calls(), 4)
+        self.assertTrue(r.facts()['continuous'])
+        self.assertEqual(r.text(), TestContinuity.NEW.encode())
+        self.assertEqual(r.facts()['position']['offset'], len(before) + len(TestContinuity.NEW))
+        return r
+
+    def test_a_rotation_after_the_capture_changes_nothing(self):
+        # runscaler rotates between the capture and the read of the text: the pass reads through the file it opened
+        # at the capture, now runner.log.1, and never the new runner.log
+        r = self.rotation_after_the_capture(True)
+        self.assertEqual(os.path.getsize(r.runlog), 0)            # the rotation ran: a new, empty runner.log
+        self.assertEqual(r.facts()['position']['inode'], str(os.stat(r.runlog + '.1').st_ino))
+
+    def test_control_no_rotation_after_the_capture(self):
+        r = self.rotation_after_the_capture(False)
+        self.assertFalse(os.path.exists(r.runlog + '.1'))
+        self.assertEqual(r.facts()['position']['inode'], str(os.stat(r.runlog).st_ino))
+
 
 class TestContinuity(unittest.TestCase):
     """continuous, and log.txt, against the state's boundary (the position the last pass captured)."""
@@ -301,6 +337,46 @@ class TestContinuity(unittest.TestCase):
         self.assertEqual(r.text(), self.NEW.encode())
         self.assertIn('runner-updater: log: runner.log at offset %d; continuous: the same file since the last pass\n'
                       % len(r.log_bytes()), res.stdout)
+
+    def r1_gaps(self, r):
+        with open(os.path.join(r.pass_dir, 'r1.json')) as f:
+            return json.load(f)['families']['fx']['gaps']
+
+    def test_a_quiet_log_is_continuous(self):
+        # the Studio's most common pass: no byte since the last pass, so the boundary IS the position. An observed
+        # family's window then takes no gap
+        r = Rig(self)
+        r.report('--observe', 'fx')
+        res = r.report()
+        self.assertEqual(r.facts()['position']['offset'], len(r.log_bytes()))
+        self.assertTrue(r.facts()['continuous'])
+        self.assertEqual(r.text(), b'')
+        self.assertIn('; continuous: the same file since the last pass\n', res.stdout)
+        self.assertEqual(self.r1_gaps(r), 0)
+
+    def test_control_a_quiet_log_with_a_byte_rewritten_before_the_boundary(self):
+        r = Rig(self)
+        r.report('--observe', 'fx')
+        old = r.log_bytes()
+        with open(r.runlog, 'r+b') as f:
+            f.seek(len(old) - 2)
+            f.write(b'X' if old[-2:-1] != b'X' else b'Y')
+        r.report()
+        self.assertFalse(r.facts()['continuous'])
+        self.assertEqual(self.r1_gaps(r), 1)
+
+    def test_a_rotation_right_at_the_boundary_is_continuous(self):
+        # the first write after a pass rotated the log, so runner.log.1 ends AT the boundary. The control of the
+        # rotations at the boundary below that are not continuous: here runner.log.1 is left as it is
+        r, old = self.first()
+        r.rotate()
+        r.append_log(self.NEW)
+        res = r.report()
+        self.assertEqual(r.log_bytes(r.runlog + '.1'), old)
+        self.assertTrue(r.facts()['continuous'])
+        self.assertEqual(r.text(), self.NEW.encode())          # nothing of .1 after the boundary, then the new file
+        self.assertEqual(r.facts()['position']['inode'], str(os.stat(r.runlog).st_ino))
+        self.assertIn('; continuous: the log rotated once (the rest of runner.log.1, then runner.log)\n', res.stdout)
 
     def test_a_rewritten_file_is_not_continuous(self):
         r, old = self.first()
@@ -712,6 +788,39 @@ class TestReportPass(unittest.TestCase):
         r.report()
         self.assertNotEqual(r.state_bytes(), s0)
         self.assertEqual(json.loads(r.state_bytes())['boundary']['position'], r.facts()['position'])
+
+    NOW = ('now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')   # the pass's clock, from the test
+
+    def not_ready_two_passes(self, ready):
+        """two passes a day apart, each with two /healthz reads of mac-a READY or not; -> (state after each, the
+        second pass's idle lines)"""
+        r = Rig(self, extra_rewrites=[self.NOW])
+        h = json.loads(json.dumps(HEALTHZ))
+        h['scale_sets'][0]['ready'] = ready
+        r.set_curl(json.dumps(h))
+        t = P[2] + 3600
+        r.report(env={'RU_TEST_NOW': str(t)})
+        s1 = json.loads(r.state_bytes())
+        r.report(env={'RU_TEST_NOW': str(t + 86400)})
+        s2 = json.loads(r.state_bytes())
+        with open(os.path.join(r.pass_dir, 'idle.json')) as f:
+            lines = json.load(f)['lines']
+        return t, s1, s2, lines
+
+    def test_idles_state_reaches_r1_so_a_set_not_ready_is_dated_once(self):
+        # idle.jq dates a set it first reads not ready (state.not_ready_since); r1 must get idle's state, so the date
+        # holds across passes and the set is excused from readiness after 24 h
+        t, s1, s2, lines = self.not_ready_two_passes(False)
+        self.assertEqual(s1.get('not_ready_since'), {'mac-a': t})
+        self.assertEqual(s2.get('not_ready_since'), {'mac-a': t})
+        self.assertEqual([l for l in lines if l.startswith('mac-a: not ready since ')
+                          and 'excused from readiness only' in l], lines, lines)
+        self.assertEqual(len(lines), 1)
+
+    def test_control_a_ready_set_is_not_dated(self):
+        t, s1, s2, lines = self.not_ready_two_passes(True)
+        self.assertEqual((s1.get('not_ready_since'), s2.get('not_ready_since')), ({}, {}))
+        self.assertEqual(lines, [])
 
 
 class TestObserve(unittest.TestCase):

@@ -166,7 +166,7 @@ What it reads:
 
 - the runscaler process (its process id and start time, from `ps`), before and after it notes how far runscaler's own log, `/Users/ci/.config/runner/runner.log`, has come;
 - the text that log gained since the last report (it follows one rotation to `runner.log.1`; after more, it says the text is not continuous, and the core counts that as a gap in its evidence);
-- `/Users/ci/.config/runner/config.toml`: its change time, each scale set's name and its `runner-image` line, and the health address and port;
+- `/Users/ci/.config/runner/config.toml`: its modification time (mtime), each scale set's name and its `runner-image` line, and the health address and port;
 - the families file `/Users/ci/.config/runner-updater/families`, one line per family: `FAMILY tart SET [SET ...]` (no file: no family);
 - two `/healthz` reads, 3 s apart.
 
