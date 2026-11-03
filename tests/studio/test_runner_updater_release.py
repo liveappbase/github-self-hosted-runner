@@ -1131,7 +1131,7 @@ class TestPassHook(unittest.TestCase):
 # a new row gets its cell. A newer release does NOT proceed alone past a STOP of NO_ROWS; past one of YES_ROWS it does,
 # so that STOP holds only its own version.
 NO_ROWS = ('JOBS FAIL ON THE NEW IMAGE', 'ROLLBACK FAILED', 'CI DISABLED', 'POOL DOWN', 'HAND CHANGE', 'recipe changed',
-           'NO BASELINE', 'NO EVIDENCE', 'NO IDLE', 'untested jq', 'SHIM REFUSED')
+           'NO BASELINE', 'NO EVIDENCE', 'NO IDLE', 'untested jq', 'SHIM REFUSED', 'DISK')
 YES_ROWS = ('check failed', 'ROLLED BACK', 'PINNED RUNNER RETIRED')
 UNKNOWN = 'A STOP THIS CORE DOES NOT KNOW'
 NO_PROCEED = 'a newer release does not proceed alone past it'
