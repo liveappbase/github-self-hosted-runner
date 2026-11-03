@@ -597,6 +597,22 @@ class TestStatus(unittest.TestCase):
         os.remove(os.path.join(r.jqd, 'fail'))       # the control
         self.assertIn('\nstatus: ok (1 STOPs)\n', r.cmd('status').stdout)
 
+    def test_untested_jq_stops_status_before_any_core_call(self):
+        # status runs status.jq, so it checks the jq as report does (review r1 P3-2: no cell held this check)
+        r = Rig(self, jq_wrap=True)
+        Paths(r).put(dict(FULL, on=True))
+        r.sb.write(os.path.join(r.jqd, 'version'), 'jq-1.6\n')
+        res = r.cmd('status', ok=False)
+        self.assertEqual((res.returncode, res.stdout), (3, (
+            "runner-updater: STOP untested jq: %s prints 'jq-1.6', which core/TESTED_JQ does not list for the core; no "
+            "new work starts. Next, in the repository: `JQ=%s python3 -I -m unittest discover -s tests/core -t .`, then "
+            "add its row to core/TESTED_JQ when they pass\n") % (r.jq, r.jq)), res.stderr)
+        self.assertEqual(core_calls(r), [])
+        os.remove(os.path.join(r.jqd, 'version'))   # the control: the tested jq
+        res = r.cmd('status')
+        self.assertIn(ON_LINE, res.stdout)
+        self.assertEqual(core_calls(r), ['status'])
+
     def test_status_takes_no_lock(self):
         r = Rig(self)
         Paths(r).put(dict(FULL, on=True))
