@@ -1,7 +1,8 @@
 """The release's wiring for golden-gate: install links it (TOOLS); release-check holds the constants that two scripts set
 to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-gate), STATEDIR (golden-build,
-golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune) and DD (runner-updater,
-runner-journal). release-check runs on a temporary git repository with only the files the constants rule reads; it
+golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune), DD (runner-updater,
+runner-journal), BIN (runner-updater, runner-enable), DF (runner-updater, tart-shim) and FLOOR_GIB (runner-updater,
+golden-build: the switch window's DISK check uses golden-build's floor). release-check runs on a temporary git repository with only the files the constants rule reads; it
 downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
@@ -34,7 +35,10 @@ class ReleaseCheckConstants(unittest.TestCase):
               'STATEDIR': ('/Users/ci/.local/state/runner-updater', 'golden-prune', 'golden-build'),
               'PINDIR': ('$STATEDIR/pin', 'runner-updater', 'golden-build'),
               'PROTECTED': ('$STATEDIR/protected', 'runner-updater', 'golden-prune'),
-              'DD': ('/bin/dd', 'runner-updater', 'runner-journal')}
+              'DD': ('/bin/dd', 'runner-updater', 'runner-journal'),
+              'BIN': ('/Users/ci/bin', 'runner-updater', 'runner-enable'),
+              'DF': ('/bin/df', 'runner-updater', 'tart-shim'),
+              'FLOOR_GIB': ('200', 'runner-updater', 'golden-build')}
 
     def check(self, name, value):
         line, changed, other = self.WIRING[name]
@@ -81,6 +85,15 @@ class ReleaseCheckConstants(unittest.TestCase):
 
     def test_two_values_of_dd_are_red(self):
         self.two_values_are_red('DD')
+
+    def test_two_values_of_bin_are_red(self):
+        self.two_values_are_red('BIN')
+
+    def test_two_values_of_df_are_red(self):
+        self.two_values_are_red('DF')
+
+    def test_two_values_of_floor_gib_are_red(self):
+        self.two_values_are_red('FLOOR_GIB')
 
 
 class LockHolderMessages(unittest.TestCase):
