@@ -34,5 +34,45 @@ class TestOwnPath(unittest.TestCase):
         self.assertEqual(set(lines_of(os.path.join(r.psd, 'path'))), {'/nonexistent'})
 
 
+LOG_FILE = (' line 5: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside '
+            'the config reads as a quiet, continuous log, so R1 would be blind while the facts look normal; remove the key')
+LOG_FORMAT = (' line 5: log-format is not "text": runscaler then writes records that the core\'s log reader ignores, so R1 '
+              'would be blind while the facts look normal; set log-format = "text" or remove the line')
+
+
+class TestLogKeys(unittest.TestCase):
+    """A config whose log the core cannot read is no facts (S3b-1 review r1 P3-1): a top-level log-file key (runscaler
+    then writes elsewhere, or nowhere with ""), or a log-format other than "text" (json records the core ignores)."""
+
+    def refused(self, top, why):
+        r = Rig(self, cfg=config(top=top))
+        res = r.report(ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: REFUSE no facts: %s%s\n' % (r.config, why), res.stdout)
+        self.assertFalse(os.path.exists(os.path.join(r.pass_dir, 'facts.json')))
+        self.assertFalse(os.path.exists(os.path.join(r.pass_dir, 'idle.json')))
+        return r
+
+    def test_a_top_level_log_file_is_refused(self):
+        for line in ('log-file = "/var/log/runscaler.log"', 'log-file = ""', '"log-file" = "x"', "log-file='x'",
+                     'log-file.x = 1'):
+            with self.subTest(line=line):
+                self.refused(line + '\n', LOG_FILE)
+
+    def test_a_log_format_other_than_text_is_refused(self):
+        for line in ('log-format = "json"', 'log-format = ""', "log-format = 'text'", '"log-format" = "text"',
+                     'log-format = "text" x'):
+            with self.subTest(line=line):
+                self.refused(line + '\n', LOG_FORMAT)
+
+    def test_control_log_format_text_and_a_log_file_key_in_a_table(self):
+        for cfg in (config(top='log-format = "text"\n'), config(top='log-format = "text"   # the default\n'),
+                    config().replace('[tart]\n', '[tart]\nlog-file = "x"\n')):
+            with self.subTest(cfg=cfg[:200]):
+                r = Rig(self, cfg=cfg)
+                r.report()
+                self.assertEqual(r.facts()['format'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

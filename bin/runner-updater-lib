@@ -41,7 +41,10 @@
 #      health-address and health-port (above the first table); each [[scaleset]] block's `name` and its non-comment
 #      `runner-image` line, both plain "..." strings. lines = {SET: IMAGE} for each block with an image; sets = every
 #      block's name. No facts on: a block with two names or two images, or with no name; two blocks with one name; a
-#      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read.
+#      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read; a top-level
+#      log-file key (runscaler then writes elsewhere, or nowhere, and runner.log reads as a quiet log); a top-level
+#      log-format that is not exactly `log-format = "text"` (the core reads only the text format). Either of the
+#      last two would leave R1 blind while the facts look normal.
 #      It reads CONFIG after the process reads: a config installed after the process started then has a later mtime,
 #      which proves nothing (the safe direction).
 #   6. families: FAMILIES, one line per family "FAMILY tart SET [SET ...]" (FAMILY [a-z][a-z0-9-]{0,40}, SET
@@ -220,6 +223,14 @@ ru_config() {
       [[ $l =~ "^${ws}name${ws}=${ws}\"([A-Za-z0-9][A-Za-z0-9._-]{0,99})\"${tail}" && $l == "$MATCH" ]] \
         || { REPLY="$CONFIG line $n: a scale set name this does not read ([A-Za-z0-9][A-Za-z0-9._-], at most 100)"; return 1 }
       bname=$match[1]
+    elif (( top )) && [[ $l =~ "^${ws}[\"']?log-file[\"']?${ws}[.=]" ]]; then
+      REPLY="$CONFIG line $n: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside the config reads as a quiet, continuous log, so R1 would be blind while the facts look normal; remove the key"
+      return 1
+    elif (( top )) && [[ $l =~ "^${ws}[\"']?log-format[\"']?${ws}[.=]" ]]; then
+      [[ $l =~ "^${ws}log-format${ws}=${ws}\"text\"${tail}" && $l == "$MATCH" ]] || {
+        REPLY="$CONFIG line $n: log-format is not \"text\": runscaler then writes records that the core's log reader ignores, so R1 would be blind while the facts look normal; set log-format = \"text\" or remove the line"
+        return 1
+      }
     elif (( top )) && [[ $l =~ "^${ws}health-address${ws}=${ws}\"([^\"\\\\[:cntrl:]]*)\"${tail}" && $l == "$MATCH" ]]; then
       ru_haddr=$match[1]
     elif (( top )) && [[ $l =~ "^${ws}health-address${ws}=" ]]; then
