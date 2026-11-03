@@ -11,7 +11,7 @@ import subprocess
 import time
 import unittest
 
-from tests.studio.test_runner_updater import IMG, IMG2, P, Rig, config, core_calls, fixture, read_text
+from tests.studio.test_runner_updater import IMG, IMG2, P, Rig, config, core_calls, fixture, read_text, the_jq
 
 SYSTEM = '/usr/bin:/bin:/usr/sbin:/sbin'
 V0, V1, V2 = '2.338.2', '2.338.9', '2.339.0'
@@ -985,6 +985,142 @@ def on_state(**kw):
                                               previous={'mac-a': IMG0}, **kw)})
 
 
+# THE NO-ACTION CELLS. macOS's sandbox lets start only the programs a command is meant to start, each by the path it
+# starts it by (with the rig's jq, the jq a wrapper runs, and its ps and curl stubs), and the action stubs of the
+# rig's stubs folder, so a bare name still reaches its logging stub (the second witness). zsh prints a denied start
+# on stderr: "...: operation not permitted: PATH".
+STATUS_RUNS = ('/bin/zsh', '/bin/cat', '/bin/date')
+PASS_RUNS = STATUS_RUNS + ('/bin/mkdir', '/bin/rm', '/bin/mv', '/bin/dd', '/bin/sleep', '/usr/bin/head', '/usr/bin/shasum',
+                           '/usr/bin/perl')   # shasum is a perl script
+REPORT_RUNS = PASS_RUNS + ('/bin/cp',)
+DENIED = ': operation not permitted: %s\n'
+ACTIONS_SEEN = ['runner-disable', 'runner-enable', 'golden-build', 'golden-gate', 'tart', 'launchctl', 'kill']
+
+
+def only_these_start(r, programs):
+    """a sandbox-exec profile: no program may start but PROGRAMS, the rig's jq and stubs, and the action stubs"""
+    allowed = set(programs) | {r.jq, the_jq(), r.sb.path('tools-ps', 'ps'), r.sb.path('tools-curl', 'curl')}
+    allowed |= {os.path.realpath(p) for p in allowed}
+    return ('(version 1)(allow default)(deny process-exec*)(allow process-exec*%s (subpath "%s"))'
+            % (''.join(' (literal "%s")' % p for p in sorted(allowed)), r.sb.stubs))
+
+
+def sandboxed(test, r, profile, *args, env=None):
+    """runner-updater ARGS under sandbox-exec with PROFILE; it must exit 0"""
+    res = r.sb.run(['/usr/bin/sandbox-exec', '-p', profile, '/bin/zsh', '-f', r.script] + list(args), extra_env=env)
+    test.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+    return res
+
+
+def actions_seen(r):
+    log = r.sb.path('logs', 'actions.log')
+    return [l.split()[0] for l in read_text(log).splitlines()] if os.path.exists(log) else []
+
+
+class TestNoActionAnyPath(unittest.TestCase):
+    """pass, report and status take no action, whatever path an action tool is called by. Each runs under a profile
+    that lets start only what it is meant to start (above): an action tool called by its ABSOLUTE path (the repo's
+    style) is denied, and zsh prints the denial. The action stubs, found through PATH, stay the second witness, and
+    `kill` (a builtin) is a logging function. The controls, under the same profile: `/bin/launchctl list` by its
+    absolute path is denied and the cell sees the denial (and the launchctl stub sees nothing); bare names reach their
+    stubs. Bound: a call whose stderr and exit status are both thrown away is seen by neither witness."""
+
+    ABSOLUTE = '/bin/launchctl list > /dev/null'
+    # where each command's planted call goes
+    PASS_AT = WOULD
+    REPORT_AT = '/bin/mv -f -- $pass/state.json $REPORT/state.json || refuse "cannot write $REPORT/state.json"\nexit 0\n'
+    STATUS_AT = "  print -r -- $out | $JQ -r 'def yn:"
+
+    def plant(self, at, calls):
+        if at == self.REPORT_AT:
+            return [KILL, (at, at.replace('exit 0\n', calls + '\nexit 0\n'))]
+        return [KILL, (at, '  ' + calls + '\n' + at)]
+
+    def a_pass(self, calls=None):
+        """two passes, under the profile: the window opens, then three counted failures (R1: rollback)"""
+        r = Rig(self, jq_wrap=True, extra_rewrites=self.plant(self.PASS_AT, calls) if calls else [KILL])
+        Paths(r).put(on_state())
+        profile = only_these_start(r, PASS_RUNS)
+        env = {'ACTIONS_LOG': r.sb.path('logs', 'actions.log')}
+        r.write_log('')
+        first = sandboxed(self, r, profile, 'pass', env=env)
+        r.append_log(fixture('studio-cut.log') + fixture('three-failures.log'))
+        res = sandboxed(self, r, profile, 'pass', env=env)
+        self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
+                      '(connect-class only))\n', res.stdout)
+        self.assertIn('runner-updater: pass: would roll back fx (this release takes no action)\n', res.stdout)
+        return r, first.stderr + res.stderr
+
+    def a_report(self, calls=None):
+        """two reports, under the profile: --observe fx, then three counted failures (R1: a rollback is due)"""
+        r = Rig(self, extra_rewrites=self.plant(self.REPORT_AT, calls) if calls else [KILL])
+        profile = only_these_start(r, REPORT_RUNS)
+        env = {'ACTIONS_LOG': r.sb.path('logs', 'actions.log')}
+        r.write_log('')
+        first = sandboxed(self, r, profile, 'report', '--observe', 'fx', env=env)
+        r.append_log(fixture('three-failures.log'))
+        res = sandboxed(self, r, profile, 'report', env=env)
+        self.assertIn('\nfx: R1: a rollback is due', res.stdout)
+        return r, first.stderr + res.stderr
+
+    def a_status(self, calls=None):
+        r = Rig(self, extra_rewrites=self.plant(self.STATUS_AT, calls) if calls else [KILL])
+        Paths(r).put(dict(FULL, on=True))
+        res = sandboxed(self, r, only_these_start(r, STATUS_RUNS), 'status',
+                        env={'ACTIONS_LOG': r.sb.path('logs', 'actions.log')})
+        self.assertIn('\nrunner-updater: STOP fx NO EVIDENCE: known true;', res.stdout)
+        return r, res.stderr
+
+    def test_each_starts_only_what_it_may(self):
+        for name, run in (('pass', self.a_pass), ('report', self.a_report), ('status', self.a_status)):
+            with self.subTest(cmd=name):
+                r, err = run()
+                self.assertEqual(err, '')                  # no denied start
+                self.assertEqual(actions_seen(r), [])      # no action stub reached
+
+    def test_control_an_action_by_its_absolute_path_is_denied_and_seen(self):
+        for name, run, n in (('pass', self.a_pass, 2), ('report', self.a_report, 2), ('status', self.a_status, 1)):
+            with self.subTest(cmd=name):
+                r, err = run(self.ABSOLUTE)
+                self.assertEqual(err.count(DENIED % '/bin/launchctl'), n, err)
+                self.assertEqual(actions_seen(r), [])      # the stub never ran: the call was by its path
+
+    def test_control_bare_names_reach_their_stubs_under_the_same_profile(self):
+        for name, run, n in (('pass', self.a_pass, 2), ('report', self.a_report, 2), ('status', self.a_status, 1)):
+            with self.subTest(cmd=name):
+                r, err = run(ACTION_CALLS)
+                self.assertEqual(actions_seen(r), ACTIONS_SEEN * n)
+                self.assertEqual(err, '')
+
+
+class TestStderrKept(unittest.TestCase):
+    """A report or a pass keeps its stderr to its last line. zsh's `exec {fd}< FILE 2>/dev/null` opens FILE AND sends
+    the shell's own stderr to /dev/null for good: after the log was opened, every later error line of the run (and a
+    sandbox denial) was lost. The lib opens the log, and runner.log.1 after a rotation, with the 2>/dev/null on a
+    group around the exec. A line planted at the end of report and of pass must reach stderr: on a first pass (the
+    log), and on a pass after one rotation (runner.log.1 too)."""
+
+    LINE = "print -u2 -r -- 'stderr reaches the end'"
+
+    def test_report_and_pass_keep_their_stderr(self):
+        for cmd in ('report', 'pass'):
+            for rotated in (False, True):
+                with self.subTest(cmd=cmd, rotated=rotated):
+                    at = TestNoActionAnyPath.REPORT_AT if cmd == 'report' else WOULD
+                    new = (at.replace('exit 0\n', self.LINE + '\nexit 0\n') if cmd == 'report'
+                           else '  ' + self.LINE + '\n' + at)
+                    r = Rig(self, extra_rewrites=[(at, new)])
+                    Paths(r).put(on_state())
+                    if rotated:
+                        r.cmd(cmd)
+                        r.rotate()
+                        r.append_log(fixture('studio-cut.log'))
+                    res = r.cmd(cmd)
+                    if rotated:
+                        self.assertIn('; continuous: the log rotated once', res.stdout)
+                    self.assertEqual(res.stderr, 'stderr reaches the end\n')
+
+
 class TestPass(unittest.TestCase):
     """runner-updater pass, the timer's entry: it TRIES the lock (held: exit 0 at once); OFF: exit 0 at once, no core
     call; ON: the facts from the real state, idle / r1 / keep / status, the core state written back into the state,
@@ -1089,28 +1225,6 @@ class TestPass(unittest.TestCase):
         os.remove(os.path.join(r.jqd, 'fail'))
         r.cmd('pass')
         self.assertEqual(lines_of(u.protected), [IMG0, IMG])
-
-    def run_rollback(self, r, u):
-        log = r.sb.path('logs', 'actions.log')
-        r.write_log('')
-        r.cmd('pass', env={'ACTIONS_LOG': log})           # the window opens
-        r.append_log(fixture('studio-cut.log') + fixture('three-failures.log'))
-        res = r.cmd('pass', env={'ACTIONS_LOG': log})
-        self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
-                      '(connect-class only))\n', res.stdout)
-        return res, read_text(log) if os.path.exists(log) else ''
-
-    def test_a_pass_takes_no_action_and_says_what_it_would_do(self):
-        r, u = self.rig(on_state(), extra_rewrites=[KILL])
-        res, actions = self.run_rollback(r, u)
-        self.assertIn('runner-updater: pass: would roll back fx (this release takes no action)\n', res.stdout)
-        self.assertEqual(actions, '')
-
-    def test_control_the_harness_sees_each_action_of_a_pass(self):
-        r, u = self.rig(on_state(), extra_rewrites=[KILL, (WOULD, '  ' + ACTION_CALLS + WOULD.lstrip())])
-        res, actions = self.run_rollback(r, u)
-        self.assertEqual([l.split()[0] for l in actions.splitlines()],
-                         ['runner-disable', 'runner-enable', 'golden-build', 'golden-gate', 'tart', 'launchctl', 'kill'] * 2)
 
     def accept_at(self, later):
         r, u = self.rig(on_state(), extra_rewrites=[NOW])

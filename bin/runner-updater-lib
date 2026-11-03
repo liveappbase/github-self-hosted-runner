@@ -155,7 +155,8 @@ ru_capture() {
   typeset -gA ru_st
   ru_st=()
   [[ -f $1 ]] || { REPLY="no runscaler log $1"; return 1 }
-  exec {ru_fd}< $1 2>/dev/null || { REPLY="cannot open the runscaler log $1"; return 1 }
+  # the 2>/dev/null is on a group: on `exec` itself it would send the shell's own stderr to /dev/null for good
+  { exec {ru_fd}< $1 } 2>/dev/null || { REPLY="cannot open the runscaler log $1"; return 1 }
   zstat -H ru_st -f $ru_fd || { REPLY="cannot stat the runscaler log $1"; return 1 }
   ru_inode=$ru_st[inode] ru_offset=$ru_st[size]
   ru_sha $ru_fd $ru_offset || { REPLY="cannot read the runscaler log $1"; return 1 }
@@ -190,7 +191,7 @@ ru_text() {
     else
       ru_why="NOT continuous: the log file was cut or rewritten at the last pass's position"
     fi
-  elif [[ -f $RUNLOG.1 ]] && exec {bfd}< $RUNLOG.1 2>/dev/null; then
+  elif [[ -f $RUNLOG.1 ]] && { exec {bfd}< $RUNLOG.1 } 2>/dev/null; then   # a group, as in ru_capture
     if zstat -H st1 -f $bfd && [[ $st1[inode] == "$ru_b[1]" ]]; then
       if (( ru_b[2] <= st1[size] )) && ru_sha $bfd $ru_b[2] && [[ $REPLY == "$ru_b[3]" ]]; then
         ru_copy $bfd $ru_b[2] $(( st1[size] - ru_b[2] )) $o && ru_copy $ru_fd 0 $ru_offset $o && ok=1
