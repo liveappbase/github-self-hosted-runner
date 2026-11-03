@@ -1,9 +1,11 @@
 """03-runscaler.sh: the image it renders, `render DIGEST STAGED`, the rejected digests, and the unit's clock (plan D2,
 D5; the changed-lines list, items 30-33 and 41).
 
-- `real [DIGEST]` (and probe, c1): with a DIGEST, that digest of the local registry; with none, the image the installed
+- `real [DIGEST]`: with a DIGEST, that digest of the local registry; with none, the image the installed
   config.toml runs NOW (pool-image.sh's image_of, the same function), and ~/run/image.ref of RUN_USER only when there is
   no config.toml (a fresh host). So a person's `03 real` after a change of pool.env's numbers keeps the running image.
+  The one-off modes `probe` and `c1` are cut (the changed-lines list, item 34): `real` and `render` are the modes, and the
+  host config's five keys only they read are gone with them.
 - `render DIGEST STAGED` (the updater's switch): renders the real sets with that digest into STAGED (a .toml file of
   ~/.config/runner) and validates it; it installs nothing (no binary, no unit, no daemon-reload, no config.toml), runs none
   of real's refusal controls, and refuses a set list other than config.toml's (an image switch never changes one). It
@@ -74,6 +76,14 @@ class Text(unittest.TestCase):
         rej = assignment(S03, 'REJECTED')
         self.assertEqual((len(lock), len(rej)), (1, 1), (lock, rej))
         self.assertEqual(rej[0], lock[0].rsplit('/', 1)[0] + '/rejected')
+
+    def test_the_one_off_modes_probe_and_c1_are_cut(self):
+        with open(S03) as f:
+            text = f.read()
+        for gone in ('PROBE_SET', 'PROBE_LABEL', 'C1_SET', 'C1_GROUP', 'C1_LABEL', 'MODE probe', 'MODE c1'):
+            self.assertNotIn(gone, text)
+        with open(os.path.join(REPO, 'linux-docker', 'host.conf.example')) as f:
+            self.assertNotRegex(f.read(), r'(?m)^(PROBE|C1)_')
 
     def test_the_unit_runs_runscaler_in_utc(self):
         with open(UNIT) as f:
@@ -279,6 +289,19 @@ class Render(unittest.TestCase):
                 if not ok:
                     self.assertEqual(g.p.config(), before)
 
+    def test_a_host_config_refusal_leaves_no_staged_file(self):
+        """render's header: a failure leaves nothing staged, a STAGED from before included; the host config's refusal
+        comes first of all, so the cleanup is set before it. The control: the stale STAGED of the classify cell, which
+        a PASS replaces."""
+        g = Rig(self)
+        g.p.write(g.staged, 'a stale file\n', 0o600)
+        os.rename(g.p.path('host.conf'), g.p.path('host.conf.away'))
+        r = g.render()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('REFUSE no host config', r.stderr)
+        self.assertFalse(os.path.lexists(g.staged))
+        self.assertEqual(g.validated(), [])
+
     def test_render_without_the_token_stages_nothing(self):
         g = Rig(self)
         os.remove(g.p.rpath('token-owner'))
@@ -293,7 +316,7 @@ class Render(unittest.TestCase):
                      ('render', X, '/tmp/config.staged.toml'), ('render', X, R + '/config.toml'),
                      ('render', X, R + '/config.real.toml'), ('render', X, R + '/staged.txt'),
                      ('render', X, R + '/sub/x.toml'), ('render', ref(X), g.staged), ('real', 'x'), ('real', X, 'x'),
-                     ('probe', X), ('upgrade',)):
+                     ('probe', X), ('upgrade',), ('probe',), ('c1',)):
             with self.subTest(args=args):
                 before = g.p.snapshot()
                 g.p.write(g.p.path('logs', 'docker.log'), '')

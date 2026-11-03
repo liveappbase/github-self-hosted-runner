@@ -4,12 +4,11 @@
 # ~/build):
 #   ssh RS_USER@<host> 'bash -s -- MODE' < linux-docker/setup/03-runscaler.sh
 # The set names, groups and labels are the host config's (host.conf.example):
-#   MODE probe         one set: PROBE_SET    (group GROUP, labels self-hosted + PROBE_LABEL)
 #   MODE real [DIGEST] two sets: MAIN_SET    (group GROUP, labels self-hosted + MAIN_LABEL) and the small lane
 #                      SMALL_SET             (same group, labels self-hosted + SMALL_LABEL, 1 runner, its own
 #                      cpu/memory: SMALL_CPU/SMALL_MEMORY)
-#   MODE c1            MAIN_SET + C1_SET     (group C1_GROUP, label C1_LABEL only, 1 runner, the real set's cpu)
 #   MODE render DIGEST STAGED   real's sets, for an image switch of the updater (below); it installs nothing
+# (The one-off modes `probe` and `c1` of the first install are cut, with the five host-config keys only they read.)
 # THE IMAGE: DIGEST (sha256:<64 hex>) is an image of the local registry. With none, the image the installed config.toml
 # RUNS NOW (image_of, pool-image.sh's own function), so a `03 real` after a change of pool.env's numbers, or after a
 # release that changes an installed file, keeps the running image; RUN_USER's ~/run/image.ref (the full 02-d1.sh run's)
@@ -17,26 +16,43 @@
 # REJECTED: ~/.local/state/runner-updater/rejected (the folder of the updater lock, runner-release.sh's RR_LOCK), which
 # the updater writes: one `sha256:<64 hex>` per line. No file, or an empty one, rejects nothing; any other content (a
 # blank line, a CR, other text, not a regular file) REFUSES: a list that cannot be read is never read as "none".
-# probe, real, c1: it installs the files above from ~/build, renders ~/.config/runner/config.MODE.new.toml (a .toml
-# NAME: runscaler takes the config type from the extension) and runs the refusal controls on throwaway copies. Only
-# when the token is in does it validate the render with runscaler's own strict `validate` and THEN install it as
-# config.MODE.toml and config.toml. No token: no CONFIG is installed ("03 STOPPED", exit 3; the binary, runner-start,
+# real: it installs the files above from ~/build, renders ~/.config/runner/config.real.new.toml (a .toml NAME:
+# runscaler takes the config type from the extension) and runs the refusal controls on throwaway copies. Only when
+# the token is in does it validate the render with runscaler's own strict `validate` and THEN install it as
+# config.real.toml and config.toml. No token: no CONFIG is installed ("03 STOPPED", exit 3; the binary, runner-start,
 # pool-ready, validate-class and the unit are). A validate that is not PASS: config.toml is not touched. It does not
 # start or restart runscaler (a running pool is fine: validate takes no lock). A config that registers a NEW set is
 # rendered only with the unit stopped (a crash restart must not register it before the operator's go).
 # render DIGEST STAGED: renders real's sets with that image into STAGED (a .toml file in ~/.config/runner, other than
-# config.toml and config.MODE.toml) and validates it. It INSTALLS NOTHING and runs none of real's refusal controls: it
+# config.toml and config.real.toml) and validates it. It INSTALLS NOTHING and runs none of real's refusal controls: it
 # refuses when a file real installs is not, as installed, the one this release pins (each one's PIN is read from ONE
 # copy, the PINS of ~/build/setup/pool-image.sh; runscaler's binary is BIN_SHA), when the render's sets are not
 # config.toml's (an image switch never changes them), and with no token. Exit: 0 PASS (STAGED is the validated render);
 # 4 API-ONLY (STAGED kept: the window's tries decide, plan D5); 1 anything else, with NOTHING staged (a STAGED from
-# before is removed first); 2 usage.
+# before is removed too, also when the host config refuses: the cleanup is set before it is read); 2 usage.
 # THE VALIDATE: `runner-start validate`, its stdout AND stderr (runner-start refuses on stderr), is classified by the ONE
 # VALIDATE RULE (~/bin/validate-class): it prints the whole output, then `VALIDATE <class>`. real installs only on PASS.
 # NUMBERS: ~/.config/runner/pool.env (0600; CONCURRENT CPU MEMORY MAX SMALL_CPU SMALL_MEMORY, whole numbers), written
-# once the pool's size is measured. real, render and c1 REFUSE without it; probe without it uses the start values
-# 3/4/4096/3 and says so. An env var of the same name that disagrees with what is used is refused: change the record,
-# not the call.
+# once the pool's size is measured. real and render REFUSE without it. An env var of the same name that disagrees with
+# what is used is refused: change the record, not the call.
+# THE ARGUMENTS, and the cleanup, come before the host config (and so before `set -e`): a usage error changes nothing,
+# and from here on nothing is staged unless this run stages it: at any exit but a render's PASS or API-ONLY, STAGED (one
+# from before too) is removed, also when the host config refuses.
+R=$HOME/.config/runner
+usage() { echo "usage: 03-runscaler.sh real [DIGEST] | render DIGEST STAGED (DIGEST: sha256:<64 hex>; STAGED: a .toml file in $R, not config.toml or config.MODE.toml)"; exit 2; }
+MODE=${1-} DIGEST= STAGED=
+case $MODE:$# in
+  real:1) ;;
+  real:2) DIGEST=$2 ;;
+  render:3) DIGEST=$2 STAGED=$3
+    case ${STAGED##*/} in config.toml|config.probe.toml|config.real.toml|config.c1.toml) usage ;; esac
+    [[ ${STAGED%/*} == "$R" && ${STAGED##*/} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.toml$ ]] || usage ;;
+  *) usage ;;
+esac
+[ -z "$DIGEST" ] || [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage
+tmp=$(mktemp -d) || exit 1
+kept=0
+trap 'rm -rf "${tmp:?}"; [ -z "$STAGED" ] || [ "$kept" = 1 ] || rm -f -- "$STAGED"' EXIT
 set -euo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
@@ -55,21 +71,9 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   done < "$HOST_CONF"
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
-host_conf 03-runscaler.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME ORG_URL TOKEN_ENV TOKEN_FILE GROUP MAIN_SET MAIN_LABEL SMALL_SET SMALL_LABEL PROBE_SET PROBE_LABEL C1_SET C1_GROUP C1_LABEL
+host_conf 03-runscaler.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME ORG_URL TOKEN_ENV TOKEN_FILE GROUP MAIN_SET MAIN_LABEL SMALL_SET SMALL_LABEL
 cd ~
-B=$HOME/build; R=$HOME/.config/runner; POOL=$R/pool.env
-usage() { echo "usage: 03-runscaler.sh probe | real [DIGEST] | c1 | render DIGEST STAGED (DIGEST: sha256:<64 hex>; STAGED: a .toml file in $R, not config.toml or config.MODE.toml)"; exit 2; }
-MODE=${1-} DIGEST= STAGED=
-case $MODE:$# in
-  probe:1|real:1|c1:1) ;;
-  real:2) DIGEST=$2 ;;
-  render:3) DIGEST=$2 STAGED=$3
-    case ${STAGED##*/} in config.toml|config.probe.toml|config.real.toml|config.c1.toml) usage ;; esac
-    [[ ${STAGED%/*} == "$R" && ${STAGED##*/} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.toml$ ]] || usage ;;
-  *) usage ;;
-esac
-[ -z "$DIGEST" ] || [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage
-SHAPE=$MODE; [ "$MODE" != render ] || SHAPE=real   # the sets a render renders: real's
+B=$HOME/build; POOL=$R/pool.env
 D1=unix:///home/${RUN_USER}/run/docker.sock
 TGZ_SHA=f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f
 BIN_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
@@ -120,35 +124,25 @@ read_pins() {   # the PINS block of pool-image.sh, as data: one "PATH HEX" line 
   { [ "$end" = 1 ] && [ -n "$out" ]; } || return 1
   printf '%s' "$out"
 }
-# Nothing is staged unless this run stages it: at any exit but a render's PASS or API-ONLY, STAGED (one from before too)
-# is removed
-tmp=$(mktemp -d); kept=0
-trap 'rm -rf "${tmp:?}"; [ -z "$STAGED" ] || [ "$kept" = 1 ] || rm -f -- "$STAGED"' EXIT
-
 say "the numbers"
-N_CONCURRENT=3 N_CPU=4 N_MEMORY=4096 N_MAX=3 N_SMALL_CPU=2 N_SMALL_MEMORY=2048
-if [ -e "$POOL" ]; then
-  [ "$(stat -c '%a %U' "$POOL")" = "600 $(id -un)" ] || die "$POOL is not 0600 and owned by $(id -un)"
-  seen=" "
-  while IFS= read -r line || [ -n "$line" ]; do
-    case $line in ''|'#'*) continue ;; esac
-    [[ $line =~ ^(CONCURRENT|CPU|MEMORY|MAX|SMALL_CPU|SMALL_MEMORY)=([1-9][0-9]*)$ ]] || die "$POOL: want KEY=whole number for $KEYS, got [$line]"
-    k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || die "$POOL names $k twice"
-    printf -v "N_$k" %s "${BASH_REMATCH[2]}"; seen="$seen$k "
-  done < "$POOL"
-  for k in $KEYS; do [[ $seen == *" $k "* ]] || die "$POOL lacks $k"; done
-  src="$POOL (B4's record)"
-else
-  [ "$MODE" = probe ] || die "no $POOL: B4's numbers are not recorded, so '$MODE' is not rendered (plan §4 B4)"
-  src="the START values (no $POOL yet: B4 has not run; the probe set only proves the route)"
-fi
+[ -e "$POOL" ] || die "no $POOL: B4's numbers are not recorded, so '$MODE' is not rendered (plan §4 B4)"
+[ "$(stat -c '%a %U' "$POOL")" = "600 $(id -un)" ] || die "$POOL is not 0600 and owned by $(id -un)"
+seen=" "
+while IFS= read -r line || [ -n "$line" ]; do
+  case $line in ''|'#'*) continue ;; esac
+  [[ $line =~ ^(CONCURRENT|CPU|MEMORY|MAX|SMALL_CPU|SMALL_MEMORY)=([1-9][0-9]*)$ ]] || die "$POOL: want KEY=whole number for $KEYS, got [$line]"
+  k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || die "$POOL names $k twice"
+  printf -v "N_$k" %s "${BASH_REMATCH[2]}"; seen="$seen$k "
+done < "$POOL"
+for k in $KEYS; do [[ $seen == *" $k "* ]] || die "$POOL lacks $k"; done
+src="$POOL (B4's record)"
 for k in $KEYS; do
   n=N_$k; e=${!k:-}; [ -z "$e" ] || [ "$e" = "${!n}" ] || die "env $k=$e disagrees with $src ($k=${!n}): change the record, not the call"
 done
 # THE SMALL LANE: short jobs get a set of their own,
 # SMALL_SET, so a finisher never waits behind a long job. `concurrent` is process-wide, so it is MAX (the big set)
 # + 1 (the small set's one runner): then the small lane always has its slot, and the big set never takes it.
-[ "$MODE" = probe ] || [ "$N_CONCURRENT" = "$((N_MAX + 1))" ] || die "$src: CONCURRENT=$N_CONCURRENT must be MAX + 1 = $((N_MAX + 1)) (one slot for the small lane)"
+[ "$N_CONCURRENT" = "$((N_MAX + 1))" ] || die "$src: CONCURRENT=$N_CONCURRENT must be MAX + 1 = $((N_MAX + 1)) (one slot for the small lane)"
 ok "concurrent=$N_CONCURRENT cpu=$N_CPU memory=$N_MEMORY max-runners=$N_MAX small-lane cpu=$N_SMALL_CPU memory=$N_SMALL_MEMORY from $src"
 
 say "(d) ${RS_USER} reaches D1 through the shared socket; the image"
@@ -194,7 +188,7 @@ umask 077
 NEW=$R/config.$MODE.new.toml; [ "$MODE" != render ] || NEW=$STAGED
 say "render ${NEW##*/}"
 header() { cat <<T
-# runscaler v0.9.5 config, MODE $SHAPE, rendered by 03-runscaler.sh. 0600.
+# runscaler v0.9.5 config, MODE real, rendered by 03-runscaler.sh. 0600.
 # Numbers from $src.
 log-level = "info"
 concurrent = $N_CONCURRENT
@@ -234,12 +228,7 @@ T
 }
 render() {   # $1 = yes: with the small lane (the real render); no: without it (the controls' base, below)
   header
-  case $SHAPE in
-    probe) set_ ${PROBE_SET} ${GROUP} '["self-hosted", "'"${PROBE_LABEL}"'"]' "$N_MAX" ;;
-    real)  set_ ${MAIN_SET} ${GROUP} '["self-hosted", "'"${MAIN_LABEL}"'"]' "$N_MAX"; [ "$1" = no ] || small ;;
-    c1)    set_ ${MAIN_SET} ${GROUP} '["self-hosted", "'"${MAIN_LABEL}"'"]' "$N_MAX"
-           set_ ${C1_SET} ${C1_GROUP} '["'"${C1_LABEL}"'"]' 1 ;;
-  esac
+  set_ ${MAIN_SET} ${GROUP} '["self-hosted", "'"${MAIN_LABEL}"'"]' "$N_MAX"; [ "$1" = no ] || small
 }
 render yes > "$NEW"
 first=$(grep -m1 -E '^name = ' "$NEW" | cut -d'"' -f2)
@@ -292,11 +281,10 @@ add '\n[scaleset.docker]\nshared-volume = "/s"\n'; refuses "docker.shared-volume
 add '\n[scaleset.docker]\ncache-volumes = ["a:/b"]\n'; refuses "docker.cache-volumes is not one the render writes"
 cp "$NEW" "$tmp/c.toml.new"; out=$(RUNNER_START_CONFIG=$tmp/c.toml.new "$HOME/bin/runner-start" validate 2>&1 || true)
 case $out in *"must end in .toml"*) ok "refused: a config name that does not end in .toml" ;; *) die "runner-start did not refuse a .toml.new name: $out" ;; esac
-if [ "$MODE" = real ]; then   # the small lane's OWN [scaleset.docker]: the real render ends inside it, so a line appended lands there
-  { cat "$NEW"; printf 'dind = true\n'; } > "$t2"; refuses "scaleset[1] '${SMALL_SET}': docker.dind resolves to True"
-  { cat "$NEW"; printf 'shared-volume = "/s"\n'; } > "$t2"; refuses "scaleset[1].docker.shared-volume is not one the render writes"
-fi
-fi   # ---- end of probe, real and c1's set check and controls
+# the small lane's OWN [scaleset.docker]: the real render ends inside it, so a line appended lands there
+{ cat "$NEW"; printf 'dind = true\n'; } > "$t2"; refuses "scaleset[1] '${SMALL_SET}': docker.dind resolves to True"
+{ cat "$NEW"; printf 'shared-volume = "/s"\n'; } > "$t2"; refuses "scaleset[1].docker.shared-volume is not one the render writes"
+fi   # ---- end of real's set check and controls
 
 if [ ! -s "$R/${TOKEN_FILE}" ]; then
   [ "$MODE" != render ] || die "no token ($R/${TOKEN_FILE}), so the render cannot be validated: nothing staged"

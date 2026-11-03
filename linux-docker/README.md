@@ -104,7 +104,7 @@ A host installed from a release before this one: do "Upgrading from a release be
 
 ## Upgrading from a release before this one
 
-This release adds the host-config key `RUNNER_VERSION`: the runner version a full 02-d1.sh run builds. This release's 02-d1.sh refuses to run without it, with `02-d1.sh: REFUSE /etc/liveapp-ci/host.conf lacks RUNNER_VERSION`, before it changes anything. Set it to the runner version the pool runs now, before you run a script of this release. The lines below change that one key in the host config installed on the host; every other line stays as it is:
+This release adds the host-config key `RUNNER_VERSION`: the runner version a full 02-d1.sh run builds. This release's 02-d1.sh refuses to run without it, with `02-d1.sh: REFUSE /etc/liveapp-ci/host.conf lacks RUNNER_VERSION`, before it changes anything. Set it to the runner version the pool runs now, before you run a script of this release. The lines below change that one key in the host config installed on the host; every other line stays as it is. (This release no longer reads `PROBE_SET`, `PROBE_LABEL`, `C1_SET`, `C1_GROUP` and `C1_LABEL`: 03-runscaler.sh's one-off modes `probe` and `c1` are gone. Their lines may stay in the host config.)
 
 1. Read that version (as RS_USER). It starts the image that config.toml names, with no network, and prints its runner's version, as `pool-image.sh up` reads it. It must print exactly one version; if it prints none or two, stop: config.toml does not name one image for both sets.
    ```

@@ -43,10 +43,3 @@ MAIN_SET=linux-ci-main
 MAIN_LABEL=linux-ci
 SMALL_SET=linux-ci-small
 SMALL_LABEL=linux-ci-small
-# 03-runscaler.sh probe: one set, in GROUP, labels self-hosted and PROBE_LABEL (a first install proves the route with it).
-PROBE_SET=linux-ci-probe
-PROBE_LABEL=linux-ci-probe
-# 03-runscaler.sh c1: the main set and one more set of one runner in its own group C1_GROUP, label C1_LABEL only.
-C1_SET=linux-ci-c1probe
-C1_GROUP=linux-ci-probe
-C1_LABEL=linux-ci-probe
