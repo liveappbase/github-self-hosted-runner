@@ -22,7 +22,9 @@ jobs:
   release-check:
     runs-on: macos-latest
     # The tests step took 4.4-4.8 min through 1f81eb6; the Studio window tests (4d2a46e) took it past 11.7 min and the
-    # job hit 15 min (run 41681004376, cancelled). Locally the suite went from 422 s to 812 s.
+    # job hit 15 min (run 41681004376, cancelled). Locally the suite went from 422 s to 812 s. The step took 878 s in run
+    # 41723291108, so it runs tools/run-tests: on a 16-CPU Mac under load, 1030 tests took 1209 s with the plain line,
+    # 343 s at -j 3 and 318 s at -j 16. Its floor is the slowest module (the Studio window tests, about 300 s).
     timeout-minutes: 30
     steps:
       - name: Fetch the commit and its history
