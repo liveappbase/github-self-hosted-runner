@@ -447,7 +447,10 @@ class TestFailures(unittest.TestCase):
         self.assertIn('no tests/ folder here', r.stderr)
 
 
-# two modules that each wait (up to WAIT s) for the other to run at the same time, and write whom they met
+# two modules that each wait (up to WAIT s) to see the other run, and write whom they met. The meet goes both ways: a
+# module that saw the other writes its saw- file, and keeps its running- marker until the other's saw- file is there
+# too (up to HOLD s). So a poll that wakes late still finds the other's marker: the meet fails only when the two modules
+# never ran at the same time
 T_MEET = '''import os
 import time
 import unittest
@@ -455,19 +458,31 @@ import unittest
 D = %(d)r
 
 
+def there(name):
+    return os.path.exists(os.path.join(D, name))
+
+
 class T(unittest.TestCase):
     def test_meet(self):
-        me = os.path.join(D, 'running-%(name)s')
-        open(me, 'w').close()
+        me, other = %(name)r, %(other)r
+        mark = os.path.join(D, 'running-' + me)
+        open(mark, 'w').close()
         try:
-            end, met = time.monotonic() + %(wait)s, []
-            while time.monotonic() < end and not met:
-                met = [n[8:] for n in os.listdir(D) if n.startswith('running-') and n != 'running-%(name)s']
-                time.sleep(0.02)
-            with open(os.path.join(D, 'met-%(name)s'), 'w') as f:
-                f.write(' '.join(met))
+            met, end = '', time.monotonic() + %(wait)s
+            while not met and time.monotonic() < end:
+                if there('running-' + other):
+                    met = other
+                else:
+                    time.sleep(0.02)
+            if met:
+                open(os.path.join(D, 'saw-' + me), 'w').close()
+                end = time.monotonic() + %(hold)s
+                while not there('saw-' + other) and time.monotonic() < end:
+                    time.sleep(0.02)
+            with open(os.path.join(D, 'met-' + me), 'w') as f:
+                f.write(met)
         finally:
-            os.remove(me)
+            os.remove(mark)
 '''
 
 
@@ -477,8 +492,9 @@ class TestParallel(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         t = Tree(self, {'tests/__init__.py': '', 'tests/a/__init__.py': '', 'tests/a/test_mixed.py': T_MIXED,
                         'tests/r/__init__.py': '',
-                        'tests/r/test_meet_a.py': T_MEET % {'d': d, 'name': 'a', 'wait': 4},
-                        'tests/r/test_meet_b.py': T_MEET % {'d': d, 'name': 'b', 'wait': 4}}, base=False)
+                        'tests/r/test_meet_a.py': T_MEET % {'d': d, 'name': 'a', 'other': 'b', 'wait': 4, 'hold': 30},
+                        'tests/r/test_meet_b.py': T_MEET % {'d': d, 'name': 'b', 'other': 'a', 'wait': 4, 'hold': 30}},
+                 base=False)
         r = t.run('-j', str(j))
         with open(os.path.join(d, 'met-a')) as fa, open(os.path.join(d, 'met-b')) as fb:
             met = (fa.read(), fb.read())
