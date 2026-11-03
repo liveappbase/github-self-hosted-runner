@@ -21,6 +21,9 @@ REGISTRY_PORT=27500
 RS_HEALTH_PORT=27080
 # The runner image's name in the local registry.
 IMAGE_NAME=linux-runner
+# The runner version (actions/runner, N.N.N) a FULL 02-d1.sh run builds: a fresh host. A runner release after that is
+# `02-d1.sh build VERSION` (linux-docker/README.md), which names its version itself; this key may stay as it was.
+RUNNER_VERSION=2.338.2
 
 # Where the scale sets register: an organization (https://github.com/ORG) or a repository (https://github.com/ORG/REPO).
 ORG_URL=https://github.com/your-org

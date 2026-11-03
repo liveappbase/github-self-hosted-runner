@@ -1,11 +1,30 @@
 #!/usr/bin/env bash
 # 02-d1.sh — D1: RUN_USER's rootless dockerd, its hardening, the `runners` network, the local registry and the runner
-# image. Runs AS RUN_USER, never root (linux-docker/README.md; needs this release's linux-docker/ as ~/build):
-#   ssh RUN_USER@<host> 'bash -s' < linux-docker/setup/02-d1.sh
-# Re-runnable (a runner release: new base digest in the Dockerfile, run it again — the new image digest goes to
-# ~/run/image.ref, but only after every check below passed on it). Then, AS RS_USER, `pool-image.sh up VERSION` (never
-# 03-runscaler.sh alone: up checks the image's runner version, keeps the rollback and restarts only with no runner),
-# and after the first job on the new image passes, `pool-image.sh accept` (or `back`). No secret here.
+# image. Runs AS RUN_USER, never root (linux-docker/README.md; needs this release's linux-docker/ as ~/build, with the
+# repository's setup/tls-excluded-spki in ~/build/setup/):
+#   ssh RUN_USER@<host> 'bash -s' < linux-docker/setup/02-d1.sh               the FULL run: a fresh host (re-runnable)
+#   ssh RUN_USER@<host> 'bash ~/build/setup/02-d1.sh build RUNNER_VERSION'     BUILD: a runner release's image
+# THE IMAGE (step 5, both modes): release v<VERSION> of actions/runner, read with setup/runner-release.sh (GitHub's API;
+# the tarball's sha256 must be the release asset's digest; every download with the filtered CA bundle and no CA
+# folder), built with --no-cache on the base image/Dockerfile pins, from a fresh 0700 context outside ~/build that holds
+# image/'s files (the RECIPE) and the checked tarball as runner.tar.gz (not part of the recipe). The runner version is
+# then read from the pushed image (pool-image.sh up's own read): it must be VERSION.
+# FULL: steps 1-9 with VERSION = the host config's RUNNER_VERSION; step 9 writes the build record, then ~/run/image.ref:
+#   this run is image.ref's ONLY writer.
+# BUILD VERSION: ONE path for the updater and a person. Step 3's read-only checks, the image (5) and its checks (6 and
+#   8), then the build record; never steps 1, 2, 4 or 7, never image.ref. It does NOT read the updater's on/off key:
+#   the updater checks its own key before it calls this, and a person's release update must work while it is off.
+#   Then, AS RS_USER, `pool-image.sh up VERSION` (never 03-runscaler.sh alone: up checks the image's runner version,
+#   keeps the rollback and restarts only with no runner), and after the first job on the new image passes,
+#   `pool-image.sh accept` (or `back`).
+# THE BUILD RECORD: ~/run/builds/<VERSION>-<RECIPE>, RECIPE = the sha256 of image/'s `sha256sum` lines (`<hash>  <name>`,
+#   names in byte order). ONE per (version, recipe): a rebuild replaces it. 0640 in a 0750 folder, so RS_USER (in
+#   RUN_USER's group) can read it. Exactly four `key value` lines, in this order: `format 1`, `version N.N.N`, `digest
+#   sha256:<64 hex>` (the image's digest in the local registry), `recipe <64 hex>`. Written whole under a temporary name
+#   (.new.*), fsynced, then renamed: a reader takes only names of the record's form, and reads each line by its pattern,
+#   as hostile (never sourced). A failed check, a version mismatch or a digest mismatch writes no record.
+# Exit: 0 done; 1 FAIL or REFUSE (the line says why; nothing a pool runs changed); 2 usage; 75 WAIT (GitHub answered
+# 403 or 429, a rate limit: run it again later). No secret here.
 set -euo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
@@ -24,7 +43,14 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   done < "$HOST_CONF"
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
-host_conf 02-d1.sh HOST_IP SSH_PORT RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME
+host_conf 02-d1.sh HOST_IP SSH_PORT RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME RUNNER_VERSION
+usage() { echo "usage: 02-d1.sh (no argument: the full run) | 02-d1.sh build RUNNER_VERSION (for example 2.339.0)"; exit 2; }
+MODE=full VERSION=$RUNNER_VERSION
+case $# in
+  0) [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "02-d1.sh: REFUSE the host config's RUNNER_VERSION is not N.N.N: [$VERSION]" >&2; exit 1; } ;;
+  2) { [ "$1" = build ] && [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; } || usage; MODE=build VERSION=$2 ;;
+  *) usage ;;
+esac
 cd ~
 B=$HOME/build; U=$(id -u)
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$U}
@@ -40,9 +66,22 @@ PUBLIC_IP=${HOST_IP}
 say() { printf '\n== %s\n' "$*"; }
 ok() { echo "OK   $*"; }
 die() { echo "FAIL $*"; exit 1; }
+wait_() { echo "WAIT $*"; exit 75; }
 sha() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ] || die "sha256 $1"; }
 quad() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ "$1" != 0.0.0.0 ]; }
+. "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh: is this release's linux-docker/ ~/build?"
+REC_DIR=$HOME/run/builds
+record() {   # the BUILD RECORD (the header says its form): written whole under a temporary name, fsynced, renamed
+  local t
+  REC=$REC_DIR/$VERSION-$RECIPE
+  [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ${IMAGE#*@} =~ ^sha256:[0-9a-f]{64}$ && $RECIPE =~ ^[0-9a-f]{64}$ ]] || return 1
+  install -d -m 750 "$REC_DIR" || return 1
+  t=$(mktemp "$REC_DIR/.new.XXXXXX") || return 1
+  { printf 'format 1\nversion %s\ndigest %s\nrecipe %s\n' "$VERSION" "${IMAGE#*@}" "$RECIPE" > "$t" && chmod 640 "$t" \
+      && dd if=/dev/null of="$t" conv=notrunc,fsync status=none && mv -f "$t" "$REC"; } || { rm -f "$t"; return 1; }
+}
 
+if [ "$MODE" = full ]; then   # ---- steps 1 and 2: the FULL run only (BUILD never installs or restarts the daemon)
 say "1. rootless dockerd"
 systemctl --user is-active --quiet docker || dockerd-rootless-setuptool.sh install
 say "2. hardening (daemon.json) + the second socket in ~/run for ${RS_USER}"
@@ -59,11 +98,18 @@ changed=0
 for _ in $(seq 1 30); do docker version >/dev/null 2>&1 && break; sleep 1; done
 s=$(stat -c '%a %U:%G' "$HOME/run/docker.sock" 2>/dev/null) || die "no socket at ~/run/docker.sock"
 [ "$s" = "660 ${RUN_USER}:${RUN_USER}" ] && ok "~/run/docker.sock $s" || die "~/run/docker.sock is [$s], want 660 ${RUN_USER}:${RUN_USER}"
+fi   # ---- end of steps 1 and 2
 say "3. (a) the daemon names the profile, is rootless, no-new-privileges"
 so=$(docker info --format '{{.SecurityOptions}}') || die "docker info does not answer"
 case "$so" in *"profile=$HOME/.config/docker/$PROFILE"*) ok "seccomp profile = ours" ;; *) die "seccomp not ours: $so" ;; esac
 case "$so" in *rootless*) ok rootless ;; *) die "not rootless: $so" ;; esac
 case "$so" in *no-new-privileges*) ok no-new-privileges ;; *) die "no no-new-privileges: $so" ;; esac
+if [ "$MODE" = build ]; then   # ---- BUILD: what the push and the checks need, read only (step 4 is the full run's)
+say "(read only) the runners network exists and the registry answers: the full run's step 4 made them"
+docker network inspect runners >/dev/null 2>&1 || die "no runners network: run the full 02-d1.sh first"
+curl -fs "http://127.0.0.1:$RPORT/v2/" >/dev/null || die "the registry does not answer on 127.0.0.1:$RPORT: run the full 02-d1.sh first"
+ok "the runners network exists; the registry answers on 127.0.0.1:$RPORT"
+else   # ---- step 4: the FULL run only
 say "4. the runners network and the registry on the default bridge"
 # A plain bridge. ICC cannot be restricted on this host: Docker refuses an enable_icc=false network without the
 # br_netfilter module, which a rootless daemon cannot load (measured). Jobs on `runners` can reach each other's open
@@ -76,14 +122,40 @@ docker inspect runner-registry >/dev/null 2>&1 || docker run -d --name runner-re
 [ "$(docker inspect -f '{{.State.Running}}' runner-registry)" = true ] || docker start runner-registry >/dev/null || die "cannot start runner-registry"
 for _ in $(seq 1 20); do curl -fs "http://127.0.0.1:$RPORT/v2/" >/dev/null && break; sleep 1; done
 curl -fs "http://127.0.0.1:$RPORT/v2/" >/dev/null || die "registry does not answer on 127.0.0.1:$RPORT"; ok "registry answers on 127.0.0.1:$RPORT"
-say "5. the runner image (build, then push, each checked; the digest of THIS build). image.ref changes only at the END,"
-say "   after every check below passed on this digest (r5 B5-4)"
-iid=$(docker build -q -t "$TAG" "$B/image") || die "docker build failed: image.ref NOT changed"
+fi   # ---- end of step 4
+say "5. the runner image of release v$VERSION (fetched and checked, built, pushed, each checked; the digest of THIS build)."
+say "   Its record (and, in the full run, image.ref) is written only at the END, after every check below passed on it (r5 B5-4)"
+install -d -m 700 "$RR_DIR" || die "cannot make $RR_DIR"
+CTX=$(mktemp -d "$RR_DIR/ctx.XXXXXX") || die "cannot make a build context in $RR_DIR"
+trap 'rm -rf -- "${CTX:?}"' EXIT
+# The RECIPE: image/'s files, each a plain file, copied into the context; the hash is of these copies (the header).
+names=$(LC_ALL=C ls -A "$B/image") && [ -n "$names" ] || die "cannot list $B/image"
+lines=
+while IFS= read -r n; do
+  [ -f "$B/image/$n" ] && [ ! -L "$B/image/$n" ] || die "image/$n is not a plain file: the recipe is image/'s plain files only"
+  [ "$n" != runner.tar.gz ] || die "image/$n: that name is the checked tarball's in the build context"
+  cp "$B/image/$n" "$CTX/$n" || die "cannot copy image/$n into the build context"
+  h=$(sha256sum < "$CTX/$n") || die "cannot hash image/$n"
+  lines+="${h%% *}  $n"$'\n'
+done <<< "$names"
+RECIPE=$(printf '%s' "$lines" | sha256sum | cut -d' ' -f1)
+[[ $RECIPE =~ ^[0-9a-f]{64}$ ]] || die "cannot hash the recipe"
+ok "the recipe: image/ ($(paste -sd' ' - <<< "$names")): sha256 $RECIPE"
+rr_release tag "$VERSION" || { [ $? != 75 ] || wait_ "GitHub's rate limit: nothing was built; run it again later"; die "release v$VERSION: nothing was built (the REFUSE line above says why)"; }
+rr_tarball "$CTX/runner.tar.gz" || die "release v$VERSION: nothing was built (the REFUSE line above says why)"
+iid=$(docker build -q --no-cache -t "$TAG" "$CTX") || die "docker build failed: no record, image.ref NOT changed"
+rm -rf -- "${CTX:?}"; trap - EXIT
 [ "$(docker inspect -f '{{.Id}}' "$TAG")" = "$iid" ] || die "the tag does not point at the image just built"
-docker push -q "$TAG" >/dev/null || die "docker push failed: image.ref NOT changed"
+docker push -q "$TAG" >/dev/null || die "docker push failed: no record, image.ref NOT changed"
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' "$TAG") || die "cannot read the digest of $TAG"
 [[ $IMAGE =~ ^localhost:$RPORT/${IMAGE_NAME}@sha256:[0-9a-f]{64}$ ]] || die "unexpected digest reference [$IMAGE]"
-ok "built and pushed $IMAGE (not yet in image.ref)"
+# The runner's version, from the image itself, as pool-image.sh up reads it: the one line that is a bare version
+# number (two such lines = no match). No network, bounded. Its labels do not carry it (measured).
+out=$(docker run --rm --network none --memory 512m --cpus 1 "$IMAGE" ./config.sh --version < /dev/null) \
+  || die "could not run $IMAGE to read its runner version: no record"
+v=$(grep -xE '[0-9]+\.[0-9]+\.[0-9]+' <<< "$out" || true)
+[ "$v" = "$VERSION" ] || die "the runner in $IMAGE is [$v], not $VERSION: no record"
+ok "built and pushed $IMAGE, runner $v (no record yet)"
 say "6. (b) a container with NO options, as the MAIN process"
 out=$(docker run --rm --network runners "$IMAGE" bash -c '
   grep -E "^(Seccomp|NoNewPrivs):" /proc/self/status | tr -s "\t" " "; echo "pid1=$(cat /proc/1/comm) umask=$(umask)"
@@ -93,7 +165,7 @@ out=$(docker run --rm --network runners "$IMAGE" bash -c '
   locale -a | grep -qi "^en_US.utf8$" && echo locale=ok; true' 2>&1) || true
 echo "$out"
 for w in "Seccomp: 2" "NoNewPrivs: 1" "pid1=docker-init" "umask=0022" "keyctl EPERM" "sudo=refused" "bwrap=ok" "locale=ok"; do
-  case "$out" in *"$w"*) ok "$w" ;; *) die "missing: $w (image.ref NOT changed)" ;; esac
+  case "$out" in *"$w"*) ok "$w" ;; *) die "missing: $w (no record, image.ref NOT changed)" ;; esac
 done
 say "6. controls: unconfined lets keyctl through; Docker's default profile stops bwrap"
 c1=$(docker run --rm --security-opt seccomp=unconfined "$IMAGE" python3 -c "import ctypes; l=ctypes.CDLL(None,use_errno=True); print('ALLOWED' if l.syscall(250,0,-4,0)>0 else 'EPERM')" 2>&1 || true)
@@ -101,6 +173,7 @@ c1=$(docker run --rm --security-opt seccomp=unconfined "$IMAGE" python3 -c "impo
 c2=$(docker run --rm --security-opt seccomp="$B/config/seccomp-default-docker-v29.9.0.json" "$IMAGE" bash -c 'cd / && bwrap --unshare-user --ro-bind / / /bin/true' 2>&1 || true)
 case "$c2" in *"No permissions to create new namespace"*|*"Operation not permitted"*) ok "control: Docker's default profile stops bwrap" ;; *) die "control: Docker's default profile did not stop bwrap as expected: [$c2]" ;; esac
 
+if [ "$MODE" = full ]; then   # ---- step 7: the FULL run only (it checks the network, not the image, and writes net.env)
 say "7. (c) a runners container reaches the internet; not the registry, the host loopback or the gateways' other ports"
 # Two gateways. RUNNERS_GW: the `runners` bridge, inside rootlesskit's DETACHED network namespace. NETNS_GW: that
 # namespace's default gateway, gvisor-tap-vsock's userspace NAT. With --detach-netns the daemon runs in the HOST's
@@ -161,6 +234,7 @@ docker run -d --rm --name liveapp-b2-listen --network runners "$IMAGE" python3 -
 sleep 2; lip=$(docker inspect -f '{{.NetworkSettings.Networks.runners.IPAddress}}' liveapp-b2-listen || true)
 ctl=$(docker run --rm --network runners "$IMAGE" python3 -c "$scan" "$lip" 2>&1 || true); docker rm -f liveapp-b2-listen >/dev/null 2>&1 || true
 grep -qx "OPEN $lip:8000" <<<"$ctl" && ok "control: the same scanner finds an open port ($lip:8000)" || die "control: the scanner missed $lip:8000 (the scan proves nothing): [$ctl]"
+fi   # ---- end of step 7
 
 say "8. (e) container ROOT (= host ${RUN_USER}, what an escape becomes) cannot list another user's home or /root; control: its own"
 done_h=" "
@@ -173,8 +247,14 @@ done
 [[ $done_h == *" /home/${RS_USER} "* ]] || die "the escape check did not reach /home/${RS_USER} (the PAT's home)"
 docker run --rm -u 0 -v "$HOME/run:/x" "$IMAGE" cat /x/net.env >/dev/null && ok "control: D1 container root reads ${RUN_USER}'s own files" || die "control failed (check (e) proves nothing)"
 
-say "9. every check passed on $IMAGE: it becomes image.ref"
+say "9. every check passed on $IMAGE (runner $VERSION): its build record$([ "$MODE" = build ] || echo ', then image.ref')"
+record || die "cannot write the build record $REC_DIR/$VERSION-$RECIPE"
+ok "build record $REC"
+if [ "$MODE" = full ]; then   # ---- image.ref: the FULL run only (its only writer)
 printf '%s\n' "$IMAGE" > "$HOME/run/image.ref.new" && chmod 644 "$HOME/run/image.ref.new" && mv -f "$HOME/run/image.ref.new" "$HOME/run/image.ref" \
   || die "cannot write ~/run/image.ref"
 [ "$(cat "$HOME/run/image.ref")" = "$IMAGE" ] && ok "image.ref = $IMAGE" || die "image.ref does not hold $IMAGE"
 echo; echo "B2 DONE (D1)"
+else
+echo; echo "BUILD DONE (D1): runner $VERSION, $IMAGE, record $REC"
+fi

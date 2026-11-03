@@ -6,7 +6,7 @@ This folder is the Linux half of the repository: a Linux host where [runscaler](
 - Jobs run on a `runners` network, with a pinned seccomp profile, no-new-privileges and an init process; `docker.dind` is always false. `runner-start` refuses to start runscaler with a config that would give a job a Docker socket.
 - Every value of the host (the users, ports, address, organization, token name, set names and labels) is in ONE host config file, `/etc/liveapp-ci/host.conf`. The scripts hold none of them, and each one refuses to run without that file.
 
-Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
+Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them, and except the build path of `02-d1.sh` (`build VERSION`, "A new runner release" below), which is new and has not yet run on that host. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
 
 ## Files
 
@@ -15,12 +15,15 @@ Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They m
 | `host.conf.example` | — | Every key of the host config, with placeholder values and what each one is. |
 | `setup/01-users.sh` | root | Creates RUN_USER and RS_USER, the group, the ssh keys, the runscaler lock rule and linger. Re-runnable. |
 | `setup/01-users-undo.sh` | root | Removes only what 01-users.sh made (its header lists what must happen first). |
-| `setup/02-d1.sh` | RUN_USER | The rootless Docker daemon and its hardening, the `runners` network, the local registry, and the runner image (built, pushed, checked; then its digest goes to `~/run/image.ref`). |
+| `setup/02-d1.sh` | RUN_USER | With no argument (the full run): the rootless Docker daemon and its hardening, the `runners` network, the local registry, and the runner image of the host config's `RUNNER_VERSION` (built, pushed, checked; then its build record, and its digest goes to `~/run/image.ref`). With `build VERSION`: only the runner image of that release, its checks and its build record. |
+| `setup/runner-release.sh` | RUN_USER | Read by 02-d1.sh, never run: how a runner release is read from GitHub, and the trust of every download (below). |
 | `setup/03-runscaler.sh` | RS_USER | Installs runscaler (by sha256), `runner-start`, `pool-ready` and the unit; renders, checks and installs the config. Never restarts runscaler. |
 | `setup/pool-image.sh` | RS_USER | Puts a new runner image into the pool (`up VERSION`), rolls it back (`back`), or ends the release (`accept`). |
 | `bin/runner-start` | RS_USER | The unit's start command: checks the config, D1, the registry and the token files, then starts runscaler. |
 | `bin/pool-ready` | RS_USER | Is runscaler serving exactly the named sets, each ready? |
-| `image/Dockerfile` | RUN_USER | The runner image: GitHub's runner image by digest, plus bubblewrap, gh, a locale and build tools. |
+| `image/Dockerfile` | RUN_USER | The runner image: GitHub's runner image by digest (the pinned base), the runner of the release 02-d1.sh fetched, plus bubblewrap, gh, a locale and build tools. |
+| `image/install-runner.sh` | (the build) | Run inside the image build: puts the fetched runner in place of the base image's runner. |
+| `../setup/tls-excluded-spki` | — | The CA keys no download trusts (the repository's top-level `setup/`; the install puts it into `~/build/setup/`). |
 | `config/` | — | The systemd unit and the two seccomp profiles (Docker's default, and the one the jobs run with). |
 
 `setup/pool-image.sh` pins `setup/03-runscaler.sh`, `bin/runner-start`, `bin/pool-ready` and `config/runscaler.service` by sha256 (`PINS`). `tools/release-check` refuses a release in which one of them changed without its pin.
@@ -43,16 +46,16 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
    ```
    ssh root@<host> 'bash -s' < linux-docker/setup/01-users.sh
    ```
-3. **The files (once as RUN_USER, once as RS_USER).** Each user gets this release's `linux-docker/` as `~/build` (an older `~/build` is moved aside, not deleted):
+3. **The files (once as RUN_USER, once as RS_USER).** Each user gets this release's `linux-docker/` as `~/build`, with the repository's `setup/tls-excluded-spki` in `~/build/setup/` (an older `~/build` is moved aside, not deleted). `COPYFILE_DISABLE=1` keeps macOS's tar from adding `._` files, which would become part of the image recipe:
    ```
-   tar -C linux-docker -cf - . | ssh <RUN_USER>@<host> 'rm -rf ~/build.new && mkdir ~/build.new && tar -C ~/build.new -xf - && { [ ! -e ~/build ] || mv ~/build ~/build.prev.$(date -u +%Y%m%dT%H%M%SZ); } && mv ~/build.new ~/build'
+   COPYFILE_DISABLE=1 tar -C linux-docker -cf - . -C .. setup/tls-excluded-spki | ssh <RUN_USER>@<host> 'rm -rf ~/build.new && mkdir ~/build.new && tar -C ~/build.new -xf - && { [ ! -e ~/build ] || mv ~/build ~/build.prev.$(date -u +%Y%m%dT%H%M%SZ); } && mv ~/build.new ~/build'
    ```
    Then the same line with `<RS_USER>`.
 4. **runscaler's download (RS_USER).** 03-runscaler.sh checks its sha256 before it extracts anything:
    ```
    ssh <RS_USER>@<host> 'mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/runner-linux-amd64.tar.gz https://github.com/ysya/runscaler/releases/download/v0.9.5/runner-linux-amd64.tar.gz'
    ```
-5. **D1 and the runner image (RUN_USER).** It must end with `B2 DONE (D1)`:
+5. **D1 and the runner image (RUN_USER).** It builds the runner version the host config's `RUNNER_VERSION` names, the way "A new runner release" below does, and writes its digest to `~/run/image.ref` (nothing else writes that file). It must end with `B2 DONE (D1)`:
    ```
    ssh <RUN_USER>@<host> 'bash -s' < linux-docker/setup/02-d1.sh
    ```
@@ -80,13 +83,23 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
 
 ## A new runner release
 
-1. A release of this repository puts the new runner image's digest into `image/Dockerfile`. Check it out, then do Install step 3 for both users (pool-image.sh refuses a `~/build` whose pinned files are not its own release's), then Install step 4: step 3 moves the old `~/build` aside with runscaler's download in it, and 03 checks that download first.
-2. As RUN_USER, Install step 5 again: it builds and checks the new image, and only then writes its digest to `~/run/image.ref`.
-3. As RS_USER, at a quiet time (it waits for the pool to be idle before it restarts runscaler):
+A new release of GitHub's runner ([actions/runner](https://github.com/actions/runner/releases)) needs no release of this repository: the image is built for the runner version you name. A release of this repository that changes `image/` or the base image is put in place the same way, after Install step 3 for both users and Install step 4 (pool-image.sh refuses a `~/build` whose pinned files are not its own release's; step 3 moves the old `~/build` aside with runscaler's download in it, and 03 checks that download first).
+
+1. **Build the image (RUN_USER).** It reads the release from GitHub, checks the runner tarball against the release's own sha256 digest, builds the image on the pinned base, runs the image checks of Install step 5 on it, and writes its build record. It must end with `BUILD DONE (D1)`. A line that starts with `WAIT` means GitHub's rate limit: run it again later. It does not look at the updater's on/off setting, so it works with the updater off:
+   ```
+   ssh <RUN_USER>@<host> 'bash ~/build/setup/02-d1.sh build <runner version>'
+   ```
+2. **Put it into the pool (RS_USER), at a quiet time** (it waits for the pool to be idle before it restarts runscaler). Coming: in a later release, `up` reads the build record of that version. Until then `up` reads `~/run/image.ref`, which only the full run writes: set `RUNNER_VERSION` in the host config to the new version (Install step 1), run Install step 5 again instead of step 1 here, and then:
    ```
    ssh -o ServerAliveInterval=60 <RS_USER>@<host> 'bash -s -- up <runner version>' < linux-docker/setup/pool-image.sh
    ```
-4. After the first job on the new image passed: the same line with `accept`. If jobs fail on it: the same line with `back`.
+3. After the first job on the new image passed: the same line with `accept`. If jobs fail on it: the same line with `back`.
+
+This release adds the host-config key `RUNNER_VERSION`: on a host installed before it, add that key (the runner version the pool runs now; Install step 1) before you run this release's 02-d1.sh, which refuses a host config without it.
+
+**The build record.** Each build that passed every check writes `~/run/builds/<version>-<recipe>` as RUN_USER (0640, so RS_USER, a member of RUN_USER's group, can read it): exactly four lines, `format 1`, `version <version>`, `digest sha256:<the image's digest in the local registry>`, `recipe <the sha256 of image/'s files>`. There is one record per version and recipe; building the same version again replaces it. It is written under a temporary name and renamed, so a cut-off run leaves no partial record. A failed check, a version mismatch or a digest mismatch writes none. Its reader must read it as untrusted data: each line by its pattern, never sourced.
+
+**The trust of the downloads.** Every download of the build path (GitHub's API and the runner tarball) uses `curl --cacert` with a filtered CA bundle (the system's bundle, without the certificates whose public key `setup/tls-excluded-spki` names) and `--capath` with an empty folder, so curl's built-in CA folder adds nothing back. That file's header gives its format; a file that breaks it, or names no key at all, stops the build before any download.
 
 ## A host that already runs these scripts from a hand copy
 
