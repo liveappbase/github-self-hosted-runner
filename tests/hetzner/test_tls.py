@@ -67,6 +67,44 @@ def emudhra_pin(text):
     return found
 
 
+# THE PINNED COPIES of the keys (Opus r1 P3-3). Each runs where it cannot read the data file, so it carries the keys,
+# and the cells below pin each one equal to the data file, both ways:
+#   setup/emudhra-deny.sh, setup/emudhra-undeny.sh: root runs each one from a copy whose sha256 a person reviewed
+#     (setup/02-wall.run-line), and the undeny also runs in a build VM's guest: a second file read at run time would be
+#     bytes no one reviewed (a file ci can write, read by root).
+#   examples/emudhra-check.yml: copied into another repository's .github/workflows/, where this repository is not.
+KEY_COPIES = ('setup/emudhra-deny.sh', 'setup/emudhra-undeny.sh', 'examples/emudhra-check.yml')
+
+
+def read_rel(rel):
+    with open(os.path.join(REPO, rel)) as f:
+        return f.read()
+
+
+def copy_keys(text):
+    """the words of TEXT's one EXCLUDED_SPKI array, in order (its # comments dropped); ValueError when TEXT does not
+    assign EXCLUDED_SPKI exactly once, as one array"""
+    if len(re.findall(r'EXCLUDED_SPKI\+?=', text)) != 1:
+        raise ValueError('it does not assign EXCLUDED_SPKI exactly once')
+    arrays = re.findall(r'(?m)^[ \t]*EXCLUDED_SPKI=\(([^)]*)\)', text)
+    if len(arrays) != 1:
+        raise ValueError('it has no EXCLUDED_SPKI=( ... ) array')
+    return re.sub(r'#[^\n]*', '', arrays[0]).split()
+
+
+def copy_pin(text, data):
+    """what breaks the pin "the copy's keys are the keys DATA (the data file's), both ways" in TEXT: [] when it holds"""
+    try:
+        keys = copy_keys(text)
+    except ValueError as e:
+        return [str(e)]
+    found = ['%r is not a key' % h for h in keys if not HEX64.fullmatch(h)]
+    found += ['it names the key %s twice' % h for h in sorted(set(keys)) if keys.count(h) > 1]
+    found += ["it lacks the data file's key %s" % h for h in data if h not in keys]
+    found += ['it holds the key %s, which the data file does not' % h for h in keys if h not in data]
+    return found
+
+
 class DataFile(unittest.TestCase):
     def test_the_release_file_is_read_by_the_agreed_rules(self):
         rows = read_data(DATA)
@@ -98,6 +136,50 @@ class DataFile(unittest.TestCase):
                 self.assertNotEqual(text, em, why)
                 self.assertNotEqual(emudhra_pin(text), [], why)
         self.assertEqual(emudhra_pin(em), [])   # the control: the real file
+
+    def test_each_pinned_copy_holds_the_data_files_keys(self):
+        data = [h for h, _ in read_data(DATA)]
+        for rel in KEY_COPIES:
+            with self.subTest(rel):
+                text = read_rel(rel)
+                self.assertEqual(copy_pin(text, data), [])
+                self.assertEqual(sorted(copy_keys(text)), sorted(data))
+                for h in data:   # each key once, in its array: no other place of the copy names it
+                    self.assertEqual(text.count(h), 1, h)
+
+    def test_the_copy_pin_sees_drift_both_ways(self):
+        data = [h for h, _ in read_data(DATA)]
+        new = 'e' * 64
+        for rel in KEY_COPIES:
+            text = read_rel(rel)
+            drifts = {
+                'a key added to the data file only': (text, data + [new]),
+                'a key dropped from the data file only': (text, data[1:]),
+                'a key added to the copy only': (text.replace(data[0], '%s %s' % (data[0], new), 1), data),
+                'a key dropped from the copy only': (text.replace(data[-1], '', 1), data),
+                'a key named twice in the copy': (text.replace(data[0], '%s %s' % (data[0], data[0]), 1), data),
+                'a second array': (text + '\nEXCLUDED_SPKI=(%s)\n' % new, data),
+                'a key appended later': (text + '\nEXCLUDED_SPKI+=(%s)\n' % new, data),
+            }
+            for why, (t, d) in drifts.items():
+                with self.subTest(rel, drift=why):
+                    self.assertNotEqual(copy_pin(t, d), [], why)
+            self.assertEqual(copy_pin(text, data), [], rel)   # the control: the copy as it is
+
+    def test_no_other_file_holds_a_key(self):
+        """the class, not the instance: a file of the tree that names a key of the data file is the data file or one of
+        KEY_COPIES (a new copy must be added there, and so pinned)"""
+        keys = [h.encode() for h, _ in read_data(DATA)]
+        holders = []
+        for top, dirs, files in os.walk(REPO):
+            dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__')]
+            for f in files:
+                p = os.path.join(top, f)
+                with open(p, 'rb') as fh:
+                    raw = fh.read()
+                if any(k in raw for k in keys):
+                    holders.append(os.path.relpath(p, REPO))
+        self.assertEqual(sorted(holders), sorted(('setup/tls-excluded-spki',) + KEY_COPIES))
 
 
 @needs_container

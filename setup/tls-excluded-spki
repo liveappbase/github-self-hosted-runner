@@ -1,8 +1,14 @@
 # tls-excluded-spki — the CA keys this repository's hosts never trust for a download: per data line, the SHA-256 of a
 # certificate's public key (its DER SubjectPublicKeyInfo), ONE space, and the certificate's name.
-# ONE copy: linux-docker/setup/runner-release.sh reads it on the Linux host (the install line puts it into ~/build/setup/);
-# on the Mac, bin/tls-excluded-lib reads it for bin/golden-emudhra (which puts the keys into the build VM and holds no
-# key of its own: tests/hetzner/test_tls.py) and for the updater's TLS filter (bin/runner-updater-release).
+# The ONE source of the keys: linux-docker/setup/runner-release.sh reads it on the Linux host (the install line puts
+# it into ~/build/setup/); on the Mac, bin/tls-excluded-lib reads it for bin/golden-emudhra (which puts the keys into
+# the build VM and holds no key of its own: tests/hetzner/test_tls.py) and for the updater's TLS filter
+# (bin/runner-updater-release).
+# Three PINNED copies run where this file cannot be read, so each carries the keys: setup/emudhra-deny.sh and
+# setup/emudhra-undeny.sh (root runs each from a copy whose sha256 a person reviewed, and the undeny also runs in a
+# build VM: a second file read at run time would be bytes no one reviewed), and examples/emudhra-check.yml (copied into
+# another repository). tests/hetzner/test_tls.py pins each copy equal to this file, both ways, and fails on any other
+# file that names a key. A key changed here is changed in each copy, in the same commit.
 # Format: a line that starts with # is a comment, an empty line is ignored, any other line is a data line whose first
 # field (the text before the first space) is 64 lowercase hex. A reader REFUSES the whole file on a data line whose first
 # field is not, on a CR byte, on a hash that appears twice, or when there is no data line: an empty list never means
