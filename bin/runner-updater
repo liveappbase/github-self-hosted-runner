@@ -1,11 +1,12 @@
 #!/bin/zsh -f
-# runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY
+# runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY
 #                | report [--observe FAMILY]... [--observe-clear FAMILY]...
 # The runner-image updater on the Studio, as ci. Design: docs/operations.md ("The updater: status, on, off, pass,
-# protect", "The switch window: rebuild and switch-now" and "The updater's report mode (no action)"); the decision
-# core's contract: core/README.md. Only `rebuild` and `switch-now` act on CI: each runs ONE switch window
-# (bin/runner-updater-window: it disables CI, builds, edits config.toml and enables CI). Nothing in this release rolls
-# back or deletes an image, and a pass takes no action. Every other write is under STATEDIR (the state, the pins, the
+# protect", "The switch window: rebuild and switch-now", "RECOVER", "Rollback: back and retry" and "The updater's
+# report mode (no action)"); the decision core's contract: core/README.md. `rebuild` and `switch-now` act on CI: each
+# runs ONE switch window (bin/runner-updater-window: it disables CI, builds, edits config.toml and enables CI); `back`
+# runs ONE rollback window (it disables CI, edits config.toml back to the previous image, enables CI and deletes the
+# image it left). A pass takes no action but RECOVER: its R1 verdicts start no rollback in this release. Every other write is under STATEDIR (the state, the pins, the
 # protected list, the journals, the pass folders). RECOVER (bin/runner-updater-window, ru_recover) ends an interrupted
 # window first: it disables, restores the config and enables CI as the window's journal says (below, RECOVER FIRST).
 #
@@ -85,8 +86,19 @@
 #            Both refuse while the updater is OFF. Their release is due from now, so they never raise NO IDLE (a pass
 #            of a later release gives ru_window the release's eligibility date). Exit 0 switched (the window closed on
 #            the new image), 1 a STOP or a REFUSE, 5 not now (START STATE or IDLE: nothing changed).
+#   back FAMILY        ONE rollback window started by a person (bin/runner-updater-window, ru_rb_window, its header):
+#            FAMILY's sets go back to its `previous` image, before an ACCEPT (the candidate: the D10 rehearsal) or after
+#            it while back_until holds; else REFUSE. It rejects the version it leaves only when that is newer than the
+#            restored image's, and holds no ROLLED BACK. It refuses while the updater is OFF. Exit 0 rolled back, 1 a
+#            STOP or a REFUSE, 5 pending (CI disabled by a person, or the target's validate UNKNOWN: nothing changed).
+#   retry FAMILY       clears the family's rejection and every STOP it holds whose line (status.jq's: D7's lines) names
+#            `runner-updater retry FAMILY`: check failed, ROLLED BACK, JOBS FAIL ON THE NEW IMAGE, NO EVIDENCE, and a
+#            rollback's ROLLBACK FAILED (its hand line). A STOP whose line names another step, and another family's,
+#            stay; a version a PINNED RUNNER RETIRED STOP still holds stays rejected. It starts nothing (the next pass may
+#            proceed), and it runs while the updater is OFF too.
 # RECOVER FIRST: an open window journal (WINDOW) that no run holds (the window holds the updater lock for its whole run,
-# so a run that took the lock and finds one found an interrupted window): pass, rebuild, switch-now, on and off end it
+# so a run that took the lock and finds one found an interrupted window): pass, rebuild, switch-now, back, retry, on and
+# off end it
 # first with RECOVER (bin/runner-updater-window's header, "RECOVER"), after the state is loaded and before the jq check
 # (it needs no tested jq). It closed: the command goes on; a pass whose RECOVER held a STOP exits 1. It stays open (CI
 # DISABLED, a person's file that fails validate, a journal it cannot read, a state it cannot write): STOP, exit 1, and
@@ -156,6 +168,8 @@
 #                window's folder ID.d), BUILDERS (the families whose builder is wired)
 #   RECOVER's:   RECOVER_WAIT (its one bound, 75 min), RECOVER_POLL (seconds between its reads), LSOF (it reads every
 #                open file of ci's processes; runner-lock-free sets the same)
+#   the rollback window's: ROLLBACK_BOUND (2 h: a rollback that cannot start, or whose target validates UNKNOWN, is
+#                tried again while R1's verdict holds, then STOP ROLLBACK FAILED)
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
 export LC_ALL=C
@@ -198,6 +212,7 @@ VALIDATE_GAP=20     # seconds between two validate tries (the ONE VALIDATE RULE)
 CLOSE_WAIT=600      # seconds the window waits for its target to run (D1: 10 min)
 CLOSE_POLL=5        # seconds between two reads of that wait
 MTIME_WAIT=10       # seconds the window waits for the clock to pass the config's mtime; further ahead: STOP
+ROLLBACK_BOUND=7200 # seconds a rollback that cannot start (or whose target validates UNKNOWN) is tried again: 2 h
 RECOVER_WAIT=4500   # seconds RECOVER waits (one bound, 75 min) for the window's tools, VMs and the runner lock
 RECOVER_POLL=10     # seconds between two of RECOVER's reads in that wait
 LSOF=/usr/sbin/lsof # RECOVER reads every open file of ci's processes with it (as runner-lock-free does)
@@ -208,7 +223,7 @@ say() { print -r -- "runner-updater: $*" }
 refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
 stop() { print -r -- "runner-updater: STOP $*"; exit 1 }
 usage() {
-  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
+  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
   exit 2
 }
 
@@ -218,7 +233,7 @@ cmd=$1
 shift
 case $cmd in
   (status|on|off|pass|protect) (( $# == 0 )) || usage "$cmd takes no argument" ;;
-  (rebuild|switch-now)
+  (rebuild|switch-now|back|retry)
     (( $# == 1 )) || usage "$cmd takes one FAMILY"
     [[ $1 =~ '^[a-z][a-z0-9-]{0,40}$' ]] || usage "not a family name: '$1'"
     family=$1
@@ -421,6 +436,59 @@ do_window() {
   exit 1
 }
 
+# ---- back FAMILY: ONE rollback window started by a person (bin/runner-updater-window, ru_rb_window: the header has
+# its rules): FAMILY's sets go back to its `previous` image, before an ACCEPT (the candidate) or after it while
+# back_until holds. It rejects the version it leaves only when that is newer than the restored image's
+do_back() {
+  local rc
+  load_state
+  run_recover
+  [[ $(print -r -- $ru_state | $JQ -r '.on') == true ]] \
+    || refuse "the updater is OFF: back runs only while it is ON (\`$INVOKED on\`); nothing changed"
+  jq_tested
+  source $RELBIN/runner-updater-window || refuse "cannot load $RELBIN/runner-updater-window"
+  ru_rb_window $family back '' $EPOCHSECONDS
+  rc=$?
+  if (( rc == 0 )); then say "back $family: the family runs $ru_w_rbt again; the window closed"; exit 0; fi
+  (( rc == 2 )) && exit 5
+  exit 1
+}
+
+# ---- retry FAMILY: the family's rejection, and every STOP it holds whose line (status.jq's: D7's lines column) names
+# `runner-updater retry FAMILY`, are cleared; a STOP whose line does not (a hand line, rebuild, switch-now), and another
+# family's, stay. A version a PINNED RUNNER RETIRED STOP still holds stays rejected (its line names no retry). It starts
+# nothing: the next pass may proceed. It needs no window, and runs while the updater is OFF too
+do_retry() {
+  local core facts out n idx
+  load_state
+  run_recover
+  jq_tested
+  print -r -- $ru_state | $JQ -e --arg f $family '.families | has($f)' > /dev/null 2>&1 \
+    || { say "retry $family: the state holds nothing for $family: nothing to clear"; exit 0 }
+  core=$(print -r -- $ru_state | $JQ -c '.core // empty') \
+    && facts=$(print -r -- $ru_state | $JQ -c --arg f $family '{format: 1, host: "studio", sets: [], proc: null,
+         position: null, continuous: false, restart: null, config: null,
+         families: (.families | map_values({provider: "tart", sets: ((.candidate.lines // {}) | keys),
+                                             candidate: (.candidate // null), back_until: (.back_until // null)})),
+         stops: (.families[$f].stops // [])}') \
+    && n=$(print -r -- $ru_state | $JQ -r --arg f $family '.families[$f].stops // [] | length') \
+    || refuse "jq could not read the STOPs of $family"
+  out=$($JQ -n -L $CORE/lib -f $CORE/status.jq --slurpfile state <(print -rn -- $core) \
+          --slurpfile facts <(print -r -- $facts) --arg now $EPOCHSECONDS 2>&1) \
+    && idx=$(print -r -- $out | $JQ -c --arg f $family --argjson n $n \
+               '[.stops[:$n] | to_entries[] | select(.value.line | contains("runner-updater retry \($f)`")) | .key]') \
+    || stop "core could not decide (status): ${out%%$'\n'*}: nothing was cleared"
+  change_state '.families[$f] |= (((.stops // []) | to_entries | map(select(.key as $k | $i | index($k) | not))
+        | map(.value)) as $left
+      | .stops = $left
+      | .rejected = [(.rejected // [])[] | select(. as $v | any($left[]; .stop == "PINNED RUNNER RETIRED" and .version == $v))])' \
+      --arg f $family --argjson i $idx
+  print -r -- $out | $JQ -r --arg f $family --argjson i $idx --argjson n $n --argjson rej "$(print -r -- $ru_state | $JQ -c --arg f $family '.families[$f].rejected // []')" \
+      '"runner-updater: retry \($f): cleared " + (if ($i | length) == 0 then "no STOP" else ([.stops[:$n] as $s | $i[] | $s[.].stop] | join(", ")) end)
+       + "; rejected now: " + (if $rej == [] then "none" else ($rej | join(", ")) end) + "; the next pass may proceed"'
+  exit 0
+}
+
 # ---- on, off (D11), under the lock
 do_on() {
   load_state
@@ -584,6 +652,8 @@ case $cmd in
   (off) do_off ;;
   (protect) do_protect ;;
   (rebuild|switch-now) do_window ;;
+  (back) do_back ;;
+  (retry) do_retry ;;
 esac
 [[ -d $REPORT ]] || /bin/mkdir -m 700 $REPORT || refuse "cannot create $REPORT"
 
