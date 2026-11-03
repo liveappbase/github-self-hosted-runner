@@ -840,7 +840,9 @@ class TestMtimeSecond(unittest.TestCase):
         w.ok()
         (at, mtime, csha), = w.enables()
         self.assertGreater(int(at), mtime)
-        self.assertEqual(w.value('installed'), '%d %s' % (mtime, csha))   # the install time, and the file's sha
+        # the install time, the file's sha, and its CONTENT sha (S3b-4a r2 P3-c: RECOVER step 1 compares it)
+        from tests.studio.test_runner_updater_recover import content_sha
+        self.assertEqual(w.value('installed'), '%d %s %s' % (mtime, csha, content_sha(w.config_now())))
 
 
 class TestKillAtEachStep(unittest.TestCase):

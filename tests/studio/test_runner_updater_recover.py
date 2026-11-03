@@ -7,6 +7,7 @@ Nth KEY line), and then a pass (or a command) runs RECOVER. runner-lock-free is 
 lsof, real lockf); the fake tart lists a VM as running when scn/running-NAME exists.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -480,7 +481,8 @@ class TestStep4Config(unittest.TestCase):
         recover(w, ok=1)
         j = w.journal()
         i = j.index('recover-target %s mac-a=%s' % (sha(w.pre), OLD))
-        self.assertEqual(j[i + 1:i + 3], ['installed %s %s' % (j[i + 1].split()[1], sha(w.pre)), 'enable-start '])
+        self.assertEqual(j[i + 1:i + 3], ['installed %s %s %s' % (j[i + 1].split()[1], sha(w.pre), content_sha(w.pre)),
+                                          'enable-start '])
         self.assertEqual([l.split(' ', 1)[0] for l in j[i + 1:]][:3], ['installed', 'enable-start', 'enable-done'])
 
 
@@ -683,7 +685,10 @@ class TestCutJournalStepRan(unittest.TestCase):
 
     def test_control_a_journal_that_ends_before_its_backup_disabled_nothing(self):
         # D1 loses only the LAST line: a journal that ends before the line that comes just before disable-start
-        # (`backup`; a rollback's `edited-sha`) never wrote disable-start. FLAG absent there is a person's: no action
+        # (`backup`; a rollback's `edited-sha`) never wrote disable-start. FLAG absent there is a person's: no action.
+        # S3b-4a r2 P3-b: RECOVER cannot tell it from two lost lines (`backup` and `disable-start`, after runner-disable
+        # ran: the same journal and the same host), which is beyond D1. So CI down is never silent: a no-action STOP
+        # CI DISABLED, held, names runner-enable. The control (FLAG present: no STOP) is TestStep1FlagPresent's first
         for kind, key in (('switch', 'config-sha'), ('rollback', 'backup')):
             with self.subTest(kind=kind):
                 if kind == 'switch':
@@ -692,31 +697,205 @@ class TestCutJournalStepRan(unittest.TestCase):
                     from tests.studio.test_runner_updater_rollback import rb_win, rollback
                     w = rb_win(self)
                     self.assertEqual(rollback(w, env={'RU_KILL_AT': key}).returncode, KILLED)
-                os.remove(w.r.flag)                              # a person's runner-disable
-                res = recover(w, ok=0)
+                os.remove(w.r.flag)                              # a person's runner-disable, or two lost lines
+                res = recover(w, ok=1)
                 self.assertIn('nothing was disabled (no disable-start)', res.stdout)
+                self.assertIn('runner-updater: STOP CI DISABLED: ', res.stdout)
                 assert_closed(self, w)
-                self.assertEqual((w.enables(), os.path.exists(w.r.flag), stops(w)), ([], False, []))
+                self.assertEqual((w.enables(), os.path.exists(w.r.flag), n_disable(w)), ([], False, 0))
+                f = w.family() or {'stops': []}
+                self.assertEqual([(s['stop'], s['detail']['hand']) for s in f['stops']],
+                                 [('CI DISABLED', w.sb.path('cibin', 'runner-enable'))])
+                self.assertIn('%s: STOP CI DISABLED' % FAM, w.status())
 
 
-class TestStep1ComparesTheSha(unittest.TestCase):
-    """S3b-4a r1 P3-3 (D1): RECOVER step 1 compares the running config with the LAST TARGET by its sha (the `installed`
-    line's), not only by the family's lines: a person's change elsewhere in the file is HAND CHANGE."""
+class TestRecoverDecidesOnce(unittest.TestCase):
+    """S3b-4a r2 N1: the F5 rules (a lost `disable-start` whose runner-disable ran; a lost `enable-start` whose
+    runner-enable ran) are decided from the WINDOW's own lines, never from a line an earlier RECOVER appended. RECOVER
+    journals `recover-start` first whenever it acts; a later RECOVER reads the lines before it as the window's, and a
+    journal with that line is never "nothing was disabled" again. Each cell: RECOVER #1 is killed after one of its own
+    lines (or leaves the journal open on purpose), then RECOVER #2 must bring CI back or hold its STOP. The controls:
+    TestCutJournalStepRan's "ends before its backup" cell and TestStep1FlagPresent's "nothing was disabled" cell."""
 
-    def test_a_change_outside_the_family_s_lines_is_hand_change(self):
-        w = killed(self, 'enable-done')
-        with open(w.r.config, 'a') as f:
-            f.write('# a hand edit\n')
-        res = recover(w, ok=1)
-        self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
+    def lost_disable_start(self, kind, w=None):
+        """a window of KIND killed at disable-start whose runner-disable ran (FLAG gone) and whose line is lost; the
+        state holds an older `restart` member"""
+        if kind == 'switch':
+            w = killed(self, 'disable-start', w)
+        else:
+            from tests.studio.test_runner_updater_rollback import rb_win, rollback
+            w = rb_win(self)
+            self.assertEqual(rollback(w, env={'RU_KILL_AT': 'disable-start'}).returncode, KILLED)
+        os.remove(w.r.flag)
+        self.assertEqual(cut(w), 'disable-start')
+        s = w.u.get()
+        s['restart'] = RESTART_OLD
+        w.u.put(s)
+        return w
+
+    def back_up(self, w, kind, res):
+        """RECOVER #2 brought CI back on the pre-window config and closed the journal: a switch holds check failed, a
+        rollback that did not reach its target nothing; the older `restart` member is gone (runner-disable stopped its
+        `to`)"""
+        self.assertNotIn('nothing was disabled', res.stdout)
         assert_closed(self, w)
-        self.assertIsNone(w.family()['candidate'])
-        self.assertEqual((n_disable(w), len(w.enables())), (1, 1))   # CI and the file as they are
+        assert_runs(self, w, w.pre)
+        self.assertEqual(stops(w), ['check failed'] if kind == 'switch' else [])
+        self.assertNotIn('restart', w.u.get())
 
-    def test_control_the_same_config_closes_switched(self):
+    def test_recover_killed_after_each_of_its_lines(self):
+        for kind, keys in (('switch', ('recover-start', 'recover-wait', 'recover-target', 'installed', 'enable-done')),
+                           ('rollback', ('recover-wait', 'recover-target', 'installed', 'enable-done'))):
+            for key in keys:
+                with self.subTest(kind=kind, key=key):
+                    w = self.lost_disable_start(kind)
+                    res = recover(w, env={'RU_KILL_AT': key})
+                    self.assertEqual(res.returncode, KILLED, res.stdout)
+                    self.back_up(w, kind, recover(w))
+
+    def test_recover_s_own_lost_enable_start(self):
+        # RECOVER #1's own last line is lost: its `enable-start`, whose runner-enable ran. The journal's last line is then
+        # RECOVER's `installed`: the lost line may be enable-start (F5), whoever wrote the line before it
+        w = self.lost_disable_start('switch')
+        res = recover(w, env={'RU_KILL_AT': 'enable-start'})
+        self.assertEqual(res.returncode, KILLED, res.stdout)
+        r = w.sb.run(['/bin/zsh', '-f', os.path.join(w.tools, 'runner-enable')])   # runner-enable ran
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(cut(w), 'enable-start')
+        res = recover(w)
+        self.assertNotIn('HAND CHANGE', res.stdout)
+        self.back_up(w, 'switch', res)
+        self.assertEqual(len(w.enables()), 1)                    # RECOVER #2 ran no runner-enable
+
+    def test_a_person_s_file_left_open_then_fixed(self):
+        # RECOVER #1 leaves the journal open on purpose: a person's file that does not validate. Its STOP says the next
+        # pass validates the file again; it does, and CI goes on the file once it validates
+        w = self.lost_disable_start('switch')
+        found = w.pre + b'# a hand edit\n'
+        w.sb.write(w.r.config, found.decode())
+        n = int(read_text(os.path.join(w.scn, 'validate.n')))
+        w.validate('refuse', call=n + 1)
+        res = recover(w, ok=1)
+        self.assertIn('the next pass validates the file again', res.stdout)
+        self.assertTrue(os.path.exists(w.u.window))
+        res = recover(w, ok=1)                                   # call n + 2: PASS
+        self.assertNotIn('nothing was disabled', res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, found)
+        self.assertEqual(stops(w), ['HAND CHANGE'])
+
+    def test_ci_disabled_left_open_then_quiet(self):
+        # RECOVER #1 leaves the journal open on purpose: CI DISABLED after its bound ("the next pass checks again")
+        w = self.lost_disable_start('switch', Win(self, extra_rewrites=[('RECOVER_WAIT=20', 'RECOVER_WAIT=1')]))
+        w.sb.write(os.path.join(w.vms, 'gold-' + today()), '')
+        w.put('running-gold-' + today())
+        res = recover(w, ok=1)
+        self.assertIn('runner-updater: STOP CI DISABLED: ', res.stdout)
+        self.assertIn('the next pass checks again', res.stdout)
+        self.assertTrue(os.path.exists(w.u.window))
+        os.remove(os.path.join(w.scn, 'running-gold-' + today()))   # the VM ends
+        self.back_up(w, 'switch', recover(w, ok=1))
+
+    def test_a_lost_enable_start_then_recover_killed_after_running(self):
+        # F5's other rule: the window's last line is `installed` (its lost enable-start ran runner-enable). RECOVER #1
+        # sees the target run and is killed after `running`: RECOVER #2 reads the WINDOW's last line, and the window
+        # switched (rolled back), with no HAND CHANGE
+        from tests.studio.test_runner_updater_rollback import rb_win, rollback
+        for kind in ('switch', 'rollback'):
+            with self.subTest(kind=kind):
+                if kind == 'switch':
+                    w = killed(self, 'enable-start')
+                else:
+                    w = rb_win(self)
+                    self.assertEqual(rollback(w, env={'RU_KILL_AT': 'enable-start'}).returncode, KILLED)
+                r = w.sb.run(['/bin/zsh', '-f', os.path.join(w.tools, 'runner-enable')])   # runner-enable ran
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(cut(w), 'enable-start')
+                res = recover(w, env={'RU_KILL_AT': 'running'})
+                self.assertEqual(res.returncode, KILLED, res.stdout)
+                res = recover(w, ok=0)
+                self.assertNotIn('HAND CHANGE', res.stdout)
+                assert_closed(self, w)
+                self.assertEqual((n_disable(w), len(w.enables())), (1, 1))   # neither RECOVER ran either
+                f = w.family()
+                if kind == 'switch':
+                    self.assertEqual((f['candidate']['lines'], f['stops']), ({'mac-a': out_name()}, []))
+                else:
+                    self.assertIsNone(f['candidate'])
+
+
+def content_sha(data):
+    """PLAN D1's CONTENT (as amended 2026-11-03, S3b-4a r2 P3-c): the sha256 of the file's lines with whole-line comments
+    (first non-blank character `#`) and blank lines removed, each kept line byte for byte with its newline"""
+    return sha(b''.join(l + b'\n' for l in data.split(b'\n') if not re.match(rb'[ \t]*(#|$)', l)))
+
+
+class TestStep1ComparesTheContent(unittest.TestCase):
+    """RECOVER step 1 (PLAN D1 as amended 2026-11-03, S3b-4a r2 P3-c; before it, S3b-4a r1 P3-3's sha compare): a cut
+    journal that ends after `enable-start` with FLAG present keeps its switch (R1 stays armed) when the running config's
+    CONTENT (whole-line comments and blank lines removed) is the content sha the window journaled on its last `installed`
+    line, beside the file's sha, before `enable-start`. A comment cannot change what runs; any other change (a number, a
+    line outside the family's, an inline comment, a space inside a line) is HAND CHANGE, so an R1 rollback never puts
+    the backup over it unseen. An older `installed` line with no content sha falls back to the file's sha."""
+
+    REAL = (('a number', b'concurrent = 2', b'concurrent = 1'),
+            ('a line outside the family', b'disable-update = false\n',
+             b'disable-update = false\n[[scaleset]]\nname = "mac-z"\nrunner-image = "%s"\n' % IMG2.encode()),
+            ('an inline comment', b'drain-timeout = "60m"', b'drain-timeout = "60m" # a note'),
+            ('a space inside a line', b'log-level = "info"', b'log-level =  "info"'))
+
+    def test_the_window_journals_the_content_sha_before_enable_start(self):
+        w = killed(self, 'enable-start')
+        j = w.journal()
+        now = w.config_now()
+        self.assertEqual(j[-2].split()[0::2], ['installed', sha(now)])
+        self.assertEqual(j[-2].split()[3:], [content_sha(now)])
+
+    def test_a_comment_only_edit_after_enable_keeps_the_switch(self):
         w = killed(self, 'enable-done')
-        recover(w, ok=0)
-        self.assertEqual(w.family()['candidate']['lines'], {'mac-a': out_name()})
+        new = b'# a note\n\n   # an indented note\n' + w.config_now() + b'\n\t\n# the last line, with no newline'
+        self.assertEqual(content_sha(new), content_sha(w.config_now()))
+        w.sb.write(w.r.config, new.decode())
+        res = recover(w, ok=0)
+        self.assertNotIn('HAND CHANGE', res.stdout)
+        assert_closed(self, w)
+        f = w.family()
+        self.assertEqual((f['candidate']['lines'], f['stops']), ({'mac-a': out_name()}, []))   # R1 stays armed
+        self.assertEqual((n_disable(w), len(w.enables())), (1, 1))
+        self.assertEqual(w.config_now(), new)                    # the person's file stays
+
+    def test_a_real_change_is_hand_change(self):
+        for what, old, new in self.REAL:
+            with self.subTest(what=what):
+                w = killed(self, 'enable-done')
+                text = w.config_now()
+                self.assertEqual(text.count(old), 1, what)
+                w.sb.write(w.r.config, text.replace(old, new).decode())
+                res = recover(w, ok=1)
+                self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
+                assert_closed(self, w)
+                self.assertIsNone(w.family()['candidate'])
+                self.assertEqual((n_disable(w), len(w.enables())), (1, 1))   # CI and the file as they are
+
+    def test_an_old_journal_without_the_content_sha_compares_the_file_s_sha(self):
+        # a comment is a change there (the file's sha); the control writes the same bytes again (a new mtime, after the
+        # start): the switch stays, as the start is compared with the journaled install time, not the mtime now
+        for edit, rc in ((b'', 0), (b'# a note\n', 1)):
+            with self.subTest(edit=edit):
+                w = killed(self, 'enable-done')
+                lines = w.journal()
+                i = max(k for k, l in enumerate(lines) if l.startswith('installed '))
+                lines[i] = ' '.join(lines[i].split()[:3])        # `installed EPOCH SHA`: an older window's line
+                with open(w.u.window, 'w') as f:
+                    f.write(''.join(l + '\n' for l in lines))
+                w.sb.write(w.r.config, (w.config_now() + edit).decode())
+                res = recover(w, ok=rc)
+                assert_closed(self, w)
+                if edit:
+                    self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
+                    self.assertIsNone(w.family()['candidate'])
+                else:
+                    self.assertEqual(w.family()['candidate']['lines'], {'mac-a': out_name()})
 
 
 class TestEveryCommandRecoversFirst(unittest.TestCase):

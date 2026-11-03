@@ -177,9 +177,10 @@
 #                                            stays open, CI down)
 #   [found P]                 ^found P$            (A FUTURE MTIME: before the file as found is copied to P)
 #   [restore P]               ^restore P$          (before the backup goes back over the config)
-#   installed EPOCH H         ^installed [0-9]+( H)?$  (the config's mtime, the install time the start must pass,
-#                                            and its sha: the file runner-enable starts; an older window's line has
-#                                            no sha)
+#   installed EPOCH H C       ^installed [0-9]+( H( H)?)?$  (the config's mtime, the install time the start must
+#                                            pass; its sha: the file runner-enable starts; and the sha of its CONTENT
+#                                            (ru_w_shas, the same read: RECOVER step 1 compares it, S3b-4a r2 P3-c). An
+#                                            older window's line has no sha, or no content sha)
 #   enable-start              ^enable-start $      (BEFORE runner-enable)
 #   [enable-refused RC]       ^enable-refused [0-9]+$
 #   enable-done               ^enable-done $
@@ -193,12 +194,15 @@
 #                                            family's new candidate, a rollback's end, or only this window's STOPs)
 #   closed EPOCH              ^closed [0-9]+$      (before the journal is renamed to WINDOWS/ID)
 #   RECOVER's own lines, after the window's:
+#   [recover-start EPOCH]     ^recover-start [0-9]+$  (RECOVER's FIRST line, once per journal, when it acts on it: the
+#                                            lines before it are the WINDOW's own; S3b-4a r2 N1)
 #   [recover-wait EPOCH]      ^recover-wait [0-9]+$  (before its first wait: the one bound starts here)
 #   [recover-target H S=I...] ^recover-target H S=I( S=I)*$  (RECOVER's own TARGET, BEFORE its `enable-start`: the sha
 #                                            and the family's lines of the config it leaves installed)
 # After a failure in the window, the steps from `disable-start` (a pre-close failure: no `stopped` follows its
 # runner-disable) or from `found`/`restore`/`target` on repeat in that order; `delete` lines come before `pin-rule`.
-# RECOVER appends its own lines (`stop`, `restore`, `delete`, `validate recover`, the enable steps) the same way.
+# RECOVER appends its own lines (`recover-start` first, then `stop`, `restore`, `delete`, `validate recover`, the enable
+# steps) the same way.
 # A cut journal: its last line may be lost (runner-journal's residual); the step it names may or may not have started.
 # A last line with no newline was cut while it was written: RECOVER drops it.
 #
@@ -219,17 +223,29 @@
 #      just before it (`backup`; a rollback's `edited-sha`): then its runner-disable may have run, CI is down, and
 #      RECOVER goes on as for a disabled window (2 on: CI comes back on the pre-window config; it cannot tell this from
 #      a person's runner-disable after the kill). A journal that ends earlier never wrote `disable-start`: its window
-#      disabled nothing, FLAG absent is a person's, and nothing restarts (the ROLLBACK precondition's rule). A journal
-#      that ended in POOL DOWN (a `stop POOL DOWN` line, or two `pre-close-failure` lines): it closes held, and RECOVER
-#      runs neither runner-disable nor runner-enable.
+#      disabled nothing, FLAG absent is a person's, and nothing restarts (the ROLLBACK precondition's rule); the journal
+#      closes, and (S3b-4a r2 P3-b) a no-action STOP CI DISABLED is held that names runner-enable: CI down is never
+#      silent. RESIDUAL (S3b-4a r2 P3-b, named): two lost lines (`backup` and `disable-start` after runner-disable ran)
+#      are beyond D1's one; they leave the same journal and the same host as a person's runner-disable, so RECOVER does
+#      not bring CI back there either: the STOP is what tells a person to. DECIDED ONCE (S3b-4a r2 N1): RECOVER writes
+#      `recover-start` before any other line of its own; a journal with that line had an earlier RECOVER act on it and is
+#      never "nothing was disabled" again (the FLAG read now may be that RECOVER's own runner-enable), and the F5 rules
+#      read the WINDOW's last line, the one before it, never a line RECOVER appended. A journal that ended in POOL DOWN
+#      (a `stop POOL DOWN` line, or two `pre-close-failure` lines): it closes held, and RECOVER runs neither
+#      runner-disable nor runner-enable.
 #   1. FLAG present after the last `enable-start` (the updater's enable), or after an `installed` that is the journal's
-#      last line (the lost line may be `enable-start`, whose runner-enable ran: S3b-4a r1 F5): the config's family lines
-#      must be the LAST TARGET (the window's `target` and RECOVER's `recover-target` lines, in order) and its sha the
-#      last `installed` line's (the file the last runner-enable started; D1, S3b-4a r1 P3-3), else a person's config
-#      runs: STOP HAND CHANGE and no action. The target must run within CLOSE_WAIT s (ru_w_wait_target), and the journal
-#      closes; else a pre-close failure (at most once per journal: the second is STOP POOL DOWN, no runner-disable); the
-#      first runs runner-disable and RECOVER goes on at 3. FLAG present after the last `disable-done` with no
-#      `enable-start` after it: a person enabled CI: STOP HAND CHANGE, no action.
+#      last line or the WINDOW's last line (the lost line may be `enable-start`, whose runner-enable ran: S3b-4a r1 F5,
+#      r2 N1): the config's family lines must be the LAST TARGET (the window's `target` and RECOVER's `recover-target`
+#      lines, in order) and its CONTENT the last `installed` line's content sha (the file the last runner-enable
+#      started; PLAN D1 as amended 2026-11-03, S3b-4a r2 P3-c: whole-line comments and blank lines are left out, as a
+#      comment cannot change what runs; an older line with no content sha: its sha, S3b-4a r1 P3-3), else a person's
+#      config runs: STOP HAND CHANGE and no action. The target must run (a runscaler started after the journaled install
+#      time, not the file's mtime now) within CLOSE_WAIT s (ru_w_wait_target), and the journal closes; else a pre-close
+#      failure (at most once per journal: the second is STOP POOL DOWN, no runner-disable); the first runs runner-disable
+#      and RECOVER goes on at 3. A pre-close failure journaled after that enable (the window's, or an earlier
+#      RECOVER's: S3b-4a r2 N2) is decided already: no new wait, no second `pre-close-failure`; RECOVER runs the
+#      runner-disable it decided and goes on at 3. FLAG present after the last `disable-done` with no `enable-start`
+#      after it: a person enabled CI: STOP HAND CHANGE, no action.
 #   2. FLAG absent: it waits until nothing is busy (ru_rc_busy): no process of this user has a journaled tool open (by
 #      the `tool` lines' dev+inode, over EVERY open file: `LSOF -n -P -a -u UID -F pDi`, never only the executables:
 #      zsh holds its script on a descriptor, so a builder whose lockf was killed alone still holds its tool while the
@@ -253,9 +269,11 @@
 # and holds no STOP is `check failed` (it was interrupted). Then ru_w_close: the pin by D2's ONE RULE, THE STOP RULE as
 # a window that ran runner-disable (a held CI DISABLED is replaced), the protected list.
 # A ROLLBACK window's RECOVER: step 4 is CONFIG EDIT's rule. When the journal already decided it (a `stop ROLLBACK
-# FAILED` line, a ROLLBACK FAILED this RECOVER raised at step 1, or a `validate post|recover N NON-API|UNKNOWN` line:
-# the target's lines just failed validate), the backup goes back with NO new validate of them (S3b-4a r1 F2): NON-API
-# holds ROLLBACK FAILED, UNKNOWN none, and the candidate and its image stay. Else the installed target stays when it
+# FAILED` line, a ROLLBACK FAILED this RECOVER raised at step 1, a `pre-close-failure` line: the target did not run
+# (S3b-4a r2 N2), or a `validate post|recover N NON-API|UNKNOWN` line: the target's lines just failed validate), the
+# backup goes back with NO new validate of them and no runner-enable on them (S3b-4a r1 F2): a pre-close failure and
+# NON-API hold ROLLBACK FAILED (retry clears it), UNKNOWN none, and the candidate and its image stay; CI goes on the
+# pre-window config, and a failure there is the journal's second pre-close failure (POOL DOWN, no runner-disable). Else the installed target stays when it
 # validates (a copy, step `recover`; three API-ONLY count), else the backup goes back (NON-API: STOP ROLLBACK FAILED;
 # UNKNOWN: none, it is tried again). A rollback that did not reach its target holds no STOP of its own (R1 stays armed).
 # Its ROLLED BACK keeps R1's verdict: WDIR/verdict.json when its sha is the `verdict` line's, else the `reason` text.
@@ -340,6 +358,25 @@ ru_w_bytes() {
 ru_tart() { /usr/bin/env -i HOME=${TARTDIR:h} PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
 # -> REPLY = CONFIG's sha256 now, or "unreadable"
 ru_w_csha() { ru_w_sha $CONFIG || REPLY=unreadable }
+# FILE -> reply = (its sha256, the sha256 of its CONTENT), from ONE read; 1 when it cannot be read. CONTENT (PLAN D1 as
+# amended 2026-11-03, S3b-4a r2 P3-c): the file's lines with whole-line comments (first non-blank character `#`) and
+# blank lines removed, each kept line byte for byte with its newline (an inline comment or a space inside a line is a
+# change). Only RECOVER step 1's "is the candidate still what runs" compares it; every other check is sha-exact
+ru_w_shas() {
+  local l o s
+  local -a kept
+  reply=()
+  ru_w_bytes $1 || return 1
+  o=$(print -rn -- $REPLY | /usr/bin/shasum -a 256 2>/dev/null) && [[ $o =~ '^[0-9a-f]{64}  -$' ]] || return 1
+  s=${o[1,64]}
+  for l in "${(@ps:\n:)REPLY}"; do
+    [[ $l =~ '^[[:blank:]]*(#|$)' ]] || kept+=("$l")
+  done
+  o=
+  (( ${#kept} )) && o="${(pj:\n:)kept}"$'\n'
+  o=$(print -rn -- $o | /usr/bin/shasum -a 256 2>/dev/null) && [[ $o =~ '^[0-9a-f]{64}  -$' ]] || return 1
+  reply=($s ${o[1,64]})
+}
 # TEXT (a tool's) -> REPLY = one journal value: each control character a `?`, at most 900 bytes (LC_ALL=C: bytes)
 ru_w_clean() { REPLY=${${1//[[:cntrl:]]/?}[1,900]} }
 
@@ -911,9 +948,11 @@ ru_w_enable() {
   mtime=$st[mtime]
   if (( mtime > EPOCHSECONDS + MTIME_WAIT )); then ru_w_future $mtime; return $?; fi
   while (( EPOCHSECONDS <= mtime )); do /bin/sleep 0.2; done   # whole seconds: a start in the same second is not proven
-  ru_w_csha
-  [[ $REPLY == "$esha" ]] || { ru_w_hand_after $REPLY "while runner-enable waited past the install second"; return 3 }
-  ru_j installed "$mtime $esha" || return 3   # the file runner-enable starts: its install time and its sha (P3-3)
+  ru_w_shas $CONFIG || reply=(unreadable)
+  [[ $reply[1] == "$esha" ]] || { ru_w_hand_after $reply[1] "while runner-enable waited past the install second"; return 3 }
+  # the file runner-enable starts: its install time, its sha (S3b-4a r1 P3-3), and the sha of its CONTENT, from the
+  # same read (S3b-4a r2 P3-c: RECOVER step 1 compares it)
+  ru_j installed "$mtime $esha $reply[2]" || return 3
   ru_j enable-start '' || return 3
   t=$($RELBIN/runner-enable 2>&1)
   rc=$?
@@ -1204,12 +1243,12 @@ typeset -gA ru_rc_pat
     build-start '[0-9]{8}'              build-failed '.+'                  build-done "$I"
     gate-start "$I"                     gate-clone "$I"                    gate '(green|red|stop|other) [0-9]+'
     enable-check '(pass|fail)'          edited-sha "$H"                    hand-change "($H|unreadable)"
-    found "$P"                          restore "$P"                       installed "[0-9]+( $H)?"
+    found "$P"                          restore "$P"                       installed "[0-9]+( $H( $H)?)?"
     enable-start ''                     enable-refused '[0-9]+'            enable-done ''
     pre-close-failure '.+'              running '[0-9]+ [0-9]+'            delete "$I"
     stop '(check failed|HAND CHANGE|POOL DOWN|DISK|NO IDLE|ROLLBACK FAILED|CI DISABLED|ROLLED BACK): .*'
     pin-rule "(removed|$V $H)"          state-write '(switched|rolled|held)'  closed '[0-9]+'
-    recover-wait '[0-9]+'               recover-target "$H $T"
+    recover-start '[0-9]+'              recover-wait '[0-9]+'              recover-target "$H $T"
   )
 }
 
@@ -1252,7 +1291,7 @@ ru_rc_load() {
   ru_w_id= ru_w_fam= ru_w_kind= ru_w_ver= ru_w_sha= ru_w_old= ru_w_work= ru_w_out= ru_w_rbt= ru_w_pinbefore=
   ru_w_bsha= ru_w_tsha= ru_w_backup= ru_w_from= ru_w_stopped= ru_w_to= ru_w_ran= ru_w_chosen= ru_w_reject=
   ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0 ru_w_restored=0 ru_w_open=1 ru_w_cmd=recover ru_w_jcmd=
-  ru_w_reason= ru_w_reason_text= ru_w_vsha= ru_rc_isha= ru_rc_bad=
+  ru_w_reason= ru_w_reason_text= ru_w_vsha= ru_rc_iepoch= ru_rc_isha= ru_rc_icsha= ru_rc_bad=
   ru_w_stops=() ru_w_vals=() ru_w_fsets=() ru_rc_targets=() ru_rc_ok=() ru_rc_tools=() ru_rc_jstops=()
   ru_rc_first window && ru_w_id=$REPLY
   ru_rc_first family && ru_w_fam=$REPLY
@@ -1279,7 +1318,8 @@ ru_rc_load() {
       (stop) [[ $v == 'CI DISABLED: '* ]] || ru_rc_jstops+=($v) ;;   # CI DISABLED is RECOVER's wait: tried again
       (pre-close-failure) ru_w_preclosed=1 ;;
       (found) ru_w_futured=1 ;;
-      (installed) ru_rc_isha=; [[ $v == *' '* ]] && ru_rc_isha=${v#* } ;;   # the last one's sha ("": an older line)
+      (installed)   # the last one's install time, sha and content sha ("": an older line has none)
+        t=(${(s: :)v}); ru_rc_iepoch=$t[1] ru_rc_isha=${t[2]-} ru_rc_icsha=${t[3]-} ;;
       (validate) [[ $v == (post|recover)' '[1-3]' '(NON-API|UNKNOWN) ]] && ru_rc_bad=${v##* } ;;
     esac
   done
@@ -1401,12 +1441,14 @@ ru_rc_config() {
   return 3
 }
 
-# STEP 1, FLAG present after the last `enable-start` (the updater's enable): the window closes when its LAST TARGET
-# runs; the config's family lines are another (a person's config runs): STOP HAND CHANGE, CI as it is. Not in CLOSE_WAIT
-# s: a pre-close failure, at most once per journal (the second: POOL DOWN, no runner-disable); the first runs
-# runner-disable and RECOVER goes on at step 3. -> the close's return, 3 open, 4 go on at step 3
+# STEP 1, FLAG present after the updater's enable (E: its place in the journal: the last `enable-start`, or the
+# `installed` line whose lost enable-start ran): the window closes when its LAST TARGET runs; the config's family
+# lines are another, or its CONTENT is not the last `installed` line's (a person's config runs): STOP HAND CHANGE, CI as
+# it is. Not in CLOSE_WAIT s: a pre-close failure, at most once per journal (the second: POOL DOWN, no runner-disable);
+# the first runs runner-disable and RECOVER goes on at step 3. A pre-close failure journaled after E is finished as
+# decided, with no new wait. -> the close's return, 3 open, 4 go on at step 3
 ru_rc_flagged() {
-  local lines why
+  local e=$1 lines why lpc since
   typeset -A st
   ru_w_lines_now $ru_w_fam || { print -r -- "runner-updater: STOP RECOVER cannot read the config ($REPLY): the window journal stays open"; return 3 }
   lines=$REPLY
@@ -1415,28 +1457,50 @@ ru_rc_flagged() {
     ru_rc_close
     return $?
   fi
-  # and the file itself (D1 :91-92, S3b-4a r1 P3-3): its sha must be the last `installed` line's, the file the last
-  # runner-enable started (a journal of an older window has none: the lines only)
-  ru_w_csha
-  if [[ -n $ru_rc_isha && $REPLY != "$ru_rc_isha" ]]; then
-    ru_w_stop "HAND CHANGE" "CI runs $CONFIG with sha $REPLY, not the file the window's last runner-enable started (sha $ru_rc_isha): a person's config; RECOVER leaves CI and the file as they are"
+  # and the file itself (PLAN D1 as amended 2026-11-03, S3b-4a r2 P3-c): its CONTENT (ru_w_shas: whole-line comments
+  # and blank lines removed) must be the content sha the last `installed` line journaled, for the file the last
+  # runner-enable started, never re-derived. A comment cannot change what runs (a HAND CHANGE would drop a live
+  # candidate); any other change is a person's. An older line with no content sha: the file's sha (S3b-4a r1 P3-3); no
+  # sha at all (an older window): the lines only
+  ru_w_shas $CONFIG || reply=(unreadable unreadable)
+  if [[ -n $ru_rc_icsha && $reply[2] != "$ru_rc_icsha" ]]; then
+    ru_w_stop "HAND CHANGE" "CI runs $CONFIG with content sha $reply[2] (comments and blank lines left out), not the content of the file the window's last runner-enable started ($ru_rc_icsha): a person's config; RECOVER leaves CI and the file as they are"
+    ru_rc_close
+    return $?
+  elif [[ -z $ru_rc_icsha && -n $ru_rc_isha && $reply[1] != "$ru_rc_isha" ]]; then
+    ru_w_stop "HAND CHANGE" "CI runs $CONFIG with sha $reply[1], not the file the window's last runner-enable started (sha $ru_rc_isha): a person's config; RECOVER leaves CI and the file as they are"
     ru_rc_close
     return $?
   fi
-  zstat -H st $CONFIG || { print -r -- "runner-updater: STOP RECOVER cannot stat $CONFIG: the window journal stays open"; return 3 }
-  ru_rcsay "CI is enabled after the window's enable-start: waiting up to $CLOSE_WAIT s for its last TARGET to run ($lines)"
-  ru_w_wait_target $lines $st[mtime]
-  case $? in
-    (0) ru_rcsay "the target runs"; ru_rc_close; return $? ;;
-    (3) return 3 ;;
-  esac
-  why="the target did not run within $CLOSE_WAIT s (FLAG, a runscaler started after $st[mtime], the lines $lines)"
-  ru_w_clean $why
-  ru_j pre-close-failure $REPLY || return 3
-  if (( ru_w_preclosed )); then
-    ru_w_stop "POOL DOWN" "$why; a second pre-close failure in this window, so no runner-disable follows: CI is down on this host"
-    ru_rc_close
-    return $?
+  lpc=${ru_rc_k[(I)pre-close-failure]}
+  if (( lpc > e )); then
+    # that enable's pre-close failure is journaled already (the window's, or an earlier RECOVER's), and the
+    # runner-disable it decided did not finish (no disable-done after it; FLAG is present): RECOVER finishes it, as
+    # decided (S3b-4a r2 N2). No new wait, and it is not a second pre-close failure
+    why="the target did not run (the journal's pre-close failure: $ru_rc_v[lpc])"
+    ru_rcsay "$why: RECOVER finishes it (runner-disable, then the window's rule for its config)"
+  else
+    # the start must follow the INSTALL TIME (D1): the last `installed` line's, journaled; not the file's mtime now,
+    # which a comment a person added after the start moved (an older journal with no such line: the mtime)
+    since=$ru_rc_iepoch
+    if [[ -z $since ]]; then
+      zstat -H st $CONFIG || { print -r -- "runner-updater: STOP RECOVER cannot stat $CONFIG: the window journal stays open"; return 3 }
+      since=$st[mtime]
+    fi
+    ru_rcsay "CI is enabled after the window's enable-start: waiting up to $CLOSE_WAIT s for its last TARGET to run ($lines)"
+    ru_w_wait_target $lines $since
+    case $? in
+      (0) ru_rcsay "the target runs"; ru_rc_close; return $? ;;
+      (3) return 3 ;;
+    esac
+    why="the target did not run within $CLOSE_WAIT s (FLAG, a runscaler started after $since, the lines $lines)"
+    ru_w_clean $why
+    ru_j pre-close-failure $REPLY || return 3
+    if (( ru_w_preclosed )); then
+      ru_w_stop "POOL DOWN" "$why; a second pre-close failure in this window, so no runner-disable follows: CI is down on this host"
+      ru_rc_close
+      return $?
+    fi
   fi
   ru_w_preclosed=1
   ru_j disable-start '' || return 3
@@ -1470,7 +1534,7 @@ ru_rc_close() {
   (( ru_w_running && ${#against} == 0 )) && [[ $ru_w_ran == "${ru_rc_targets[1]}" ]] && sw=1
   if [[ $ru_w_kind == rollback ]]; then ru_rb_close $sw; return $?; fi
   if (( ! sw && ${#ru_w_stops} == 0 )); then
-    ru_w_stop "check failed" "the window was interrupted (its journal ends at \`${ru_rc_k[-1]-}\`): RECOVER ended it and CI runs the config it left"
+    ru_w_stop "check failed" "the window was interrupted (its own lines end at \`${ru_rc_wl:-${ru_rc_k[-1]-}}\`): RECOVER ended it and CI runs the config it left"
   fi
   ru_w_close $sw
 }
@@ -1493,7 +1557,7 @@ ru_rc_archive() {
 # closed with a STOP held; 3 it stays open (a STOP printed, held when the state can be written). The caller holds the
 # updater lock, loaded the state (ru_state) and sourced this file and the lib
 ru_recover() {
-  local flag=0 lds ldd le rc h lines pre
+  local flag=0 lds ldd le e wn rc h lines pre
   [[ -e $WINDOW || -L $WINDOW ]] || return 0
   ru_rcsay "the window journal $WINDOW is open and no run holds the updater lock: RECOVER ends it"
   ru_rc_read || { print -r -- "runner-updater: STOP RECOVER cannot read the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
@@ -1503,24 +1567,43 @@ ru_recover() {
     ru_rc_archive
     return $?
   fi
+  # THE WINDOW'S OWN LINES (S3b-4a r2 N1): the lines before RECOVER's first `recover-start` (every line when there is
+  # none). The F5 rules read the WINDOW's last line, never a line an earlier RECOVER appended
+  wn=$(( ${ru_rc_k[(i)recover-start]} - 1 ))
+  ru_rc_wl=
+  (( wn )) && ru_rc_wl=$ru_rc_k[wn]
   lds=${ru_rc_k[(I)disable-start]} ldd=${ru_rc_k[(I)disable-done]} le=${ru_rc_k[(I)enable-start]}
   [[ -e $FLAG ]] && flag=1
   # FLAG first (step 1; S3b-4a r1 F5). FLAG present and no disable-done (or no disable-start): nothing was disabled.
   # FLAG absent and no disable-start: D1 loses only the journal's LAST line, so disable-start can be the lost line only
   # when the journal ends at the line written just before it (`backup`; a rollback's `edited-sha`). Then its
   # runner-disable may have run: CI is down, and RECOVER goes on as for a disabled window (step 2 on). A journal that
-  # ends earlier never wrote disable-start: its window disabled nothing, and FLAG absent is a person's (nothing restarts)
+  # ends earlier never wrote disable-start: its window disabled nothing, and FLAG absent is a person's (nothing restarts).
+  # Decided ONCE (S3b-4a r2 N1): a journal with a `recover-start` line had an earlier RECOVER act on it (it decided CI
+  # was down because of the window, or reached the window's enable), and RECOVER never decides "nothing was disabled"
+  # for it again: the FLAG it reads now may be that RECOVER's own runner-enable
   pre=backup
   [[ $ru_w_kind == rollback ]] && pre=edited-sha
-  if (( flag && ! ldd )) || { (( ! lds )) && [[ ${ru_rc_k[-1]-} != "$pre" ]] }; then
-    if (( lds )); then ru_rcsay "nothing was disabled (FLAG present and no disable-done): the journal closes, no STOP"
-    else ru_rcsay "nothing was disabled (no disable-start): the journal closes, no STOP"; fi
-    (( flag )) || ru_rcsay "CI is disabled ($FLAG is absent), and not by this window: it stays as it is"
-    ru_rc_archive
-    return $?
+  if (( wn == ${#ru_rc_k} )) && { (( flag && ! ldd )) || { (( ! lds )) && [[ $ru_rc_wl != "$pre" ]] } }; then
+    if (( flag )); then
+      if (( lds )); then ru_rcsay "nothing was disabled (FLAG present and no disable-done): the journal closes, no STOP"
+      else ru_rcsay "nothing was disabled (no disable-start): the journal closes, no STOP"; fi
+      ru_rc_archive
+      return $?
+    fi
+    # FLAG absent (S3b-4a r2 P3-b): by D1 a person disabled CI, and nothing restarts. Two lost lines (`backup` and
+    # `disable-start`, after runner-disable ran) leave the same journal and the same host: beyond D1, and RECOVER cannot
+    # tell them apart. So CI down is never silent: a no-action STOP CI DISABLED, held, names runner-enable
+    ru_rcsay "nothing was disabled (no disable-start): CI is disabled ($FLAG is absent), and the window's journal shows no runner-disable of its own: CI stays as it is; the journal closes"
+    ru_w_stop "CI DISABLED" "CI is disabled ($FLAG is absent), and the journal of an interrupted window (its last line: \`$ru_rc_wl\`) shows no runner-disable of its own: a person disabled CI, or a power loss lost more than the journal's last line. RECOVER changes nothing. If no person disabled CI, enable it by hand. This STOP holds $ru_w_fam until a window of it disables CI again (for example \`runner-updater rebuild $ru_w_fam\`)" $BIN/runner-enable
+    if [[ -n $ru_w_fam ]]; then ru_w_hold_stops || return 3; fi
+    ru_rc_archive || return 3
+    return 1
   fi
-  (( lds )) || ru_rcsay "CI is disabled ($FLAG is absent) and the journal ends at \`$pre\`: its lost last line may be disable-start, whose runner-disable ran: RECOVER brings CI back"
+  (( lds || flag )) || ru_rcsay "CI is disabled ($FLAG is absent) and the window's lines end at \`$pre\`: its lost last line may be disable-start, whose runner-disable ran: RECOVER brings CI back"
   ru_rc_complete || { print -r -- "runner-updater: STOP RECOVER cannot act on the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
+  # RECOVER acts: its first line, once per journal, before any other line of its own
+  if (( wn == ${#ru_rc_k} )); then ru_j recover-start $EPOCHSECONDS || return 3; fi
   # a journal that ended in POOL DOWN (its second pre-close failure): it closes held, and nothing more runs
   if (( ${ru_rc_jstops[(I)POOL DOWN: *]} )) || (( ${#${(M)ru_rc_k:#pre-close-failure}} >= 2 )); then
     (( ${ru_rc_jstops[(I)POOL DOWN: *]} )) \
@@ -1530,10 +1613,14 @@ ru_recover() {
     return $?
   fi
   if (( flag )); then
-    # FLAG present after the last enable-start; or after an `installed` that is the journal's last line: the lost line
-    # may be enable-start, whose runner-enable ran (S3b-4a r1 F5), and the file it names is the one it was to start
-    if (( le > ldd )) || [[ ${ru_rc_k[-1]-} == installed ]]; then
-      ru_rc_flagged
+    # FLAG present after the last enable-start; or after an `installed` that is the journal's last line, or the
+    # WINDOW's last line (S3b-4a r2 N1: an earlier RECOVER appended after it): the lost line may be enable-start, whose
+    # runner-enable ran (S3b-4a r1 F5), and the file it names is the one it was to start. E: that enable's place
+    e=$le
+    [[ ${ru_rc_k[-1]-} == installed ]] && e=${#ru_rc_k}
+    [[ $ru_rc_wl == installed ]] && (( wn > e )) && e=$wn
+    if (( e > ldd )); then
+      ru_rc_flagged $e
       rc=$?
       (( rc == 4 )) || return $rc
     else
@@ -1647,12 +1734,18 @@ ru_rb_recover_target() {
 
 # RECOVER step 4 of a rollback whose installed edit is still the config: 0 when the journal (or this RECOVER) already
 # decided CONFIG EDIT's rule (S3b-4a r1 F2): a ROLLBACK FAILED (journaled, or raised now by step 1's pre-close
-# failure), or a `validate post|recover N NON-API|UNKNOWN` line: the target's lines just failed validate. Then the
-# backup goes back with NO new validate of them; a NON-API with no ROLLBACK FAILED yet raises it, an UNKNOWN none. 1
-# not decided: the target's lines are validated now (ru_rb_recover_target)
+# failure); a `pre-close-failure` line (S3b-4a r2 N2: the window's, or an earlier RECOVER's: the target did not run,
+# and its ROLLBACK FAILED comes only after `restore`, so a kill before it leaves the line alone); or a `validate
+# post|recover N NON-API|UNKNOWN` line: the target's lines just failed validate. Then the backup goes back with NO new
+# validate of them and no runner-enable on them; a pre-close failure or a NON-API with no ROLLBACK FAILED yet raises it,
+# an UNKNOWN none. 1 not decided: the target's lines are validated now (ru_rb_recover_target)
 ru_rb_decided() {
   if ru_w_hasstop "ROLLBACK FAILED" || (( ${ru_rc_jstops[(I)ROLLBACK FAILED: *]} )); then
     ru_rcsay "the rollback's ROLLBACK FAILED is decided: the backup goes back, with no new validate of its lines"
+    return 0
+  fi
+  if (( ru_w_preclosed )); then
+    ru_w_stop "ROLLBACK FAILED" "RECOVER: the rollback's target did not run (the journal's pre-close failure): the backup goes back, and CI is never enabled again on the target that just failed to run"
     return 0
   fi
   [[ -n $ru_rc_bad ]] || return 1

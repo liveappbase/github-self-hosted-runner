@@ -569,6 +569,84 @@ class TestRecoverAfterAFailedPostValidate(unittest.TestCase):
         self.assertIsNone(w.family()['candidate'])
 
 
+# runner-enable's hook: a target that never runs (launchd's runscaler exits at once whenever the config is SHA T)
+TARGET_NEVER_RUNS = '''T=%s PSD=%s
+if [[ $(/usr/bin/shasum -a 256 < $C | /usr/bin/cut -c1-64) == $T ]]; then /bin/cp $PSD/background $PSD/out; fi
+'''
+
+
+class TestRecoverAfterAPreCloseFailure(unittest.TestCase):
+    """S3b-4a r2 N2: a journaled `pre-close-failure` (the window's, or an earlier RECOVER's) whose config is still the
+    target's edit is DECIDED, as the window decided it (CONFIG EDIT's rule): the backup goes back with no new validate
+    and no runner-enable on the target that just failed to run, ROLLBACK FAILED holds with its retry line, CI goes on the
+    pre-window config, and the candidate and its image stay. RECOVER finishes a journaled pre-close failure whose
+    runner-disable did not finish (FLAG still present): it is not a second one, so no POOL DOWN. A switch in the same
+    spot ends the same way (check failed). Controls: the window not killed ends the same;
+    TestRecoverAfterAFailedPostValidate's cell killed at `installed` still rolls back."""
+
+    def target_never_runs(self, w, target):
+        tsha = sha(target)
+        for n in (1, 2, 3):
+            w.hook('enable-hook.%d' % n, TARGET_NEVER_RUNS % (tsha, w.r.psd))
+        return tsha
+
+    def decided(self, w, tsha, name='ROLLBACK FAILED'):
+        assert_closed(self, w)
+        self.assertEqual([e[2] for e in w.enables()], [tsha, sha(w.pre)])   # never the target again
+        assert_runs(self, w, w.pre)
+        self.assertEqual(n_disable(w), 2)                   # the window's, and the one its pre-close failure decided
+        if name == 'ROLLBACK FAILED':
+            self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+            f = w.family()
+            self.assertEqual((f['candidate']['version'], f['rejected']), (V2, []))
+            self.assertTrue(os.path.exists(os.path.join(w.vms, NEW)))
+            self.assertEqual(len(w.validates()), 2)         # PRE-VALIDATE and post: no new validate of the target
+        else:
+            self.assertEqual(stops(w), [name])
+
+    def test_control_not_killed(self):
+        w = rb_win(self)
+        tsha = self.target_never_runs(w, config((('mac-a', OLD),)).encode())
+        self.assertEqual(rollback(w).returncode, 1)
+        self.decided(w, tsha)
+
+    def test_killed_at_each_line_of_the_pre_close_path(self):
+        for kill in ('pre-close-failure', 'disable-start:2', 'disable-done:2', 'restore'):
+            with self.subTest(kill=kill):
+                w = rb_win(self)
+                tsha = self.target_never_runs(w, config((('mac-a', OLD),)).encode())
+                self.assertEqual(rollback(w, env={'RU_KILL_AT': kill}).returncode, KILLED)
+                res = w.r.cmd('pass', ok=False)
+                self.assertNotIn('POOL DOWN', res.stdout)
+                self.decided(w, tsha)
+
+    def test_recover_s_own_pre_close_failure_killed_before_its_runner_disable(self):
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'enable-done'}).returncode, KILLED)
+        w.r.set_ps([])                               # the target's runscaler is gone: step 1's wait fails
+        res = w.r.cmd('pass', ok=False, env={'RU_KILL_AT': 'pre-close-failure'})
+        self.assertEqual(res.returncode, KILLED, res.stdout)
+        res = w.r.cmd('pass', ok=False)
+        self.assertNotIn('POOL DOWN', res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, w.pre)
+        self.assertEqual(n_disable(w), 2)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+        self.assertEqual(w.family()['candidate']['version'], V2)
+
+    def test_a_switch_the_same(self):
+        from tests.studio.test_runner_updater_recover import out_name
+        from tests.studio.test_runner_updater_window import switched_config
+        for kill in ('pre-close-failure', 'disable-start:2'):
+            with self.subTest(kill=kill):
+                w = Win(self)
+                tsha = self.target_never_runs(w, switched_config(w.pre, out_name()))
+                self.assertEqual(w.run(env={'RU_KILL_AT': kill}).returncode, KILLED)
+                res = w.r.cmd('pass', ok=False)
+                self.assertNotIn('POOL DOWN', res.stdout)
+                self.decided(w, tsha, 'check failed')
+
+
 class TestTwoHourBound(unittest.TestCase):
     """S3b-4a r1 F3: the 2-h bound (ROLLBACK_BOUND from SINCE) covers every retried rollback failure: a runner-disable
     time-out, an UNKNOWN validate before and after the edit. Past it the next call holds STOP ROLLBACK FAILED and runs
