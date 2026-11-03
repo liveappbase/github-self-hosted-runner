@@ -17,7 +17,9 @@ permissions:
 jobs:
   release-check:
     runs-on: macos-latest
-    timeout-minutes: 15
+    # The tests step took 4.4-4.8 min through 1f81eb6; the Studio window tests (4d2a46e) took it past 11.7 min and the
+    # job hit 15 min (run 41681004376, cancelled). Locally the suite went from 422 s to 812 s.
+    timeout-minutes: 30
     steps:
       - name: Fetch the commit and its history
         run: |
