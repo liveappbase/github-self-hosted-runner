@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # watchdog/run — the weekly runner watchdog (PLAN D8). A liveapp calendar duty runs it in the self-instance, from a
 # release of this repository checked by its sha256, where bash, gh and jq exist. It READS GitHub (gh api: the newest
-# actions/runner release and its list; the jobs on main of the last 14 days in --repo; the head of a few job logs),
-# writes nothing there, and prints ONLY lines:
+# actions/runner release and its list; the jobs on main of the last 14 days in --repo; the head of a few job logs)
+# through ONE helper, ghapi, which passes --allow-escape-sequences when this gh lists that flag in `gh api --help`
+# (read once a run: gh 2.98.0 and newer refuse a body that holds a terminal escape sequence without it, and a job log
+# holds colour codes; an older gh rejects the flag), and tries a failed call once more, 3 seconds later. It writes
+# nothing there, and prints ONLY lines:
 #   open TOPIC TEXT      ask the owner (TEXT: the rest of the line; it holds backticks and the host lines)
 #   clear TOPIC          withdraw that ask
 # every `clear` before every `open` (a full ask cap frees first). The duty pipes the lines, in order, into this ONE
@@ -21,8 +24,8 @@
 # The rules (watchdog.jq): STALE, FAILING; one topic per (rule, newest release), e.g. runner-stale-2-339-0, and
 # `clear` for the topics of every release before it in the list read and for a rule that finds nothing. NOT MEASURED
 # (a label with no job, a log with no version) never opens an ask alone: it rides in another ask's text.
-# COULD-NOT-RUN (a jq that core/TESTED_JQ does not list for the watchdog, a gh failure, a program error, a bad
-# argument): that ONE line only, `open runner-watchdog-could-not-run-<release> …` (no release suffix when the newest
+# COULD-NOT-RUN (a jq that core/TESTED_JQ does not list for the watchdog, a gh call that failed twice or a failed
+# `gh api --help`, a program error, a bad argument): that ONE line only, `open runner-watchdog-could-not-run-<release> …` (no release suffix when the newest
 # release cannot be read).
 # Exit 0 whenever it printed its lines; it reads no environment variable of its own. bash 3.2 parses it (macOS).
 set -u -o pipefail
@@ -41,8 +44,26 @@ cnr() { # REASON — the one COULD-NOT-RUN line, then stop
   exit 0
 }
 
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/watchdog.XXXXXX") || cnr "mktemp failed"
+
+# EVERY read is ghapi. gh 2.98.0 and newer refuse a body that holds a terminal escape sequence (a job log holds colour
+# codes) unless given --allow-escape-sequences, and an older gh rejects that flag as unknown: so the flag goes on every
+# call when this gh's `gh api --help` lists it, read once here (no version number compared)
+ghhelp=$(gh api --help 2>/dev/null) || cnr "gh api --help failed"
+esc=
+case $ghhelp in *--allow-escape-sequences*) esc=--allow-escape-sequences ;; esac
+# A run makes about 200 calls, and one transient failure must not end it (issue #3): a failed call is tried ONCE more,
+# 3 seconds later, and only a second failure is the caller's COULD-NOT-RUN
+ghapi() { # FILE ARG... — `gh api ARG...` into FILE; the rc of its last try
+  local f=$1; shift
+  gh api ${esc:+"$esc"} "$@" > "$f" 2>/dev/null && return 0
+  sleep 3
+  gh api ${esc:+"$esc"} "$@" > "$f" 2>/dev/null
+}
+
 # the newest release first: every topic is per release
-tag=$(gh api repos/actions/runner/releases/latest --jq .tag_name 2>/dev/null) || cnr "gh api repos/actions/runner/releases/latest failed"
+ghapi "$tmp/latest.txt" repos/actions/runner/releases/latest --jq .tag_name || cnr "gh api repos/actions/runner/releases/latest failed"
+tag=$(cat "$tmp/latest.txt")
 [[ $tag =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || cnr "the newest actions/runner release has no version tag"
 release=${BASH_REMATCH[1]}
 
@@ -96,11 +117,10 @@ done < "$tested"
 
 prog=$here/watchdog.jq
 [ -f "$prog" ] || cnr "watchdog/watchdog.jq is not next to this program"
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/watchdog.XXXXXX") || cnr "mktemp failed"
 
 api() { # FILE PATH [--paginate] — one read; a failure ends the run as COULD-NOT-RUN, naming the call
   local f=$1 p=$2; shift 2
-  gh api "$@" "$p" > "$f" 2>/dev/null || cnr "gh api $p failed"
+  ghapi "$f" "$@" "$p" || cnr "gh api $p failed"
 }
 
 api "$tmp/releases.json" 'repos/actions/runner/releases?per_page=30'

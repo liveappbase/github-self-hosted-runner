@@ -1,11 +1,14 @@
 """watchdog/run + watchdog/watchdog.jq — the weekly runner watchdog (PLAN D8), against a substitute gh. Pinned: the rules
 STALE (a label's newest job on main runs a version older than a release out for more than 7 days), FAILING (the
 newest version differs from 8 days ago, and the last 7 days' failure share is at least twice the 7 days before, with at
-least 3 failures) and COULD-NOT-RUN (an untested jq, a gh failure, a program error: ONE line); one topic per (rule,
-newest release), `clear` for the topics of the releases before it; NOT MEASURED only inside another ask's text; the
-output is only `open TOPIC TEXT` and `clear TOPIC` lines; gh is only read. fixtures/releases.json is the real
-actions/runner release list (2026-11-01, a prerelease among them); fixtures/job-log-head.txt the head of a real job
-log (its runner group renamed). Every trigger has a control that comes out the other way."""
+least 3 failures) and COULD-NOT-RUN (an untested jq, a gh call that failed twice, a program error: ONE line); one
+topic per (rule, newest release), `clear` for the topics of the releases before it; NOT MEASURED only inside another
+ask's text; the output is only `open TOPIC TEXT` and `clear TOPIC` lines; gh is only read, every call with
+--allow-escape-sequences when `gh api --help` lists it (read once a run: a new gh refuses a log with escape sequences
+without it, an old one rejects the flag) and never otherwise, and a failed call is tried once more after `sleep 3`
+(issue #3). fixtures/releases.json is the real actions/runner release list (2026-11-01, a prerelease among them);
+fixtures/job-log-head.txt the head of a real job log (its runner group renamed); ESCAPED_HEAD is synthetic. Every
+trigger has a control that comes out the other way."""
 import calendar
 import json
 import os
@@ -15,7 +18,7 @@ import sys
 import time
 import unittest
 
-from tests.watchdog.wdrun import REPO, Sandbox, fixture, jq_version
+from tests.watchdog.wdrun import FLAG, REPO, Sandbox, fixture, jq_version
 
 REPO_ARG = 'example-org/example'
 HOSTS = ['--hz', 'ssh scaler@hz.example', '--studio', 'ssh ci@studio.example']
@@ -33,8 +36,10 @@ class World:
     """Jobs on main: one run per job. job(label, days_ago, ...) adds one; install() answers every gh call."""
 
     def __init__(self, now=NOW, releases=None):
-        """releases: [(version, days_ago)], newest first, all final (default: the real list, newest 2.338.2)."""
+        """releases: [(version, days_ago)], newest first, all final (default: the real list, newest 2.338.2). head:
+        the log head of every job, its version line replaced by the job's (default: fixtures/job-log-head.txt)."""
         self.now, self.jobs, self.next_id, self.releases = now, [], 1000, releases
+        self.head = fixture('job-log-head.txt')
 
     def job(self, label, days_ago, conclusion='success', version='2.338.2'):
         self.next_id += 1
@@ -64,7 +69,9 @@ class World:
         runs = [{'id': j['run_id'], 'head_branch': 'main'} for j in self.jobs]
         sb.answer('repos/%s/actions/runs?branch=main&created=>=%s&per_page=100' % (REPO_ARG, since),
                   {'total_count': len(runs), 'workflow_runs': runs})
-        head = fixture('job-log-head.txt')
+        head = self.head
+        assert head.count("Current runner version: '2.338.2'") == 1 and head.count("'2.338.2'") == 1, \
+            'a log head names 2.338.2 once, in its version line (each job puts its own version there)'
         for j in self.jobs:
             api = {k: v for k, v in j.items() if not k.startswith('_')}
             sb.answer('repos/%s/actions/runs/%d/jobs?per_page=100' % (REPO_ARG, j['run_id']),
@@ -304,11 +311,13 @@ class CouldNotRun(unittest.TestCase):
         w = healthy()
         w.install(sb)
         since = time.strftime('%Y-%m-%d', time.gmtime(NOW - 14 * DAY))
-        sb.answer('repos/%s/actions/runs?branch=main&created=>=%s&per_page=100' % (REPO_ARG, since), rc=1)
+        runs = 'repos/%s/actions/runs?branch=main&created=>=%s&per_page=100' % (REPO_ARG, since)
+        sb.answer(runs, rc=1)
         rc, out, err = sb.run(['--repo', REPO_ARG] + HOSTS + FAMS + ['--now', str(NOW)])
         self.assertEqual(rc, 0, err)
         l = self.one_line(out.splitlines())
         self.assertIn('actions/runs', l)
+        self.assertEqual(sum(1 for c in sb.gh_calls() if runs in c), 2, sb.timeline())     # tried twice (issue #3)
 
     def test_the_newest_release_unreadable(self):
         sb = Sandbox(self)
@@ -317,6 +326,8 @@ class CouldNotRun(unittest.TestCase):
         sb.answer('repos/actions/runner/releases/latest', rc=1, jq_expr='.tag_name')
         rc, out, _ = sb.run(['--repo', REPO_ARG] + HOSTS + FAMS + ['--now', str(NOW)])
         self.one_line(out.splitlines(), 'runner-watchdog-could-not-run')
+        self.assertEqual(sum(1 for c in sb.gh_calls() if 'repos/actions/runner/releases/latest' in c), 2,
+                         sb.timeline())
 
     def test_a_program_that_does_not_compile(self):
         sb = Sandbox(self)
@@ -352,6 +363,139 @@ class CouldNotRun(unittest.TestCase):
         args = ['--repo', REPO_ARG] + HOSTS + ['--family', 'hz-docker=hz:linux-a,linux-b,linux-a',
                                                '--family', 'mac-golden=studio:mac-a'] + ['--now', str(NOW)]
         self.assertEqual(list(opened(watch(self, w, args=args))), ['runner-stale-2-338-2'])
+
+
+E = '\x1b'
+# a SYNTHETIC log head (no line of a real job log): terminal escape sequences (colour codes, an erase, a window title)
+# on the lines before the version line, around the text on its own line, and on the lines after it; a byte order mark
+# first, as in a real log (and fixtures/job-log-head.txt)
+ESCAPED_HEAD = '﻿' + ''.join('2026-11-01T09:00:00.%07dZ %s\n' % (i, l) for i, l in enumerate((
+    E + '[36;1mRequested labels: self-hosted, example-label' + E + '[0m',
+    E + '[1;33mJob defined at: example-org/example/.github/workflows/ci.yml@refs/heads/main' + E + '[0m',
+    E + '[32m' + E + "[1mCurrent runner version: '2.338.2'" + E + '[0m' + E + '[K',
+    E + "[36;1mRunner name: 'runner-0000abcd'" + E + '[0m',
+    E + "[36;1mMachine name: 'example-machine'" + E + '[0m',
+    E + '[90m##[group]Operating System' + E + '[0m',
+    'Example OS 1.0',
+    E + '[90m##[endgroup]' + E + '[0m',
+    E + ']0;example title' + E + '\\',
+)))
+
+
+def stale_world(head=None):
+    """healthy, and linux-a's newest job runs 2.338.0 (STALE): the lines name the version a log head gives."""
+    w = healthy()
+    w.job('linux-a', 0.1, version='2.338.0')
+    if head is not None:
+        w.head = head
+    return w
+
+
+class EscapeSequences(unittest.TestCase):
+    """gh 2.98.0 and newer refuse a body that holds a terminal escape sequence (a job log holds colour codes) unless
+    given --allow-escape-sequences, and gh 2.66.1 rejects that flag: watchdog/run passes it on every call when this
+    gh's `gh api --help` lists it, read once a run."""
+
+    def run_in(self, gh, head):
+        sb = Sandbox(self, gh=gh)
+        return watch(self, stale_world(head), sb=sb), sb
+
+    def test_a_new_gh_gets_the_flag_on_every_call_and_an_escaped_log_reads_as_a_clean_one(self):
+        clean, _ = self.run_in('new', None)
+        self.assertIn('linux-a (hz-docker) runs runner 2.338.0', opened(clean)['runner-stale-2-338-2'])
+        lines, sb = self.run_in('new', ESCAPED_HEAD)
+        self.assertEqual(lines, clean)
+        calls = sb.gh_calls()
+        self.assertEqual(calls.count(['api', '--help']), 1, calls)                     # read once a run
+        reads = [c for c in calls if c != ['api', '--help']]
+        self.assertTrue(any(any(a.endswith('/logs') for a in c) for c in reads), reads)
+        self.assertTrue(any('repos/actions/runner/releases/latest' in c for c in reads), reads)
+        for c in reads:                                             # every call goes through the one helper
+            self.assertIn(FLAG, c)
+
+    def test_an_old_gh_never_gets_the_flag_and_an_escaped_log_reads_as_a_clean_one(self):
+        clean, _ = self.run_in('old', None)
+        self.assertIn('linux-a (hz-docker) runs runner 2.338.0', opened(clean)['runner-stale-2-338-2'])
+        lines, sb = self.run_in('old', ESCAPED_HEAD)
+        self.assertEqual(lines, clean)
+        calls = sb.gh_calls()
+        self.assertEqual(calls.count(['api', '--help']), 1, calls)
+        self.assertEqual([c for c in calls if FLAG in c], [])
+
+    def test_control_a_new_gh_not_given_the_flag_cannot_read_an_escaped_log(self):
+        # the refusal bites: this gh refuses as a new one does, but its help does not list the flag, so it gets none
+        lines, _ = self.run_in('new-unlisted', ESCAPED_HEAD)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], r'^open runner-watchdog-could-not-run-2-338-2 The weekly runner watchdog could not '
+                                   r'run: gh api repos/%s/actions/jobs/[0-9]+/logs failed\.' % REPO_ARG)
+        clean, _ = self.run_in('new-unlisted', None)                # and it reads a clean log
+        self.assertIn('runner-stale-2-338-2', opened(clean))
+
+    def test_a_gh_whose_help_fails_cannot_run(self):
+        lines, sb = self.run_in('no-help', None)
+        self.assertEqual(len(lines), 1, lines)
+        self.assertTrue(lines[0].startswith('open runner-watchdog-could-not-run The weekly runner watchdog could not '
+                                            'run: gh api --help failed.'), lines)
+        self.assertEqual(sb.gh_calls(), [['api', '--help']])
+
+
+class VersionRead(unittest.TestCase):
+    def test_the_version_is_read_through_escape_sequences_before_after_and_around_its_line(self):
+        for gh in ('new', 'old'):
+            with self.subTest(gh=gh):
+                o = opened(watch(self, stale_world(ESCAPED_HEAD), sb=Sandbox(self, gh=gh)))
+                self.assertEqual(list(o), ['runner-stale-2-338-2'])
+                t = o['runner-stale-2-338-2']
+                self.assertIn('linux-a (hz-docker) runs runner 2.338.0 on its newest job on main', t)
+                self.assertNotIn('Not measured', t)
+
+    def test_control_an_escaped_head_with_no_version_line_is_not_measured(self):
+        for gh in ('new', 'old'):
+            with self.subTest(gh=gh):
+                w = stale_world(ESCAPED_HEAD)
+                w.job('mac-a', 0.05)
+                w.jobs[-1]['_version'] = None
+                t = opened(watch(self, w, sb=Sandbox(self, gh=gh)))['runner-stale-2-338-2']
+                self.assertIn('Not measured: mac-a (mac-golden): its newest job log names no runner version', t)
+
+
+class Retry(unittest.TestCase):
+    """Issue #3: a run makes about 200 gh calls, and one transient failure ended it as COULD-NOT-RUN. A failed call is
+    tried once more after `sleep 3`; a second failure is COULD-NOT-RUN, the line as before."""
+
+    def calls(self, w):
+        newest = w.jobs[-1]                                         # stale_world's linux-a job: its log is read
+        since = time.strftime('%Y-%m-%d', time.gmtime(w.now - 14 * DAY))
+        return (('repos/actions/runner/releases/latest', '.tag_name'),
+                ('repos/actions/runner/releases?per_page=30', None),
+                ('repos/%s/actions/runs?branch=main&created=>=%s&per_page=100' % (REPO_ARG, since), None),
+                ('repos/%s/actions/runs/%d/jobs?per_page=100' % (REPO_ARG, newest['run_id']), None),
+                ('repos/%s/actions/jobs/%d/logs' % (REPO_ARG, newest['id']), None))
+
+    def test_a_call_that_fails_once_is_tried_again_after_a_pause_and_the_lines_are_those_of_a_run_that_never_failed(self):
+        clean = watch(self, stale_world())
+        self.assertIn('runner-stale-2-338-2', opened(clean))
+        for path, jq_expr in self.calls(stale_world()):
+            with self.subTest(path=path):
+                sb = Sandbox(self)
+                sb.fail(path, 1, jq_expr)
+                self.assertEqual(watch(self, stale_world(), sb=sb), clean)
+                t = sb.timeline()
+                at = [i for i, c in enumerate(t) if path in c]
+                self.assertEqual(len(at), 2, t)                     # exactly two tries
+                self.assertEqual(at[1], at[0] + 2, t)
+                self.assertEqual(t[at[0] + 1], ['#sleep', '3'])     # a fixed pause between them
+                self.assertEqual([c for c in t if c[:1] == ['#sleep']], [['#sleep', '3']], t)   # and no other
+
+    def test_control_a_call_that_fails_every_time_is_tried_twice_and_the_run_cannot_run(self):
+        w = stale_world()
+        path = self.calls(w)[-1][0]
+        sb = Sandbox(self)
+        sb.fail(path, 99)
+        lines = watch(self, w, sb=sb)
+        self.assertEqual(lines, ['open runner-watchdog-could-not-run-2-338-2 The weekly runner watchdog could not run: '
+                                 'gh api %s failed. Fix it, then run the duty again.' % path])
+        self.assertEqual(sum(1 for c in sb.gh_calls() if path in c), 2, sb.timeline())
 
 
 if __name__ == '__main__':
