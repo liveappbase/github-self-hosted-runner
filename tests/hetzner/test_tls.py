@@ -474,6 +474,55 @@ exec /usr/bin/sha256sum "$@"
             self.assertTrue(r2.stdout.endswith(' curl-rc=60\n'), r2.stdout + r2.stderr)
             self.assertEqual(sb.gh.seen, [])
 
+    def test_a_refusal_names_the_data_file_never_the_private_copy(self):
+        """rr_bundle parses a private copy of the data file (in a .new.* folder it removes): a REFUSE about the file
+        names ~/build/setup/tls-excluded-spki, the file a person can fix. The control: the good file refuses nothing."""
+        for why, lines, ok in (('a bad first field', ['NOT-HEX a line'], False), ('no data line', ['# none'], False),
+                               ('a duplicate', ['c' * 64 + ' a', 'c' * 64 + ' b'], False),
+                               ('the control: a good file', ['c' * 64 + ' a'], True)):
+            with self.subTest(why):
+                sb = Sandbox(self)
+                data = sb.excluded(*lines)
+                r, _ = self.bundle(sb)
+                self.assertEqual(r.returncode == 0, ok, r.stderr)
+                self.assertNotIn('/.new.', r.stdout + r.stderr)
+                if not ok:
+                    refuse = [l for l in r.stderr.splitlines() if 'REFUSE' in l]
+                    self.assertEqual(len(refuse), 1, r.stderr)
+                    self.assertIn('REFUSE ' + data, refuse[0])
+
+    def test_the_tls_folder_holds_only_the_bundle_its_ca_path_and_stamp_after_every_check(self):
+        """After a check that builds, one that finds the bundle current, and one that refuses (a bad data file, then a
+        source under the floor), the folder holds bundle.pem, capath and stamp and nothing else (no .new.* folder);
+        a refusal on a fresh home leaves capath alone."""
+        def tls(sb):
+            return sorted(os.listdir(os.path.join(sb.home, '.cache', 'liveapp-ci', 'tls')))
+        three = ['bundle.pem', 'capath', 'stamp']
+        sb = Sandbox(self)
+        r, _ = self.bundle(sb)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(tls(sb), three, 'after a build')
+        r, _ = self.bundle(sb)
+        self.assertIn('is current', r.stdout)
+        self.assertEqual(tls(sb), three, 'after a check that found the bundle current')
+        good = os.path.join(sb.build, 'setup', 'tls-excluded-spki')
+        with open(good) as f:
+            keep = f.read()
+        sb.excluded('NOT-HEX a line')
+        r, _ = self.bundle(sb)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(tls(sb), three, 'after a refusal of the data file')
+        sb.write(good, keep)
+        sb.write(sb.path('source.pem'), ''.join(pems(sb.system_bundle)[:FLOOR - 1]))
+        r, _ = self.bundle(sb)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(tls(sb), three, 'after a refusal under the floor')
+        fresh = Sandbox(self)
+        fresh.excluded('NOT-HEX a line')
+        r, _ = self.bundle(fresh)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(tls(fresh), ['capath'], 'after a refusal on a fresh home')
+
     def test_a_bundle_made_under_a_lower_floor_is_rebuilt(self):
         """The floor is part of what made a bundle: one made with RR_FLOOR 50 from 99 certificates is not current for
         a filter whose floor is 100, which refuses it. The control: the same floor again keeps it."""

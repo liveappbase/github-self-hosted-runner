@@ -238,7 +238,8 @@ class Upgrade(unittest.TestCase):
     def test_step_2_refuses_a_version_that_is_not_N_N_N_and_writes_nothing(self):
         bad = (('a trailing space', '2.338.2 '), ('an empty version', ''), ('the placeholder left in', LEFT),
                ('a leading v', 'v2.338.2'), ('two numbers', '2.338'), ('four numbers', '2.338.2.1'),
-               ('an empty number', '2..338'), ('a leading space', ' 2.338.2'), ('a second line', '2.338.2\n2.338.2'))
+               ('an empty number', '2..338'), ('a leading space', ' 2.338.2'), ('a second line', '2.338.2\n2.338.2'),
+               ('a leading dot', '.2.338'), ('a trailing dot', '2.338.'))
         sb = Sandbox(self)
         lap = self.laptop(sb)
         full = self.installed(sb)
