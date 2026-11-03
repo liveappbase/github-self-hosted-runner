@@ -1,9 +1,10 @@
 """Helpers for the tests of linux-docker/ (the Linux host's scripts), stdlib only.
 
 Those scripts run on a Linux host (bash 5, GNU coreutils, OpenSSL, curl), so these cells run IN A THROWAWAY LINUX
-CONTAINER as root, with the repository mounted read-only and no network (RUN_LINE). Outside such a container (not
-Linux, not root, or no /.dockerenv) each cell SKIPS: a copy that ran as root on a real host could still reach that
-host's programs. In a container that lacks a tool the cells need, they FAIL (a uniform skip would hide that).
+CONTAINER as root (RUN_LINE by hand; the ubuntu rows of .github/workflows/release-check.yml in CI). Where they cannot
+run (not Linux, or not root) each cell SKIPS. On Linux as root with no container's /.dockerenv each cell FAILS before
+it runs: a copy that ran as root on a real host could still reach that host's programs, and a skip there would let a
+CI row pass with no cell run (verdict, test_support.py). In a container that lacks a tool the cells need, they FAIL.
 
 A cell makes a Sandbox: a temporary folder, removed by the cell's cleanup. In it
 - home/build is linux-docker/ (the host's ~/build) plus setup/tls-excluded-spki from the repository's top-level setup/
@@ -33,7 +34,8 @@ import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUN_LINE = ('docker run --rm --network none -v "$PWD":/w:ro -w /w IMAGE python3 -I -B -m unittest discover -s '
-            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl and ca-certificates)')
+            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl and ca-certificates; '
+            'the ubuntu rows of .github/workflows/release-check.yml run them so too)')
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 SYSTEM_BUNDLE = '/etc/ssl/certs/ca-certificates.crt'
 OPENSSL = '/usr/bin/openssl'
@@ -46,11 +48,36 @@ ARCH = {'x86_64': 'x64', 'aarch64': 'arm64'}.get(os.uname().machine, '?')
 FLOOR = 100
 
 
-def in_container():
-    return sys.platform.startswith('linux') and os.geteuid() == 0 and os.path.exists('/.dockerenv')
+def verdict(platform=None, euid=None, dockerenv=None):
+    """'run': Linux, root, and a container's /.dockerenv. 'skip': not Linux or not root (the cells cannot run there).
+    'fail': Linux as root with no /.dockerenv. The cells could run, but it may be a real host, so they neither run nor
+    pass as skipped: a CI row whose container ever lacked the mark goes red, not green with every cell skipped."""
+    platform = sys.platform if platform is None else platform
+    euid = os.geteuid() if euid is None else euid
+    dockerenv = os.path.exists('/.dockerenv') if dockerenv is None else dockerenv
+    if not platform.startswith('linux') or euid != 0:
+        return 'skip'
+    return 'run' if dockerenv else 'fail'
 
 
-needs_container = unittest.skipUnless(in_container(), 'runs only as root in a throwaway Linux container: ' + RUN_LINE)
+SKIP_WHY = 'runs only as root in a throwaway Linux container: ' + RUN_LINE
+FAIL_WHY = 'Linux as root, but no /.dockerenv: this may be a real host, so these cells do not run (' + RUN_LINE + ')'
+
+
+def contained(v):
+    """The class decorator for verdict v: run the cells, skip them, or fail each one before it runs."""
+    def deco(cls):
+        if v == 'skip':
+            return unittest.skip(SKIP_WHY)(cls)
+        if v == 'fail':
+            def setUp(self):
+                self.fail(FAIL_WHY)
+            cls.setUp = setUp
+        return cls
+    return deco
+
+
+needs_container = contained(verdict())
 
 
 def require_tools(test):
@@ -349,8 +376,11 @@ class Sandbox:
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
 
     def __init__(self, test):
-        if not in_container():
-            raise unittest.SkipTest('runs only as root in a throwaway Linux container: ' + RUN_LINE)
+        v = verdict()
+        if v == 'skip':
+            raise unittest.SkipTest(SKIP_WHY)
+        if v == 'fail':
+            test.fail(FAIL_WHY)
         require_tools(test)
         self.test = test
         self.root = os.path.realpath(tempfile.mkdtemp(prefix='hz-'))

@@ -95,17 +95,40 @@ A new release of GitHub's runner ([actions/runner](https://github.com/actions/ru
    ```
 3. After the first job on the new image passed: the same line with `accept`. If jobs fail on it: the same line with `back`.
 
-This release adds the host-config key `RUNNER_VERSION`: on a host installed before it, add that key (the runner version the pool runs now; Install step 1) before you run this release's 02-d1.sh, which refuses a host config without it.
+A host installed from a release before this one: do "Upgrading from a release before this one" (below) first.
 
 **The build record.** Each build that passed every check writes `~/run/builds/<version>-<recipe>` as RUN_USER (0640, so RS_USER, a member of RUN_USER's group, can read it): exactly four lines, `format 1`, `version <version>`, `digest sha256:<the image's digest in the local registry>`, `recipe <the sha256 of image/'s files>`. There is one record per version and recipe; building the same version again replaces it. It is written under a temporary name and renamed, so a cut-off run leaves no partial record. A failed check, a version mismatch or a digest mismatch writes none. Its reader must read it as untrusted data: each line by its pattern, never sourced.
 
 **The trust of the downloads.** Every download of the build path (GitHub's API and the runner tarball) uses `curl --cacert` with a filtered CA bundle (the system's bundle, without the certificates whose public key `setup/tls-excluded-spki` names) and `--capath` with an empty folder, so curl's built-in CA folder adds nothing back. That file's header gives its format; a file that breaks it, or names no key at all, stops the build before any download.
 
+## Upgrading from a release before this one
+
+This release adds the host-config key `RUNNER_VERSION`: the runner version a full 02-d1.sh run builds. This release's 02-d1.sh refuses to run without it, with `02-d1.sh: REFUSE /etc/liveapp-ci/host.conf lacks RUNNER_VERSION`, before it changes anything. Set it to the runner version the pool runs now, before you run a script of this release:
+
+1. Read that version (as RS_USER). It starts the image that config.toml names, with no network, and prints its runner's version, as `pool-image.sh up` reads it. It must print exactly one version; if it prints none or two, stop: config.toml does not name one image for both sets.
+   ```
+   ssh <RS_USER>@<host> 'sed -n "s/^runner-image = \"\(.*\)\"$/\1/p" ~/.config/runner/config.toml | sort -u | while read -r i; do DOCKER_HOST=unix:///home/<RUN_USER>/run/docker.sock docker run --rm --network none --memory 512m --cpus 1 "$i" ./config.sh --version < /dev/null | grep -xE "[0-9]+\.[0-9]+\.[0-9]+"; done'
+   ```
+2. Add it to your copy of the host config (`<version>` is what step 1 printed):
+   ```
+   printf '\nRUNNER_VERSION=%s\n' <version> >> host.conf
+   ```
+3. Install that host config (Install step 1's line):
+   ```
+   ssh root@<host> 'install -d -m 755 /etc/liveapp-ci && umask 022 && cat > /etc/liveapp-ci/host.conf.new && chmod 644 /etc/liveapp-ci/host.conf.new && mv /etc/liveapp-ci/host.conf.new /etc/liveapp-ci/host.conf' < host.conf
+   ```
+4. Check it: this must print the one line `RUNNER_VERSION=<version>`:
+   ```
+   ssh <RUN_USER>@<host> 'grep -xE "RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+" /etc/liveapp-ci/host.conf'
+   ```
+
+Then install this release's files as for every release ("A new runner release", its first paragraph).
+
 ## A host that already runs these scripts from a hand copy
 
 Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, checks that the pool runs the config and image its records name, and does nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
 
-1. Install step 1 (the host config, with the values the host uses today).
+1. Install step 1 (the host config, with the values the host uses today). Its `RUNNER_VERSION` is the runner version the pool runs now: "Upgrading from a release before this one", step 1, reads it.
 2. Install step 3 for both users, then Install step 4.
 3. Check that runscaler runs the installed config.toml, read only. It prints the image config.toml names for both sets and the record that names it too (`image.ref`, or after a `back` the kept config, `config.toml.pre-image`), and checks that runscaler started after config.toml was installed (pool-image.sh's own rule, in whole seconds). It must end with `OK   runscaler started`. A line that starts with `STOP` says what to do: the move stops there; do it, then run this check again:
    ```

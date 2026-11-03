@@ -47,7 +47,7 @@ host_conf 02-d1.sh HOST_IP SSH_PORT RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_POR
 usage() { echo "usage: 02-d1.sh (no argument: the full run) | 02-d1.sh build RUNNER_VERSION (for example 2.339.0)"; exit 2; }
 MODE=full VERSION=$RUNNER_VERSION
 case $# in
-  0) [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "02-d1.sh: REFUSE the host config's RUNNER_VERSION is not N.N.N: [$VERSION]" >&2; exit 1; } ;;
+  0) [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "02-d1.sh: REFUSE $HOST_CONF: RUNNER_VERSION is not N.N.N: [$VERSION]" >&2; exit 1; } ;;
   2) { [ "$1" = build ] && [[ $2 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; } || usage; MODE=build VERSION=$2 ;;
   *) usage ;;
 esac

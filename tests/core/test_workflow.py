@@ -1,7 +1,9 @@
 """The CI legs of core/TESTED_JQ: .github/workflows/release-check.yml's jq-linux matrix is exactly TESTED_JQ's ci rows
 (version, image, areas), its job name is the one tools/release-check reads on a tag ("jq VERSION (IMAGE)"), each leg
 checks that the image's jq prints the row's version, and the hosted macOS job runs the tests with /usr/bin/jq (the
-local row). Read as text: the stdlib has no YAML parser, so the rows keep one fixed shape."""
+local row). The ubuntu rows, and only they, also run tests/hetzner (linux-docker/'s scripts: no jq, so not a TESTED_JQ
+area), and the setup step installs what those cells need. Read as text: the stdlib has no YAML parser, so the rows keep
+one fixed shape."""
 import os
 import re
 import unittest
@@ -11,16 +13,32 @@ from tests.core.corejq import REPO, tested_rows
 WF = os.path.join(REPO, '.github', 'workflows', 'release-check.yml')
 
 
+JQ_FREE = ('hetzner',)   # areas a row also runs that use no jq, so they are no TESTED_JQ area
+
+
 def workflow():
     with open(WF) as f:
         return f.read()
 
 
+def matrix():
+    return re.findall(r'^\s+- \{jq: (\S+), image: "([^"]+)", areas: "([a-z ]+)"\}$', workflow(), re.M)
+
+
 class Workflow(unittest.TestCase):
     def test_the_jq_linux_matrix_is_the_ci_rows(self):
-        rows = re.findall(r'^\s+- \{jq: (\S+), image: "([^"]+)", areas: "([a-z ]+)"\}$', workflow(), re.M)
+        rows = [(v, i, ' '.join(x for x in a.split() if x not in JQ_FREE)) for v, i, a in matrix()]
         want = sorted((v, w[3:], ' '.join(a)) for v, a, w in tested_rows() if w.startswith('ci:'))
         self.assertEqual(sorted(rows), want)
+
+    def test_the_ubuntu_rows_and_only_they_run_the_linux_docker_cells(self):
+        rows = matrix()
+        self.assertTrue([i for _, i, _ in rows if i.startswith('ubuntu:')], 'no ubuntu row')
+        for v, i, a in rows:
+            self.assertEqual('hetzner' in a.split(), i.startswith('ubuntu:'), (v, i, a))
+        # what those cells need beyond the tests' own: curl, openssl and the system's CA bundle (tests/hetzner/support.py)
+        self.assertIn('DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl git '
+                      'jq openssl python3\n', workflow())
 
     def test_the_job_name_release_check_reads(self):
         self.assertIn('    name: jq ${{ matrix.jq }} (${{ matrix.image }})\n', workflow())

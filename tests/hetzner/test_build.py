@@ -303,6 +303,40 @@ class Release(unittest.TestCase):
 
 
 @needs_container
+class HostConfig(unittest.TestCase):
+    """A host installed before RUNNER_VERSION existed: 02-d1.sh refuses in BOTH modes before anything runs, and the
+    refusal names the fix, the key and the file (linux-docker/README.md, "Upgrading from a release before this one")."""
+
+    def conf(self, sb, line):
+        p = sb.path('host.conf')
+        with open(p) as f:
+            text = f.read()
+        self.assertEqual(text.count('\nRUNNER_VERSION=2.338.2\n'), 1)
+        sb.write(p, text.replace('\nRUNNER_VERSION=2.338.2\n', '\n' + line), 0o644)
+
+    def test_a_host_config_without_RUNNER_VERSION_refuses_in_both_modes(self):
+        for args in (('build', VERSION), ()):
+            with self.subTest(args=args):
+                g = Rig(self)
+                self.conf(g.sb, '')
+                r = g.sb.d1(*args)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stderr, '02-d1.sh: REFUSE %s lacks RUNNER_VERSION (linux-docker/host.conf.example)\n'
+                                 % g.sb.path('host.conf'))
+                self.assertEqual((r.stdout, g.sb.calls('docker'), g.sb.calls('curl')), ('', [], []))
+
+    def test_a_RUNNER_VERSION_that_is_no_version_refuses_the_full_run_and_names_the_file(self):
+        g = Rig(self)
+        self.conf(g.sb, 'RUNNER_VERSION=2.338\n')
+        r = g.sb.d1()
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stderr, '02-d1.sh: REFUSE %s: RUNNER_VERSION is not N.N.N: [2.338]\n' % g.sb.path('host.conf'))
+        self.assertEqual((r.stdout, g.sb.calls('docker')), ('', []))
+        r = g.sb.d1('build', VERSION)    # the control: BUILD names its version itself
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+@needs_container
 class FullRun(unittest.TestCase):
     def test_the_full_run_builds_the_host_config_version_and_writes_image_ref(self):
         g = Rig(self, version=OLD)
