@@ -97,6 +97,8 @@ class Rig:
         if jq_wrap:   # logs each call; --version from jqwrap/version when it exists; jqwrap/fail names a program to fail
             self.jq = sb.stub('jq', JQ_WRAP % {'d': self.jqd, 'jq': self.jq}, folder=self.jqd)
         self.rewrites = [
+            # its own PATH, with the stubs folder first: a bare call of an action tool reaches its stub (TestNoAction)
+            ('export PATH=/usr/bin:/bin:/usr/sbin:/sbin', 'export PATH=%s:/usr/bin:/bin:/usr/sbin:/sbin' % sb.stubs),
             ('RUNNER=/Users/ci/bin/runner', 'RUNNER=' + self.runner),
             ('CONFIG=/Users/ci/.config/runner/config.toml', 'CONFIG=' + self.config),
             ('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + self.statedir),
@@ -162,6 +164,13 @@ class Rig:
             self.test.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         return r
 
+    def cmd(self, *args, env=None, ok=True, script=None):
+        """runner-updater ARGS (any command), with the rig's environment and ENV"""
+        r = self.sb.run(['/bin/zsh', '-f', script or self.script] + list(args), extra_env=env)
+        if ok:
+            self.test.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
     def facts(self):
         with open(os.path.join(self.pass_dir, 'facts.json')) as f:
             return json.load(f)
@@ -202,6 +211,7 @@ BACKGROUND = ['    1     0 Mon Nov  2 09:47:57 2026     /sbin/launchd',
 
 PS_STUB = '''d=%(d)s
 n=0; [[ -f $d/count ]] && n=$(<$d/count); (( n++ )); print -r -- $n > $d/count
+print -r -- "$PATH" >> $d/path
 f=$d/out; [[ -f $d/out.$n ]] && f=$d/out.$n
 [[ -f $f ]] || exit 1
 /bin/cat $f

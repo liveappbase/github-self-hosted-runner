@@ -41,9 +41,12 @@
 #   STATEDIR     the updater's state folder; REPORT = STATEDIR/report (this command's own state and pass folder),
 #                LOCKFILE = STATEDIR/lock (the updater lock), PROTECTED = STATEDIR/protected (golden-prune reads it)
 #   FAMILIES     the host's families file (bin/runner-updater-lib, ru_families)
+#   PATH         its own, set at the top (the system folders): it never depends on the caller's PATH, so the weekly
+#                watchdog's `runner-updater status` over a non-interactive ssh runs it as the timer does
 #   JQ PS CURL   the tools it runs (each by its absolute path); CORE, the release's core/ beside this file's bin/
 #   HEALTHZ_GAP  seconds between the two /healthz reads
 set -u
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
 export LC_ALL=C
 export TZ=UTC   # ps prints start times in TZ, and the lib reads them back in it; the core's clock is UTC
 umask 077
