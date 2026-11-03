@@ -4,8 +4,9 @@
 # host path; the decision core and the watchdog under /usr/bin/jq (core/TESTED_JQ's local row). The jq-linux jobs run
 # the core's and the watchdog's tests once per ci row of core/TESTED_JQ, in that image with its own jq package;
 # tools/release-check --build reads their results on the tagged commit by their names, "jq VERSION (IMAGE)". The ubuntu
-# rows also run tests/hetzner (linux-docker/'s scripts, which use no jq): those cells run as root in the job's container,
-# and fail rather than skip on a Linux root without a container's /.dockerenv (tests/hetzner/support.py).
+# rows also run tests/hetzner (linux-docker/'s scripts; pool-image.sh's unattended switch asks core/idle.jq, under the
+# image's jq): those cells run as root in the job's container, and fail rather than skip on a Linux root without a
+# container's /.dockerenv (tests/hetzner/support.py).
 # No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
 # home-data rules read every reachable commit). Never pull_request_target; the token can only read.
 name: release-check

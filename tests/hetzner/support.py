@@ -8,7 +8,8 @@ CI row pass with no cell run (verdict, test_support.py). In a container that lac
 
 A cell makes a Sandbox: a temporary folder, removed by the cell's cleanup. In it
 - home/build is linux-docker/ (the host's ~/build) plus setup/tls-excluded-spki from the repository's top-level setup/
-  (the install line ships it there). Its scripts are the REAL ones with ONLY their pin lines rewritten (PIN_REWRITES):
+  and the decision core, core/ (the install line ships both there: ~/build/setup/ and ~/build/core/). Its scripts are
+  the REAL ones with ONLY their pin lines rewritten (PIN_REWRITES):
   each rewrite must match exactly once, and the copy may then hold no host path (LEFT_OUT) at all;
 - host.conf is the host config (root's file, 0644): host.conf.example's values, RUN_USER=root (the cells run as root);
 - stubs/ holds the substitutes, each logging its calls to logs/: docker (driven by docker.json; it keeps D1 in
@@ -405,7 +406,19 @@ if urls and urls[0].startswith('http://127.0.0.1:') and '/manifests/' in urls[0]
         sys.exit(c['registry_rc'])
     sys.exit(0 if urls[0].rsplit('/', 1)[1] in c.get('served', []) else 22)
 if urls and urls[0].startswith('http://127.0.0.1:') and urls[0].endswith('/healthz'):
-    h = json.load(open(SB + '/curl.json')).get('healthz')     # runscaler's /healthz; None = no answer
+    with open(SB + '/logs/events.log', 'a') as f:
+        f.write('healthz read\n')
+    c = json.load(open(SB + '/curl.json'))     # runscaler's /healthz; None = no answer. healthz_seq: one per read,
+    seq = c.get('healthz_seq')                 # in order, the last one kept for every later read
+    if seq:
+        h = seq[0]
+        if len(seq) > 1:
+            c['healthz_seq'] = seq[1:]
+            with open(SB + '/curl.json.new', 'w') as f:
+                json.dump(c, f)
+            os.replace(SB + '/curl.json.new', SB + '/curl.json')
+    else:
+        h = c.get('healthz')
     if h is None:
         sys.exit(7)
     sys.stdout.write(json.dumps(h))
@@ -457,6 +470,9 @@ class Sandbox:
         data = os.path.join(REPO, 'setup', 'tls-excluded-spki')
         if os.path.exists(data):
             shutil.copy(data, os.path.join(self.build, 'setup', 'tls-excluded-spki'))
+        core = os.path.join(REPO, 'core')     # the install line ships the decision core into ~/build/core
+        if os.path.isdir(core):
+            shutil.copytree(core, os.path.join(self.build, 'core'), symlinks=True)
         self.gh = FakeGitHub(test)
         with open(SYSTEM_BUNDLE) as f:
             self.system_bundle = f.read()
@@ -652,22 +668,164 @@ if a[:1] == ['validate']:
         if 'log-level = "liveapp-bogus"' in f.read():
             say('  ✗ global config: log-level must be one of debug, info, warn, error\nError: validation failed\n', 1)
     v = json.load(open(SB + '/runner.json'))
+    if v.get('seq'):           # one answer per validate, in order, the last one kept for every later validate
+        a0 = v['seq'][0]
+        if len(v['seq']) > 1:
+            v['seq'] = v['seq'][1:]
+            with open(SB + '/runner.json.new', 'w') as f:
+                json.dump(v, f)
+            os.replace(SB + '/runner.json.new', SB + '/runner.json')
+        v = a0
     say(v['out'], v['rc'])
 if a[:1] == ['run']:
     say('TZ-CHECK ' + subprocess.run(['date', '+%z'], capture_output=True, text=True).stdout, 0)
 say('runner stub: no answer for: %s\n' % ' '.join(a), 99)
 '''
 
-SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
-# systemctl --user, for the pool cells: runscaler's unit as systemd.json holds it ({active, enabled, start}); logs each
-# call, one line of its arguments. restart: active, start = now (see tests/hetzner/support.py, Pool).
-import json, os, sys, time
+HZLIB = r'''# hzlib: shared by the pool cells' substitutes (tests/hetzner/support.py, Pool): the clock, runscaler's process
+# (systemd.json, and the lines it writes to runscaler's log), and the cell's hooks (hooks.json)
+import fcntl, json, os, signal, time
 SB = @SB@
+LOG = os.path.join(os.environ.get('HOME', '/nonexistent'), '.config', 'runner', 'runner.log')
+
+
+def load(name, default=None):
+    p = os.path.join(SB, name)
+    if not os.path.exists(p):
+        return default
+    with open(p) as f:
+        return json.load(f)
+
+
+def save(name, obj):
+    p = os.path.join(SB, name)
+    with open(p + '.new', 'w') as f:
+        json.dump(obj, f)
+    os.replace(p + '.new', p)
+
+
+def event(text):
+    with open(os.path.join(SB, 'logs', 'events.log'), 'a') as f:
+        f.write(text + '\n')
+
+
+def now():
+    """Whole seconds: the cell's fake clock (clock.json) when it set one, else the real clock."""
+    c = load('clock.json')
+    return int(c['now']) if c else int(time.time())
+
+
+def runlog(msg):
+    """One record of runscaler's log, as the process writes it (runscaler's text format, UTC)."""
+    with open(LOG, 'a') as f:
+        f.write('%s INFO %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now())), msg))
+
+
+def stop(st):
+    if st['active']:
+        runlog('runscaler stopped pid=%d' % st['pid'])
+        event('process %d stopped' % st['pid'])
+        st.update(last_pid=st['pid'], last_start=st['start'])
+    st.update(active=False, pid=0)
+
+
+def take(at):
+    """An injection hook (no action): True, once, when the cell set one for AT."""
+    hooks = load('hooks.json', [])
+    for h in hooks:
+        if h['at'] == at and not h.get('fired'):
+            h['fired'] = True
+            save('hooks.json', hooks)
+            event('injected ' + at)
+            return True
+    return False
+
+
+def start(st):
+    st['next_pid'] = st.get('next_pid', 100) + 1
+    st.update(active=True, pid=st['next_pid'], start=now())
+    event('process %d started %d' % (st['pid'], st['start']))
+    runlog('runscaler started pid=%d' % st['pid'])
+
+
+def fire(at):
+    """The cell's hooks for event AT, each once: hooks.json = [{"at": AT, "do": [ACTION, ...]}]."""
+    hooks = load('hooks.json', [])
+    todo = [h for h in hooks if h['at'] == at and not h.get('fired')]
+    if not todo:
+        return
+    for h in todo:
+        h['fired'] = True
+    save('hooks.json', hooks)
+    for h in todo:
+        event('hook %s: %s' % (at, ' '.join(h['do'])))
+        for a in h['do']:
+            act(a)
+
+
+def act(a):
+    if a in ('restart', 'start'):          # an INDEPENDENT restart (systemd's own, or a person's), or a start
+        st = load('systemd.json')
+        if a == 'restart':
+            stop(st)
+        start(st)
+        st['independent'] = st.get('independent', 0) + 1
+        save('systemd.json', st)
+    elif a == 'revive':                    # the stopped process runs again (a stop that did not stop it)
+        st = load('systemd.json')
+        st.update(active=True, pid=st['last_pid'], start=st['last_start'])
+        event('process %d revived %d' % (st['pid'], st['start']))
+        save('systemd.json', st)
+    elif a == 'probe-lock':                # is the updater lock held now? (a new open: another holder's view)
+        p = os.path.join(os.environ['HOME'], '.local', 'state', 'runner-updater', 'lock')
+        if not os.path.exists(p):
+            event('updater lock FREE (no lock file)')
+            return
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            event('updater lock FREE')
+        except BlockingIOError:
+            event('updater lock held')
+        finally:
+            os.close(fd)
+    elif a == 'busy':                      # /healthz turns busy from here on
+        c = load('curl.json')
+        c['healthz'] = c['busy']
+        c.pop('healthz_seq', None)
+        save('curl.json', c)
+    elif a == 'edit-config':               # a person edits config.toml
+        with open(os.path.join(os.path.dirname(LOG), 'config.toml'), 'a') as f:
+            f.write('# a hand change\n')
+    elif a == 'edit-staged':               # the staged file changes after 03 validated it
+        with open(os.path.join(os.path.dirname(LOG), 'config.staged.toml'), 'a') as f:
+            f.write('# changed after the validate\n')
+    elif a == 'kill':                      # SIGKILL pool-image.sh's own process group, and nothing else
+        g = os.getpgid(0)
+        with open('/proc/%d/cmdline' % g, 'rb') as f:
+            cmd = f.read()
+        if b'pool-image.sh' not in cmd:
+            event('kill REFUSED: the group leader %d is not pool-image.sh' % g)
+            return
+        event('kill %d' % g)
+        os.killpg(g, signal.SIGKILL)
+    else:
+        event('hook action UNKNOWN: ' + a)
+'''
+
+SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
+# systemctl --user, for the pool cells: runscaler's unit as systemd.json holds it ({active, enabled, start, pid}); logs
+# each call, one line of its arguments. stop: the process logs its last line and exits; start: a new process (a new pid,
+# start = the clock) logs its first line; restart: both. show: ActiveState, MainPID, ActiveEnterTimestamp (see
+# tests/hetzner/support.py, Pool).
+import os, sys, time
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
 a = sys.argv[1:]
 with open(SB + '/logs/systemctl.log', 'a') as f:
     f.write(' '.join(a) + '\n')
-P = SB + '/systemd.json'
-st = json.load(open(P))
+st = hzlib.load('systemd.json')
 if a[:1] == ['--user']:
     a = a[1:]
 cmd = a[0] if a else ''
@@ -679,18 +837,132 @@ if cmd == 'is-active':
 if cmd == 'is-enabled':
     print('enabled' if st['enabled'] else 'disabled')
     sys.exit(0 if st['enabled'] else 1)
-if cmd == 'show' and 'ActiveEnterTimestamp' in a:
-    print(('@%d' % st['start']) if '--timestamp=unix' in a else
-          time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(st['start'])))
+if cmd == 'show' and a[1:2] == ['runscaler']:
+    vals = {'ActiveEnterTimestamp': ('@%d' % st['start']) if '--timestamp=unix' in a else
+            time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(st['start'])),
+            'MainPID': str(st.get('pid', 0) if st['active'] else 0),
+            'ActiveState': 'active' if st['active'] else 'inactive'}
+    props = [a[i + 1] for i, x in enumerate(a[:-1]) if x == '-p']
+    if not props or any(p not in vals for p in props):
+        sys.stderr.write('systemctl stub: no answer for: %s\n' % ' '.join(sys.argv[1:]))
+        sys.exit(99)
+    for p in props:
+        print(vals[p] if '--value' in a else '%s=%s' % (p, vals[p]))
+    sys.stdout.flush()
+    if 'shows_since_stop' in st:           # the Nth read after a stop, once answered: "systemctl:show-after-stop-N"
+        st['shows_since_stop'] += 1
+        hzlib.save('systemd.json', st)
+        hzlib.fire('systemctl:show-after-stop-%d' % st['shows_since_stop'])
     sys.exit(0)
-if cmd == 'restart':
-    st.update(active=True, start=int(time.time()), restarts=st.get('restarts', 0) + 1)
-    with open(P + '.new', 'w') as f:
-        json.dump(st, f)
-    os.replace(P + '.new', P)
+if cmd in ('restart', 'stop', 'start') and a[1:] == ['runscaler']:
+    if cmd in ('restart', 'stop'):
+        hzlib.stop(st)
+    if cmd in ('restart', 'start') and not st['active']:
+        hzlib.start(st)
+    k = {'restart': 'restarts', 'stop': 'stops', 'start': 'starts'}[cmd]
+    st[k] = st.get(k, 0) + 1
+    if cmd == 'stop':
+        st['shows_since_stop'] = 0
+    hzlib.save('systemd.json', st)
+    hzlib.fire('systemctl:%s-done' % cmd)
     sys.exit(0)
 sys.stderr.write('systemctl stub: no answer for: %s\n' % ' '.join(sys.argv[1:]))
 sys.exit(99)
+'''
+
+# The opt-in substitutes of the unattended cells (Pool.fake_clock, Pool.hooks, Pool.disk, Pool.jq_version)
+DATE_STUB = r'''#!/usr/bin/python3 -I
+# date, for the pool cells with a fake clock: `date +%s` reads clock.json (logged); every other call is the real date
+import os, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+c = hzlib.load('clock.json')
+if a == ['+%s'] and c:
+    hzlib.event('date %d' % int(c['now']))
+    print(int(c['now']))
+    sys.exit(0)
+os.execv('/usr/bin/date', ['date'] + a)
+'''
+
+SLEEP_STUB = r'''#!/usr/bin/python3 -I
+# sleep, for the pool cells with a fake clock: it moves clock.json on by its argument and returns at once (logged)
+import os, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+c = hzlib.load('clock.json')
+if not c or len(a) != 1:
+    os.execv('/usr/bin/sleep', ['sleep'] + a)
+c['now'] += float(a[0])
+hzlib.save('clock.json', c)
+hzlib.event('sleep %s' % a[0])
+'''
+
+DD_STUB = r'''#!/usr/bin/python3 -I
+# dd, for the pool cells with hooks: the real dd, then, when it synced the window journal, the hooks of
+# "journal:KEY" (KEY: the journal's last line's key, now on disk). An injection "ddfail:KEY" makes the sync of that
+# line fail instead (exit 1, no dd)
+import os, subprocess, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+of = [x[3:] for x in a if x.startswith('of=')]
+k = None
+if of and of[0].endswith('/runner-updater/window') and os.path.exists(of[0]):
+    with open(of[0], 'rb') as f:
+        last = f.read().splitlines()[-1:]
+    k = last[0].split(b' ', 1)[0].decode() if last else ''
+    if hzlib.take('ddfail:' + k):
+        sys.exit(1)
+r = subprocess.run(['/usr/bin/dd'] + a)
+if r.returncode == 0 and k is not None:
+    hzlib.event('journal ' + k)
+    hzlib.fire('journal:' + k)
+sys.exit(r.returncode)
+'''
+
+MV_STUB = r'''#!/usr/bin/python3 -I
+# mv, for the pool cells with hooks: the hooks of "mv:NAME" (NAME: the destination's base name), the real mv, then
+# the hooks of "mv-done:NAME"
+import os, subprocess, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+dest = os.path.basename([x for x in a if not x.startswith('-')][-1])
+hzlib.event('mv ' + dest)
+hzlib.fire('mv:' + dest)
+r = subprocess.run(['/usr/bin/mv'] + a)
+if r.returncode == 0:
+    hzlib.fire('mv-done:' + dest)
+sys.exit(r.returncode)
+'''
+
+DF_STUB = r'''#!/usr/bin/python3 -I
+# df, for the pool cells: `df -Pk PATH` answers df.json's {size_k, avail_k} in df's POSIX form (logged)
+import json, sys
+SB = @SB@
+a = sys.argv[1:]
+with open(SB + '/logs/df.log', 'a') as f:
+    f.write(' '.join(a) + '\n')
+d = json.load(open(SB + '/df.json'))
+used = d['size_k'] - d['avail_k']
+print('Filesystem     1024-blocks      Used Available Capacity Mounted on')
+print('/dev/sda1      %d %d %d %d%% /' % (d['size_k'], used, d['avail_k'], (100 * used + d['size_k'] - 1) // d['size_k']))
+'''
+
+JQ_STUB = r'''#!/usr/bin/python3 -I
+# jq, for the pool cells: `jq --version` prints jq.json's version; every other call is the real jq
+import json, os, sys
+SB = @SB@
+if sys.argv[1:] == ['--version']:
+    print(json.load(open(SB + '/jq.json'))['version'])
+    sys.exit(0)
+os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
 '''
 
 PASS_OUT = ('  ✓ scaleset[0] "linux-ci-main" — provider=docker url=https://github.com/your-org max=3 min=0\n'
@@ -756,12 +1028,13 @@ class Pool(Sandbox):
         self.pin('setup/03-runscaler.sh', 'BIN_SHA', hashlib.sha256(runner).hexdigest())
         self.rewrite_pins()
         sb = repr(self.root)
+        self.write(self.path('stubs', 'hzlib.py'), HZLIB.replace('@SB@', sb))
         self.write(self.path('stubs', 'systemctl'), SYSTEMCTL_STUB.replace('@SB@', sb), 0o755)
         self.write(self.path('stubs', 'ss'), '#!/bin/sh\nexit 0\n', 0o755)
-        self.unit = {'active': False, 'enabled': False, 'start': 0}
+        self.unit = {'active': False, 'enabled': False, 'start': 0, 'pid': 0, 'next_pid': 100}
         self.set_unit()
         self.runner = {'rc': 0, 'out': PASS_OUT}
-        self.curl.update(served=[], healthz=healthz())
+        self.curl.update(served=[], healthz=healthz(), busy=healthz(**{'linux-ci-main': {'busy': 1}}))
         self.docker['versions'] = {}
         self.R = os.path.join(self.HOME, '.config', 'runner')
         os.makedirs(self.R, mode=0o700)
@@ -802,7 +1075,10 @@ class Pool(Sandbox):
             f.write(text[:m.start(1)] + '\n'.join(rows) + text[m.end(1):])
 
     def set_unit(self, **kw):
-        """runscaler's unit, as the systemctl substitute answers: active, enabled, start (epoch)."""
+        """runscaler's unit, as the systemctl substitute answers: active, enabled, start (epoch), pid (its MainPID);
+        kw over the unit as it is now (a substitute may have changed it)."""
+        if os.path.exists(self.path('systemd.json')):
+            self.unit = self.unit_now()
         self.unit.update(kw)
         self.write(self.path('systemd.json'), json.dumps(self.unit))
 
@@ -869,8 +1145,80 @@ class Pool(Sandbox):
         m = int(os.stat(self.rpath('config.toml')).st_mtime)
         while int(time.time()) <= m:     # the start comes after the install's second, and is never in the future:
             time.sleep(0.05)              # wait for the clock (a state), never for a set time
-        self.set_unit(active=True, enabled=True, start=int(time.time()))
+        self.set_unit(active=True, enabled=True, start=int(time.time()), pid=100)
+        self.write(self.rpath('runner.log'), '%s INFO runscaler started pid=100\n' % time.strftime(
+            '%Y-%m-%d %H:%M:%S', time.gmtime()), 0o600)
         return r
+
+    # ---- the unattended cells (pool-image.sh up --unattended / back --unattended)
+
+    def fake_clock(self, ahead=10):
+        """A fake clock from now on: `date +%s` reads it, `sleep N` moves it on by N and returns at once, and the
+        systemctl substitute starts a process at it. It starts AHEAD seconds past the real clock, so every start it
+        gives is after every real install time."""
+        self.write(self.path('clock.json'), json.dumps({'now': int(time.time()) + ahead + 0.5}))
+        sb = repr(self.root)
+        self.write(self.path('stubs', 'date'), DATE_STUB.replace('@SB@', sb), 0o755)
+        self.write(self.path('stubs', 'sleep'), SLEEP_STUB.replace('@SB@', sb), 0o755)
+
+    def hooks(self, *hooks):
+        """The cell's hooks, each (AT, ACTION, ...): AT `journal:KEY` (after that journal line is synced), `mv:NAME`
+        or `mv-done:NAME` (around a rename onto NAME), `systemctl:stop-done` / `:start-done`; ACTION restart (an
+        independent restart), start, revive (the stopped process runs again), busy (/healthz turns busy), edit-config
+        (a hand edit), edit-staged, probe-lock (is the updater lock held?), kill (SIGKILL of pool-image.sh's process
+        group: only an unattended() run is one). An injection, AT with no ACTION: `ddfail:KEY` (the sync of that
+        journal line fails)."""
+        self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
+        sb = repr(self.root)
+        self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)
+        self.write(self.path('stubs', 'mv'), MV_STUB.replace('@SB@', sb), 0o755)
+
+    def disk(self, size_k, avail_k):
+        """`df -Pk` answers this size and free space (KiB)."""
+        self.write(self.path('df.json'), json.dumps({'size_k': size_k, 'avail_k': avail_k}))
+        self.write(self.path('stubs', 'df'), DF_STUB.replace('@SB@', repr(self.root)), 0o755)
+
+    def jq_version(self, version):
+        """`jq --version` prints VERSION; every other jq call is the image's jq."""
+        self.write(self.path('jq.json'), json.dumps({'version': version}))
+        self.write(self.path('stubs', 'jq'), JQ_STUB.replace('@SB@', repr(self.root)), 0o755)
+
+    def unattended(self, *args, prefix=()):
+        """pool-image.sh ARGS (`up --unattended V D`, `back --unattended`) in a NEW SESSION (a `kill` hook kills its
+        group, never this process), PREFIX before it (a wrapper that holds the updater lock)."""
+        self.files()
+        p = subprocess.Popen(list(prefix) + ['bash', os.path.join(self.build, 'setup', 'pool-image.sh')] + list(args),
+                             env=self.env(), cwd=self.HOME, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+
+        def stop():
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.test.addCleanup(stop)
+        out, err = p.communicate(timeout=600)
+        return subprocess.CompletedProcess(p.args, p.returncode, out, err)
+
+    STATE = os.path.join(HOME, '.local', 'state', 'runner-updater')
+
+    def window(self):
+        """The OPEN window journal's lines, or None when there is none."""
+        t = self.read(os.path.join(self.STATE, 'window'))
+        return None if t is None else t.splitlines()
+
+    def closed(self):
+        """[(ID, lines)] of the closed window journals (windows/ID), oldest first."""
+        d = os.path.join(self.STATE, 'windows')
+        if not os.path.isdir(d):
+            return []
+        names = [n for n in os.listdir(d) if not n.endswith('.d')]
+        names.sort(key=lambda n: os.stat(os.path.join(d, n)).st_mtime_ns)
+        return [(n, self.read(os.path.join(d, n)).splitlines()) for n in names]
+
+    def events(self):
+        """The substitutes' event lines: process starts and stops, hooks, clock reads and sleeps."""
+        return (self.read(self.path('logs', 'events.log')) or '').splitlines()
 
     def snapshot(self):
         """{path: (sha256, mtime_ns, mode)} of every file in the home but ~/build: what an install would change."""

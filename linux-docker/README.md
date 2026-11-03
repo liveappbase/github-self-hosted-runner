@@ -6,7 +6,7 @@ This folder is the Linux half of the repository: a Linux host where [runscaler](
 - Jobs run on a `runners` network, with a pinned seccomp profile, no-new-privileges and an init process; `docker.dind` is always false. `runner-start` refuses to start runscaler with a config that would give a job a Docker socket.
 - Every value of the host (the users, ports, address, organization, token name, set names and labels) is in ONE host config file, `/etc/liveapp-ci/host.conf`. The scripts hold none of them, and each one refuses to run without that file.
 
-Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them, and except the release path (`02-d1.sh build VERSION`, then `pool-image.sh up VERSION` from its build record: "A new runner release" below) and `03-runscaler.sh render`, which are new and have not yet run on that host. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
+Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them, and except the release path (`02-d1.sh build VERSION`, then `pool-image.sh up VERSION` from its build record: "A new runner release" below), `03-runscaler.sh render`, and `pool-image.sh`'s unattended modes ("The updater's switch and rollback" below), which are new and have not yet run on that host. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
 
 ## Files
 
@@ -16,15 +16,16 @@ Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They m
 | `setup/01-users.sh` | root | Creates RUN_USER and RS_USER, the group, the ssh keys, the runscaler lock rule and linger. Re-runnable. |
 | `setup/01-users-undo.sh` | root | Removes only what 01-users.sh made (its header lists what must happen first). |
 | `setup/02-d1.sh` | RUN_USER | With no argument (the full run): the rootless Docker daemon and its hardening, the `runners` network, the local registry, and the runner image of the host config's `RUNNER_VERSION` (built, pushed, checked; then its build record, and its digest goes to `~/run/image.ref`). With `build VERSION`: only the runner image of that release, its checks and its build record. |
-| `setup/runner-release.sh` | RUN_USER | Read by 02-d1.sh, never run: how a runner release is read from GitHub, and the trust of every download (below). |
+| `setup/runner-release.sh` | RUN_USER, RS_USER | Read by 02-d1.sh and by pool-image.sh's unattended modes, never run: how a runner release is read from GitHub, the trust of every download (below), and the updater lock. |
 | `setup/03-runscaler.sh` | RS_USER | Installs runscaler (by sha256), `runner-start`, `pool-ready`, `validate-class` and the unit; renders, checks and installs the config (`real`, with the image config.toml runs unless it is given one). Never restarts runscaler. `render` (the updater's) renders and validates a config into a file of its own and installs nothing. |
-| `setup/pool-image.sh` | RS_USER | Puts the image of a runner release's build record into the pool (`up VERSION`), rolls it back (`back`), or ends the release (`accept`). |
+| `setup/pool-image.sh` | RS_USER | Puts the image of a runner release's build record into the pool (`up VERSION`), rolls it back (`back`), or ends the release (`accept`). The updater's own switch and rollback are its unattended modes (`up --unattended`, `back --unattended`: "The updater's switch and rollback", below). |
 | `bin/runner-start` | RS_USER | The unit's start command: checks the config, D1, the registry and the token files, then starts runscaler. |
 | `bin/validate-class` | RS_USER | The class of one `runner-start validate` result (PASS, API-ONLY, NON-API or UNKNOWN): the same rule as the Mac's `bin/validate-class`. |
 | `bin/pool-ready` | RS_USER | Is runscaler serving exactly the named sets, each ready? |
 | `image/Dockerfile` | RUN_USER | The runner image: GitHub's runner image by digest (the pinned base), the runner of the release 02-d1.sh fetched, plus bubblewrap, gh, a locale and build tools. |
 | `image/install-runner.sh` | (the build) | Run inside the image build: puts the fetched runner in place of the base image's runner. |
 | `../setup/tls-excluded-spki` | — | The CA keys no download trusts (the repository's top-level `setup/`; the install puts it into `~/build/setup/`). |
+| `../core/` | RS_USER | The updater's decision core, the same files as the Mac's (the repository's top-level `core/`; the install puts it into `~/build/core/`): the unattended switch asks its `idle.jq` whether the pool is idle, under a jq that `core/TESTED_JQ` lists. |
 | `config/` | — | The systemd unit and the two seccomp profiles (Docker's default, and the one the jobs run with). |
 
 `setup/pool-image.sh` pins `setup/03-runscaler.sh`, `bin/runner-start`, `bin/pool-ready`, `bin/validate-class` and `config/runscaler.service` by sha256 (`PINS`); `03-runscaler.sh render` reads the same pins. `tools/release-check` refuses a release in which one of them changed without its pin.
@@ -47,9 +48,9 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
    ```
    ssh root@<host> 'bash -s' < linux-docker/setup/01-users.sh
    ```
-3. **The files (once as RUN_USER, once as RS_USER).** Each user gets this release's `linux-docker/` as `~/build`, with the repository's `setup/tls-excluded-spki` in `~/build/setup/` (an older `~/build` is moved aside, not deleted). `COPYFILE_DISABLE=1` keeps macOS's tar from adding `._` files, which would become part of the image recipe:
+3. **The files (once as RUN_USER, once as RS_USER).** Each user gets this release's `linux-docker/` as `~/build`, with the repository's `setup/tls-excluded-spki` in `~/build/setup/` and its `core/` as `~/build/core/` (an older `~/build` is moved aside, not deleted). `COPYFILE_DISABLE=1` keeps macOS's tar from adding `._` files, which would become part of the image recipe:
    ```
-   COPYFILE_DISABLE=1 tar -C linux-docker -cf - . -C .. setup/tls-excluded-spki | ssh <RUN_USER>@<host> 'rm -rf ~/build.new && mkdir ~/build.new && tar -C ~/build.new -xf - && { [ ! -e ~/build ] || mv ~/build ~/build.prev.$(date -u +%Y%m%dT%H%M%SZ); } && mv ~/build.new ~/build'
+   COPYFILE_DISABLE=1 tar -C linux-docker -cf - . -C .. setup/tls-excluded-spki core | ssh <RUN_USER>@<host> 'rm -rf ~/build.new && mkdir ~/build.new && tar -C ~/build.new -xf - && { [ ! -e ~/build ] || mv ~/build ~/build.prev.$(date -u +%Y%m%dT%H%M%SZ); } && mv ~/build.new ~/build'
    ```
    Then the same line with `<RS_USER>`.
 4. **runscaler's download (RS_USER).** 03-runscaler.sh checks its sha256 before it extracts anything:
@@ -101,6 +102,20 @@ A host installed from a release before this one: do "Upgrading from a release be
 **The build record.** Each build that passed every check writes `~/run/builds/<version>-<recipe>` as RUN_USER (0640, so RS_USER, a member of RUN_USER's group, can read it): exactly four lines, `format 1`, `version <version>`, `digest sha256:<the image's digest in the local registry>`, `recipe <the sha256 of image/'s files>`. There is one record per version and recipe; building the same version again replaces it. It is written under a temporary name and renamed, so a cut-off run leaves no partial record. A failed check, a version mismatch or a digest mismatch writes none. `pool-image.sh up <version>` reads the record of its own release's recipe, as untrusted data: once, each line by its pattern, never sourced.
 
 **The trust of the downloads.** Every download of the build path (GitHub's API and the runner tarball) uses `curl --cacert` with a filtered CA bundle (the system's bundle, without the certificates whose public key `setup/tls-excluded-spki` names) and `--capath` with an empty folder, so curl's built-in CA folder adds nothing back. That file's header gives its format; a file that breaks it, or names no key at all, stops the build before any download.
+
+## The updater's switch and rollback
+
+The runner-image updater (not yet on this host: its timer comes in a later release) switches the pool to a new runner release, and rolls it back, with `pool-image.sh`'s two unattended modes. Both run as RS_USER from `~/build` itself (`bash ~/build/setup/pool-image.sh …`), hold the updater lock, and keep a journal: `~/.local/state/runner-updater/window`, one line per step, each written to disk before the step it names. When a window ends, its journal moves to `~/.local/state/runner-updater/windows/<id>`, and the full output of each validate and the two `/healthz` reads stay in `windows/<id>.d/`.
+
+- `up --unattended <version> <digest>` checks what runs (both sets name one image, the registry still serves it, runscaler started after `config.toml` was installed, 10% of the disk free, a tested jq), renders and validates the new config into `~/.config/runner/config.staged.toml` (up to three tries, 20 s apart), and checks that it differs from `config.toml` in the image lines alone. Then it reads `/healthz` twice, 3 s apart; if any set is busy it removes the staged file, changes nothing and exits 3. If all are idle, it keeps `config.toml` as `config.toml.prev`, renames the staged file over `config.toml` (`rename-start`, then `renamed` with the time), waits for the next second, and restarts runscaler: it stops it (`stopping`), notes where the log ends once the old process has exited (`stopped`), starts it (`starting`), and waits until a process that started after the rename runs (`running`). Exit 0: the new image runs.
+- `back --unattended` puts `config.toml.prev` back the same way, after it validated a copy of it, with no wait for idle: runscaler's restart lets busy runners finish their jobs first.
+
+What a person reads in a journal: the last line says how the window ended. `closed` after `running`: done. `stop <name>: <text>` then `closed`: a STOP, and the text says what to do. `end <text>` then `closed`: nothing changed, and the updater tries again later. A journal still at `window` (not moved to `windows/`) did not end: the run was cut off, or `config.toml` was changed by hand after the rename (`hand-change`, then `stop HAND CHANGE`). Then nothing restarts on that file, and the updater's next pass ends the journal. To keep such a file, check it with `RUNNER_START_CONFIG=~/.config/runner/config.toml ~/bin/runner-start validate`, and restart runscaler at idle only when that passes.
+
+A person rolls back an updater's switch with the same mode, as RS_USER. It refuses while a journal is open, and it does nothing (exit 1, `end rollback pending`) while runscaler is stopped or disabled:
+```
+ssh <RS_USER>@<host> 'bash ~/build/setup/pool-image.sh back --unattended'
+```
 
 ## Upgrading from a release before this one
 
