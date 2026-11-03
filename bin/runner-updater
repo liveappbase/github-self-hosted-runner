@@ -384,8 +384,9 @@ if [[ ! -e $STATEDIR && ! -L $STATEDIR ]]; then
   /bin/rmdir -- $new
 fi
 [[ -d $STATEDIR && ! -L $STATEDIR ]] || refuse "$STATEDIR is not a folder"
-# the list: protect writes it from the state, so it alone goes on without one (the text says how to get it back
-# without emptying it: an empty list in place of a lost one would let golden-prune print an image the updater keeps)
+# the list: protect and pass write it from the state, so they go on without one; the others refuse with how to get it
+# back without emptying it (an empty list in place of a lost one would let golden-prune print an image the updater
+# keeps)
 if [[ $cmd != (protect|pass) ]]; then
   back="\`$INVOKED protect\` writes it from the updater's state (a pass does too, while the updater is ON); then run $cmd again"
   if [[ ! -e $PROTECTED && ! -L $PROTECTED ]]; then

@@ -18,7 +18,8 @@
 #   --observe-clear: they change OBSERVEFILE in this pass (below).
 #
 # ru_state_load FILE — the updater's state (its layout: bin/runner-updater's header) into ru_state, compact JSON: 0;
-#   a missing FILE is a fresh state (OFF, no family). 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
+#   a missing FILE is a fresh state (OFF, no family), but a folder of FILE it cannot search is 1: FILE would look
+#   absent there. 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
 #   (the wait line): its format is not 1. It opens FILE once: a rename over FILE while it reads gives it one whole state.
 # ru_write FILE TEXT — TEXT, byte for byte, into FILE by rename: written to FILE.new, synced to disk (DD, as
 #   runner-journal does: so a power cut after the rename cannot leave FILE empty), then renamed over FILE. 1 + REPLY
@@ -392,6 +393,9 @@ then . else error("not a state of format 1") end'
 # that runs while a writer renames a new state in gets one of the two whole.
 ru_state_load() {
   local f=$1 text fmt
+  # behind a folder it cannot search, a state would look absent (fresh: OFF): not read as fresh
+  [[ ! -e ${f:h} && ! -L ${f:h} ]] || [[ -d ${f:h} && -x ${f:h} ]] \
+    || { REPLY="${f:h} cannot be searched: a state in it would look absent"; return 1 }
   if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh; return 0; fi
   [[ -f $f && ! -L $f && -r $f ]] || { REPLY="$f is not a readable regular file"; return 1 }
   text=$(/bin/cat -- $f && print -rn -- .) || { REPLY="$f cannot be read"; return 1 }

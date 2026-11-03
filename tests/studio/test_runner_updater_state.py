@@ -245,6 +245,21 @@ class TestState(unittest.TestCase):
                     self.assertTrue(res.stdout.endswith(': it is left as it is\n'), res.stdout)
                     self.assertEqual(u.raw(), raw)
 
+    def test_a_state_folder_it_cannot_search_is_refused_never_read_as_fresh(self):
+        # behind a folder it cannot search, the state would look absent, which reads as OFF
+        for mode in (0o000, 0o600):
+            with self.subTest(mode=oct(mode)):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(dict(FULL, on=True))
+                os.chmod(r.statedir, mode)
+                res = r.cmd('status', ok=False)
+                os.chmod(r.statedir, 0o700)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertEqual(res.stdout, 'runner-updater: REFUSE %s cannot be searched: a state in it would look '
+                                             'absent: it is left as it is\n' % r.statedir)
+                self.assertIn(ON_LINE, r.cmd('status').stdout)    # the control: the same state, the folder 0700
+
     RENAME = '/bin/mv -f -- $f.new $f ||'   # ru_write's rename (bin/runner-updater-lib)
 
     def torn(self, before_rename):
