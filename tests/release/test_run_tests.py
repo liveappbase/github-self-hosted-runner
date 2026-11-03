@@ -2,8 +2,9 @@
 runs, one unittest process per module, N at a time. Each cell builds a small tree of planted test modules in a
 temporary folder and runs the runner there (and, where a cell compares, the plain discover line too): the same test
 count as plain discover (a module's and a package's load_tests included); a failing module is rc 1 and named; a module
-killed by SIGKILL, one that does not report, one whose report is not a pass and one that loads other tests than
-discovery found each count as failed; a discovery that fails or finds nothing is red; -j 1 and -j 4 give the same
+killed by SIGKILL, one that does not report, one whose report is not a pass, one that fails to import, and one that
+loads more or fewer tests than discovery found each count as failed and are named; a discovery that fails or finds
+nothing is red; -j 1 and -j 4 give the same
 results (and -j 4 runs modules at once, -j 1 never); the module with the most tests starts first; each module runs
 with the caller's env and -I; a SIGTERM ends the run red and ends the module it was running; the mutant that ignores a
 module's rc goes red."""
@@ -107,6 +108,23 @@ class T(unittest.TestCase):
 if 'tests.a.test_one' not in sys.modules:
     T.test_b = lambda self: None
 '''
+# its twin in the other direction: in discovery it has 2 tests, and the second fails; alone it has 1, so a run that let
+# it pass would drop that failing test without a sign
+T_FEWER = '''import sys
+import unittest
+
+
+class T(unittest.TestCase):
+    def test_a(self):
+        pass
+
+
+if 'tests.a.test_one' in sys.modules:
+    T.test_b = lambda self: self.fail('planted failure')
+'''
+# a module that imports IMPORT: discovery cannot load a module whose import raises, so it makes one failing test that
+# names the module (and loads no module); that test counts for the module it names
+T_IMPORT = 'import unittest\nimport IMPORT\n\n\nclass T(unittest.TestCase):\n    def test_a(self):\n        pass\n'
 
 # the base tree: 7 tests in 4 modules (a package's own __init__ is one), 1 skipped; a helper that does not match
 # test*.py, a module with no test and a folder with no __init__.py hold tests that discovery does not run
@@ -241,6 +259,23 @@ class TestSameTests(unittest.TestCase):
         t = Tree(self, {'tests/a/test_order.py': T_ONE})
         self.assertEqual(t.run().returncode, 0)
 
+    def test_a_module_that_loads_fewer_tests_than_discovery_found_fails(self):
+        t = Tree(self, {'tests/a/test_order.py': T_FEWER})
+        rc, ran, err = t.plain()
+        self.assertEqual((rc, ran), (1, 9), err)                  # the plain line runs the second test, and it fails
+        self.assertIn('AssertionError: planted failure', err)
+        r = t.run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertEqual(r.modules['tests.a.test_order'][1:], ('FAILED (loaded 1 tests, discovery found 2)',
+                                                               'loaded 1 tests, discovery found 2', '1', '0', '0', '0'))
+        self.assertEqual(r.last, 'run-tests: FAILED: 1 of 5 modules: tests.a.test_order (loaded 1 tests, discovery '
+                                 'found 2)')
+        # control: the same module without the test that depends on the order passes
+        t = Tree(self, {'tests/a/test_order.py': T_ONE})
+        self.assertEqual(t.plain()[:2], (0, 8))
+        r = t.run()
+        self.assertEqual((r.returncode, r.last), (0, 'run-tests: OK'), r.stdout)
+
 
 class TestFailures(unittest.TestCase):
     def test_a_failing_module_gives_rc_1_and_names_it(self):
@@ -254,6 +289,24 @@ class TestFailures(unittest.TestCase):
         self.assertEqual(r.summary, [('9', '5', str(os.cpu_count() or 1), '1', '0', '1')], r.stdout)
         self.assertEqual(r.last, 'run-tests: FAILED: 1 of 5 modules: tests.a.test_bad (tests failed, rc 1)')
         self.assertIn('AssertionError: planted failure', r.stdout)     # the module's own block is in the output
+
+    def test_a_module_that_fails_to_import_gives_rc_1_and_names_it(self):
+        t = Tree(self, {'tests/a/test_import.py': T_IMPORT.replace('IMPORT', 'tests.a.no_such_module')})
+        rc, ran, err = t.plain()
+        self.assertEqual((rc, ran), (1, 8), err)
+        self.assertIn("ModuleNotFoundError: No module named 'tests.a.no_such_module'", err)
+        r = t.run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('run-tests: tests: 8 tests in 5 modules, ', r.stdout)
+        self.assertEqual(why(r, 'tests.a.test_import'), 'no report, rc 1')
+        self.assertEqual(r.last, 'run-tests: FAILED: 1 of 5 modules: tests.a.test_import (no report, rc 1)')
+        self.assertIn("ModuleNotFoundError: No module named 'tests.a.no_such_module'", r.stdout)   # its own block
+        # control: the same module, importable, passes
+        t = Tree(self, {'tests/a/test_import.py': T_IMPORT.replace('IMPORT', 'tests.a.helper')})
+        self.assertEqual(t.plain()[:2], (0, 8))
+        r = t.run()
+        self.assertEqual((r.returncode, r.last), (0, 'run-tests: OK'), r.stdout)
+        self.assertEqual(r.modules['tests.a.test_import'][1:4], ('OK', '', '1'))
 
     def end(self, line):
         return Tree(self, {'tests/a/test_end.py': T_END.replace('LINE', line)}).run()
