@@ -117,6 +117,8 @@
 #   running PID START         ^running [0-9]+ [0-9]+$  (the last TARGET runs)
 #   stop NAME: TEXT           ^stop (check failed|HAND CHANGE|POOL DOWN|DISK|NO IDLE): .*$
 #   pin-rule V H | removed    ^pin-rule (removed|V H)$ (D2's ONE RULE, before the pin is written or removed)
+#   state-write switched|held ^state-write (switched|held)$ (before the state is written: the family's new candidate,
+#                                            or only this window's STOPs)
 #   closed EPOCH              ^closed [0-9]+$      (before the journal is renamed to WINDOWS/ID)
 # After a failure in the window, the steps from `disable-start` (a pre-close failure) or from `restore`/`target` on
 # repeat in that order. A cut journal: its last line may be lost (runner-journal's residual); the step it names may or
@@ -153,13 +155,14 @@ ru_j() {
 # text, the release's sha (switch-now reruns a NO IDLE's release with it), a hand line for a STOP that needs one
 ru_w_stop() {
   local o
-  o=$($JQ -n -c --arg f $ru_w_fam --arg s $1 --arg v "$ru_w_ver" --arg t $2 --arg h "${3-}" --arg sha "$ru_w_sha" \
+  o=$($JQ -n -c --arg f "$ru_w_fam" --arg s "$1" --arg v "$ru_w_ver" --arg t "$2" --arg h "${3-}" --arg sha "$ru_w_sha" \
         '{family: $f, stop: $s, version: (if $v == "" then null else $v end), user: null,
           detail: ({text: $t} + (if $sha != "" then {sha: $sha} else {} end) + (if $h != "" then {hand: $h} else {} end))}') \
     || o="{\"family\":\"$ru_w_fam\",\"stop\":\"$1\",\"version\":null,\"user\":null,\"detail\":null}"
   ru_w_stops+=($o)
   print -r -- "runner-updater: STOP $1: $2"
-  (( ! ru_w_open )) || ru_j stop "$1: ${2[1,900]}" || true
+  # one journal line: a control character (a tab in a tool's output) is a `?` there; the state keeps the text whole
+  (( ! ru_w_open )) || ru_j stop "$1: ${${2//[[:cntrl:]]/?}[1,900]}" || true
 }
 
 # FILTER [JQ OPTION...]: the state changed by FILTER, written by rename (ru_write); 1 + REPLY
@@ -503,6 +506,7 @@ ru_w_close() {
   local switched=$1 oldv=
   ru_w_pin_rule || { print -r -- "runner-updater: STOP $REPLY: the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
   ru_w_version $ru_w_old && oldv=$REPLY
+  ru_j state-write ${${switched:#0}:+switched}${${switched:#1}:+held} || return 3
   if (( switched )); then
     ru_w_state ".families[\$f] = ((.families[\$f] // $ru_w_family_new)
         | .candidate = {version: \$v, lines: (\$sets | split(\" \") | map({(.): \$out}) | add), closed_at: \$now}

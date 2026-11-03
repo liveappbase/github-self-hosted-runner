@@ -18,7 +18,7 @@ import time
 import unittest
 
 from tests.studio.test_runner_updater import BACKGROUND, FIX, HEALTHZ, IMG, IMG2, P, Rig, config, read_text
-from tests.studio.test_runner_updater_state import Paths, fam, lines_of, state, stop
+from tests.studio.test_runner_updater_state import Paths, fam, lib_run, lines_of, state, stop
 from tests.studio import test_golden_build as gb
 
 FAM = 'mac-golden'
@@ -273,7 +273,7 @@ HAPPY_KEYS = ['window', 'family', 'kind', 'command', 'version', 'runner-sha', 'd
               'tool', 'tool', 'tool', 'pin-before', 'target', 'validate', 'idle', 'config-sha', 'backup', 'disable-start',
               'disable-done', 'pin-write', 'build-start', 'build-done', 'gate-start', 'gate-clone', 'gate', 'enable-check',
               'validate', 'edited-sha', 'validate', 'installed', 'enable-start', 'enable-done', 'running', 'pin-rule',
-              'closed']
+              'state-write', 'closed']
 
 
 class TestRebuild(unittest.TestCase):
@@ -593,7 +593,8 @@ class TestAfterDisable(unittest.TestCase):
         self.assertEqual(len(w.calls('runner-disable')), 1)
         (at, mtime, csha), = w.enables()
         self.assertEqual(csha, sha(w.pre))                       # CI enabled on the pre-window config
-        self.assertEqual(w.keys()[-2:], ['pin-rule', 'closed'])
+        self.assertEqual(w.keys()[-3:], ['pin-rule', 'state-write', 'closed'])
+        self.assertEqual(w.value('state-write'), 'held')
         self.assertEqual(w.value('pin-rule'), '%s %s' % (V0, SHA0))
         self.assertEqual(read_text(w.pin), '%s %s\n' % (V0, SHA0))
         self.assertEqual(('restore' in w.keys()), edited)
@@ -609,6 +610,12 @@ class TestAfterDisable(unittest.TestCase):
         self.back(w, 'build: golden-build exit 1: golden-build: STOP tart clone failed')
         self.assertEqual(w.value('build-failed'), 'exit 1')
         self.assertEqual(w.calls('golden-gate'), [])
+
+    def test_a_stop_text_with_a_control_character_is_journaled_with_it_replaced(self):
+        w = Win(self)
+        w.hook('build-hook', "print -r -- $'golden-build: STOP a\\tb'; exit 1\n")
+        self.back(w, 'build: golden-build exit 1: golden-build: STOP a\tb')
+        self.assertIn('stop check failed: build: golden-build exit 1: golden-build: STOP a?b', w.journal())
 
     def test_a_done_name_that_is_not_the_journaled_date(self):
         w = Win(self)
@@ -729,7 +736,7 @@ class TestPoolDown(unittest.TestCase):
         self.assertEqual(w.config_now(), w.pre)
         self.assertEqual([l for l in w.journal() if l.startswith('target ')],
                          ['target mac-a=liveapp-mac-golden-' + today(), 'target mac-a=' + OLD])
-        self.assertEqual(w.keys()[-3:], ['running', 'pin-rule', 'closed'])
+        self.assertEqual(w.keys()[-4:], ['running', 'pin-rule', 'state-write', 'closed'])
 
     def test_the_target_does_not_run_in_time(self):
         w = Win(self)
@@ -739,7 +746,7 @@ class TestPoolDown(unittest.TestCase):
         self.assertIn('runner-updater: STOP check failed: the target did not run within 3 s', res.stdout)
         self.assertEqual(len(w.calls('runner-disable')), 2)
         self.assertEqual(w.config_now(), w.pre)
-        self.assertEqual(w.keys()[-3:], ['running', 'pin-rule', 'closed'])
+        self.assertEqual(w.keys()[-4:], ['running', 'pin-rule', 'state-write', 'closed'])
 
 
 class TestMtimeSecond(unittest.TestCase):
@@ -831,6 +838,13 @@ class TestKillAtEachStep(unittest.TestCase):
         self.assertEqual(w.keys()[-1], 'pin-rule')
         self.assertEqual(w.value('pin-rule'), '%s %s' % (V0, SHA0))
         self.assertEqual(read_text(w.pin), '%s %s\n' % (V2, SHA2))   # still the window's
+
+    def test_state_write(self):
+        w = self.killed('state-write')
+        self.assertEqual(w.value('state-write'), 'switched')
+        self.assertIsNone(w.family())                                # the state is not written yet
+        self.assertEqual(read_text(w.pin), '%s %s\n' % (V0, SHA0))
+        self.assert_recover_needed(w)
 
     def test_closed(self):
         w = self.killed('closed')
@@ -929,6 +943,43 @@ class TestRecoverNeeded(unittest.TestCase):
                           res.stdout)
         self.assertEqual((w.r.ps_calls(), w.calls('runner-disable')), (0, []))
         self.assertIn('runner-updater: status: a window journal is open: %s' % w.u.window, w.status())
+
+    def test_an_open_journal_comes_before_every_other_refusal(self):
+        # the command's own check, first: a config the window would refuse still gives RECOVER needed
+        w = Win(self, cfg=config(top='log-file = "/elsewhere.log"\n'))
+        w.sb.write(w.u.window, 'window 20261101080000-1\nfamily %s\n' % FAM, 0o600)
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4)', res.stdout)
+        self.assertNotIn('log-file', res.stdout)
+        os.remove(w.u.window)                    # the control: the same config, no journal
+        res = w.run()
+        self.assertIn('a top-level log-file key', res.stdout)
+
+    WINDOW_CALL = ('WINDOW=%(w)s WINDOWS=%(ws)s CONFIG=%(c)s\nsource %(win)s || exit 8\n'
+                   'ru_window mac-golden %(v)s %(sha)s idle 0 pass\nprint -r -- "rc $?"\n'
+                   '[[ -d $WINDOWS ]] && print -r -- "windows made"\n')
+
+    def window_call(self, open_journal):
+        w = Win(self)
+        if open_journal:
+            w.sb.write(w.u.window, 'window 20261101080000-1\n', 0o600)
+        body = self.WINDOW_CALL % {'w': w.u.window, 'ws': os.path.join(w.r.statedir, 'windows'),
+                                   'c': w.sb.path('no-config'), 'win': os.path.join(w.tools, 'runner-updater-window'),
+                                   'v': V0, 'sha': SHA0}
+        return lib_run(w.r, body)
+
+    def test_ru_window_itself_refuses_an_open_journal(self):
+        # the function a later pass calls: its own check, before it makes or reads anything
+        res = self.window_call(True)
+        self.assertEqual(res.stdout.splitlines()[-1], 'rc 1', res.stdout + res.stderr)
+        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4): the window journal ', res.stdout)
+        self.assertNotIn('windows made', res.stdout)
+
+    def test_control_ru_window_with_no_open_journal_goes_on(self):
+        res = self.window_call(False)
+        self.assertNotIn('RECOVER needed', res.stdout)
+        self.assertIn('windows made', res.stdout)
 
     def test_control_no_open_journal_the_pass_runs(self):
         w = Win(self)

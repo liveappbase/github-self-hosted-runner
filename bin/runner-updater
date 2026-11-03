@@ -40,9 +40,11 @@
 #   status   no lock, and it writes no file anywhere (the core gets its inputs through pipes). It reads STATE once
 #            and calls status.jq with facts from it (each family's candidate and back_until, the STOPs it holds) and
 #            its core state; a status.jq that does not decide is a STOP. It prints ON or OFF; each family: its candidate
-#            or "no candidate", back_until, its rejected versions; status.jq's verdict and lines (the STOP lines with
-#            their next step, the evidence lines, each back_until); and per STOP its D7 properties, `known false` and
-#            "unknown" for a STOP this core does not know (never guessed). With no STATEDIR it creates nothing.
+#            or "no candidate", back_until, its rejected versions; an open window journal; each family of BUILDERS in
+#            the state: its host pin (`host pin V`, or none: D2's ONE RULE removes a pin whose version is not known);
+#            status.jq's verdict and lines (the STOP lines with their next step, the evidence lines, each back_until);
+#            and per STOP its D7 properties, `known false` and "unknown" for a STOP this core does not know (never
+#            guessed). With no STATEDIR it creates nothing.
 #   on       sets on = true. It refuses, and changes nothing, a warm pool (PLAN D6): a set of the families file that the
 #            config has, with a [tart] pool-size > 0 or a pool-size line the lib does not read (ru_pools); so it also
 #            refuses a config or families file it cannot read (it cannot check them).
