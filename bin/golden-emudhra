@@ -16,7 +16,11 @@
 #     removed after a green gate. Its FAIL lines are above it. The image is NOT checked: never RED.
 # A STOP before the start (exit 1, no GATE line) means it could not start.
 # The incident: eMudhra's intermediate keys were compromised. homebrew-core a2ee7ae08c6 excludes three root keys by the
-# SHA-256 of their public key (SPKI); EXCLUDED_SPKI in the guest part copies them with that commit's source line.
+# SHA-256 of their public key (SPKI). ONE copy of them: setup/tls-excluded-spki of the same tree (EXCLUDED), with that
+# commit's source line. The host part reads it with bin/tls-excluded-lib (the one Mac reader) before anything else, in
+# both modes: a file it refuses (its header: a bad first field, a CR byte, a key named twice, no data line) STOPS the
+# stage before any tart exec. It fills the keys into the guest part's EXCLUDED_SPKI line, and the guest part STOPS
+# (exit 2) at every step when that line holds anything but keys.
 # VM is a RUNNING gold-* build VM that answers `tart exec`. The stage drives the guest ONLY through `tart exec`, as the
 # guest's admin user (as golden-build's gexec). RUNNER_TARBALL is the GitHub runner tarball INSIDE the guest that the
 # image's runner was unpacked from (golden-build keeps it until this stage); RUNNER_SHA256 is its sha256.
@@ -45,6 +49,7 @@ set -u
 export LC_ALL=C
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
 NODEDIFF=${0:A:h:h}/setup/emudhra.node-diff
+EXCLUDED=${0:A:h:h}/setup/tls-excluded-spki
 
 die() { print -r -- "golden-emudhra: STOP $*"; exit 1 }
 say() { print -r -- "golden-emudhra: $*" }
@@ -59,6 +64,9 @@ else
   [[ $tgz =~ '^/[A-Za-z0-9/._-]+$' ]] || die "RUNNER_TARBALL must be an absolute path in the guest: '$tgz'"
   [[ $tsha =~ '^[0-9a-f]{64}$' ]] || die "RUNNER_SHA256 must be 64 lowercase hex: '$tsha'"
 fi
+# the excluded keys (the header): read once, here, before any tart exec; filled into the guest part below
+source ${0:A:h}/tls-excluded-lib || die "cannot load ${0:A:h}/tls-excluded-lib (the reader of $EXCLUDED)"
+tls_excluded $EXCLUDED || die "the excluded keys: $REPLY"
 tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
 gexec() { tart exec $vm "$@" }
 
@@ -86,13 +94,13 @@ ASSET_ROOTS=(/System/Library/AssetsV2/com_apple_MobileAsset_PKITrustStore /priva
 KC_FLOOR=100
 ANCHORS_FLOOR=200
 BUNDLE_FLOOR=100
-# homebrew-core a2ee7ae08c6, ca-certificates.rb, EXCLUDED_SPKI_HASHES. Its source line:
-# "Exclude AAA Certificate Services and the emSign G3 roots by their public keys."
-EXCLUDED_SPKI=(
-  bd153ed7b0434f6886b17bce8bbe84ed340c7132d702a8f4fa318f756ecbd6f3  # AAA Certificate Services
-  c619e4780ed8e0abeda24ad732567de4383a7ea941338f6d1a7d1b49ac792fe9  # emSign Root TLS CA - G3
-  8d417db2dd8bf5e3084d1e3f196d583849d81bdd4c00c70b9d39369e96b8c782  # emSign ECC Root CA - G3
-)
+# the excluded keys: the host part fills this line with the keys of setup/tls-excluded-spki (ONE copy; that file has
+# homebrew-core a2ee7ae08c6's source line). Anything but keys here: STOP, at every step
+EXCLUDED_SPKI=(@EXCLUDED_SPKI@)
+for x in $EXCLUDED_SPKI; do
+  [[ $x =~ '^[0-9a-f]{64}$' ]] || { print -r -- "STOP the guest part holds no excluded key from the host ($x)"; exit 2 }
+done
+(( ${#EXCLUDED_SPKI} )) || { print -r -- "STOP the guest part holds no excluded key from the host"; exit 2 }
 # The control roots (never denied; verify-cert must stay 0), by the SHA-256 of the certificate in KC
 CONTROL_ROOTS=(
   e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2  # USERTrust RSA Certification Authority
@@ -836,6 +844,11 @@ exit 0
 EOS
 )
 
+# the keys into the guest part's one EXCLUDED_SPKI line (each key is 64 hex: nothing in them is shell syntax)
+g="EXCLUDED_SPKI=(${(j: :)tls_keys})"
+g=${GUEST/'EXCLUDED_SPKI=(@EXCLUDED_SPKI@)'/$g}
+[[ $g != "$GUEST" && $g != *@EXCLUDED_SPKI@* ]] || die "the guest part has no one EXCLUDED_SPKI=(@EXCLUDED_SPKI@) line to fill"
+GUEST=$g
 /bin/zsh -f -n -c "$GUEST" || die "the guest part does not parse (above)"
 RAW=   # when set: phase also appends the guest's raw lines (without the prefix) to this host file
 phase() { # STEP WORKDIR [ARGS…] — one step in the guest; its output prefixed; returns the step's exit status

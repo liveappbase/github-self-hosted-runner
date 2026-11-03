@@ -90,12 +90,22 @@ def guest_text(tc):
     return text[start:text.index(GUEST_END, start)]
 
 
+EXCLUDED_LINE = 'EXCLUDED_SPKI=(@EXCLUDED_SPKI@)'   # the guest part's line the host fills with the data file's keys
+
+
+def data_keys(path=os.path.join(REPO, 'setup', 'tls-excluded-spki')):
+    """The keys of a valid setup/tls-excluded-spki, in order (its first fields; the file's header has the format)."""
+    return [l.split(' ', 1)[0] for l in read(path).split('\n') if l and not l.startswith('#')]
+
+
 def guest_copy(tc, d, rewrites):
-    """Write the guest part to D/guest.zsh with REWRITES applied, and the W pattern rewritten into D. Returns
-    (path, W): run it as `zsh -f path STEP W ARGS…`."""
+    """Write the guest part to D/guest.zsh as the host delivers it (its EXCLUDED_SPKI line filled with the keys of
+    setup/tls-excluded-spki), with REWRITES applied, and the W pattern rewritten into D. Returns (path, W): run it as
+    `zsh -f path STEP W ARGS…`."""
     w = os.path.join(d, 'w.guest')
     os.makedirs(w)
-    rw = list(rewrites) + [('[[ $W == /private/tmp/golden-emudhra.* && -d $W ]]', '[[ $W == %s && -d $W ]]' % w)]
+    rw = [(EXCLUDED_LINE, 'EXCLUDED_SPKI=(%s)' % ' '.join(data_keys()))] + list(rewrites)
+    rw += [('[[ $W == /private/tmp/golden-emudhra.* && -d $W ]]', '[[ $W == %s && -d $W ]]' % w)]
     text = rewrite(tc, guest_text(tc), rw, 'the guest part of bin/golden-emudhra')
     assert_no_ci(tc, text, (), 'the guest part')
     tc.assertNotIn('/private/tmp/golden-emudhra', text)
@@ -118,6 +128,7 @@ case $1 in
   (/bin/zsh)
     [[ $2 == -f && $3 == -c && $5 == golden-emudhra-guest ]] || { print -r -- "stub tart: guest shape: $1 $2 $3" >> $D/unexpected; exit 9 }
     /bin/zsh -f -n -c "$4" || { print -r -- "stub tart: the guest part does not parse" >> $D/unexpected; exit 9 }
+    print -r -- "$4" > $D/guest.txt   # the guest part as the host delivered it
     step=$6; shift 5
     print -r -- "${(j:|:)@}" >> $D/calls
     [[ $step == census && -d $D/hosttmp ]] && /bin/ls $D/hosttmp > $D/census-tmp 2>&1
@@ -132,8 +143,9 @@ esac
 
 def emudhra_copy(tc, d, named_src=None):
     """bin/golden-emudhra and bin/node-diff-compare copied into D/bin, REAL rewritten to a stub tart (D/stub/tart)
-    whose `exec` answers each guest step from D/scenario/<step>.out and <step>.rc; the named list is D/setup/
-    emudhra.node-diff (a copy of NAMED_SRC, when given). Returns the copy's path."""
+    whose `exec` answers each guest step from D/scenario/<step>.out and <step>.rc (and keeps the guest part it got in
+    D/guest.txt); the named list is D/setup/emudhra.node-diff (a copy of NAMED_SRC, when given); the excluded keys and
+    their reader as excluded_copy puts them. Returns the copy's path."""
     tart = stub(os.path.join(d, 'stub', 'tart'), EMUDHRA_TART.replace('@D@', d).replace('@W@', GUEST_W))
     os.makedirs(os.path.join(d, 'scenario'))
     tool = os.path.join(d, 'bin', 'golden-emudhra')
@@ -142,9 +154,17 @@ def emudhra_copy(tc, d, named_src=None):
                 allow_ci=('HOME=/Users/ci ',))
     if os.path.exists(os.path.join(REPO, 'bin', 'node-diff-compare')):
         copy_script(tc, 'bin/node-diff-compare', os.path.join(d, 'bin', 'node-diff-compare'))
+    excluded_copy(tc, d)
     if named_src:
         write(os.path.join(d, 'setup', 'emudhra.node-diff'), read(named_src))
     return tool
+
+
+def excluded_copy(tc, d):
+    """bin/tls-excluded-lib into D/bin and setup/tls-excluded-spki into D/setup, beside a copy of golden-emudhra (it
+    reads its keys from ../setup/ through that reader)."""
+    copy_script(tc, 'bin/tls-excluded-lib', os.path.join(d, 'bin', 'tls-excluded-lib'))
+    write(os.path.join(d, 'setup', 'tls-excluded-spki'), read(os.path.join(REPO, 'setup', 'tls-excluded-spki')))
 
 
 def scenario(d, step, out='', rc=0, sleep=None):

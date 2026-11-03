@@ -1,0 +1,35 @@
+#!/bin/zsh -f
+# tls-excluded-lib — the ONE Mac reader of setup/tls-excluded-spki, the CA keys this repository's hosts never trust
+# (that file's header gives its format). zsh functions, SOURCED, never run: bin/golden-emudhra sources it (the keys it
+# fills into its guest part). It reads no constant and writes nothing. linux-docker/setup/runner-release.sh reads the same file in bash with the same rules: the cells of
+# tests/studio/test_runner_updater_release.py run this reader on the cases tests/hetzner/test_tls.py runs on that one.
+#
+#   tls_excluded FILE  0, and tls_keys = every key, in file order, once every line passed. 1, tls_keys empty and REPLY
+#                      = why, when it REFUSES the whole file: a data line whose first field (the text before the first
+#                      space) is not 64 lowercase hex (a line of only spaces, a tab after the key), a CR byte anywhere,
+#                      a key named twice, no data line (an empty list never means "nothing to exclude"), or a FILE it
+#                      cannot read. A line that starts with # is a comment and an empty line is skipped; the text after
+#                      the key's space is a free name, and a key with no name is read. FILE is read ONCE.
+
+tls_excluded() {
+  local f=$1 text l h
+  typeset -ga tls_keys
+  tls_keys=()
+  [[ -f $f && -r $f ]] || { REPLY="cannot read the excluded keys $f"; return 1 }
+  text=$(/bin/cat -- $f && print -rn -- .) || { REPLY="cannot read the excluded keys $f"; return 1 }
+  text=${text%.}
+  [[ $text != *$'\r'* ]] || { REPLY="$f holds a CR byte: the whole file is refused"; return 1 }
+  for l in "${(@f)text}"; do
+    [[ -z $l || $l == '#'* ]] && continue
+    h=${l%% *}
+    if ! [[ $h =~ '^[0-9a-f]{64}$' && $h == "$MATCH" ]]; then
+      tls_keys=(); REPLY="$f: a data line whose first field is not 64 lowercase hex: the whole file is refused"; return 1
+    fi
+    if (( ${tls_keys[(Ie)$h]} )); then
+      tls_keys=(); REPLY="$f names the key $h twice: the whole file is refused"; return 1
+    fi
+    tls_keys+=($h)
+  done
+  (( ${#tls_keys} )) \
+    || { REPLY="$f has no data line: the whole file is refused (an empty list never means nothing to exclude)"; return 1 }
+}

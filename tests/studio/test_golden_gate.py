@@ -15,7 +15,8 @@ import subprocess
 import time
 import unittest
 
-from tests.studio.support_emudhra import BASE_ENV, REPO, ZSH, copy_script, lines, read, run, stub, tmpdir, write
+from tests.studio.support_emudhra import (BASE_ENV, REPO, ZSH, copy_script, excluded_copy, lines, read, run, stub, tmpdir,
+                                          write)
 
 IMAGE = 'liveapp-mac-golden-20261101'
 OTHERS = ['liveapp-mac-golden-20261031', 'gold-20261101', 'runner-abc123']
@@ -382,6 +383,7 @@ class GateVerdicts(GateRig, unittest.TestCase):
         copy_script(self, 'bin/golden-emudhra', os.path.join(self.d, 'bin', 'golden-emudhra'),
                     rewrites=[('REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart', 'REAL=' + self.tart)],
                     allow_ci=('HOME=/Users/ci ',))
+        excluded_copy(self, self.d)   # golden-emudhra reads its keys through tls-excluded-lib
         self.guest('save', '1. save\n')
         self.guest('gate', 'census: control USERTrust RSA: verify-cert exits 0 (pass)\ngate: no FAIL\n')
 

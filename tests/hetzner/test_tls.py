@@ -5,7 +5,9 @@ and the filter in linux-docker/setup/runner-release.sh that builds the CA bundle
   of a certificate's DER SubjectPublicKeyInfo, ONE space, free text). A reader REFUSES the whole file on a data line
   whose first field is not 64 lowercase hex, a CR byte, a duplicate hash, or no data line: an empty list fails
   closed, it never means "nothing to exclude".
-- bin/golden-emudhra still holds its own copy (its EXCLUDED_SPKI array): the two are pinned equal, both ways.
+- bin/golden-emudhra holds no copy of the keys: its host part reads the file (bin/tls-excluded-lib, the one Mac reader)
+  and fills its guest part's EXCLUDED_SPKI line with them. The pin cell reads its text; tests/studio/
+  test_runner_updater_release.py runs it (TestGoldenEmudhraKeys) and runs the Mac reader on this file's cases.
 - The filter (rr_bundle) drops every certificate of the source bundle whose key the file names, keeps at least 100,
   and rebuilds the bundle when its source, the data file, the openssl, the filter's own code, its floor or the bundle
   file itself changed. Every download (rr_curl) runs it first, so a bundle another filter left in ~/.cache is rebuilt.
@@ -49,26 +51,20 @@ def read_data(path):
     return out
 
 
-def read_emudhra(path):
-    """golden-emudhra's EXCLUDED_SPKI=( … ) array: [(hash, name)], each line `  <hash>  # <name>`."""
-    with open(path) as f:
-        text = f.read()
-    m = re.search(r'^EXCLUDED_SPKI=\(\n(.*?)^\)\n', text, re.M | re.S)
-    if not m:
-        raise ValueError('no EXCLUDED_SPKI=( … ) array')
-    out = []
-    for l in m.group(1).splitlines():
-        mm = re.fullmatch(r'  ([0-9a-f]{64})  # (.+)', l)
-        if not mm:
-            raise ValueError('an array line of another shape: %r' % l)
-        out.append((mm.group(1), mm.group(2)))
-    return out
-
-
-def compare(emudhra, data):
-    """(in golden-emudhra but not in the file, in the file but not in golden-emudhra)."""
-    a, b = read_emudhra(emudhra), read_data(data)
-    return [x for x in a if x not in b], [x for x in b if x not in a]
+def emudhra_pin(text):
+    """What breaks the pin "golden-emudhra READS setup/tls-excluded-spki and holds no key of its own" in TEXT (its
+    source): a list of findings, [] when it holds. Its one EXCLUDED_SPKI array holds only the placeholder the host part
+    fills; no key of the data file is anywhere in it; its host part names the file once and reads it once."""
+    found = []
+    arrays = re.findall(r'^EXCLUDED_SPKI=\((.*?)\)', text, re.M | re.S)
+    if arrays != ['@EXCLUDED_SPKI@']:
+        found.append('its EXCLUDED_SPKI arrays are %r, not the one placeholder the host fills' % arrays)
+    found += ['it holds the key %s: the data file is the one copy' % h for h, _ in read_data(DATA) if h in text]
+    if len(re.findall(r'^EXCLUDED=\$\{0:A:h:h\}/setup/tls-excluded-spki(?= |$)', text, re.M)) != 1:
+        found.append('it does not name setup/tls-excluded-spki once (EXCLUDED=${0:A:h:h}/setup/tls-excluded-spki)')
+    if len(re.findall(r'^tls_excluded \$EXCLUDED \|\| die ', text, re.M)) != 1:
+        found.append('it does not read the file once (tls_excluded $EXCLUDED || die ...)')
+    return found
 
 
 class DataFile(unittest.TestCase):
@@ -81,28 +77,27 @@ class DataFile(unittest.TestCase):
         with open(DATA) as f:
             self.assertIn('# homebrew-core a2ee7ae08c6, ca-certificates.rb, EXCLUDED_SPKI_HASHES', f.read())
 
-    def test_golden_emudhra_holds_the_same_keys_both_ways(self):
-        only_emudhra, only_file = compare(EMUDHRA, DATA)
-        self.assertEqual(only_emudhra, [], 'bin/golden-emudhra excludes a key setup/tls-excluded-spki does not')
-        self.assertEqual(only_file, [], 'setup/tls-excluded-spki excludes a key bin/golden-emudhra does not')
+    def test_golden_emudhra_reads_the_file_and_holds_no_key(self):
+        with open(EMUDHRA) as f:
+            self.assertEqual(emudhra_pin(f.read()), [])
 
-    def test_the_pin_sees_drift_in_each_direction(self):
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, True)
+    def test_the_pin_sees_a_key_copied_back_or_the_read_dropped(self):
         with open(EMUDHRA) as f:
             em = f.read()
-        with open(DATA) as f:
-            data = f.read()
         h0, n0 = read_data(DATA)[0]
-        line = '  %s  # %s\n' % (h0, n0)
-        self.assertEqual(em.count(line), 1)
-        with open(os.path.join(d, 'em'), 'w') as f:
-            f.write(em.replace(line, ''))
-        with open(os.path.join(d, 'data'), 'w') as f:
-            f.write(data.replace('%s %s\n' % (h0, n0), ''))
-        self.assertEqual(compare(os.path.join(d, 'em'), DATA), ([], [(h0, n0)]))
-        self.assertEqual(compare(EMUDHRA, os.path.join(d, 'data')), ([(h0, n0)], []))
-        self.assertEqual(compare(EMUDHRA, DATA), ([], []))   # the control: the real pair
+        broken = {
+            'a key back in the array': em.replace('EXCLUDED_SPKI=(@EXCLUDED_SPKI@)', 'EXCLUDED_SPKI=(\n  %s  # %s\n)' % (h0, n0)),
+            'a key in a comment': em.replace('\nset -u\n', '\n# %s\nset -u\n' % h0, 1),
+            'a second array': em.replace('\nset -u\n', '\nset -u\nEXCLUDED_SPKI=(%s)\n' % h0, 1),
+            'the read dropped': re.sub(r'(?m)^tls_excluded \$EXCLUDED \|\| die .*\n', '', em),
+            'another file named': em.replace('EXCLUDED=${0:A:h:h}/setup/tls-excluded-spki',
+                                             'EXCLUDED=${0:A:h:h}/setup/other-spki'),
+        }
+        for why, text in broken.items():
+            with self.subTest(why):
+                self.assertNotEqual(text, em, why)
+                self.assertNotEqual(emudhra_pin(text), [], why)
+        self.assertEqual(emudhra_pin(em), [])   # the control: the real file
 
 
 @needs_container
