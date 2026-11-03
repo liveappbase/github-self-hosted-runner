@@ -19,9 +19,11 @@
 # BUILD VERSION: ONE path for the updater and a person. Step 3's read-only checks, the image (5) and its checks (6 and
 #   8), then the build record; never steps 1, 2, 4 or 7, never image.ref. It does NOT read the updater's on/off key:
 #   the updater checks its own key before it calls this, and a person's release update must work while it is off.
-#   Then, AS RS_USER, `pool-image.sh up VERSION` (never 03-runscaler.sh alone: up checks the image's runner version,
-#   keeps the rollback and restarts only with no runner), and after the first job on the new image passes,
-#   `pool-image.sh accept` (or `back`).
+#   What follows a build (linux-docker/README.md, "A new runner release", step 2): until `up` reads the build record
+#   (a later release), it reads ~/run/image.ref, which BUILD never writes. So a person sets RUNNER_VERSION in the host
+#   config to VERSION and does the full run; then, AS RS_USER, `pool-image.sh up VERSION` (never 03-runscaler.sh
+#   alone: up checks the image's runner version, keeps the rollback and restarts only with no runner), and after the
+#   first job on the new image passes, `pool-image.sh accept` (or `back`).
 # THE BUILD RECORD: ~/run/builds/<VERSION>-<RECIPE>, RECIPE = the sha256 of image/'s `sha256sum` lines (`<hash>  <name>`,
 #   names in byte order). ONE per (version, recipe): a rebuild replaces it. 0640 in a 0750 folder, so RS_USER (in
 #   RUN_USER's group) can read it. Exactly four `key value` lines, in this order: `format 1`, `version N.N.N`, `digest

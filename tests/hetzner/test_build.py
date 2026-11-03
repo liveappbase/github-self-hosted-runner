@@ -14,7 +14,7 @@ host user's ONE updater lock for the whole run (a second run waits), give each b
 only for the digest of the image just built. Every download checks the filtered CA bundle first.
 
 Each cell runs a copy of the real 02-d1.sh and runner-release.sh (only their pin lines rewritten) against the stubs and
-the local HTTPS GitHub of tests/hetzner/support.py, in a container.
+the local HTTPS GitHub of tests/hetzner/support.py, in a container. The Header cell reads text and runs anywhere.
 """
 import calendar
 import fcntl
@@ -25,7 +25,7 @@ import re
 import time
 import unittest
 
-from tests.hetzner.support import (Sandbox, needs_container, pki, sha256_file, tarball, ARCH, IMAGE_NAME,
+from tests.hetzner.support import (REPO, Sandbox, needs_container, pki, sha256_file, tarball, ARCH, IMAGE_NAME,
                                    REGISTRY_PORT)
 
 VERSION = '2.339.0'
@@ -592,6 +592,26 @@ class FullRun(unittest.TestCase):
         self.assertEqual(g.records(), ['%s-%s' % (OLD, recipe(sb.build))])
         self.assertTrue(os.path.exists(os.path.join(sb.home, 'run', 'net.env')))
         self.assertTrue(sb.lines('systemctl'))    # steps 1 and 2 ran
+
+
+class Header(unittest.TestCase):
+    def test_the_header_says_what_follows_a_build_as_the_readme_does(self):
+        """What a person does after BUILD: until `pool-image.sh up` reads the build record (a later release), up reads
+        ~/run/image.ref, which BUILD never writes, so README "A new runner release" step 2 sets RUNNER_VERSION and runs
+        the full 02-d1.sh before up. 02-d1.sh's header said BUILD, then `up VERSION`, which up refuses. The two say the
+        same; the release whose up reads the record changes this cell with both. Text only: it runs anywhere."""
+        with open(os.path.join(REPO, 'linux-docker', 'README.md')) as f:
+            sec = f.read().split('\n## A new runner release\n', 1)[1].split('\n## ', 1)[0]
+        step2 = re.search(r'^2\. .*$', sec, re.M).group(0)
+        for w in ('Until then', '~/run/image.ref', 'RUNNER_VERSION', 'Install step 5'):
+            self.assertIn(w, step2)
+        with open(os.path.join(REPO, 'linux-docker', 'setup', '02-d1.sh')) as f:
+            text = f.read()
+        para = re.search(r'^# BUILD VERSION:.*?(?=^# [A-Z][A-Z ]*:)', text, re.M | re.S).group(0)
+        lo = para.lower()
+        for w in ('runner_version', 'image.ref', 'full run', 'pool-image.sh up'):
+            self.assertIn(w, lo, para)
+        self.assertLess(lo.index('full run'), lo.index('pool-image.sh up'), para)
 
 
 if __name__ == '__main__':
