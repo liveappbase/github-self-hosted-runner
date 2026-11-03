@@ -109,14 +109,17 @@ This release adds the host-config key `RUNNER_VERSION`: the runner version a ful
    ```
    ssh <RS_USER>@<host> 'sed -n "s/^runner-image = \"\(.*\)\"$/\1/p" ~/.config/runner/config.toml | sort -u | while read -r i; do DOCKER_HOST=unix:///home/<RUN_USER>/run/docker.sock docker run --rm --network none --memory 512m --cpus 1 "$i" ./config.sh --version < /dev/null | grep -xE "[0-9]+\.[0-9]+\.[0-9]+"; done'
    ```
-2. Set it in the installed host config (root; `<version>` is what step 1 printed). It keeps every other line, puts `RUNNER_VERSION=<version>` in place of a `RUNNER_VERSION` line it may have, and keeps the file as it was before as `host.conf.prev`:
+2. Set it in the installed host config (root). Put what step 1 printed in place of `<version>`, at the start of the line: that is the only place you edit. The line refuses a version that is not three numbers joined by dots (N.N.N, with no space), and then writes nothing. Else it keeps every other line, puts `RUNNER_VERSION=<version>` in place of a `RUNNER_VERSION` line it may have, and keeps the file as it was before as `host.conf.prev`:
    ```
-   ssh root@<host> 'f=/etc/liveapp-ci/host.conf; cp -p "$f" "$f.prev" || exit 1; grep -v "^RUNNER_VERSION=" "$f.prev" > "$f.new"; [ $? -le 1 ] || exit 1; printf "RUNNER_VERSION=%s\n" "<version>" >> "$f.new" && chmod 644 "$f.new" && mv "$f.new" "$f" && echo "OK $f: RUNNER_VERSION=<version> (the file before: $f.prev)"'
+   ssh root@<host> 'v="<version>"; f=/etc/liveapp-ci/host.conf; ok=; case $v in *[!0-9.]*|.*|*.|*..*|*.*.*.*) ;; *.*.*) ok=1 ;; esac; [ "$ok" = 1 ] || { printf "REFUSE [%s] is not a runner version N.N.N: nothing was written\n" "$v"; exit 1; }; cp -p "$f" "$f.prev" || exit 1; grep -v "^RUNNER_VERSION=" "$f.prev" > "$f.new"; [ $? -le 1 ] || exit 1; printf "RUNNER_VERSION=%s\n" "$v" >> "$f.new" && chmod 644 "$f.new" && mv "$f.new" "$f" && echo "OK $f: RUNNER_VERSION=$v (the file before: $f.prev)"'
    ```
-3. Check it against this release, from your checkout: the installed host config must hold each key of `linux-docker/host.conf.example` once (they are the keys this release's scripts read). It must print the one line `RUNNER_VERSION=<version>`. A line that starts with `WANT` names a key the installed file lacks or holds twice: stop, and compare it with `host.conf.prev` and with your own copy of the host config:
+3. Check it against this release, from your checkout: the installed host config must hold each key of `linux-docker/host.conf.example` once (they are the keys this release's scripts read), and its `RUNNER_VERSION` must be N.N.N. It must print the one line `RUNNER_VERSION=<version>` and nothing else. A line that starts with `WANT` says what is wrong; `host.conf.prev` is the file before step 2:
    ```
-   sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' linux-docker/host.conf.example | ssh <RUN_USER>@<host> 'f=/etc/liveapp-ci/host.conf; n=0; while read -r k; do c=$(grep -c "^$k=" "$f"); [ "$c" = 1 ] || { echo "WANT one $k line in $f, found $c"; n=1; }; done; [ "$n" = 0 ] && grep -xE "RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+" "$f"'
+   sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' linux-docker/host.conf.example | ssh <RUN_USER>@<host> 'f=/etc/liveapp-ci/host.conf; n=0; while read -r k; do c=$(grep -c "^$k=" "$f"); [ "$c" = 1 ] || { echo "WANT one $k line in $f, found $c"; n=1; }; done; grep -xE "RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+" "$f" || { echo "WANT RUNNER_VERSION=N.N.N in $f, found [$(grep "^RUNNER_VERSION=" "$f")]"; n=1; }; [ "$n" = 0 ]'
    ```
+   - `WANT one KEY line in …, found 0`: the installed file lacks KEY, so each script that reads KEY refuses to run. As root, add the line `KEY=value` to it with your host's value (`host.conf.example` says what KEY is), then run this check again.
+   - `WANT one KEY line in …, found 2` (or more): every script refuses a host config that names a key twice. As root, keep the one line with your host's value, remove the others, then run this check again.
+   - `WANT RUNNER_VERSION=N.N.N in …, found […]`: run step 2 again with the version step 1 printed, then this check.
 
 Then install this release's files as for every release ("A new runner release", its first paragraph).
 
