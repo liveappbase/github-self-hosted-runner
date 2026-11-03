@@ -1,0 +1,13 @@
+# tls-excluded-spki — the CA keys this repository's hosts never trust for a download: per data line, the SHA-256 of a
+# certificate's public key (its DER SubjectPublicKeyInfo), ONE space, and the certificate's name.
+# ONE copy: linux-docker/setup/runner-release.sh reads it on the Linux host (the install line puts it into ~/build/setup/);
+# bin/golden-emudhra still holds the same keys in its EXCLUDED_SPKI array, and tests/hetzner/test_tls.py pins the two equal.
+# Format: a line that starts with # is a comment, an empty line is ignored, any other line is a data line whose first
+# field (the text before the first space) is 64 lowercase hex. A reader REFUSES the whole file on a data line whose first
+# field is not, on a CR byte, on a hash that appears twice, or when there is no data line: an empty list never means
+# "nothing to exclude".
+# homebrew-core a2ee7ae08c6, ca-certificates.rb, EXCLUDED_SPKI_HASHES. Its source line:
+# "Exclude AAA Certificate Services and the emSign G3 roots by their public keys."
+bd153ed7b0434f6886b17bce8bbe84ed340c7132d702a8f4fa318f756ecbd6f3 AAA Certificate Services
+c619e4780ed8e0abeda24ad732567de4383a7ea941338f6d1a7d1b49ac792fe9 emSign Root TLS CA - G3
+8d417db2dd8bf5e3084d1e3f196d583849d81bdd4c00c70b9d39369e96b8c782 emSign ECC Root CA - G3
