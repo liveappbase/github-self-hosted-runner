@@ -284,4 +284,6 @@ reads 0).
   SHIM REFUSED and PINNED RUNNER RETIRED) unless the glue already holds them; `lines`: the STOP lines, the evidence
   lines, then each `back_until`. The STOP table is PLAN D7's; `rejects` is `after-retry` for a connect-class-only
   ROLLED BACK. SHIM REFUSED has no row in D7 (D6 names it): candidate not closed, version not rejected, a newer
-  release does not proceed alone. A STOP this core does not know: `known` false, its properties null, never guessed.
+  release does not proceed alone. DISK has none either (D5 names it: before runner-disable, free disk below the
+  builder's floor plus the family's image): the same three properties, and its line sends a person to free disk. A
+  STOP this core does not know: `known` false, its properties null, never guessed.

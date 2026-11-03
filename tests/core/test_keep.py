@@ -34,7 +34,7 @@ def held(name, family='fx'):
 # PLAN D7's STOPs that a person must answer: every STOP but NO EVIDENCE, which heals itself
 PERSON_STOPS = ('check failed', 'ROLLED BACK', 'PINNED RUNNER RETIRED', 'JOBS FAIL ON THE NEW IMAGE', 'ROLLBACK FAILED',
                 'CI DISABLED', 'POOL DOWN', 'HAND CHANGE', 'recipe changed', 'NO BASELINE', 'NO IDLE', 'untested jq',
-                'SHIM REFUSED', 'A STOP THIS CORE DOES NOT KNOW')
+                'SHIM REFUSED', 'DISK', 'A STOP THIS CORE DOES NOT KNOW')
 
 
 class HeldStops(unittest.TestCase):

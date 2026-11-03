@@ -25,6 +25,7 @@ TABLE = {
     'NO IDLE': (False, False, False),
     'untested jq': (None, False, False),
     'SHIM REFUSED': (False, False, False),      # D6 names it ("STOP with the shim's reason"); D7 has no row: see README
+    'DISK': (False, False, False),              # D5 DISK names it ("the DISK STOP is its path"); D7 has no row: see README
 }
 
 
@@ -121,6 +122,12 @@ class Lines(unittest.TestCase):
 
     def test_retired_says_a_newer_release_is_needed(self):
         self.assertIn('a newer runner release', self.line('PINNED RUNNER RETIRED'))
+
+    def test_disk_names_the_numbers_and_what_to_do(self):
+        l = self.line('DISK', text='free disk 180 GiB < 250 GiB (the builder\'s floor 200 GiB + the image 50 GiB)')
+        self.assertTrue(l.startswith('fx: STOP DISK (runner 2.339.0): free disk 180 GiB < 250 GiB'), l)
+        self.assertIn('Next, by hand: free disk on the host (docs/operations.md, "Disk"); the next window of fx checks '
+                      'it again', l)
 
     def test_shim_refused_names_the_reason_and_the_runbook(self):
         l = self.line('SHIM REFUSED', reason='set mac-a: free disk below the floor: 93 GiB < 100 GiB')

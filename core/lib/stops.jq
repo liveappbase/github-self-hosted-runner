@@ -2,7 +2,8 @@
 # reads "a newer release proceeds alone?" from it (core/README.md, "KEEP" and "The programs' outputs").
 
 # STOP -> [candidate closed?, version rejected?, a newer release proceeds alone?]; null = the plan's "—". SHIM REFUSED
-# is D6's ("STOP with the shim's reason"): D7 has no row for it, so its properties are this table's own.
+# is D6's ("STOP with the shim's reason") and DISK is D5's (free disk below the builder's floor plus the image, before
+# runner-disable: "the DISK STOP is its path"): D7 has no row for either, so their properties are this table's own.
 def table: {
   "check failed": [true, false, true],
   "ROLLED BACK": [true, true, true],
@@ -17,7 +18,8 @@ def table: {
   "NO EVIDENCE": [false, false, false],
   "NO IDLE": [false, false, false],
   "untested jq": [null, false, false],
-  "SHIM REFUSED": [false, false, false]
+  "SHIM REFUSED": [false, false, false],
+  "DISK": [false, false, false]
 };
 
 # a STOP's row, or null for a STOP this core does not know (its properties are never guessed)

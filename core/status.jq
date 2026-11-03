@@ -44,6 +44,8 @@ def render:
        elif $n == "untested jq" then
          ": \($d.jq.version // "?") at \($d.jq.path // "?") is not in core/TESTED_JQ; no new work starts. Next, in the repository: "
          + "`JQ=\($d.jq.path // "PATH") python3 -I -m unittest discover -s tests/core -t .`, then add its row to core/TESTED_JQ when they pass"
+       elif $n == "DISK" then
+         what($d) + ". Next, by hand: free disk on the host (docs/operations.md, \"Disk\"); the next window of \($f) checks it again"
        elif $n == "SHIM REFUSED" then
          ": \($d.reason // "the shim refused a VM start"). Next: docs/operations.md, \"When the shim refuses\""
        else ": this core does not know this STOP" + what($d) end))};
