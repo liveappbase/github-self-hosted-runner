@@ -306,6 +306,42 @@ class TestStatus(unittest.TestCase):
         self.assertIn('\nrunner-updater: STOP fx BOGUS: known false; candidate closed: unknown; version rejected: '
                       'unknown; a newer release proceeds alone: no\n', out)
 
+    # macOS's sandbox: every file write denied but /dev/null (a pipe or a process substitution writes no file)
+    NO_WRITE = '(version 1)(allow default)(deny file-write*)(allow file-write* (literal "/dev/null"))'
+
+    def under_no_write(self, r, c):
+        return r.sb.run(['/usr/bin/sandbox-exec', '-p', self.NO_WRITE, '/bin/zsh', '-f', r.script, c])
+
+    def test_status_writes_no_file_anywhere(self):
+        # the slice writes only under STATEDIR, and status writes nothing at all: not even a temporary file (macOS's
+        # mktemp -d writes in the user's own temporary folder, whatever TMPDIR says)
+        r = Rig(self)
+        u = Paths(r)
+        u.put(FULL)
+        res = self.under_no_write(r, 'status')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('\nfx: STOP NO EVIDENCE (runner %s)' % V2, res.stdout)
+        self.assertIn('\nrunner-updater: STOP fx NO EVIDENCE: known true;', res.stdout)
+
+    def test_control_the_sandbox_stops_a_command_that_writes(self):
+        r = Rig(self)
+        u = Paths(r)
+        raw = u.put(FULL)
+        res = self.under_no_write(r, 'on')
+        self.assertNotEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(u.raw(), raw)
+
+    def test_a_core_that_cannot_decide_is_a_stop(self):
+        r = Rig(self, jq_wrap=True)
+        Paths(r).put(FULL)
+        r.sb.write(os.path.join(r.jqd, 'fail'), 'status')
+        res = r.cmd('status', ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertTrue(res.stdout.endswith('runner-updater: STOP core could not decide (status): exit 5: injected '
+                                            'failure\n'), res.stdout)
+        os.remove(os.path.join(r.jqd, 'fail'))       # the control
+        self.assertIn('\nstatus: ok (1 STOPs)\n', r.cmd('status').stdout)
+
     def test_status_takes_no_lock(self):
         r = Rig(self)
         Paths(r).put(dict(FULL, on=True))
@@ -606,7 +642,8 @@ class TestProtected(unittest.TestCase):
         u.put(state(families={'fx': fam(candidate=cand())}))
         r.sb.write(u.protected, IMG + '\n', 0o600)
         seen = r.sb.path('logs', 'dd-saw')
-        stub = r.sb.stub('dd', self.DD_BODY % (u.protected, seen, 'exit 1' if fail else 'exec /bin/dd "$@"'),
+        stub = r.sb.stub('dd', self.DD_BODY % (u.protected, seen, 'print -u2 -r -- "dd: injected failure"; exit 1'
+                                              if fail else 'exec /bin/dd "$@"'),
                          folder=r.sb.mkdir('dd'))
         script = pair(r, 'with-dd', script_rewrites=[('DD=/bin/dd', 'DD=' + stub)])
         return r, u, seen, r.cmd('protect', script=script, ok=False)
@@ -620,8 +657,8 @@ class TestProtected(unittest.TestCase):
     def test_a_sync_that_fails_stops_and_the_old_list_stays(self):
         r, u, seen, res = self.dd_rig(fail=True)
         self.assertEqual(res.returncode, 1, res.stdout)
-        self.assertIn('runner-updater: STOP the protected list cannot be written (cannot sync %s.new to disk): %s is as '
-                      'it was\n' % (u.protected, u.protected), res.stdout)
+        self.assertIn('runner-updater: STOP the protected list cannot be written (cannot sync %s.new to disk: dd: '
+                      'injected failure): %s is as it was\n' % (u.protected, u.protected), res.stdout)
         self.assertEqual(lines_of(u.protected), [IMG])
         self.assertFalse(os.path.lexists(u.protected + '.new'))
 

@@ -412,7 +412,7 @@ ru_write() {
   /bin/rm -f -- $f.new 2>/dev/null
   { print -rn -- $2 > $f.new } 2>/dev/null || { /bin/rm -f -- $f.new 2>/dev/null; REPLY="cannot write $f.new"; return 1 }
   out=$($DD if=/dev/null of=$f.new conv=notrunc,fsync 2>&1) \
-    || { /bin/rm -f -- $f.new; REPLY="cannot sync $f.new to disk${${(f)out}[1]:+: ${${(f)out}[1]}}"; return 1 }
+    || { /bin/rm -f -- $f.new; REPLY="cannot sync $f.new to disk${${out%%$'\n'*}:+: ${out%%$'\n'*}}"; return 1 }
   /bin/mv -f -- $f.new $f || { /bin/rm -f -- $f.new; REPLY="cannot rename $f.new to $f"; return 1 }
 }
 

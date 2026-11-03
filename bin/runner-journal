@@ -25,5 +25,5 @@ file=$1 key=$2 value=$3
 (( ${#value} <= 1000 )) || stop "VALUE is ${#value} bytes, more than 1000: nothing written"   # LC_ALL=C: bytes
 print -r -- "$key $value" >> $file || stop "cannot append to $file"
 out=$($DD if=/dev/null of=$file conv=notrunc,fsync 2>&1) \
-  || stop "dd could not fsync $file (the line is written, not known to be on disk): ${${(f)out}[1]-}"
+  || stop "dd could not fsync $file (the line is written, not known to be on disk): ${out%%$'\n'*}"
 exit 0

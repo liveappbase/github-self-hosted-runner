@@ -28,8 +28,9 @@
 #
 # COMMANDS. Every command but status holds the updater lock, LOCKFILE (zsh's zsystem flock, held by this process
 # until it exits): a command waits for it; a pass (the timer's) only tries it.
-#   status   no lock, no write. It reads STATE once and calls status.jq with facts from it (each family's candidate
-#            and back_until, the STOPs it holds) and its core state. It prints ON or OFF; each family: its candidate
+#   status   no lock, and it writes no file anywhere (the core gets its inputs through pipes). It reads STATE once
+#            and calls status.jq with facts from it (each family's candidate and back_until, the STOPs it holds) and
+#            its core state; a status.jq that does not decide is a STOP. It prints ON or OFF; each family: its candidate
 #            or "no candidate", back_until, its rejected versions; status.jq's verdict and lines (the STOP lines with
 #            their next step, the evidence lines, each back_until); and per STOP its D7 properties, `known false` and
 #            "unknown" for a STOP this core does not know (never guessed). With no STATEDIR it creates nothing.
@@ -223,19 +224,17 @@ run_core() {
 # ---- status: no lock, no write. ONE read of the state; the facts status.jq needs come from it (each family's
 # candidate and back_until, the STOPs it holds), and the core's own state is its `core` member
 do_status() {
-  local now tmp rc
+  local now core facts out rc
   load_state   # ONE read of the renamed file: everything status prints comes from it
   jq_tested
   now=$(/bin/date -u +%s)
   [[ $now =~ '^[0-9]+$' ]] || refuse "the clock gave '$now'"
-  tmp=$(/usr/bin/mktemp -d) || refuse "cannot create a temporary folder"
-  trap "/bin/rm -rf -- ${(q)tmp}" EXIT
-  print -r -- $ru_state | $JQ -c '.core // empty' > $tmp/state.json \
-    && print -r -- $ru_state | $JQ -c '{format: 1, host: "studio", sets: [], proc: null, position: null,
+  core=$(print -r -- $ru_state | $JQ -c '.core // empty') \
+    && facts=$(print -r -- $ru_state | $JQ -c '{format: 1, host: "studio", sets: [], proc: null, position: null,
          continuous: false, restart: null, config: null,
          families: (.families | map_values({provider: "tart", sets: ((.candidate.lines // {}) | keys),
                                              candidate: (.candidate // null), back_until: (.back_until // null)})),
-         stops: [.families[] | (.stops // [])[]]}' > $tmp/facts.json \
+         stops: [.families[] | (.stops // [])[]]}') \
     || refuse "jq could not build the facts of the state"
   print -r -- $ru_state | $JQ -r 'def utc: strftime("%Y-%m-%d %H:%M UTC");
     "runner-updater: status: the updater is \(if .on then "ON" else "OFF" end)",
@@ -248,16 +247,18 @@ do_status() {
         + "; " + (if .back_until == null then "back: none" else "back until \(.back_until | utc)" end)
         + "; rejected: " + (if (.rejected // []) == [] then "none" else (.rejected | join(", ")) end)
     end' || refuse "jq could not print the state"
-  $JQ -n -L $CORE/lib -f $CORE/status.jq --slurpfile state $tmp/state.json --slurpfile facts $tmp/facts.json \
-      --arg now $now > $tmp/status.json 2> $tmp/status.err
+  # the core's inputs come through process substitutions (pipes, no file): status writes nothing anywhere. Its
+  # stderr goes with its output: anything but one decision is "could not decide"
+  out=$($JQ -n -L $CORE/lib -f $CORE/status.jq --slurpfile state <(print -rn -- $core) \
+          --slurpfile facts <(print -r -- $facts) --arg now $now 2>&1)
   rc=$?
-  if (( rc != 0 )) || ! decided $tmp status; then
-    stop "core could not decide (status): exit $rc${$(/usr/bin/head -n 1 $tmp/status.err 2>/dev/null):+: $(/usr/bin/head -n 1 $tmp/status.err)}"
+  if (( rc != 0 )) || ! print -r -- $out | $JQ -e -s 'length == 1 and (.[0] | type) == "object"
+       and (.[0].verdict | type) == "string" and (.[0].lines | type) == "array"' > /dev/null 2>&1; then
+    stop "core could not decide (status): exit $rc${${out%%$'\n'*}:+: ${out%%$'\n'*}}"
   fi
-  $JQ -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
+  print -r -- $out | $JQ -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
     "status: \(.verdict) (\(.reason))", .lines[],
-    (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")' \
-    $tmp/status.json
+    (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")'
   exit 0
 }
 

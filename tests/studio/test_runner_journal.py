@@ -96,6 +96,9 @@ class RunnerJournal(unittest.TestCase):
         r = self.journal(self.j, 'k', 'v', tool=tool)
         self.assert_stop(r)
         self.assertIn('fsync', r.stdout)
+        # dd's one line reaches the STOP line whole (a one-line value is not an array: [1] would be its first letter)
+        self.assertTrue(r.stdout.endswith('(the line is written, not known to be on disk): dd: injected failure\n'),
+                        r.stdout)
         # control: the real dd
         r = self.journal(self.j, 'k', 'v')
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
