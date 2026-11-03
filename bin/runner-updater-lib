@@ -17,9 +17,12 @@
 #   The globals ru_observe_add and ru_observe_clear (arrays of family names) are the caller's --observe and
 #   --observe-clear: they change OBSERVEFILE in this pass (below).
 #
+# ru_reach PATH — THE RULE for every folder on the path to a file whose absence means something: each one that exists
+#   must be a folder this process can search, else a name behind it looks absent. 0, or 1 + REPLY (that folder). Every
+#   reader below calls it before it tests a name: ru_state_load, ru_protect (WINDOW), ru_families, ru_observe.
 # ru_state_load FILE — the updater's state (its layout: bin/runner-updater's header) into ru_state, compact JSON: 0;
-#   a missing FILE is a fresh state (OFF, no family), but a folder of FILE it cannot search is 1: FILE would look
-#   absent there. 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
+#   a missing FILE is a fresh state (OFF, no family), but a folder on its path it cannot search is 1 (ru_reach): FILE
+#   would look absent there. 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
 #   (the wait line): its format is not 1. It opens FILE once: a rename over FILE while it reads gives it one whole state.
 # ru_write FILE TEXT — TEXT, byte for byte, into FILE by rename: written to FILE.new, synced to disk (DD, as
 #   runner-journal does: so a power cut after the rename cannot leave FILE empty), then renamed over FILE. 1 + REPLY
@@ -61,7 +64,8 @@
 #   6. families: FAMILIES, one line per family "FAMILY tart SET [SET ...]" (FAMILY [a-z][a-z0-9-]{0,40}, SET
 #      [A-Za-z0-9][A-Za-z0-9._-]{0,99}, one space between), lines that start with # and empty lines skipped. Read as
 #      hostile: never sourced, every line must match exactly. No facts on any other line, a family named twice, a set
-#      named twice in a family, or a set in two families. No FAMILIES file: no family (a status line says so).
+#      named twice in a family, or a set in two families. No FAMILIES file: no family (a status line says so); a
+#      folder on its path it cannot search (ru_reach): no facts.
 #      facts.families.F = {provider: "tart", sets, candidate, back_until}, both from step 7.
 #   7. With HELD (a pass: JSON {families: {FAMILY: {candidate, back_until}}, stops: [...]}, from the updater's state):
 #      each family's candidate and back_until, and the STOPs, are HELD's. A family that HELD gives a candidate or a
@@ -70,7 +74,8 @@
 #      "observed", lines: {SET: IMAGE}, closed_at: EPOCH}}), or null. In this pass, each
 #      ru_observe_add family is added with its CURRENT config lines and closed_at = NOW (a family already observed
 #      keeps its record: one window); each ru_observe_clear family is removed. A family that is not in FAMILIES, or a
-#      set of it with no config line: no facts. The file is written by rename. An OBSERVEFILE it cannot read: no facts.
+#      set of it with no config line: no facts. The file is written by rename. An OBSERVEFILE it cannot read, or one
+#      behind a folder it cannot search (ru_reach): no facts.
 #   8. healthz: two reads, HEALTHZ_GAP seconds apart: `CURL -fsS --noproxy '*' --max-time 5
 #      http://ADDRESS:PORT/healthz`, ADDRESS and PORT from the config's top-level health-address and health-port
 #      (runscaler's defaults when absent: 127.0.0.1 and 8080). A health-port of 0 (no health server), or an address or
@@ -82,6 +87,21 @@ zmodload -F zsh/stat b:zstat || { print -r -- "runner-updater-lib: zsh/stat cann
 zmodload zsh/datetime || { print -r -- "runner-updater-lib: zsh/datetime cannot be loaded"; return 1 }
 
 ru_say() { print -r -- "runner-updater: $*" }
+
+# ru_reach PATH: 0 when every folder on the path to PATH that exists is a folder this process can search. A test of a
+# name behind a folder it cannot search fails as if nothing were there, so a state would read as fresh (OFF), a list
+# or a window's journal as absent, a pin as absent: every reader of a file whose absence means something calls this
+# first. 1 + REPLY = "FOLDER cannot be searched" (the first one from PATH up). PATH is absolute. ONE rule: golden-prune
+# and golden-build's pin() hold the same loop.
+ru_reach() {
+  local d=$1
+  [[ $d == /* ]] || { REPLY="$d is not an absolute path"; return 1 }
+  while [[ $d != / ]]; do
+    d=${d:h}
+    [[ ! -e $d && ! -L $d ]] || [[ -d $d && -x $d ]] || { REPLY="$d cannot be searched"; return 1 }
+  done
+  return 0
+}
 
 # ---- the process
 # -> REPLY = {"pid":N,"start":EPOCH} or null; return 1 with REPLY = why it cannot be read
@@ -269,6 +289,7 @@ ru_families() {
   local -A owner
   local -a sets
   ru_fam=() ru_fam_order=()
+  ru_reach $FAMILIES || { REPLY="$REPLY: the families file $FAMILIES would look absent"; return 1 }
   if [[ ! -e $FAMILIES && ! -L $FAMILIES ]]; then
     ru_say "families: no families file $FAMILIES: no family is observed"
     return 0
@@ -299,6 +320,7 @@ ru_families() {
 ru_observe() {
   local file=$1 now=$2 f s obs i
   local -a pairs shown
+  ru_reach $file || { REPLY="$REPLY: the observe file $file would look absent"; return 1 }
   if [[ -e $file || -L $file ]]; then
     [[ -f $file && ! -L $file ]] || { REPLY="$file is not a regular file: remove it (rm $file)"; return 1 }
     obs=$($JQ -c 'if type == "object" and all(.[]; type == "object" and .version == "observed"
@@ -394,8 +416,7 @@ then . else error("not a state of format 1") end'
 ru_state_load() {
   local f=$1 text fmt
   # behind a folder it cannot search, a state would look absent (fresh: OFF): not read as fresh
-  [[ ! -e ${f:h} && ! -L ${f:h} ]] || [[ -d ${f:h} && -x ${f:h} ]] \
-    || { REPLY="${f:h} cannot be searched: a state in it would look absent"; return 1 }
+  ru_reach $f || { REPLY="$REPLY: a state behind it would look absent"; return 1 }
   if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh; return 0; fi
   [[ -f $f && ! -L $f && -r $f ]] || { REPLY="$f is not a readable regular file"; return 1 }
   text=$(/bin/cat -- $f && print -rn -- .) || { REPLY="$f cannot be read"; return 1 }
@@ -429,6 +450,7 @@ ru_write() {
 #     before its back_until: until ACCEPT + 7 days;
 #   - an open window's journaled names: each `image NAME` line of WINDOW (the window journals every image name it
 #     makes or needs kept on such a line, BEFORE it makes it). An `image` line whose NAME is not an image name: 1.
+#     A folder on WINDOW's path it cannot search: 1 (ru_reach), never "no window".
 ru_protect() {
   local names text l v
   local -a list
@@ -437,6 +459,7 @@ ru_protect() {
              else empty end)') \
     || { REPLY="jq could not read the images of the state"; return 1 }
   list=(${(f)names})
+  ru_reach $WINDOW || { REPLY="$REPLY: an open window's journal $WINDOW would look absent"; return 1 }
   if [[ -e $WINDOW || -L $WINDOW ]]; then
     [[ -f $WINDOW && ! -L $WINDOW && -r $WINDOW ]] || { REPLY="$WINDOW is not a readable regular file"; return 1 }
     text=$(/bin/cat -- $WINDOW && print -rn -- .) || { REPLY="$WINDOW cannot be read"; return 1 }

@@ -4,6 +4,7 @@
 The rig is test_runner_updater's (every path constant rewritten into a sandbox; stubs for ps and curl; the real core).
 """
 import calendar
+import contextlib
 import json
 import os
 import subprocess
@@ -160,6 +161,31 @@ class TestOwnPath(unittest.TestCase):
 WAIT = 'runner-updater: WAIT the state %s has format %s; this updater reads format 1: it waits and changes nothing\n'
 OFF_LINE = 'runner-updater: status: the updater is OFF\n'
 ON_LINE = 'runner-updater: status: the updater is ON\n'
+# a folder on the path to STATEDIR's files that exists but cannot be searched (D: that folder; S: STATEDIR; C: the
+# command)
+CLOSED = ('runner-updater: REFUSE %(d)s cannot be searched, so the files in %(s)s would look absent (a state as a fresh '
+          'one: OFF). Look at its mode (ci must be able to search it), then run %(c)s again\n')
+PIN_CLOSED = ('runner-updater: STOP %s cannot be read and searched: off removes the pins in it, and would not see them. '
+              'The updater is OFF; the pins stay. Look at its mode (ci must be able to read and search it), then run '
+              'off again\n')
+
+
+def lib_run(r, body):
+    """BODY in a zsh that sourced the REAL runner-updater-lib (the rig's copy, beside the script), with JQ the rig's
+    jq: -> the finished process"""
+    driver = r.sb.write(r.sb.path('driver', 'drive'), 'set -u\nexport LC_ALL=C TZ=UTC\numask 077\nJQ=%s\nDD=/bin/dd\n'
+                        'source %s || exit 9\n%s\n' % (r.jq, r.lib, body), 0o755)
+    return r.sb.run(['/bin/zsh', '-f', driver])
+
+
+@contextlib.contextmanager
+def closed(d, mode):
+    """D's mode is MODE until the with block ends (then 0700 again, also when the block fails)"""
+    os.chmod(d, mode)
+    try:
+        yield
+    finally:
+        os.chmod(d, 0o700)
 
 
 class TestState(unittest.TestCase):
@@ -246,7 +272,8 @@ class TestState(unittest.TestCase):
                     self.assertEqual(u.raw(), raw)
 
     def test_a_state_folder_it_cannot_search_is_refused_never_read_as_fresh(self):
-        # behind a folder it cannot search, the state would look absent, which reads as OFF
+        # behind a folder it cannot search, the state would look absent, which reads as OFF (every level and every
+        # command: TestClosedFolders)
         for mode in (0o000, 0o600):
             with self.subTest(mode=oct(mode)):
                 r = Rig(self)
@@ -256,8 +283,7 @@ class TestState(unittest.TestCase):
                 res = r.cmd('status', ok=False)
                 os.chmod(r.statedir, 0o700)
                 self.assertEqual(res.returncode, 1, res.stdout)
-                self.assertEqual(res.stdout, 'runner-updater: REFUSE %s cannot be searched: a state in it would look '
-                                             'absent: it is left as it is\n' % r.statedir)
+                self.assertEqual(res.stdout, CLOSED % {'d': r.statedir, 's': r.statedir, 'c': 'status'})
                 self.assertIn(ON_LINE, r.cmd('status').stdout)    # the control: the same state, the folder 0700
 
     RENAME = '/bin/mv -f -- $f.new $f ||'   # ru_write's rename (bin/runner-updater-lib)
@@ -284,6 +310,156 @@ class TestState(unittest.TestCase):
         r, u, raw, res = self.torn(': ; ')
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(u.get(), dict(FULL, on=True))
+
+
+COMMANDS = ('status', 'on', 'off', 'pass', 'protect', 'report')
+
+
+class TestClosedFolders(unittest.TestCase):
+    """ONE rule for every folder on the path to a file the updater reads (bin/runner-updater-lib, ru_reach): a folder
+    that exists but cannot be searched hides what is behind it (a stat there fails as if nothing were there), so a
+    state would read as fresh (OFF), the protected list as missing, a pin as absent. Every command refuses before it
+    reads or writes anything when STATEDIR's parent or STATEDIR is 0000 or 0600 (no search right). off also lists
+    PINDIR, so a PINDIR it cannot read and search is a STOP that leaves every pin. The controls: the same folders at
+    0700."""
+
+    LIST = IMG0 + '\n' + IMG + '\n'
+
+    def run_closed(self, level, mode, cmd):
+        r = Rig(self)
+        u = Paths(r)
+        raw = u.put(on_state())
+        r.sb.write(u.protected, self.LIST, 0o600)
+        d = r.statedir if level == 'STATEDIR' else os.path.dirname(r.statedir)
+        with closed(d, mode):
+            res = r.cmd(cmd, ok=False)
+        return r, u, raw, d, res
+
+    def test_every_command_refuses_a_folder_it_cannot_search_on_the_path_to_the_state(self):
+        for level in ('the parent of STATEDIR', 'STATEDIR'):
+            for mode in (0o000, 0o600):
+                for cmd in COMMANDS:
+                    with self.subTest(level=level, mode=oct(mode), cmd=cmd):
+                        r, u, raw, d, res = self.run_closed(level, mode, cmd)
+                        self.assertEqual((res.returncode, res.stdout), (1, CLOSED % {'d': d, 's': r.statedir, 'c': cmd}),
+                                         res.stderr)
+                        self.assertEqual(u.raw(), raw)
+                        self.assertEqual(read_text(u.protected), self.LIST)
+                        self.assertEqual(sorted(os.listdir(r.statedir)), ['protected', 'state.json'])
+                        self.assertEqual(r.ps_calls(), 0)
+
+    def test_control_the_same_folders_at_0700(self):
+        for level in ('the parent of STATEDIR', 'STATEDIR'):
+            for cmd in COMMANDS:
+                with self.subTest(level=level, cmd=cmd):
+                    r, u, raw, d, res = self.run_closed(level, 0o700, cmd)
+                    self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                    if cmd == 'status':
+                        self.assertIn(ON_LINE, res.stdout)
+
+    def test_off_stops_at_a_pin_folder_it_cannot_read_and_search_and_every_pin_stays(self):
+        for mode in (0o000, 0o600, 0o300, 0o100):
+            with self.subTest(mode=oct(mode)):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(on_state())
+                pins = u.pins(**OFF_PINS)
+                with closed(u.pindir, mode):
+                    res = r.cmd('off', ok=False)
+                self.assertEqual((res.returncode, res.stdout),
+                                 (1, 'runner-updater: off: the updater is OFF\n' + PIN_CLOSED % u.pindir), res.stderr)
+                self.assertEqual(u.pin_files(), pins)
+                self.assertIsNone(u.raw(u.actions))
+                self.assertFalse(u.get()['on'])
+        # the control: the same pins, PINDIR 0700
+        r = Rig(self)
+        u = Paths(r)
+        u.put(on_state())
+        u.pins(**OFF_PINS)
+        with closed(u.pindir, 0o700):
+            r.cmd('off')
+        self.assertEqual(u.pin_files(), {})
+        self.assertEqual(lines_of(u.actions), OFF_JOURNAL)
+
+    def test_a_families_file_behind_a_folder_it_cannot_search_is_no_facts(self):
+        # report and pass read the families file (bin/runner-updater-lib, ru_families): "no file" is "no family"
+        for cmd in ('report', 'pass'):
+            for mode in (0o000, 0o600, 0o700):
+                with self.subTest(cmd=cmd, mode=oct(mode)):
+                    r = Rig(self)
+                    Paths(r).put(on_state())
+                    d = r.sb.mkdir('updater-config')
+                    fams = r.sb.write(os.path.join(d, 'families'), 'fx tart mac-a\n')
+                    script = pair(r, 'deep-families', script_rewrites=[('FAMILIES=' + r.families, 'FAMILIES=' + fams)])
+                    with closed(d, mode):
+                        res = r.cmd(cmd, script=script, ok=False)
+                    if mode == 0o700:   # the control
+                        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                        self.assertIn('\nr1 fx: ', res.stdout)
+                    else:
+                        self.assertEqual(res.returncode, 1, res.stdout)
+                        self.assertIn('runner-updater: REFUSE no facts: %s cannot be searched: the families file %s '
+                                      'would look absent\n' % (d, fams), res.stdout)
+
+
+class TestClosedFoldersInTheLib(unittest.TestCase):
+    """The lib's own readers keep the rule whoever calls them (bin/runner-updater checks STATEDIR's path first, so
+    these cells call the REAL lib directly): ru_state_load (the state), ru_protect (an open window's journal) and
+    ru_observe (report's observe file). Each injection has its control: the same folder at 0700."""
+
+    def test_ru_state_load(self):
+        for mode in (0o000, 0o600, 0o700):
+            with self.subTest(mode=oct(mode)):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(on_state())
+                parent = os.path.dirname(r.statedir)
+                with closed(parent, mode):
+                    res = lib_run(r, 'ru_state_load %s; print -rl -- "rc=$?" "${REPLY-}" "${ru_state-}"' % u.state)
+                out = res.stdout.splitlines()
+                if mode == 0o700:
+                    self.assertEqual(out[0], 'rc=0', res.stdout + res.stderr)
+                    self.assertTrue(json.loads(out[2])['on'])
+                else:
+                    self.assertEqual(out[:2], ['rc=1', '%s cannot be searched: a state behind it would look absent'
+                                               % parent], res.stdout + res.stderr)
+
+    def test_ru_protect(self):
+        for mode in (0o000, 0o600, 0o700):
+            with self.subTest(mode=oct(mode)):
+                r = Rig(self)
+                d = r.sb.mkdir('windows')
+                window = r.sb.write(os.path.join(d, 'window'), 'family fx\nimage %s\n' % IMG3, 0o600)
+                lst = r.sb.write(r.sb.path('lists', 'protected'), IMG + '\n', 0o600)
+                with closed(d, mode):
+                    res = lib_run(r, 'PROTECTED=%s WINDOW=%s\nru_protect \'%s\' 0; print -rl -- "rc=$?" "${REPLY-}"'
+                                  % (lst, window, json.dumps(state())))
+                out = res.stdout.splitlines()
+                if mode == 0o700:
+                    self.assertEqual(out[0], 'rc=0', res.stdout + res.stderr)
+                    self.assertEqual(read_text(lst), IMG3 + '\n')
+                else:
+                    self.assertEqual(out, ['rc=1', '%s cannot be searched: an open window\'s journal %s would look '
+                                                   'absent' % (d, window)], res.stderr)
+                    self.assertEqual(read_text(lst), IMG + '\n')
+
+    def test_ru_observe(self):
+        for mode in (0o000, 0o600, 0o700):
+            with self.subTest(mode=oct(mode)):
+                r = Rig(self)
+                d = r.sb.mkdir('observed')
+                obs = {'fx': {'version': 'observed', 'closed_at': T0, 'lines': {'mac-a': IMG}}}
+                f = r.sb.write(os.path.join(d, 'observe.json'), json.dumps(obs), 0o600)
+                with closed(d, mode):
+                    res = lib_run(r, 'ru_observe_add=() ru_observe_clear=()\nru_observe %s %d; '
+                                     'print -rl -- "rc=$?" "${REPLY-}" "${ru_observed-}"' % (f, T0))
+                out = res.stdout.splitlines()
+                if mode == 0o700:
+                    self.assertEqual(out[0], 'rc=0', res.stdout + res.stderr)
+                    self.assertEqual(json.loads(out[2]), obs)
+                else:
+                    self.assertEqual(out[:2], ['rc=1', '%s cannot be searched: the observe file %s would look absent'
+                                               % (d, f)], res.stdout + res.stderr)
 
 
 class TestStatus(unittest.TestCase):

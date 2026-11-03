@@ -8,7 +8,9 @@
 # CONFIGURED is not a golden name or not among NAMEs, or a golden name repeats.
 # The protected list: no STATEDIR means no updater on this host, and nothing is protected. STATEDIR without PROTECTED,
 # a PROTECTED that is not a readable regular file (a symlink is not), or a line that is not an image name
-# ([A-Za-z0-9][A-Za-z0-9._-]*): REFUSE. An empty PROTECTED protects nothing.
+# ([A-Za-z0-9][A-Za-z0-9._-]*): REFUSE. An empty PROTECTED protects nothing. A folder on the path to PROTECTED (its
+# parents up to /, STATEDIR) that exists but cannot be searched: REFUSE, never "no updater" (a name behind it looks
+# absent; the rule of bin/runner-updater-lib's ru_reach).
 # Design: docs/operations.md ("Rebuilding the image").
 set -u
 export LC_ALL=C
@@ -27,6 +29,12 @@ for n in "$@"; do isgolden $n && golden+=($n); done
 (( ${#${(@u)golden}} == ${#golden} )) || refuse "a golden name appears twice"
 (( ${golden[(Ie)$configured]} )) || refuse "configured image not present: '$configured'"
 protected=()
+d=$PROTECTED   # behind a folder it cannot search, STATEDIR and its list look absent ("no updater"): the rule of ru_reach
+while [[ $d != / ]]; do
+  d=${d:h}
+  [[ ! -e $d && ! -L $d ]] || [[ -d $d && -x $d ]] \
+    || refuse "$d cannot be searched: the updater's protected list $PROTECTED would look absent behind it"
+done
 if [[ -e $STATEDIR || -L $STATEDIR ]]; then
   [[ -e $PROTECTED || -L $PROTECTED ]] || refuse "the updater's $STATEDIR has no protected list $PROTECTED"
   [[ -f $PROTECTED && ! -L $PROTECTED && -r $PROTECTED ]] || refuse "$PROTECTED is not a readable regular file"

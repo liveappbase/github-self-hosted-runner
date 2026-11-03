@@ -39,7 +39,8 @@
 #            nothing. Else it sets on = false, then removes every file of PINDIR (golden-build's host pins), each one
 #            journaled FIRST with runner-journal into ACTIONS (`pin-remove NAME VERSION SHA256`, or `pin-remove NAME
 #            (not one line VERSION SHA256)`): a journal it cannot write is a STOP before that removal (the pin stays;
-#            run off again). A PINDIR entry that is not a file, or a PINDIR that is not a folder: STOP.
+#            run off again). A PINDIR entry that is not a file, a PINDIR that is not a folder, or one it cannot read and
+#            search (it would list as empty): STOP, and the pins stay.
 #   pass     the timer's entry (its LaunchAgent comes later). It TRIES the lock: held, "another run holds the
 #            updater lock", exit 0 at once. OFF: "the updater is OFF", exit 0 at once, no core call. ON: the jq check
 #            (as report's step 2), then the facts (ru_collect, with each family's candidate and back_until and the
@@ -85,6 +86,9 @@
 # so is a list that is not a readable regular file: never an empty list, which in place of a lost one would let
 # golden-prune print an image the updater keeps, but `protect`, which writes it from the state. REPORT is made under
 # the lock.
+# A folder on the path to STATEDIR's files (STATEDIR, or one above it) that exists but cannot be searched: every
+# command, status too, refuses before it reads anything (the lib's ru_reach, ONE rule): behind it the state would read
+# as fresh (OFF), the list as missing and a pin as absent.
 # Exit: 0 done; 1 a REFUSE (the state folder or its list, a state it does not read, a fact it cannot read, an --observe
 # it cannot do, off while a window is open) or a STOP (a write that failed, the core could not decide); 2 usage; 3 STOP
 # untested jq; 4 WAIT (a state of another format). A pass that finds the lock held, or the updater OFF: 0.
@@ -150,6 +154,9 @@ case $cmd in
   (*) usage "unknown command '$cmd'" ;;
 esac
 source $RELBIN/runner-updater-lib || refuse "cannot load $RELBIN/runner-updater-lib"
+# every folder on the path to STATEDIR's files must be one it can search (the lib's ru_reach), before any command reads
+# one: behind a folder it cannot search, the state would read as fresh (OFF), the list as missing, a pin as absent
+ru_reach $STATE || refuse "$REPLY, so the files in $STATEDIR would look absent (a state as a fresh one: OFF). Look at its mode (ci must be able to search it), then run $cmd again"
 
 # the state, under the lock (status: with no lock, ONE read) -> ru_state; WAIT (exit 4) on a state of another format,
 # REFUSE on one this release does not read: either way the file stays as it is
@@ -282,6 +289,9 @@ do_off() {
   say "off: the updater is OFF"
   [[ -e $PINDIR || -L $PINDIR ]] || exit 0
   [[ -d $PINDIR && ! -L $PINDIR ]] || stop "$PINDIR is not a folder: off removes the pins in it; look at what it is"
+  # it lists PINDIR: one it cannot read lists as empty, one it cannot search hides each pin
+  [[ -r $PINDIR && -x $PINDIR ]] \
+    || stop "$PINDIR cannot be read and searched: off removes the pins in it, and would not see them. The updater is OFF; the pins stay. Look at its mode (ci must be able to read and search it), then run off again"
   for p in $PINDIR/*(DN); do
     [[ -f $p || -L $p ]] || stop "$p is not a file: off removes only pin files; look at what it is"
     c=

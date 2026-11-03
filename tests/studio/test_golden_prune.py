@@ -15,9 +15,10 @@ TODAY = ''.join(G + d + '\n' for d in ('20261001', '20261010', '20261015'))   # 
 
 
 class Rig:
-    def __init__(self, test, cat_body=None):
+    def __init__(self, test, cat_body=None, deep=False):
+        """deep: STATEDIR is two folders below the sandbox (ci/state/runner-updater), so its parent can be closed"""
         sb = self.sb = Sandbox(test)
-        self.state = sb.path('state')
+        self.state = sb.path('ci', 'state', 'runner-updater') if deep else sb.path('state')
         self.protected = os.path.join(self.state, 'protected')
         rewrites = [('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + self.state)]
         if cat_body is not None:   # a cat that reads the list as the test says
@@ -106,6 +107,35 @@ class TestProtected(unittest.TestCase):
         r.updater(G + '20261001\n' + G + '20261010\n' + G + '20261015\n')   # all of today's list: nothing printed
         res = r.run()
         self.assertEqual((res.returncode, res.stdout, res.stderr), (0, '', ''))
+
+
+class TestClosedFolders(unittest.TestCase):
+    """A folder on the path to the protected list that exists but cannot be searched hides the list: a stat behind it
+    fails as if nothing were there, so golden-prune would read "no updater" and protect nothing. Every such folder is a
+    REFUSE (the rule of bin/runner-updater-lib's ru_reach). The control: the same folders at 0700."""
+
+    def test_a_folder_it_cannot_search_on_the_path_to_the_list_is_refused(self):
+        for level in ('the parent of STATEDIR', 'STATEDIR'):
+            for mode in (0o000, 0o600):
+                with self.subTest(level=level, mode=oct(mode)):
+                    r = Rig(self, deep=True)
+                    r.updater(G + '20261001\n')
+                    d = r.state if level == 'STATEDIR' else os.path.dirname(r.state)
+                    os.chmod(d, mode)
+                    try:
+                        res = r.run()
+                    finally:
+                        os.chmod(d, 0o700)
+                    self.assertEqual((res.returncode, res.stdout, res.stderr), (1, '', (
+                        "golden-prune: REFUSE %s cannot be searched: the updater's protected list %s would look absent "
+                        "behind it\n") % (d, r.protected)))
+
+    def test_control_the_same_folders_at_0700(self):
+        r = Rig(self, deep=True)
+        r.updater(G + '20261001\n')
+        os.chmod(os.path.dirname(r.state), 0o700)
+        res = r.run()
+        self.assertEqual((res.returncode, res.stdout, res.stderr), (0, TODAY.replace(G + '20261001\n', ''), ''))
 
 
 if __name__ == '__main__':

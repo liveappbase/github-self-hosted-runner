@@ -80,15 +80,17 @@ def q(p):
 
 
 class Rig:
-    def __init__(self, test, cat_body=None):
+    def __init__(self, test, cat_body=None, deep=False):
+        """deep: STATEDIR is two folders below the sandbox (ci/state/runner-updater), so its parent can be closed"""
         self.test = test
         sb = self.sb = Sandbox(test)
+        self.statedir = sb.path('ci', 'state', 'runner-updater') if deep else sb.path('state')
         self.vms = sb.mkdir('vms')
         self.scn = sb.mkdir('scenario')
         self.logdir = sb.mkdir('logdir')
         self.flag = sb.path('enabled')
         self.lock = sb.path('runner.lock')
-        self.pin = sb.path('state', 'pin', 'mac-golden')
+        self.pin = os.path.join(self.statedir, 'pin', 'mac-golden')
         fake = sb.mkdir('fake')
         sb.stub('tart', TART % {'vms': q(self.vms), 'scn': q(self.scn), 'pidf': q(sb.path('realrun.pid')),
                                 'major': MAJOR}, folder=fake)
@@ -99,7 +101,7 @@ class Rig:
             ('LOCK=/tmp/runner.lock', 'LOCK=' + self.lock),
             ('FLAG=/Users/ci/.config/runner/enabled', 'FLAG=' + self.flag),
             ('LOGDIR=/Users/ci/Library/Logs/mac-runner', 'LOGDIR=' + self.logdir),
-            ('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + sb.path('state')),
+            ('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + self.statedir),
             ('HOME=/Users/ci ', 'HOME=%s ' % sb.home),
             ('vol=/Users/ci/.tart; [[ -d $vol ]] || vol=/Users/ci', 'vol=%s' % sb.home),
             ('FLOOR_GIB=200', 'FLOOR_GIB=0'),
@@ -330,6 +332,30 @@ class TestPin(unittest.TestCase):
         r.write_pin(GOOD_PIN)
         os.chmod(r.sb.path('state', 'pin'), 0o700)
         os.chmod(r.sb.path('state'), 0o700)
+        res = r.run('--print-runner')
+        self.assertEqual((res.returncode, res.stdout), (0, 'host pin %s (release literal %s)\n' % (PIN_V, LIT_V)))
+
+    def test_e_a_closed_folder_on_the_path_to_the_pin_stops(self):
+        # every folder on the path, the parent of STATEDIR too (the rule of bin/runner-updater-lib's ru_reach)
+        for level in ('the parent of STATEDIR', 'STATEDIR', 'PINDIR'):
+            for mode in (0o000, 0o600):
+                with self.subTest(level=level, mode=oct(mode)):
+                    r = Rig(self, deep=True)
+                    r.write_pin(GOOD_PIN)
+                    pindir = os.path.dirname(r.pin)
+                    d = {'the parent of STATEDIR': os.path.dirname(r.statedir), 'STATEDIR': r.statedir,
+                         'PINDIR': pindir}[level]
+                    os.chmod(d, mode)
+                    try:
+                        res = r.run('--print-runner')
+                    finally:
+                        os.chmod(d, 0o700)
+                    self.assertEqual((res.returncode, res.stdout), (
+                        1, "golden-build: STOP host pin %s is not one line 'VERSION SHA256' (%s cannot be searched)\n"
+                        % (r.pin, d)))
+        r = Rig(self, deep=True)   # the control: the same folders at 0700
+        r.write_pin(GOOD_PIN)
+        os.chmod(os.path.dirname(r.statedir), 0o700)
         res = r.run('--print-runner')
         self.assertEqual((res.returncode, res.stdout), (0, 'host pin %s (release literal %s)\n' % (PIN_V, LIT_V)))
 
