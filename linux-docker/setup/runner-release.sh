@@ -6,12 +6,14 @@
 #
 #   rr_excluded FILE        the keys the data file excludes, one per line on stdout (or REFUSE)
 #   rr_bundle               the filtered CA bundle is current, or is rebuilt: sets RR_BUNDLE and RR_CAPATH
+#   rr_curl ARG...          ONE download: rr_bundle first (its lines on stderr), then curl with the trust below
 #   rr_release tag VERSION  release v<VERSION>; rr_release latest: the newest release. GitHub's API answer, checked:
 #                           sets RR_VERSION, RR_PUBLISHED (epoch seconds), RR_DIGEST (sha256:<64 hex>), RR_URL
 #   rr_tarball FILE         downloads RR_URL into FILE, then its sha256 must be RR_DIGEST
 # Each returns 0, or 1 with a REFUSE line on stderr; rr_release returns 75 with a WAIT line on stderr when GitHub
-# answers 403 or 429 (a rate limit: try again later). Call each in a condition (`rr_bundle || …`): they test their own
-# commands' exit codes, so a bare call under `set -e` would exit at the first such test.
+# answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its rr_bundle
+# refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own commands' exit
+# codes, so a bare call under `set -e` would exit at the first such test.
 #
 # TRUST (plan D2): every download is rr_curl, curl with ~/.curlrc ignored (-q first), https only (redirects too), TLS
 # 1.2 or newer, OPENSSL_X509_TEA_DISABLE=1, --cacert RR_BUNDLE and --capath RR_CAPATH, an EMPTY folder. That folder
@@ -23,8 +25,12 @@
 # SHA-256 of the DER SubjectPublicKeyInfo (RR_OPENSSL x509 -pubkey, then pkey -pubin -outform DER: homebrew-core's
 # reading). At least RR_FLOOR certificates kept, else REFUSE. A certificate openssl cannot read: REFUSE (never kept,
 # never silently dropped). The bundle lives in RR_DIR/tls (0700) with a stamp naming the sha256 of the source and of
-# the data file, RR_OPENSSL's version and the bundle's own sha256; any of them changed (the bundle edited too), and the
-# bundle is rebuilt before the download. RR_OPENSSL, measured on the Linux host 2026-11-02: OpenSSL 3.5.5.
+# the data file, RR_OPENSSL's version, the sha256 of the filter's own code (rr_sha, rr_excluded and rr_bundle as this
+# bash holds them: what runs, not the file, which a new release may replace mid-run), RR_FLOOR, and the bundle's own
+# sha256; any of them changed (the bundle edited too), and the bundle is rebuilt. EVERY download runs that check first
+# (rr_curl), so an input that changes between two downloads (a key added to the data file after the release was read)
+# holds for the next one, and a bundle that ~/.cache kept from another release of this file is rebuilt. RR_OPENSSL,
+# measured on the Linux host 2026-11-02: OpenSSL 3.5.5.
 # THE DATA FILE: setup/tls-excluded-spki of the repository (the install line puts it into ~/build/setup/, beside this
 # file). Its own header gives the format and the refusals.
 
@@ -64,16 +70,19 @@ rr_excluded() {   # rr_excluded FILE: every hash, once all lines passed; one bad
 }
 
 rr_bundle() {
-  local d=$RR_DIR/tls ex ov src exs want b t l pem= in=0 kept=0 dropped=0 h
+  local d=$RR_DIR/tls ex ov src exs fc want b t l pem= in=0 kept=0 dropped=0 h
   RR_BUNDLE= RR_CAPATH=
   [ -x "$RR_OPENSSL" ] || { rr_no "no $RR_OPENSSL"; return 1; }
   { ov=$("$RR_OPENSSL" version < /dev/null) && [ -n "$ov" ]; } || { rr_no "$RR_OPENSSL version does not answer"; return 1; }
+  [[ $RR_FLOOR =~ ^[1-9][0-9]*$ ]] || { rr_no "RR_FLOOR is not a count: [$RR_FLOOR]"; return 1; }
   ex=$(rr_excluded "$RR_EXCLUDED") || return 1
   src=$(rr_sha "$RR_SRC") || { rr_no "cannot read the CA bundle $RR_SRC"; return 1; }
   exs=$(rr_sha "$RR_EXCLUDED") || { rr_no "cannot hash $RR_EXCLUDED"; return 1; }
+  fc=$(declare -f rr_sha rr_excluded rr_bundle | sha256sum) && fc=${fc%% *} && [[ $fc =~ ^[0-9a-f]{64}$ ]] \
+    || { rr_no "cannot hash the filter's own code"; return 1; }
   install -d -m 700 "$RR_DIR" "$d" "$d/capath" || { rr_no "cannot make $d"; return 1; }
   [ -z "$(ls -A "$d/capath")" ] || { rr_no "$d/capath, curl's CA folder, must be empty: something put a file there"; return 1; }
-  want="source $src"$'\n'"excluded $exs"$'\n'"openssl $ov"
+  want="source $src"$'\n'"excluded $exs"$'\n'"openssl $ov"$'\n'"filter $fc"$'\n'"floor $RR_FLOOR"
   if [ -f "$d/bundle.pem" ] && [ -f "$d/stamp" ] && b=$(rr_sha "$d/bundle.pem") \
      && [ "$(cat "$d/stamp")" = "$want"$'\n'"bundle $b" ]; then
     RR_BUNDLE=$d/bundle.pem RR_CAPATH=$d/capath
@@ -113,8 +122,9 @@ rr_bundle() {
   echo "OK   the filtered CA bundle: $kept certificates of $RR_SRC kept, $dropped dropped by their excluded keys ($RR_BUNDLE)"
 }
 
-rr_curl() {   # rr_curl ARG...: curl with the trust above (every download of this path)
-  { [ -f "$RR_BUNDLE" ] && [ -d "$RR_CAPATH" ]; } || { rr_no "no filtered CA bundle: run rr_bundle first"; return 1; }
+rr_curl() {   # rr_curl ARG...: ONE download of this path: the bundle check first (its lines on stderr, so that the
+  # caller's stdout is curl's alone), then curl with the trust above. Exit: curl's, or 126 when the check refused.
+  rr_bundle >&2 || return 126
   OPENSSL_X509_TEA_DISABLE=1 curl -q --proto =https --proto-redir =https --tlsv1.2 --cacert "$RR_BUNDLE" \
     --capath "$RR_CAPATH" -sS "$@" < /dev/null
 }
@@ -129,10 +139,11 @@ rr_release() {
     *) rr_no "usage: rr_release tag VERSION | rr_release latest"; return 1 ;;
   esac
   [ -n "$RR_ARCH" ] || { rr_no "no runner build for this machine ($(uname -m))"; return 1; }
-  rr_bundle || return 1
+  install -d -m 700 "$RR_DIR" || { rr_no "cannot make $RR_DIR"; return 1; }
   j=$(mktemp "$RR_DIR/release.XXXXXX") || { rr_no "cannot make a file in $RR_DIR"; return 1; }
   code=$(rr_curl --max-time 60 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
-           -o "$j" -w '%{http_code}' "$url") || { rc=$?; rm -f -- "$j"; rr_no "GitHub's API did not answer $url (curl exit $rc)"; return 1; }
+           -o "$j" -w '%{http_code}' "$url") || { rc=$?; rm -f -- "$j"
+    [ "$rc" = 126 ] || rr_no "GitHub's API did not answer $url (curl exit $rc)"; return 1; }
   case $code in
     200) ;;
     403|429) rm -f -- "$j"; echo "runner-release: WAIT GitHub answered $code (a rate limit) for $url" >&2; return 75 ;;
@@ -188,11 +199,11 @@ PY
 }
 
 rr_tarball() {   # rr_tarball FILE: after rr_release; a FILE that fails the digest check is removed
-  local f=${1-} s
+  local f=${1-} s rc
   { [ -n "$f" ] && [ -n "$RR_URL" ] && [[ $RR_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; } \
     || { rr_no "usage: rr_tarball FILE, after rr_release"; return 1; }
   rr_curl -fL --max-redirs 5 --max-time 900 --max-filesize 2147483648 -o "$f" "$RR_URL" \
-    || { rm -f -- "$f"; rr_no "the download of $RR_URL failed"; return 1; }
+    || { rc=$?; rm -f -- "$f"; [ "$rc" = 126 ] || rr_no "the download of $RR_URL failed (curl exit $rc)"; return 1; }
   s=$(rr_sha "$f") || { rm -f -- "$f"; rr_no "cannot hash $f"; return 1; }
   [ "sha256:$s" = "$RR_DIGEST" ] || { rm -f -- "$f"; rr_no "$RR_URL: its sha256 is $s, not the release asset's digest $RR_DIGEST"; return 1; }
   echo "OK   $RR_URL: its sha256 is the release asset's digest"

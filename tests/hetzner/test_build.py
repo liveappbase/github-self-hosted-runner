@@ -9,7 +9,8 @@ steps 6 and 8 (never steps 1, 2, 4 or 7), and writes ONE BUILD RECORD per (versi
 ~/run/builds/<VERSION>-<RECIPE>, 0640, four strict `key value` lines (format, version, digest, recipe), written whole
 and renamed into place. A digest mismatch, another runner version in the image, a failed check, a hostile digest, or a
 kill before the rename: no record. GitHub's 403 or 429: WAIT, exit 75. It never writes ~/run/image.ref; the full run
-(no argument) builds the host config's RUNNER_VERSION the same way, and is image.ref's only writer.
+(no argument) builds the host config's RUNNER_VERSION the same way, and is image.ref's only writer. Every
+download checks the filtered CA bundle first.
 
 Each cell runs a copy of the real 02-d1.sh and runner-release.sh (only their pin lines rewritten) against the stubs and
 the local HTTPS GitHub of tests/hetzner/support.py, in a container.
@@ -270,6 +271,70 @@ class Build(unittest.TestCase):
                 self.assertIn('FAIL', r.stdout, name)
                 self.assertIn('image/%s' % name, r.stdout, name)    # it failed AT the recipe's check
                 self.assertEqual(g.built(), [], name)
+
+
+@needs_container
+class TrustBeforeEveryDownload(unittest.TestCase):
+    """EVERY download checks the filtered CA bundle first (rr_curl runs rr_bundle): an input that changes after the
+    release was read and before the tarball's download (a key added to the data file, the file emptied or broken)
+    holds for that download. The hook: a python3 substitute that runs the real one and, right after rr_release's own
+    parse (the API call is done; the download is next), records the bundle's inode and writes inject.txt over the data
+    file."""
+    HOOK = '''#!/bin/sh
+/usr/bin/python3 "$@"; rc=$?
+if [ "$1 $2" = "-I -" ] && [ ! -e @ROOT@/hooked ]; then
+  stat -c %i @HOME@/.cache/liveapp-ci/tls/bundle.pem > @ROOT@/hooked
+  [ ! -f @ROOT@/inject.txt ] || cat @ROOT@/inject.txt > @HOME@/build/setup/tls-excluded-spki
+fi
+exit $rc
+'''
+
+    def run_with(self, change):
+        g = Rig(self)
+        with open(os.path.join(g.sb.build, 'setup', 'tls-excluded-spki')) as f:
+            data = f.read()
+        if change is not None:
+            g.sb.write(g.sb.path('inject.txt'), change(data))
+        g.sb.write(g.sb.path('stubs', 'python3'),
+                   self.HOOK.replace('@ROOT@', g.sb.root).replace('@HOME@', g.sb.home), 0o755)
+        r = g.sb.d1('build', VERSION)
+        with open(g.sb.path('hooked')) as f:      # the hook ran: the release was read
+            ino = int(f.read())
+        now = os.stat(os.path.join(g.sb.home, '.cache', 'liveapp-ci', 'tls', 'bundle.pem')).st_ino
+        api = '/repos/actions/runner/releases/tags/v' + VERSION
+        dl = '/actions/runner/releases/download/v%s/actions-runner-linux-%s-%s.tar.gz' % (VERSION, ARCH, VERSION)
+        return g, r, now != ino, api, dl
+
+    def test_a_key_excluded_after_the_release_was_read_stops_the_download(self):
+        for why, key, ok in (('the server CA', pki().ca_spki, False), ('another key', pki().other_spki, True)):
+            with self.subTest(why):
+                g, r, rebuilt, api, dl = self.run_with(lambda t: t + key + ' added after the release was read\n')
+                self.assertEqual(r.returncode == 0, ok, r.stdout + r.stderr)
+                self.assertTrue(rebuilt, 'the data file changed, and the download used the bundle made before')
+                self.assertEqual(dl in g.sb.gh.seen, ok, g.sb.gh.seen)
+                self.assertEqual(len(g.records()), 1 if ok else 0)
+                if not ok:
+                    self.assertEqual(g.sb.gh.seen, [api])
+                    self.assertEqual(g.built(), [])
+
+    def test_a_data_file_broken_after_the_release_was_read_refuses_before_the_download(self):
+        for why, change in (('emptied', lambda t: ''), ('comments only', lambda t: '# nothing excluded\n'),
+                            ('a bad first field', lambda t: t + 'NOT-64-HEX a broken line\n')):
+            with self.subTest(why):
+                g, r, _, api, dl = self.run_with(change)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('runner-release: REFUSE', r.stderr)
+                self.assertEqual(g.sb.gh.seen, [api])
+                self.assertEqual(len([c for c in g.sb.calls('curl') if any(x.startswith('https://') for x in c['argv'])]),
+                                 1, 'a download was asked for')
+                self.assertEqual((g.records(), g.built()), ([], []))
+
+    def test_an_unchanged_input_set_keeps_the_bundle(self):
+        g, r, rebuilt, api, dl = self.run_with(None)     # the control: nothing changes between the two downloads
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertFalse(rebuilt, 'the bundle was rebuilt with no input changed')
+        self.assertIn(dl, g.sb.gh.seen)
+        self.assertEqual(len(g.records()), 1)
 
 
 @needs_container

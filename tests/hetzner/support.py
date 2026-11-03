@@ -450,10 +450,11 @@ class Sandbox:
         return {'HOME': self.home, 'PATH': self.path('stubs') + ':' + SYSTEM_PATH, 'LC_ALL': 'C',
                 'TMPDIR': self.path('tmp'), 'XDG_RUNTIME_DIR': self.path('xdg')}
 
-    def lib(self, script, *args):
-        """Run bash with the copied runner-release.sh sourced, then script (its $1.. = args)."""
+    def lib(self, script, *args, source='runner-release.sh'):
+        """Run bash with the copied runner-release.sh (or another file of ~/build/setup/) sourced, then script (its
+        $1.. = args)."""
         return subprocess.run(['bash', '-c', 'set -u; . "$0" || exit 9\n' + script,
-                               os.path.join(self.build, 'setup', 'runner-release.sh')] + list(args),
+                               os.path.join(self.build, 'setup', source)] + list(args),
                               env=self.env(), cwd=self.home, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=300)
 

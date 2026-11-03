@@ -7,7 +7,8 @@ and the filter in linux-docker/setup/runner-release.sh that builds the CA bundle
   closed, it never means "nothing to exclude".
 - bin/golden-emudhra still holds its own copy (its EXCLUDED_SPKI array): the two are pinned equal, both ways.
 - The filter (rr_bundle) drops every certificate of the source bundle whose key the file names, keeps at least 100,
-  and rebuilds the bundle when its source, the data file, the openssl or the bundle file itself changed.
+  and rebuilds the bundle when its source, the data file, the openssl, the filter's own code, its floor or the bundle
+  file itself changed. Every download (rr_curl) runs it first, so a bundle another filter left in ~/.cache is rebuilt.
 The data-file and pin cells read text and run anywhere; the reader and filter cells run the copied bash in a container
 (tests/hetzner/support.py).
 """
@@ -155,8 +156,8 @@ class Reader(unittest.TestCase):
 
 @needs_container
 class Filter(unittest.TestCase):
-    def bundle(self, sb):
-        r = sb.lib('rr_bundle && printf "%s\\n%s\\n" "$RR_BUNDLE" "$RR_CAPATH"')
+    def bundle(self, sb, source='runner-release.sh', first=''):
+        r = sb.lib(first + 'rr_bundle && printf "%s\\n%s\\n" "$RR_BUNDLE" "$RR_CAPATH"', source=source)
         return r, (r.stdout.splitlines()[-2:] if r.returncode == 0 else None)
 
     def keys(self, path):
@@ -276,6 +277,53 @@ class Filter(unittest.TestCase):
         rebuilt, b, _ = changes('tamper', tamper)
         self.assertTrue(rebuilt, 'a bundle changed by hand was used as it was')
         self.assertNotIn(pki().other_spki, self.keys(b))
+
+    def test_a_bundle_made_by_another_filter_is_rebuilt_before_a_download(self):
+        """A bundle and its stamp left in ~/.cache by ANOTHER version of the filter (here one that keeps every
+        certificate), with the same source, data file and openssl: this filter rebuilds it before the download, so the
+        excluded CA is dropped and no request reaches the server. The control: this filter's own bundle is kept."""
+        for other in (True, False):
+            with self.subTest(other=other):
+                sb = Sandbox(self)
+                url = sb.gh.base + '/repos/actions/runner/releases/latest'
+                sb.excluded(pki().ca_spki + ' the test CA (it signs the local GitHub)')
+                rr = os.path.join(sb.build, 'setup', 'runner-release.sh')
+                with open(rr) as f:
+                    text = f.read()
+                keep = text.replace("        *$'\\n'$h$'\\n'*) dropped=$((dropped + 1)) ;;",
+                                    "        KEEP-EVERY-CERTIFICATE) dropped=$((dropped + 1)) ;;")
+                self.assertNotEqual(keep, text)
+                sb.write(os.path.join(sb.build, 'setup', 'rr-other.sh'), keep)
+                r, paths = self.bundle(sb, source='rr-other.sh' if other else 'runner-release.sh')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(pki().ca_spki in self.keys(paths[0]), other)
+                ino = os.stat(paths[0]).st_ino
+                r = sb.lib('rr_curl -o /dev/null -w "%{http_code}" "$1"; echo " curl-rc=$?"', url)
+                self.assertTrue(r.stdout.endswith(' curl-rc=60\n'), r.stdout + r.stderr)   # TLS refused
+                self.assertEqual(sb.gh.seen, [])
+                self.assertEqual(os.stat(paths[0]).st_ino != ino, other, 'rebuilt' if other else 'kept')
+                self.assertNotIn(pki().ca_spki, self.keys(paths[0]))
+
+    def test_a_bundle_made_under_a_lower_floor_is_rebuilt(self):
+        """The floor is part of what made a bundle: one made with RR_FLOOR 50 from 99 certificates is not current for
+        a filter whose floor is 100, which refuses it. The control: the same floor again keeps it."""
+        for floor, ok in (('', False), ('RR_FLOOR=50; ', True)):
+            with self.subTest(second=floor or 'RR_FLOOR %d' % FLOOR):
+                sb = Sandbox(self)
+                sb.write(sb.path('source.pem'), ''.join(pems(sb.system_bundle)[:FLOOR - 1]))
+                sb.excluded(pki().other_spki + ' x')
+                r, paths = self.bundle(sb, first='RR_FLOOR=50; ')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(len(self.keys(paths[0])), FLOOR - 1)
+                ino = os.stat(paths[0]).st_ino
+                r, _ = self.bundle(sb, first=floor)
+                if ok:
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    self.assertIn('is current', r.stdout)
+                    self.assertEqual(os.stat(paths[0]).st_ino, ino)
+                else:
+                    self.assertNotEqual(r.returncode, 0, r.stdout)
+                    self.assertIn('REFUSE only %d certificates' % (FLOOR - 1), r.stderr)
 
 
 if __name__ == '__main__':
