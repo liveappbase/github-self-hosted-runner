@@ -6,8 +6,12 @@
 # .github/workflows/release-check.yml has a 30-minute limit. The tests are independent (each makes its own temporary
 # folder), so this tool runs the same tests N modules at a time.
 #
-# The plain line stays the reference: `JQ=/usr/bin/jq python3 -I -m unittest discover -s tests -t .`. Both must agree
-# on the test count. Run this tool where you run that line: in the repository root.
+# The plain line stays the reference, and it stays required before every tag (docs/operations.md, "Releasing
+# (maintainers)"): `JQ=/usr/bin/jq python3 -I -m unittest discover -s tests -t .`. This tool is the line the hosted CI
+# runs, and a fast check while you work. It cannot replace the plain line: each module gets a fresh process, so a test
+# that fails only after another module ran in the same process (an env var, the cwd or a module global left changed)
+# is red only in the plain line. The test count needs no second look: this tool checks its total against discovery's
+# (below). Run this tool where you run the plain line: in the repository root.
 #
 # What it does:
 # - Discovery is unittest's own: one process runs `unittest discover` (start folder tests, or tests/AREA for each
@@ -28,7 +32,7 @@
 # the tests each module loaded, not the ones it ran: a class that skips itself in setUpClass runs none of its tests,
 # in both lines.)
 #
-# Exit: 0 only when every module passed; 1 otherwise (also on SIGINT or SIGTERM: it ends the module processes it
+# Exit: 0 only when every module passed and their total is discovery's; 1 otherwise (also on SIGINT or SIGTERM: it ends the module processes it
 # started, prints what they wrote so far, and names them); 2 on a usage error.
 import argparse
 import json
