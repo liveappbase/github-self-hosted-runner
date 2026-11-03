@@ -3,7 +3,7 @@
 A Sandbox runs watchdog/run (a copy of watchdog/ and core/TESTED_JQ, so a test may break a file) with PATH = a stubs
 folder and the system folders, and nothing else of the caller's environment:
 - `gh`: a stub that answers `gh api PATH ...` from a map the test writes (PATH -> body, or an rc; or a body after a
-  number of failed calls), and logs each call. It is one of the GH_MODES: `new` (the default) is a gh of 2.98.0 or
+  number of calls that fail part way, each writing half the body first), and logs each call. It is one of the GH_MODES: `new` (the default) is a gh of 2.98.0 or
   newer, which refuses a body that holds an ESC byte unless it is given --allow-escape-sequences, and lists that flag
   in `gh api --help`; `old` is gh 2.66.1, which has no such check, and to which the flag is an unknown flag;
 - `sleep`: a stub that logs its arguments (in the gh log, as ['#sleep', ...]) and returns at once;
@@ -79,6 +79,8 @@ if ans is None:
     sys.stderr.write('gh: Not Found (HTTP 404)\n')
     sys.exit(1)
 if ans.get('rc') or before < ans.get('fails', 0):
+    if not ans.get('rc'):
+        sys.stdout.write(ans['out'][:len(ans['out']) // 2])         # part way, as a --paginate that fails at a page
     sys.stderr.write(ans.get('err', 'gh: HTTP 502\n'))
     sys.exit(ans.get('rc') or 1)
 if mode['refuses'] and '\x1b' in ans['out'] and FLAG not in args:
@@ -157,7 +159,8 @@ class Sandbox:
         self.ghmap[key] = {'out': out if isinstance(out, str) else json.dumps(out), 'rc': rc}
 
     def fail(self, path, times, jq_expr=None):
-        """The first TIMES calls of PATH fail (rc 1, an HTTP 502 on stderr); later ones get its answer."""
+        """The first TIMES calls of PATH fail part way (half its answer on stdout, then rc 1 and an HTTP 502 on stderr,
+        as a --paginate call that fails at a later page); later ones get its answer."""
         self.failing[path + (' --jq ' + jq_expr if jq_expr else '')] = times
 
     def timeline(self):
