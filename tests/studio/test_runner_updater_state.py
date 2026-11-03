@@ -46,12 +46,16 @@ def state(on=False, families=None, images=None, **extra):
     return s
 
 
+# a window's own restart of runscaler, kept for the next pass (bin/runner-updater-window; the pass passes it as
+# facts.restart once, then clears it)
+RESTART = {'from': {'pid': P[0], 'start': P[2]}, 'to': {'pid': 5151, 'start': P[2] + 600},
+           'stopped': {'inode': '123', 'offset': 45, 'sha': 'b' * 64}}
 # every member the state holds (a member this release does not read makes every command WAIT: TestUnknownMembers)
 FULL = state(on=False, families={
     'fx': fam(candidate=cand(), previous={'mac-a': IMG}, rejected=[V1], recipe='a' * 64,
               stops=[stop('fx', 'NO EVIDENCE', detail={'text': 'no job completed in 72 h'})]),
     'fy': fam(previous={'mac-c': IMG0}, back_until=T0 + 7 * 86400)},
-    images={IMG2: V2, IMG: V0}, core={'format': 1, 'not_ready_since': {}})
+    images={IMG2: V2, IMG: V0}, core={'format': 1, 'not_ready_since': {}}, restart=RESTART)
 
 
 class Paths:
@@ -259,7 +263,11 @@ class TestState(unittest.TestCase):
            'a stop of another family': dict(FULL, families={'fx': fam(stops=[stop('fy', 'NO EVIDENCE')])}),
            'a stop with no name': dict(FULL, families={'fx': fam(stops=[stop('fx', '')])}),
            'an image record of a name it does not read': dict(FULL, images={'a/b': V2}),
-           'a core that is not an object': dict(FULL, core=[1])}
+           'a core that is not an object': dict(FULL, core=[1]),
+           'a restart with no stopped': dict(FULL, restart={k: v for k, v in RESTART.items() if k != 'stopped'}),
+           'a restart whose process has no pid': dict(FULL, restart=dict(RESTART, to={'start': 1})),
+           'a restart whose inode is a number': dict(FULL, restart=dict(RESTART, stopped=dict(RESTART['stopped'], inode=123))),
+           'a restart whose sha is not one': dict(FULL, restart=dict(RESTART, stopped=dict(RESTART['stopped'], sha='x')))}
 
     def test_a_state_it_cannot_read_is_refused_and_left_as_it_is(self):
         for why, s in self.BAD.items():
@@ -344,6 +352,12 @@ class TestUnknownMembers(unittest.TestCase):
             'a name with a newline': with_(lambda s, fx: s.update({'a\nb': 1}), '"a\\nb"'),
             'two at once': with_(lambda s, fx: (s.update(stops=[self.HOSTWIDE]), fx.update(checked={'mac-a': IMG3})),
                                  'stops, families.fx.checked'),
+            'a member of the restart': with_(lambda s, fx: s.update(restart=dict(RESTART, later=1)), 'restart.later'),
+            'a member of a restart read': with_(lambda s, fx: s.update(restart=dict(RESTART, to=dict(RESTART['to'], uid=5))),
+                                                'restart.to.uid'),
+            'a member of the restart position': with_(
+                lambda s, fx: s.update(restart=dict(RESTART, stopped=dict(RESTART['stopped'], file='runner.log'))),
+                'restart.stopped.file'),
         }
 
     def test_every_command_that_reads_the_state_waits(self):
@@ -368,7 +382,7 @@ class TestUnknownMembers(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 r = Rig(self, jq_wrap=True)
                 u = Paths(r)
-                s = on_state()
+                s = on_state(restart=RESTART)
                 s['families']['fx']['stops'] = [stop('fx', 'NO EVIDENCE')]
                 u.put(s)
                 r.sb.write(u.protected, IMG3 + '\n', 0o600)
@@ -1071,10 +1085,13 @@ WOULD = '  pass_would   # what this pass would do'
 ACTION_CALLS = 'runner-disable; runner-enable; golden-build; golden-gate x; tart list; launchctl list; kill -0 $$; '
 
 
-def on_state(**kw):
-    """ON, family fx's candidate = the rig's config lines (mac-a: IMG), its old image IMG0"""
-    return state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': IMG}, closed_at=P[2] + 100),
-                                              previous={'mac-a': IMG0}, **kw)})
+def on_state(restart=None, **kw):
+    """ON, family fx's candidate = the rig's config lines (mac-a: IMG), its old image IMG0; RESTART: a restart member"""
+    s = state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': IMG}, closed_at=P[2] + 100),
+                                           previous={'mac-a': IMG0}, **kw)})
+    if restart is not None:
+        s['restart'] = restart
+    return s
 
 
 # THE NO-ACTION CELLS. macOS's sandbox lets start only the programs a command is meant to start, each by the path it
@@ -1306,6 +1323,21 @@ class TestPass(unittest.TestCase):
         self.assertFalse(os.path.exists(r.report_dir))   # report's state stays apart
         r.cmd('pass')                                     # the next pass reads the boundary this one wrote
         self.assertTrue(self.facts(u)['continuous'])
+
+    def test_a_pass_passes_the_restart_member_once_and_clears_it(self):
+        r, u = self.rig(on_state(restart=RESTART))
+        r.cmd('pass')
+        self.assertEqual(self.facts(u)['restart'], RESTART)
+        self.assertNotIn('restart', u.get())
+        r.cmd('pass')
+        self.assertIsNone(self.facts(u)['restart'])
+
+    def test_control_a_pass_whose_core_cannot_decide_keeps_the_restart_member(self):
+        r, u = self.rig(on_state(restart=RESTART))
+        r.sb.write(os.path.join(r.jqd, 'fail'), 'r1')
+        res = r.cmd('pass', ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(u.get()['restart'], RESTART)
 
     def test_the_next_pass_rewrites_a_missing_list(self):
         r, u = self.rig(on_state())

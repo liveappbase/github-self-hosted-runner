@@ -8,7 +8,8 @@
 #   exports TZ=UTC and LC_ALL=C (ps prints its start times in TZ; this file reads them back in the same zone).
 #
 # ru_collect PASSDIR STATEFILE OBSERVEFILE NOW [HELD] — ONE pass's facts. It writes, into PASSDIR:
-#   facts.json    format 1, exactly as core/README.md says; host "studio"; restart null; stops: HELD's (report: []).
+#   facts.json    format 1, exactly as core/README.md says; host "studio"; restart and stops: HELD's (report: null
+#                 and []): the restart a switch window recorded (bin/runner-updater-window, THE OWN RESTART).
 #   log.txt       runscaler's log text from the state's boundary to this pass's captured position, no byte past it.
 #   healthz.json  the /healthz reads of this pass, oldest first, one JSON object per line (a read that fails, or is
 #                 not one JSON object, is not added).
@@ -72,9 +73,10 @@
 #      named twice in a family, or a set in two families. No FAMILIES file: no family (a status line says so); a
 #      folder on its path it cannot search (ru_reach): no facts.
 #      facts.families.F = {provider: "tart", sets, candidate, back_until}, both from step 7.
-#   7. With HELD (a pass: JSON {families: {FAMILY: {candidate, back_until}}, stops: [...]}, from the updater's state):
-#      each family's candidate and back_until, and the STOPs, are HELD's. A family that HELD gives a candidate or a
-#      back_until and FAMILIES does not name: no facts. OBSERVEFILE is not read.
+#   7. With HELD (a pass: JSON {families: {FAMILY: {candidate, back_until}}, stops: [...], restart}, from the updater's
+#      state): each family's candidate and back_until, the STOPs and the restart (null when absent) are HELD's. A
+#      family that HELD gives a candidate or a back_until and FAMILIES does not name: no facts. OBSERVEFILE is not
+#      read.
 #      Without HELD (report): back_until null, no STOP, and the candidates are OBSERVEFILE's (JSON {FAMILY: {version:
 #      "observed", lines: {SET: IMAGE}, closed_at: EPOCH}}), or null. In this pass, each
 #      ru_observe_add family is added with its CURRENT config lines and closed_at = NOW (a family already observed
@@ -455,6 +457,9 @@ def image_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$");
 def version_ok: type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$");
 def epoch_ok: type == "number" and . >= 0 and . == floor;
 def lines_ok: type == "object" and length > 0 and all(to_entries[]; (.key | set_ok) and (.value | image_ok));
+def proc_ok: type == "object" and (.pid | type) == "number" and .pid >= 1 and .pid == (.pid | floor) and (.start | epoch_ok);
+def position_ok: type == "object" and (.inode | type) == "string" and (.inode | test("^[0-9]+$")) and (.offset | epoch_ok)
+  and (.sha | type) == "string" and (.sha | test("^[0-9a-f]{64}$"));
 def stop_ok($f): type == "object" and .family == $f and (.stop | type) == "string" and (.stop | length) > 0
   and (.version == null or (.version | type) == "string") and (.user == null or (.user | type) == "string")
   and (.detail == null or (.detail | type) == "object");
@@ -470,20 +475,26 @@ if type == "object" and .format == 1 and (.on | type) == "boolean"
    and (.families | type) == "object" and all(.families | to_entries[]; .key as $f | ($f | fam_ok) and (.value | family_ok($f)))
    and (.images | type) == "object" and all(.images | to_entries[]; (.key | image_ok) and (.value | version_ok))
    and (.core == null or (.core | type) == "object")
+   and (.restart == null or (.restart | type == "object" and (.from | proc_ok) and (.to | proc_ok) and (.stopped | position_ok)))
 then . else error("not a state of format 1") end'
 # the members of a checked state that this release does not read, at each level it reads: the top, a family, its
-# candidate, each STOP ("" when none). A later member that names an image or holds a STOP needs this rule: the older
-# release (a rollback across one) then WAITs, and never writes a shorter protected list or prints a status that hides
-# a STOP. A name that is not plain is shown as JSON (no raw newline reaches the WAIT line)
+# candidate, each STOP, the restart and its three parts ("" when none). A later member that names an image or holds a
+# STOP needs this rule: the older release (a rollback across one) then WAITs, and never writes a shorter protected
+# list or prints a status that hides a STOP. A name that is not plain is shown as JSON (no raw newline reaches the WAIT line)
 ru_state_members='
 def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
-[(keys - ["format", "on", "families", "images", "core"])[] | shown]
+[(keys - ["format", "on", "families", "images", "core", "restart"])[] | shown]
 + [.families | to_entries[] | .key as $f | .value
    | ((keys - ["candidate", "previous", "back_until", "rejected", "recipe", "stops"])[] | "families.\($f).\(shown)"),
      (if (.candidate | type) == "object" then (.candidate | keys - ["version", "lines", "closed_at"])[]
         | "families.\($f).candidate.\(shown)" else empty end),
      ((.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
         | "families.\($f).stops[\($i)].\(shown)")]
++ (if (.restart | type) == "object" then .restart as $r
+     | [($r | keys - ["from", "to", "stopped"])[] | "restart.\(shown)"]
+       + [("from", "to") as $k | ($r[$k] | keys - ["pid", "start"])[] | "restart.\($k).\(shown)"]
+       + [($r.stopped | keys - ["inode", "offset", "sha"])[] | "restart.stopped.\(shown)"]
+   else [] end)
 | join(", ")'
 
 # ru_state_load FILE -> ru_state (the state, compact JSON) and 0; a missing FILE is ru_fresh (and ru_state_absent=1,
@@ -606,7 +617,7 @@ ru_collect() {
       --arg sha $ru_sha_now --argjson continuous $ru_continuous --argjson installed $ru_installed \
       --argjson lines $lines_json --argjson sets $sets_json --argjson families $fam_json --argjson held $held \
       '{format: 1, host: "studio", sets: $sets, proc: {before: $before, after: $after},
-        position: {inode: $inode, offset: $offset, sha: $sha}, continuous: $continuous, restart: null,
+        position: {inode: $inode, offset: $offset, sha: $sha}, continuous: $continuous, restart: ($held.restart // null),
         config: {installed: $installed, lines: $lines}, families: $families, stops: $held.stops}' > $pass/facts.json \
     || { REPLY="jq could not write $pass/facts.json"; return 1 }
   exec {ru_fd}<&-

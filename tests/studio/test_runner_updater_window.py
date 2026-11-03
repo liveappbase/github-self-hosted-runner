@@ -3,8 +3,11 @@ WINDOW") of bin/runner-updater-window, for the family mac-golden (its builder: g
 
 The rig is test_runner_updater's (every path constant rewritten into a sandbox; ps and curl stubs; the real core), plus
 a fake host. FLAG is a file. runner-disable (a stub in the release's bin/) removes it and takes runscaler out of the ps
-output; runner-enable writes it and puts a runscaler started NOW into the ps output (launchd's start), and records the
-config's mtime and sha as it is called; its --check passes. runner-start validate answers from a scenario. golden-build
+output (scn/keep-proc.N: its call N leaves it there), and its call N appends scn/drain.N to runner.log (the stopped
+runscaler's last records); runner-enable writes it (scn/no-flag.N: not) and puts a runscaler started NOW into the ps
+output (launchd's start), sources scn/enable-hook.N, refuses with scn/enable-refuse.N's text (empty: the stamp's), and
+records the config's mtime and sha as it is called; its --check passes. runner-start validate answers from a scenario
+(scn/validate-prehook.N runs before it reads the config, scn/validate-hook.N after). golden-build
 is a stub that makes the image in the fake tart's list (or the REAL golden-build copy with stub tart, for the --date
 identity and an interrupt at clone and at publication); golden-gate is a stub that journals its clone and says GREEN;
 df and du are stubs. runner-journal and validate-class are the real ones; a copy of runner-journal can SIGKILL its
@@ -14,10 +17,11 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
 import time
 import unittest
 
-from tests.studio.test_runner_updater import BACKGROUND, FIX, HEALTHZ, IMG, IMG2, P, Rig, config, read_text
+from tests.studio.test_runner_updater import BACKGROUND, FIX, HEALTHZ, IMG, IMG2, P, Rig, config, proc_line, read_text
 from tests.studio.test_runner_updater_state import Paths, fam, lib_run, lines_of, state, stop
 from tests.studio import test_golden_build as gb
 
@@ -40,10 +44,12 @@ def today():
     return time.strftime('%Y%m%d', time.gmtime())
 
 
-DISABLE = '''F=%(flag)s PSD=%(psd)s S=%(scn)s
+DISABLE = '''F=%(flag)s PSD=%(psd)s S=%(scn)s LOG=%(log)s
+n=$(( $(/bin/cat $S/disable.n 2>/dev/null || print 0) + 1 )); print -r -- $n > $S/disable.n
 /bin/rm -f $F
 [[ -f $S/disable-fail ]] && { print -r -- "runner-disable: still held after 3700s"; exit 1 }
-/bin/cp $PSD/background $PSD/out
+[[ -f $S/drain.$n ]] && /bin/cat $S/drain.$n >> $LOG          # the stopped runscaler's last records, as it drains
+[[ -f $S/keep-proc.$n ]] || /bin/cp $PSD/background $PSD/out   # keep-proc: it did not stop the old runscaler
 print -r -- "runner-disable: disabled; the lock is free"
 '''
 
@@ -60,13 +66,16 @@ fi
 count enable; n=$REPLY
 typeset -A st; zstat -H st $C
 print -r -- "$EPOCHREALTIME $st[mtime] $(/usr/bin/shasum -a 256 < $C | /usr/bin/cut -c1-64)" >> $S/enable.calls
-[[ -f $S/enable-refuse.$n ]] && { print -u2 -r -- "runner-enable: REFUSE the wall stamp does not match Tart"; exit 1 }
-: > $F
+if [[ -f $S/enable-refuse.$n ]]; then   # the file's text is the refusal (empty: the stamp's)
+  t=$(<$S/enable-refuse.$n); print -u2 -r -- "${t:-runner-enable: REFUSE the wall stamp does not match Tart}"; exit 1
+fi
+[[ -f $S/no-flag.$n ]] || : > $F
 if [[ ! -f $S/no-start.$n ]]; then
   export TZ=UTC
   print -r -- "$(printf '%%5d %%5d' $(( 6000 + n )) $UID) $(strftime '%%a %%b %%e %%H:%%M:%%S %%Y' $EPOCHSECONDS)     $RUN run --config $C" > $PSD/out.new
   /bin/cat $PSD/background >> $PSD/out.new; /bin/mv -f $PSD/out.new $PSD/out
 fi
+[[ -f $S/enable-hook.$n ]] && source $S/enable-hook.$n
 print -r -- "runner-enable: enabled (shim ok)"
 '''
 
@@ -74,6 +83,7 @@ START = '''S=%(scn)s C=%(config)s
 [[ $1 == validate ]] || exit 2
 n=$(( $(/bin/cat $S/validate.n 2>/dev/null || print 0) + 1 )); print -r -- $n > $S/validate.n
 cfg=${2:-$C}
+[[ -f $S/validate-prehook.$n ]] && source $S/validate-prehook.$n   # before it reads the config
 print -r -- "$n ${2:-configured} $(/usr/bin/shasum -a 256 < $cfg | /usr/bin/cut -c1-64)" >> $S/validate.calls
 [[ -f $S/validate-hook.$n ]] && source $S/validate-hook.$n
 spec=$S/validate; [[ -f $S/validate.$n ]] && spec=$S/validate.$n
@@ -125,7 +135,8 @@ KILL_AT = ('\nexit 0\n', '\n[[ $key == "${RU_KILL_AT-}" ]] && kill -KILL $PPID\n
 class Win:
     """the fake host and the release's bin/ beside the updater (the rig's tools/)"""
 
-    def __init__(self, test, real_build=False, cfg=None, families='mac-golden tart mac-a\n', s=None, extra_rewrites=()):
+    def __init__(self, test, real_build=False, cfg=None, families='mac-golden tart mac-a\n', s=None, extra_rewrites=(),
+                 win_rewrites=()):
         self.test = test
         r = self.r = Rig(test, cfg=cfg, families=families, extra_rewrites=extra_rewrites)
         sb = self.sb = r.sb
@@ -135,11 +146,11 @@ class Win:
         self.vms = sb.mkdir('vms')
         self.pin = os.path.join(r.statedir, 'pin', FAM)
         os.makedirs(os.path.join(r.tartdir, 'vms'), exist_ok=True)
-        sb.copy_script('bin/runner-updater-window', [])
+        sb.copy_script('bin/runner-updater-window', list(win_rewrites))
         sb.copy_script('bin/validate-class', [])
         sb.copy_script('bin/runner-journal', [KILL_AT])           # the real one, with the kill hook (RU_KILL_AT)
         v = {'flag': r.flag, 'psd': r.psd, 'scn': self.scn, 'config': r.config, 'runner': r.runner, 'sha': SHA0, 'v': V0,
-             'pin': self.pin, 'vms': self.vms}
+             'pin': self.pin, 'vms': self.vms, 'log': r.runlog}
         sb.stub('runner-disable', DISABLE % v, folder=self.tools)
         sb.stub('runner-enable', ENABLE % v, folder=self.tools)
         sb.stub('runner-start', START % v, folder=self.tools)
@@ -270,10 +281,10 @@ def switched_config(pre, new):
 
 
 HAPPY_KEYS = ['window', 'family', 'kind', 'command', 'version', 'runner-sha', 'date', 'image', 'image', 'image', 'tool',
-              'tool', 'tool', 'tool', 'pin-before', 'target', 'validate', 'idle', 'config-sha', 'backup', 'disable-start',
-              'disable-done', 'pin-write', 'build-start', 'build-done', 'gate-start', 'gate-clone', 'gate', 'enable-check',
-              'validate', 'edited-sha', 'validate', 'installed', 'enable-start', 'enable-done', 'running', 'pin-rule',
-              'state-write', 'closed']
+              'tool', 'tool', 'tool', 'pin-before', 'target', 'validate', 'idle', 'from', 'config-sha', 'backup',
+              'disable-start', 'disable-done', 'stopped', 'pin-write', 'build-start', 'build-done', 'gate-start',
+              'gate-clone', 'gate', 'enable-check', 'validate', 'edited-sha', 'validate', 'installed', 'enable-start',
+              'enable-done', 'running', 'pin-rule', 'state-write', 'closed']
 
 
 class TestRebuild(unittest.TestCase):
@@ -987,6 +998,448 @@ class TestRecoverNeeded(unittest.TestCase):
         self.assertNotIn('RECOVER needed', res.stdout)
         self.assertGreater(w.r.ps_calls(), 0)
         self.assertNotIn('a window journal is open', w.status())
+
+
+
+class TestPreWindowStopsKeepWhatStillHolds(unittest.TestCase):
+    """A STOP raised before runner-disable replaces only a held STOP of its own name. It never removes a held POOL DOWN
+    (CI is down on the host: only a window that sees its target run, `running`, clears it) or a held NO IDLE (its
+    release, which switch-now runs)."""
+
+    def test_a_pre_window_stop_keeps_a_held_pool_down(self):
+        w = Win(self)
+        for n in (1, 2, 3, 4):
+            w.put('enable-refuse.%d' % n)
+        w.run()                                   # the first window: POOL DOWN, CI down, today's output kept (gate green)
+        self.assertEqual([s['stop'] for s in w.family()['stops']], ['check failed', 'POOL DOWN'])
+        self.assertFalse(os.path.exists(w.r.flag))
+        res = w.run()                             # the same day: step 1 finds today's output, before START STATE
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP check failed: pre-window: liveapp-mac-golden-%s already exists' % today(),
+                      res.stdout)
+        self.assertEqual(sorted(s['stop'] for s in w.family()['stops']), ['POOL DOWN', 'check failed'])
+        self.assertIn('pre-window', [s for s in w.family()['stops'] if s['stop'] == 'check failed'][0]['detail']['text'])
+        st = w.status()
+        self.assertIn('\n%s: STOP POOL DOWN (runner %s): runner-enable refused' % (FAM, V0), st)
+        self.assertIn('Next, by hand: `%s/runner-enable`' % w.sb.path('cibin'), st)
+
+    def test_a_pre_window_stop_keeps_a_held_no_idle_and_its_release(self):
+        held = stop(FAM, 'NO IDLE', version=V2, detail={'text': 'IDLE: mac-a: busy 1', 'sha': SHA2})
+        w = Win(self, s=state(on=True, families={FAM: fam(stops=[held])}, images={OLD: V0}))
+        w.put('free-kib', 10 * GIB)               # DISK: a STOP before runner-disable
+        res = w.run('switch-now')
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP DISK: ', res.stdout)
+        self.assertEqual(sorted(s['stop'] for s in w.family()['stops']), ['DISK', 'NO IDLE'])
+        w.put('free-kib', 300 * GIB)
+        w.ok('switch-now')                        # switch-now still runs the NO IDLE's release
+        self.assertEqual((w.value('version'), w.value('runner-sha')), (V2, SHA2))
+        self.assertEqual(w.family()['stops'], [])
+
+    def test_a_pre_window_stop_replaces_a_held_stop_of_its_own_name(self):
+        held = stop(FAM, 'DISK', version=V0, detail={'text': 'an old reading'})
+        w = Win(self, s=state(on=True, families={FAM: fam(stops=[held])}, images={OLD: V0}))
+        w.put('free-kib', 10 * GIB)
+        w.run()
+        (s,) = w.family()['stops']
+        self.assertEqual(s['stop'], 'DISK')
+        self.assertIn('free disk 10 GiB', s['detail']['text'])
+
+    def test_control_a_window_that_switches_clears_a_held_pool_down(self):
+        held = stop(FAM, 'POOL DOWN', version=V0, detail={'text': 'x', 'hand': '/x/runner-enable'})
+        w = Win(self, s=state(on=True, families={FAM: fam(stops=[held])}, images={OLD: V0}))   # a person enabled CI
+        w.ok()
+        self.assertEqual(w.family()['stops'], [])
+
+    def test_control_a_failed_window_that_sees_ci_run_clears_it(self):
+        held = stop(FAM, 'POOL DOWN', version=V0, detail={'text': 'x', 'hand': '/x/runner-enable'})
+        w = Win(self, s=state(on=True, families={FAM: fam(stops=[held])}, images={OLD: V0}))
+        w.put('build-fail')
+        w.run()
+        self.assertIn('running', w.keys())
+        self.assertEqual([s['stop'] for s in w.family()['stops']], ['check failed'])
+
+
+# the old runscaler's last record, written while runner-disable drains it; then the new one's: a CANNOT START of the
+# new image, and a record after it (the last record of a pass is held to the next one)
+P_LINE = ('2026-11-01 05:00:10 ERRO mac-a: Failed to start runner, will retry error="failed to start runner on '
+          'runner-0000aaaa: tart exec: exit status 1"\n')
+Q_LINES = ('2026-11-01 05:01:00 ERRO mac-a: Failed to start runner, will retry error="failed to start runner on '
+           'runner-0000bbbb: tart exec: exit status 1"\n'
+           '2026-11-01 05:01:10 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1\n')
+RESTART = {'from': {'pid': 1, 'start': 2}, 'to': {'pid': 3, 'start': 4}, 'stopped': {'inode': '5', 'offset': 0,
+                                                                                    'sha': '6' * 64}}
+
+
+class TestOwnRestart(unittest.TestCase):
+    """THE OWN RESTART (PLAN D6, core/README.md "Ownership by position"): the window reads the runscaler it will stop
+    (`from`, which must be the state's boundary process), captures the log position once runner-disable has returned
+    and no runscaler runs (`stopped`), and reads the new one running (`to`). The state's `restart` member keeps them
+    until the next pass, which passes them as facts.restart once and clears them: that pass reads no gap, and the
+    switched family's evidence opens at `stopped`."""
+
+    def window(self, *scenario):
+        """a pass (the boundary: P, at the log's end), then rebuild; SCENARIO: empty scenario files (e.g. no-start.1)"""
+        w = Win(self)
+        w.r.write_log('')
+        w.r.cmd('pass')
+        w.hook('drain.1', P_LINE)
+        for name in scenario:
+            w.put(name)
+        res = w.run()
+        return w, res
+
+    def second_pass(self, w):
+        w.r.append_log(Q_LINES)
+        w.r.cmd('pass')
+        with open(os.path.join(w.r.statedir, 'pass', 'r1.json')) as f:
+            r1 = json.load(f)
+        with open(os.path.join(w.r.statedir, 'pass', 'facts.json')) as f:
+            facts = json.load(f)
+        return r1, facts, w.u.get()['core']['families'][FAM]
+
+    def test_the_pass_after_a_window_has_no_gap_and_counts_q_from_stopped(self):
+        w, res = self.window()
+        self.assertEqual(res.returncode, 0, res.stdout)
+        after = w.r.log_bytes()
+        self.assertEqual(after, P_LINE.encode())
+        pid, start = (int(x) for x in w.value('running').split())
+        rs = {'from': {'pid': P[0], 'start': P[2]}, 'to': {'pid': pid, 'start': start},
+              'stopped': {'inode': str(os.stat(w.r.runlog).st_ino), 'offset': len(after),
+                          'sha': hashlib.sha256(after[-64:]).hexdigest()}}
+        self.assertEqual(w.u.get()['restart'], rs)
+        self.assertEqual(w.value('from'), '%d %d' % (P[0], P[2]))
+        self.assertEqual(w.value('stopped'), '%s %d %s' % (rs['stopped']['inode'], len(after), rs['stopped']['sha']))
+        r1, facts, ev = self.second_pass(w)
+        self.assertEqual(facts['restart'], rs)
+        self.assertNotIn('restart', w.u.get())    # passed once, then cleared
+        self.assertIn("(the updater's own restart: P's text to `stopped`, then Q's)", r1['reason'])
+        self.assertEqual((ev['open'], ev['gaps']), (True, 0))
+        self.assertEqual([x['t'] for x in ev['sets']['mac-a']['fails']], ['2026-11-01 05:01:00'])   # Q's, not P's
+
+    def test_control_the_same_with_no_restart_member_is_a_gap(self):
+        w, res = self.window()
+        self.assertEqual(res.returncode, 0, res.stdout)
+        s = w.u.get()
+        del s['restart']
+        w.u.put(s)
+        r1, facts, ev = self.second_pass(w)
+        self.assertIsNone(facts['restart'])
+        self.assertIn('(the text before this boundary is UNKNOWN: it counts neither way)', r1['reason'])
+        self.assertEqual(ev['sets'].get('mac-a', {}).get('fails', []), [])
+
+    def test_from_is_not_the_boundary_process_no_restart_is_recorded(self):
+        # no pass before the window: the state has no boundary process; a stale record is removed
+        w = Win(self, s=state(on=True, images={OLD: V0}, restart=RESTART))
+        w.ok()
+        self.assertEqual(w.value('from'), 'none')
+        self.assertNotIn('restart', w.u.get())
+
+    def test_a_pre_close_failure_records_no_restart(self):
+        # the text between the two runner-disables may be a third runscaler's: neither P's nor Q's
+        w, res = self.window('enable-refuse.1')
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(w.keys().count('running'), 1)
+        self.assertNotIn('restart', w.u.get())
+
+    def test_a_runscaler_still_running_after_runner_disable_is_no_stopped(self):
+        w, res = self.window('keep-proc.1', 'no-start.1')
+        self.assertEqual(w.value('stopped'), 'none')
+        self.assertNotIn('restart', w.u.get())
+
+    def test_a_runscaler_seen_right_after_the_capture_is_no_stopped(self):
+        # ps reads: the pass's two, START STATE, `from`, then `stopped`'s: none before the capture, one after it
+        w = Win(self)
+        w.r.write_log('')
+        w.r.cmd('pass')
+        w.r.set_ps([proc_line(*P)], call=6)
+        w.ok()
+        self.assertEqual(w.value('stopped'), 'none')
+        self.assertNotIn('restart', w.u.get())
+
+    def test_control_no_runscaler_before_or_after_the_capture(self):
+        w, res = self.window()
+        self.assertRegex(w.value('stopped'), r'^[0-9]+ [0-9]+ [0-9a-f]{64}$')
+
+
+class TestTheTargetRuns(unittest.TestCase):
+    """D1's close proof, each part on its own: FLAG present, ONE runscaler started after the config's install time
+    (whole seconds), and the config's family lines = the last TARGET. In each cell the first runner-enable does not
+    prove it: no `running` for it, a pre-close failure follows, and the second runner-enable's runscaler (6002) runs."""
+
+    def proven_only_after_the_pre_close_failure(self, w):
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        k = w.keys()
+        self.assertEqual((k.count('pre-close-failure'), k.count('running')), (1, 1), k)
+        self.assertLess(k.index('pre-close-failure'), k.index('running'))
+        self.assertEqual(w.value('running').split()[0], '6002')
+        self.assertEqual(len(w.calls('runner-disable')), 2)
+
+    def test_the_old_runscaler_that_still_runs_is_not_the_target(self):
+        w = Win(self)
+        w.put('keep-proc.1')                      # runner-disable did not stop it, and runner-enable starts none
+        w.put('no-start.1')
+        self.proven_only_after_the_pre_close_failure(w)
+
+    def test_a_new_runscaler_with_no_flag_is_not_the_target(self):
+        w = Win(self)
+        w.put('no-flag.1')
+        self.proven_only_after_the_pre_close_failure(w)
+
+    def test_a_new_runscaler_on_other_family_lines_is_not_the_target(self):
+        w = Win(self)
+        w.hook('enable-hook.1', "/usr/bin/sed -i '' 's/runner-image = \"liveapp-mac-golden-[0-9]*\"/runner-image = "
+                                '"%s"/\' %s\n' % (IMG2, w.r.config))
+        self.proven_only_after_the_pre_close_failure(w)
+        self.assertEqual([l for l in w.journal() if l.startswith('target ')][-1], 'target mac-a=' + IMG2)
+
+    def test_control_the_first_runscaler_is_the_target(self):
+        w = Win(self)
+        w.ok()
+        self.assertEqual(w.value('running').split()[0], '6001')
+        self.assertNotIn('pre-close-failure', w.keys())
+
+
+SEQ_TOOLS = (('tools-ps', 'ps'), ('tools-curl', 'curl'), ('tools-disk', 'df'), ('tools-disk', 'du'), ('fake', 'tart'),
+             ('tools', 'runner-start'), ('tools', 'runner-enable'), ('tools', 'runner-disable'), ('tools', 'golden-build'),
+             ('tools', 'golden-gate'))
+
+
+def seq_log(w):
+    """every host tool the window runs writes its name and first argument into ONE log, in call order"""
+    seq = w.sb.path('logs', 'seq.log')
+    for folder, name in SEQ_TOOLS:
+        p = w.sb.path(folder, name)
+        head, rest = read_text(p).split('\n', 1)
+        w.sb.write(p, '%s\nprint -r -- "%s ${1-}" >> %s\n%s' % (head, name, seq, rest), 0o755)
+    return seq
+
+
+class TestIdlePairLast(unittest.TestCase):
+    """PLAN D5: the idle pair's last read is followed only by runner-disable. Every check (START STATE, DISK,
+    runner-enable --check, PRE-VALIDATE, the runscaler read `from`) runs before the pair; after its second read only
+    local writes (runner-journal, jq, shasum, dd) come before runner-disable."""
+
+    def test_after_the_second_idle_read_the_next_tool_is_runner_disable(self):
+        w = Win(self)
+        seq = seq_log(w)
+        w.ok()
+        names = [l.split()[0] for l in lines_of(seq)]
+        curls = [i for i, n in enumerate(names) if n == 'curl']
+        self.assertEqual(len(curls), 3, names)    # START STATE's read, then the pair
+        self.assertEqual(names[curls[2] + 1], 'runner-disable', names)
+        for t in ('ps', 'tart', 'df', 'du', 'runner-enable', 'runner-start'):
+            self.assertIn(t, names[:curls[1]], (t, names))
+
+
+class TestHandChangeAfterTheInstall(unittest.TestCase):
+    """A person's edit after the window installed its edit (during the post-edit validate, between its tries, or while
+    enable waits past the install second): the window restores nothing over the person's file and never enables CI on
+    it. STOP HAND CHANGE, CI stays down, and the window journal stays open (RECOVER, S3b-4, ends it)."""
+
+    def hook_file(self, w, name, body):
+        return w.sb.write(w.sb.path('hooks', name), '#!/bin/zsh -f\n' + body, 0o755)
+
+    def handed(self, w, found, env=None):
+        res = w.run(env=env)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP HAND CHANGE: %s changed after the window installed its edit' % w.r.config,
+                      res.stdout)
+        self.assertEqual(w.enables(), [])
+        self.assertFalse(os.path.exists(w.r.flag))
+        self.assertEqual(w.config_now(), found)
+        self.assertTrue(os.path.exists(w.u.window))
+        self.assertEqual(w.keys()[-2:], ['hand-change', 'stop'])
+        self.assertEqual(w.value('hand-change'), sha(found))
+        self.assertNotIn('restore', w.keys())
+        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4)', w.r.cmd('pass', ok=False).stdout)
+        return res
+
+    def test_an_edit_during_a_post_edit_validate_try(self):
+        w = Win(self)
+        w.validate('api', call=3)                 # post-edit try 1: API-ONLY, try again
+        w.hook('validate-hook.3', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)   # after try 1 read the config
+        w.validate('refuse', call=4)              # a try 2 would read the person's file: NON-API
+        self.handed(w, switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n')
+
+    def test_an_edit_before_a_try_reads_the_config(self):
+        w = Win(self)
+        w.hook('validate-prehook.3', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)
+        w.validate('refuse', call=3)              # try 1 reads the person's file: NON-API
+        self.handed(w, switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n')
+
+    # the window copy runs RU_TEST_HOOK where it would sleep: between two validate tries, or in the mtime-second wait
+    ONCE = '[[ -f ${0:h}/done ]] || { print -r -- "# a hand edit" >> %s; : > ${0:h}/done }\n'
+
+    def test_an_edit_between_two_tries_is_never_validated(self):
+        w = Win(self, win_rewrites=[('/bin/sleep $VALIDATE_GAP', '/bin/zsh -f $RU_TEST_HOOK')])
+        hook = self.hook_file(w, 'gap', self.ONCE % w.r.config)
+        w.validate('api', call=3)                 # post-edit try 1: API-ONLY; the edit lands before try 2
+        found = switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n'
+        self.handed(w, found, env={'RU_TEST_HOOK': hook})
+        self.assertNotIn(sha(found), [v[2] for v in w.validates()])
+
+    def test_an_edit_while_enable_waits_past_the_install_second(self):
+        w = Win(self, win_rewrites=[('/bin/sleep 0.2', '/bin/zsh -f $RU_TEST_HOOK')])
+        hook = self.hook_file(w, 'wait', (self.ONCE % w.r.config) + '/bin/sleep 0.2\n')
+        w.hook('validate-hook.3', 'zmodload zsh/datetime; export TZ=UTC\n'   # the installed edit's mtime 2 s ahead
+                                  '/usr/bin/touch -t $(strftime %%Y%%m%%d%%H%%M.%%S $(( EPOCHSECONDS + 2 ))) %s\n'
+                                  % w.r.config)
+        self.handed(w, switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n',
+                    env={'RU_TEST_HOOK': hook})
+        self.assertEqual(w.validates()[-1][2], sha(switched_config(w.pre, 'liveapp-mac-golden-' + today())))
+
+    def test_control_a_non_api_post_validate_on_the_windows_own_edit_enables_the_backup(self):
+        w = Win(self)
+        w.validate('refuse', call=3)
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual([e[2] for e in w.enables()], [sha(w.pre)])
+        self.assertEqual(w.config_now(), w.pre)
+        self.assertFalse(os.path.exists(w.u.window))
+
+
+class TestToolTextInTheJournal(unittest.TestCase):
+    """Every journal value made from a tool's text (pre-close-failure, build-failed, stop) is one line of at most 900
+    bytes, each control character a `?` (runner-journal refuses a control character or more than 1000 bytes): a long or
+    tabbed refusal still takes the window's one pre-close recovery."""
+
+    def refused_once(self, text):
+        w = Win(self)
+        w.hook('enable-refuse.1', text)
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(len(w.calls('runner-disable')), 2)
+        self.assertEqual(w.config_now(), w.pre)
+        self.assertTrue(os.path.exists(w.r.flag))
+        self.assertEqual(w.enables()[-1][2], sha(w.pre))
+        self.assertEqual([s['stop'] for s in w.family()['stops']], ['check failed'])
+        self.assertFalse(os.path.exists(w.u.window))
+        v = w.value('pre-close-failure')
+        self.assertNotRegex(v, '[\x00-\x1f\x7f]')
+        self.assertLessEqual(len(v.encode()), 900)
+        return w, v
+
+    def test_a_1200_byte_refusal(self):
+        w, v = self.refused_once('runner-enable: REFUSE FILES is not green: ' + 'x' * 1200)
+        self.assertTrue(v.startswith('runner-enable refused (exit 1): runner-enable: REFUSE FILES is not green: xxx'), v)
+        self.assertIn('x' * 1200, [s for s in w.family()['stops']][0]['detail']['text'])   # the state keeps it whole
+
+    def test_a_tab_in_the_refusal(self):
+        w, v = self.refused_once('runner-enable: REFUSE a\tb')
+        self.assertEqual(v, 'runner-enable refused (exit 1): runner-enable: REFUSE a?b')
+
+    def test_control_a_short_refusal(self):
+        w, v = self.refused_once('')
+        self.assertEqual(v, 'runner-enable refused (exit 1): runner-enable: REFUSE the wall stamp does not match Tart')
+
+    def test_a_tab_in_the_done_name(self):
+        w = Win(self)
+        w.put('done-name', 'x\ty')
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(w.value('build-failed'), 'DONE x?y')
+        self.assertFalse(os.path.exists(w.u.window))
+        self.assertTrue(os.path.exists(w.r.flag))
+
+
+class TestFailedWindowDeletesItsOutput(unittest.TestCase):
+    """PLAN D5 :209, RECOVER step 3: a window that ends held, whose gate did not pass, deletes its builder's names (the
+    output, the work VM) that tart lists, each journaled first (`delete NAME`), and only when no non-comment line of
+    the config names it. The old image is never one of them. golden-prune (the REAL copy) then prints nothing new."""
+
+    OLDER = 'liveapp-mac-golden-20260901'
+
+    def prune(self, w):
+        prune = w.sb.copy_script('bin/golden-prune', [
+            ('STATEDIR=/Users/ci/.local/state/runner-updater', 'STATEDIR=' + w.r.statedir)],
+            dest=w.sb.path('prune', 'golden-prune'))
+        return subprocess.run(['/bin/zsh', '-f', prune, OLD] + sorted(os.listdir(w.vms)), capture_output=True, text=True)
+
+    def red(self, cfg=None, sets=('mac-a',)):
+        out = 'liveapp-mac-golden-' + today()
+        w = Win(self, cfg=cfg)
+        w.r.set_curl(json.dumps(healthz(*sets)))
+        w.sb.write(os.path.join(w.vms, self.OLDER), '')
+        w.put('gate', 1)
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        return w, out
+
+    def test_a_gate_red_window_deletes_its_output(self):
+        w, out = self.red(cfg=config(top='# today: liveapp-mac-golden-%s\n' % today()))   # a comment names it
+        self.assertFalse(os.path.exists(os.path.join(w.vms, out)))
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+        k = w.keys()
+        self.assertEqual(w.value('delete'), out)
+        self.assertLess(k.index('delete'), k.index('pin-rule'))
+        self.assertIn(['delete', out], w.calls('tart'))
+        self.assertNotIn(out, lines_of(w.u.protected))
+        p = self.prune(w)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, '', ''))
+
+    def test_a_name_a_config_line_names_is_kept(self):
+        out = 'liveapp-mac-golden-' + today()
+        w, _ = self.red(cfg=config((('mac-a', OLD), ('mac-c', out))), sets=('mac-a', 'mac-c'))   # another set names it
+        self.assertTrue(os.path.exists(os.path.join(w.vms, out)))
+        self.assertNotIn('delete', w.keys())
+
+    def test_control_a_gate_green_window_keeps_its_output(self):
+        w = Win(self)
+        w.validate('refuse', call=3)              # a failure after the gate passed
+        w.run()
+        self.assertTrue(os.path.exists(os.path.join(w.vms, 'liveapp-mac-golden-' + today())))
+        self.assertNotIn('delete', w.keys())
+
+    def test_a_kill_at_delete_leaves_the_output(self):
+        w = Win(self)
+        w.put('gate', 1)
+        res = w.run(env={'RU_KILL_AT': 'delete'})
+        self.assertEqual(res.returncode, KILLED, res.stdout + res.stderr)
+        self.assertEqual(w.keys()[-1], 'delete')
+        self.assertTrue(os.path.exists(os.path.join(w.vms, 'liveapp-mac-golden-' + today())))
+
+
+class TestFutureMtime(unittest.TestCase):
+    """The wait past the config's install second is bounded (MTIME_WAIT): a config whose mtime is further ahead of the
+    clock (clock skew, a hand `touch`) is STOP check failed, the file as found is kept in the window's folder, the
+    backup goes back and CI is enabled on it, and the window ends (the lock is free). TestMtimeSecond is the control:
+    2 s ahead, it waits and enables."""
+
+    def test_a_config_dated_in_the_future_does_not_hold_ci_down(self):
+        w = Win(self)
+        w.hook('check-hook.2', 'print -r -- "# a hand edit" >> %s\n/usr/bin/touch -t 203001010000 %s\n'
+               % (w.r.config, w.r.config))
+        found = w.pre + b'# a hand edit\n'
+        res = w.sb.run(['/bin/zsh', '-f', w.r.script, 'rebuild', FAM], timeout=60)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("runner-updater: STOP check failed: the config's mtime ", res.stdout)
+        self.assertEqual(w.config_now(), w.pre)
+        self.assertTrue(os.path.exists(w.r.flag))
+        self.assertEqual([e[2] for e in w.enables()], [sha(w.pre)])
+        self.assertEqual(w.r.log_bytes(w.value('found')), found)
+        self.assertEqual(sorted(s['stop'] for s in w.family()['stops']), ['HAND CHANGE', 'check failed'])
+        self.assertFalse(os.path.exists(w.u.window))
+        self.assertNotIn('another run holds', w.r.cmd('pass').stdout)
+
+
+class TestPinRuleNoSha(unittest.TestCase):
+    """D2's ONE RULE: the old image's version is known (the state's record) but no sha256 of it is (not this window's,
+    not the pre-window pin's, not the release literal's): the pin is removed, never written with another version's
+    sha."""
+
+    V1 = '2.338.9'
+
+    def test_a_version_known_with_no_sha_removes_the_pin(self):
+        self.assertNotIn(self.V1, (V0, V2))
+        held = stop(FAM, 'NO IDLE', version=V2, detail={'text': 'x', 'sha': SHA2})
+        w = Win(self, s=state(on=True, families={FAM: fam(stops=[held])}, images={OLD: self.V1}))
+        w.put('build-fail')
+        res = w.run('switch-now')
+        self.assertIn('the pin %s is removed: no sha256 of runner %s is known' % (w.pin, self.V1), res.stdout)
+        self.assertEqual(w.value('pin-rule'), 'removed')
+        self.assertFalse(os.path.exists(w.pin))
 
 
 if __name__ == '__main__':

@@ -30,6 +30,9 @@
 #   images     {IMAGE: "N.N.N"}: each image the updater built or adopted, and its runner version (D2's pin rule)
 #   core       the decision core's own state (the `state` that idle.jq and r1.jq return) | absent: a fresh core.
 #              report's core state is apart from it, in REPORT.
+#   restart    {from: {pid, start}, to: {pid, start}, stopped: {inode: "N", offset: N, sha}} | absent: the switch
+#              window's own restart of runscaler (bin/runner-updater-window, THE OWN RESTART), kept for the next pass,
+#              which passes it to the core as facts.restart once and then removes it.
 #   A MEMBER THIS RELEASE DOES NOT READ (at the top, in a family, in a candidate or in a STOP): every command WAITs
 #   (exit 4), names it, and writes nothing. A later member that names an image or holds a STOP needs this rule: an
 #   older release (a rollback across one) then waits, and never writes a shorter protected list or prints a status that
@@ -57,8 +60,10 @@
 #   pass     the timer's entry (its LaunchAgent comes later). It TRIES the lock: held, "another run holds the
 #            updater lock", exit 0 at once. OFF: "the updater is OFF", exit 0 at once, no core call. ON: the jq check
 #            (as report's step 2), then the facts (ru_collect, with each family's candidate and back_until and the
-#            STOPs from the state, never --observe's) into PASSDIR, idle / r1 / keep / status (report's steps 4 and 5,
-#            on the core state of the state's `core` member), then the new core state written into STATE by rename,
+#            STOPs from the state, never --observe's; facts.restart = the state's `restart` member) into PASSDIR,
+#            idle / r1 / keep / status (report's steps 4 and 5, on the core state of the state's `core` member), then
+#            the new core state written into STATE by rename (the `restart` member removed in the same write: it is
+#            passed once),
 #            then the protected list rewritten (as protect), then what it WOULD do: "would roll back FAMILY" (r1),
 #            "would accept FAMILY", "would hold FAMILY: STOP JOBS FAIL ON THE NEW IMAGE" or "... STOP NO EVIDENCE"
 #            (keep). It does none of it. A program that could not decide: STATE and the list stay as they were.
@@ -141,8 +146,8 @@
 #   the window's: FLAG (the agent's flag), REAL (tart), REALRUN, LOGDIR (golden-build's logs), TARTDIR (Tart's home:
 #                its volume's free disk, TARTDIR/vms/IMAGE's size), BIN (the installed tools: the hand lines), LOCK (the
 #                runner lock: the config edit holds it), DF DU, FLOOR_GIB (golden-build's floor), VALIDATE_GAP,
-#                CLOSE_WAIT, CLOSE_POLL (seconds), WINDOWS (STATEDIR/windows: the closed journals, and each window's
-#                folder ID.d), BUILDERS (the families whose builder is wired)
+#                CLOSE_WAIT, CLOSE_POLL, MTIME_WAIT (seconds), WINDOWS (STATEDIR/windows: the closed journals, and each
+#                window's folder ID.d), BUILDERS (the families whose builder is wired)
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
 export LC_ALL=C
@@ -184,6 +189,7 @@ FLOOR_GIB=200
 VALIDATE_GAP=20     # seconds between two validate tries (the ONE VALIDATE RULE)
 CLOSE_WAIT=600      # seconds the window waits for its target to run (D1: 10 min)
 CLOSE_POLL=5        # seconds between two reads of that wait
+MTIME_WAIT=10       # seconds the window waits for the clock to pass the config's mtime; further ahead: STOP
 WINDOWS=$STATEDIR/windows
 BUILDERS=(mac-golden)   # the families whose builder is wired (mac-golden: golden-build)
 
@@ -463,12 +469,12 @@ do_pass() {
   print -r -- $ru_state | $JQ -c '.core // empty' > $PASSDIR/state.json || refuse "cannot copy the core's state into $PASSDIR"
   /bin/rm -f -- $PASSDIR/{idle,r1,keep,status}.json
   held=$(print -r -- $ru_state | $JQ -c '{families: (.families | map_values({candidate: (.candidate // null),
-           back_until: (.back_until // null)})), stops: [.families[] | (.stops // [])[]]}') \
+           back_until: (.back_until // null)})), stops: [.families[] | (.stops // [])[]], restart: (.restart // null)}') \
     || refuse "jq could not read the families of the state"
   say "pass: one pass at $(strftime '%Y-%m-%d %H:%M:%S UTC' $now) ($now); it takes no action"
   ru_collect $PASSDIR $PASSDIR/state.json '' $now $held || refuse "no facts: $REPLY"
   run_core $PASSDIR $STATE $now
-  change_state '.core = $c[0]' --slurpfile c $PASSDIR/state.json
+  change_state '.core = $c[0] | del(.restart)' --slurpfile c $PASSDIR/state.json   # the restart: passed once
   write_protected $now
   pass_would   # what this pass would do: no action in this release
   # which release each family may switch to, or why not: bin/runner-updater-release (its header: THE PASS HOOK)
