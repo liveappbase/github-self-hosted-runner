@@ -7,7 +7,9 @@
 #
 # THE STATE, STATE (STATEDIR/state.json): ONE JSON object, written by rename (STATE.new, then a rename over STATE), read
 # under the updater lock (status alone reads it with no lock: ONE read, so a rename while it runs gives it the old or
-# the new state, whole). A missing STATE is a fresh install: OFF, no family, nothing held. Its members:
+# the new state, whole). A missing STATE is a fresh install: OFF, no family, nothing held; but beside a protected
+# list that is not an empty regular file it is a LOST state (the updater writes a name into the list only from a
+# state): every command that reads the state refuses, and writes nothing. Its members:
 #   format     1. A state of another format (or none): every command prints "runner-updater: WAIT ..." and exits 4,
 #              and nothing is written. A state of format 1 that is not the shape below: REFUSE, exit 1, left as it is.
 #   on         true | false (D11: a fresh install is OFF)
@@ -163,15 +165,22 @@ source $RELBIN/runner-updater-lib || refuse "cannot load $RELBIN/runner-updater-
 # one: behind a folder it cannot search, the state would read as fresh (OFF), the list as missing, a pin as absent
 ru_reach $STATE || refuse "$REPLY, so the files in $STATEDIR would look absent (a state as a fresh one: OFF). Look at its mode (ci must be able to search it), then run $cmd again"
 
-# the state, under the lock (status: with no lock, ONE read) -> ru_state; WAIT (exit 4) on a state of another format,
-# REFUSE on one this release does not read: either way the file stays as it is
+# the state, under the lock (status: with no lock, ONE read) -> ru_state; WAIT (exit 4) on a state of another format
+# or with a member this release does not read, REFUSE on one it does not read, and on a missing state beside a list
+# that is not empty (a lost state): in each case nothing is written
 load_state() {
   ru_state_load $STATE
   case $? in
-    (0) return 0 ;;
+    (0) ;;
     (2) print -r -- "runner-updater: WAIT $REPLY"; exit 4 ;;
     (*) refuse "$REPLY: it is left as it is" ;;
   esac
+  # a missing state is fresh, but the updater writes a name into the list only from a state: a list that is not an
+  # empty regular file says a state existed and is lost, and a fresh state would drop what the list protects
+  if (( ru_state_absent )) && [[ -e $PROTECTED || -L $PROTECTED ]] \
+     && ! [[ -f $PROTECTED && ! -L $PROTECTED && ! -s $PROTECTED ]]; then
+    refuse "there is no state $STATE, but the protected list $PROTECTED is not empty: a state existed and is lost, and a fresh one would drop what the list protects. Put the state back; or, when no image in the list must be kept, move the list aside and run $cmd again"
+  fi
 }
 # JQFILTER [JQ OPTION...]: the state changed by it, written by rename
 change_state() {

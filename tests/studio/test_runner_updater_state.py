@@ -934,6 +934,79 @@ class TestProtected(unittest.TestCase):
         self.assertFalse(os.path.lexists(u.protected + '.new'))
 
 
+LOST = ('runner-updater: REFUSE there is no state %(s)s, but the protected list %(p)s is not empty: a state existed and '
+        'is lost, and a fresh one would drop what the list protects. Put the state back; or, when no image in the list '
+        'must be kept, move the list aside and run %(c)s again\n')
+
+
+class TestLostState(unittest.TestCase):
+    """A missing state is a fresh install (OFF, nothing held). But the updater writes a name into the protected list only
+    from a state, so a list that is not empty says a state existed and is lost. A fresh state there drops what the list
+    protects: protect would write the shorter list at once; on, and then the next pass, would; off would write a fresh
+    state that hides the evidence. So every command that reads the state REFUSEs on a missing state beside a list that
+    is not an empty regular file, and writes nothing (review r1 P3-1). The controls: a missing state beside an empty
+    list, or beside no list."""
+
+    def lost(self, cmd, make_list):
+        r = Rig(self, jq_wrap=True)
+        u = Paths(r)
+        make_list(r, u)
+        before = sorted(os.listdir(r.statedir))
+
+        def the_list():   # its bytes when it is a readable file; what lstat says in every case
+            st = os.lstat(u.protected)
+            readable = os.path.isfile(u.protected) and os.access(u.protected, os.R_OK)
+            return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode, u.raw(u.protected) if readable else None)
+        listed = the_list()
+        res = r.cmd(cmd, ok=False)
+        self.assertEqual((res.returncode, res.stdout), (1, LOST % {'s': u.state, 'p': u.protected, 'c': cmd}), res.stderr)
+        self.assertFalse(os.path.lexists(u.state))
+        self.assertEqual(the_list(), listed)
+        self.assertEqual(sorted(set(os.listdir(r.statedir)) - {'lock'}), before)
+        self.assertEqual((core_calls(r), r.ps_calls()), ([], 0))
+
+    def test_a_missing_state_beside_a_list_with_names_is_refused(self):
+        def names(r, u):
+            r.sb.write(u.protected, IMG + '\n' + IMG2 + '\n', 0o600)
+        for cmd in ('status', 'on', 'off', 'pass', 'protect'):
+            with self.subTest(cmd=cmd):
+                self.lost(cmd, names)
+
+    def test_a_missing_state_beside_a_list_that_is_not_an_empty_file_is_refused(self):
+        # on and off refuse such a list before they read the state (TestListRefusals); these three read the state first
+        def symlink(r, u):
+            os.remove(u.protected)
+            os.symlink(r.sb.write(r.sb.path('elsewhere'), ''), u.protected)
+
+        def folder(r, u):
+            os.remove(u.protected)
+            os.mkdir(u.protected)
+
+        def unreadable(r, u):
+            r.sb.write(u.protected, IMG + '\n', 0o000)
+        for how, make in (('a symlink', symlink), ('a folder', folder), ('unreadable, with a name', unreadable)):
+            for cmd in ('status', 'pass', 'protect'):
+                with self.subTest(how=how, cmd=cmd):
+                    self.lost(cmd, make)
+
+    def test_control_a_missing_state_beside_an_empty_list_or_none(self):
+        for how in ('an empty list', 'no list'):
+            for cmd in ('status', 'pass', 'protect', 'on', 'off'):
+                if how == 'no list' and cmd in ('on', 'off'):
+                    continue   # they refuse a missing list on their own (TestListRefusals)
+                with self.subTest(how=how, cmd=cmd):
+                    r = Rig(self, jq_wrap=True)
+                    u = Paths(r)
+                    if how == 'no list':
+                        os.remove(u.protected)
+                    res = r.cmd(cmd)
+                    self.assertNotIn('REFUSE', res.stdout)
+                    if cmd == 'protect':
+                        self.assertEqual(u.raw(u.protected), b'')
+                    if cmd == 'on':
+                        self.assertEqual(u.get(), state(on=True))
+
+
 class TestListRefusals(unittest.TestCase):
     """A STATEDIR without its list, or a list that is not a readable regular file: report, on and off refuse, and say
     how to get the list back WITHOUT emptying it: `protect` writes it from the state (S3b-1 review r2 P3)."""

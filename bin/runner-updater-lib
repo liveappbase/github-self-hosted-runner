@@ -425,7 +425,8 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
         | "families.\($f).stops[\($i)].\(shown)")]
 | join(", ")'
 
-# ru_state_load FILE -> ru_state (the state, compact JSON) and 0; a missing FILE is ru_fresh. 1 + REPLY when FILE is
+# ru_state_load FILE -> ru_state (the state, compact JSON) and 0; a missing FILE is ru_fresh (and ru_state_absent=1,
+# else 0: the caller may know better than "fresh", see bin/runner-updater's load_state). 1 + REPLY when FILE is
 # not a state this reads; 2 + REPLY (the wait line) when it is of another format, or holds a member this release does
 # not read (ru_state_members). FILE is opened ONCE, so a reader that runs while a writer renames a new state in gets
 # one of the two whole.
@@ -433,7 +434,8 @@ ru_state_load() {
   local f=$1 text fmt st members
   # behind a folder it cannot search, a state would look absent (fresh: OFF): not read as fresh
   ru_reach $f || { REPLY="$REPLY: a state behind it would look absent"; return 1 }
-  if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh; return 0; fi
+  ru_state_absent=0
+  if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh ru_state_absent=1; return 0; fi
   [[ -f $f && ! -L $f && -r $f ]] || { REPLY="$f is not a readable regular file"; return 1 }
   text=$(/bin/cat -- $f && print -rn -- .) || { REPLY="$f cannot be read"; return 1 }
   text=${text%.}
