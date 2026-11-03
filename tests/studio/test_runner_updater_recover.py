@@ -423,7 +423,7 @@ class TestStep4Config(unittest.TestCase):
         recover(w, ok=1)
         assert_runs(self, w, w.pre)
         self.assertNotIn('restore', w.keys())
-        self.assertNotIn('validate recover 1 PASS', w.journal())   # the pre-window config was validated before
+        self.assertNotIn('validate hand 1 PASS', w.journal())   # the pre-window config was validated before
 
     def test_another_config_that_validates_is_left_and_enabled(self):
         w = killed(self, 'build-start')
@@ -431,7 +431,7 @@ class TestStep4Config(unittest.TestCase):
         w.sb.write(w.r.config, found.decode())
         res = recover(w, ok=1)
         assert_runs(self, w, found)
-        self.assertIn('validate recover 1 PASS', w.journal())
+        self.assertIn('validate hand 1 PASS', w.journal())
         self.assertEqual(w.validates()[-1][2], sha(found))
         self.assertEqual(stops(w), ['HAND CHANGE'])
         self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
@@ -480,7 +480,7 @@ class TestStep4Config(unittest.TestCase):
         recover(w, ok=1)
         j = w.journal()
         i = j.index('recover-target %s mac-a=%s' % (sha(w.pre), OLD))
-        self.assertEqual(j[i + 1:i + 3], ['installed ' + j[i + 1].split()[1], 'enable-start '])
+        self.assertEqual(j[i + 1:i + 3], ['installed %s %s' % (j[i + 1].split()[1], sha(w.pre)), 'enable-start '])
         self.assertEqual([l.split(' ', 1)[0] for l in j[i + 1:]][:3], ['installed', 'enable-start', 'enable-done'])
 
 
@@ -592,6 +592,131 @@ class TestCutJournal(unittest.TestCase):
                 w = killed(self, key)
                 self.assertEqual(cut(w), key)
                 self.safe(w, key, True)
+
+
+class TestCutJournalStepRan(unittest.TestCase):
+    """S3b-4a r1 F5: the journal's last line is lost, but the step it names RAN (its side effect is on the host).
+    RECOVER is FLAG first: no journal ends with CI down and no STOP, and a switch whose target runs keeps its
+    candidate. The controls are TestCutJournal's cells (the step did not run)."""
+
+    def test_disable_start_lost_after_runner_disable_ran(self):
+        w = killed(self, 'disable-start')
+        os.remove(w.r.flag)                                      # runner-disable's first act
+        self.assertEqual(cut(w), 'disable-start')
+        res = recover(w)
+        self.assertNotIn('nothing was disabled', res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, w.pre)                              # CI back, on the pre-window config
+        self.assertEqual(stops(w), ['check failed'])
+        self.assertEqual(n_disable(w), 0)
+
+    def test_enable_start_lost_after_runner_enable_ran(self):
+        w = killed(self, 'enable-start')
+        new = switched_config(w.pre, out_name())
+        r = w.sb.run(['/bin/zsh', '-f', os.path.join(w.tools, 'runner-enable')])   # runner-enable ran
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(cut(w), 'enable-start')
+        res = recover(w, ok=0)
+        self.assertNotIn('HAND CHANGE', res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, new)
+        self.assertEqual((n_disable(w), len(w.enables())), (1, 1))   # RECOVER ran neither
+        f = w.family()
+        self.assertEqual((f['candidate']['lines'], f['stops']), ({'mac-a': out_name()}, []))   # R1 stays armed
+
+    def test_restore_lost_after_the_backup_went_back(self):
+        w = Win(self)
+        w.validate('refuse', call=3)                             # after the edit: the backup goes back
+        killed(self, 'restore', w)
+        w.sb.write(w.r.config, w.pre.decode())                   # the backup went back
+        self.assertEqual(cut(w), 'restore')
+        recover(w, ok=1)
+        assert_closed(self, w)
+        assert_runs(self, w, w.pre)
+        self.assertEqual(stops(w), ['check failed'])
+
+    def test_delete_lost_after_the_image_was_deleted(self):
+        w = Win(self)
+        w.put('gate', 1)                                         # gate RED: the held close deletes the output
+        killed(self, 'delete', w)
+        os.remove(os.path.join(w.vms, out_name()))               # tart deleted it
+        self.assertEqual(cut(w), 'delete')
+        recover(w, ok=1)
+        assert_closed(self, w)
+        assert_runs(self, w, w.pre)
+        self.assertEqual(stops(w), ['check failed'])
+        self.assertNotIn('delete', w.keys())
+
+    def test_around_runner_disable_in_both_windows(self):
+        # the cut at each line around runner-disable, with runner-disable already run (FLAG gone), in a switch and in a
+        # rollback window: CI comes back on the pre-window config, the journal closes
+        from tests.studio.test_runner_updater_rollback import rb_win, rollback
+        for kind in ('switch', 'rollback'):
+            for key in ('disable-start', 'disable-done'):
+                with self.subTest(kind=kind, key=key):
+                    if kind == 'switch':
+                        w = killed(self, key)
+                    else:
+                        w = rb_win(self)
+                        self.assertEqual(rollback(w, env={'RU_KILL_AT': key}).returncode, KILLED)
+                    if os.path.exists(w.r.flag):
+                        os.remove(w.r.flag)                      # runner-disable's first act
+                    self.assertEqual(cut(w), key)
+                    res = recover(w)
+                    self.assertIn(res.returncode, (0, 1), res.stdout)
+                    self.assertNotIn('nothing was disabled', res.stdout)
+                    assert_closed(self, w)
+                    assert_runs(self, w, w.pre)
+
+    def test_enable_start_lost_in_a_rollback_after_runner_enable_ran(self):
+        from tests.studio.test_runner_updater_rollback import rb_win, rollback
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'enable-start'}).returncode, KILLED)
+        r = w.sb.run(['/bin/zsh', '-f', os.path.join(w.tools, 'runner-enable')])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(cut(w), 'enable-start')
+        res = recover(w, ok=0)
+        self.assertNotIn('HAND CHANGE', res.stdout)
+        assert_closed(self, w)
+        self.assertIsNone(w.family()['candidate'])               # it rolled back
+        self.assertEqual(len(w.enables()), 1)
+
+    def test_control_a_journal_that_ends_before_its_backup_disabled_nothing(self):
+        # D1 loses only the LAST line: a journal that ends before the line that comes just before disable-start
+        # (`backup`; a rollback's `edited-sha`) never wrote disable-start. FLAG absent there is a person's: no action
+        for kind, key in (('switch', 'config-sha'), ('rollback', 'backup')):
+            with self.subTest(kind=kind):
+                if kind == 'switch':
+                    w = killed(self, key)
+                else:
+                    from tests.studio.test_runner_updater_rollback import rb_win, rollback
+                    w = rb_win(self)
+                    self.assertEqual(rollback(w, env={'RU_KILL_AT': key}).returncode, KILLED)
+                os.remove(w.r.flag)                              # a person's runner-disable
+                res = recover(w, ok=0)
+                self.assertIn('nothing was disabled (no disable-start)', res.stdout)
+                assert_closed(self, w)
+                self.assertEqual((w.enables(), os.path.exists(w.r.flag), stops(w)), ([], False, []))
+
+
+class TestStep1ComparesTheSha(unittest.TestCase):
+    """S3b-4a r1 P3-3 (D1): RECOVER step 1 compares the running config with the LAST TARGET by its sha (the `installed`
+    line's), not only by the family's lines: a person's change elsewhere in the file is HAND CHANGE."""
+
+    def test_a_change_outside_the_family_s_lines_is_hand_change(self):
+        w = killed(self, 'enable-done')
+        with open(w.r.config, 'a') as f:
+            f.write('# a hand edit\n')
+        res = recover(w, ok=1)
+        self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
+        assert_closed(self, w)
+        self.assertIsNone(w.family()['candidate'])
+        self.assertEqual((n_disable(w), len(w.enables())), (1, 1))   # CI and the file as they are
+
+    def test_control_the_same_config_closes_switched(self):
+        w = killed(self, 'enable-done')
+        recover(w, ok=0)
+        self.assertEqual(w.family()['candidate']['lines'], {'mac-a': out_name()})
 
 
 class TestEveryCommandRecoversFirst(unittest.TestCase):

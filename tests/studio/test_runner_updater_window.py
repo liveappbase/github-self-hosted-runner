@@ -744,6 +744,40 @@ class TestHandChange(unittest.TestCase):
         w.ok()
         self.assertEqual(w.config_now(), switched_config(w.pre, 'liveapp-mac-golden-' + today()))
 
+    def test_a_hand_change_that_does_not_validate_gets_no_ci(self):
+        # S3b-4a r1 F6 (PLAN :236-243 as amended): CI on the file as found ONLY when a copy of it validates
+        w = Win(self)
+        w.hook('check-hook.2', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)
+        found = w.pre + b'# a hand edit\n'
+        w.validate('refuse', call=3)            # 1: PRE-VALIDATE, 2: the target, 3: the copy of the person's file
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP HAND CHANGE: %s changed inside the window' % w.r.config, res.stdout)
+        self.assertIn('runner-enable` by hand', res.stdout)
+        self.assertEqual(w.validates()[-1][2], sha(found))
+        self.assertEqual((w.enables(), os.path.exists(w.r.flag)), ([], False))
+        self.assertEqual(w.config_now(), found)
+        self.assertTrue(os.path.exists(w.u.window))      # open, with its hand-change line: RECOVER validates again
+        self.assertEqual(w.value('hand-change'), sha(found))
+        self.assertIn('validate hand 1 NON-API', w.journal())
+        w.validate('refuse', call=4)
+        w.r.cmd('pass', ok=False)                         # RECOVER: it still does not validate: CI stays down
+        self.assertEqual((w.enables(), os.path.exists(w.r.flag)), ([], False))
+        self.assertTrue(os.path.exists(w.u.window))
+        w.r.cmd('pass', ok=False)                         # it validates now: CI on it
+        assert_closed_runs = (os.path.exists(w.u.window), w.enables()[-1][2], os.path.exists(w.r.flag))
+        self.assertEqual(assert_closed_runs, (False, sha(found), True))
+
+    def test_control_a_hand_change_that_validates_is_validated_first(self):
+        w = Win(self)
+        w.hook('check-hook.2', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)
+        found = w.pre + b'# a hand edit\n'
+        w.run()
+        self.assertEqual(len(w.validates()), 3)
+        self.assertEqual(w.validates()[-1][2], sha(found))
+        self.assertIn('validate hand 1 PASS', w.journal())
+        self.assertEqual([e[2] for e in w.enables()], [sha(found)])
+
 
 class TestPoolDown(unittest.TestCase):
     """A pre-close failure (runner-enable refuses, or the target does not run in time) happens at most ONCE per journal:
@@ -806,7 +840,7 @@ class TestMtimeSecond(unittest.TestCase):
         w.ok()
         (at, mtime, csha), = w.enables()
         self.assertGreater(int(at), mtime)
-        self.assertEqual(int(w.value('installed')), mtime)
+        self.assertEqual(w.value('installed'), '%d %s' % (mtime, csha))   # the install time, and the file's sha
 
 
 class TestKillAtEachStep(unittest.TestCase):

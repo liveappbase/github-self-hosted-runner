@@ -457,5 +457,328 @@ class TestRetry(unittest.TestCase):
         self.assertIn('Next: `runner-updater retry %s`' % FAM, w.status())
 
 
+V1 = '2.338.9'                 # a runner version that is neither the release literal (V0) nor the candidate's (V2)
+SHA1 = '3' * 64
+RETRY = 'runner-updater retry %s' % FAM
+
+
+def hands(w):
+    """{STOP: its hand line} of the family's held STOPs"""
+    f = w.family()
+    return {s['stop']: (s.get('detail') or {}).get('hand') for s in f['stops']} if f else {}
+
+
+def retry_then_rollback(test, w):
+    """every ROLLBACK FAILED line of status names `runner-updater retry FAMILY`; retry clears it; the next ru_rollback
+    starts (no REFUSE) and rolls back"""
+    lines = [l for l in w.status().splitlines() if l.startswith('%s: STOP ROLLBACK FAILED' % FAM)]
+    test.assertTrue(lines)
+    for l in lines:
+        test.assertTrue(l.endswith('Next, by hand: `%s`' % RETRY), l)
+    res = w.r.cmd('retry', FAM, ok=False)
+    test.assertIn('cleared ROLLBACK FAILED', res.stdout)
+    test.assertNotIn('ROLLBACK FAILED', stops(w))
+    res = rollback(w)
+    test.assertNotIn('REFUSE', res.stdout)
+    test.assertEqual(res.returncode, 0, res.stdout)
+    test.assertIsNone(w.family()['candidate'])
+
+
+class TestRollbackFailedNamesRetry(unittest.TestCase):
+    """S3b-4a r1 F1: EVERY ROLLBACK FAILED the family holds names `runner-updater retry FAMILY` as its hand line, from
+    every raiser (the pre-close path, RECOVER step 1's pre-close failure, and a STOP RECOVER holds again from a journal
+    line), so `retry` clears it and R1 can roll back again."""
+
+    def test_runner_enable_refuses_on_the_target(self):
+        w = rb_win(self)
+        w.put('enable-refuse.1')
+        self.assertEqual(rollback(w).returncode, 1)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+        assert_runs(self, w, w.pre)
+        retry_then_rollback(self, w)
+
+    def test_the_target_does_not_run_in_close_wait(self):
+        w = rb_win(self)
+        w.put('no-start.1')
+        self.assertEqual(rollback(w).returncode, 1)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+        retry_then_rollback(self, w)
+
+    def test_recover_holds_the_journaled_rollback_failed_again(self):
+        w = rb_win(self)
+        w.validate('refuse', call=2)                 # the post-edit validate is NON-API
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'restore'}).returncode, KILLED)
+        self.assertIn('stop ROLLBACK FAILED: after the edit: ', '\n'.join(w.journal()))
+        w.r.cmd('pass', ok=False)                    # RECOVER
+        assert_closed(self, w)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+        retry_then_rollback(self, w)
+
+    def test_recover_step_1_pre_close_failure_on_a_rollback_journal(self):
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'enable-done'}).returncode, KILLED)
+        w.r.set_ps([])                               # the target's runscaler is gone: step 1's wait fails
+        res = w.r.cmd('pass', ok=False)
+        self.assertIn('runner-updater: STOP ROLLBACK FAILED: the target did not run within 3 s', res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, w.pre)                   # the backup back (CONFIG EDIT's rule), CI on it
+        self.assertEqual(w.family()['candidate']['version'], V2)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+        retry_then_rollback(self, w)
+
+
+class TestRecoverAfterAFailedPostValidate(unittest.TestCase):
+    """S3b-4a r1 F2: a rollback journal that records a STOP class at the post-edit validate is finished as the window
+    decided (CONFIG EDIT's rule): the BACKUP back with no new validate of the target, CI on the pre-window config only;
+    NON-API holds ROLLBACK FAILED, UNKNOWN none; the candidate and its image stay."""
+
+    def recovered(self, cls, kill):
+        w = rb_win(self)
+        w.validate(cls, call=2)                      # call 1: PRE-VALIDATE (PASS); call 2: after the edit
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': kill}).returncode, KILLED)
+        self.assertEqual(w.enables(), [])
+        res = w.r.cmd('pass', ok=False)              # RECOVER; any validate it ran would PASS
+        assert_closed(self, w)
+        self.assertEqual(len(w.validates()), 2, res.stdout)   # no new validate of the target
+        self.assertEqual([e[2] for e in w.enables()], [sha(w.pre)])
+        assert_runs(self, w, w.pre)
+        f = w.family()
+        self.assertEqual((f['candidate']['version'], f['rejected']), (V2, []))
+        self.assertTrue(os.path.exists(os.path.join(w.vms, NEW)))
+        return w
+
+    def test_non_api_killed_at_each_line_after_it(self):
+        for kill in ('validate:2', 'stop', 'restore'):
+            with self.subTest(kill=kill):
+                w = self.recovered('refuse', kill)
+                self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+
+    def test_unknown_killed_at_each_line_after_it(self):
+        for kill in ('validate:2', 'restore'):
+            with self.subTest(kill=kill):
+                w = self.recovered('unknown', kill)
+                self.assertEqual(stops(w), [])
+
+    def test_control_killed_at_installed_after_a_post_pass_rolls_back(self):
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'installed'}).returncode, KILLED)
+        w.r.cmd('pass', ok=False)
+        self.assertIn('validate recover 1 PASS', w.journal())
+        assert_closed(self, w)
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+        self.assertIsNone(w.family()['candidate'])
+
+
+class TestTwoHourBound(unittest.TestCase):
+    """S3b-4a r1 F3: the 2-h bound (ROLLBACK_BOUND from SINCE) covers every retried rollback failure: a runner-disable
+    time-out, an UNKNOWN validate before and after the edit. Past it the next call holds STOP ROLLBACK FAILED and runs
+    no runner-disable; within it (the control) the rollback is tried again."""
+
+    H = 3600
+
+    def first(self, kind):
+        w = rb_win(self)
+        if kind == 'disable':
+            w.put('disable-fail')
+            self.assertEqual(rollback(w, since=int(time.time()) - self.H).returncode, 3)
+            os.remove(os.path.join(w.scn, 'disable-fail'))
+        elif kind == 'post':
+            w.validate('unknown', call=2)
+            self.assertEqual(rollback(w, since=int(time.time()) - self.H).returncode, 1)
+            self.assertEqual(stops(w), [])
+        else:
+            w.validate('unknown', call=1)
+            self.assertEqual(rollback(w, since=int(time.time()) - self.H).returncode, 2)
+            w.validate('unknown', call=2)
+        return w
+
+    def test_past_the_bound_no_runner_disable(self):
+        for kind in ('disable', 'post', 'pre'):
+            with self.subTest(kind=kind):
+                w = self.first(kind)
+                n = n_disable(w)
+                res = rollback(w, since=int(time.time()) - 3 * self.H)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: STOP ROLLBACK FAILED: ', res.stdout)
+                self.assertEqual(n_disable(w), n)
+                self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+                self.assertFalse(os.path.exists(w.u.window))
+                self.assertEqual((w.config_now(), os.path.exists(w.r.flag)), (w.pre, True))
+                self.assertEqual([e[2] for e in w.enables()][-1:], [] if kind == 'pre' else [sha(w.pre)])
+
+    def test_control_within_the_bound_it_is_tried_again(self):
+        for kind in ('disable', 'post', 'pre'):
+            with self.subTest(kind=kind):
+                w = self.first(kind)
+                n, v = n_disable(w), len(w.validates())
+                res = rollback(w, since=int(time.time()) - self.H)
+                self.assertNotIn('ROLLBACK FAILED', res.stdout)
+                self.assertGreater(len(w.validates()), v)
+                if kind == 'pre':
+                    self.assertEqual((res.returncode, n_disable(w)), (2, n))
+                else:
+                    self.assertEqual((res.returncode, n_disable(w)), (0, n + 1), res.stdout)
+
+
+def archived(w, name, family, *lines):
+    """a closed journal in WINDOWS (an earlier window's), FAMILY's, with LINES"""
+    w.sb.write(os.path.join(w.r.statedir, 'windows', name),
+               ''.join(l + '\n' for l in ['window ' + name, 'family ' + family, 'kind switch'] + list(lines)
+                       + ['closed 1']))
+
+
+class TestPinAfterARollback(unittest.TestCase):
+    """S3b-4a r1 F4: D2's ONE RULE at a rollback's close: the pin names the restored image's version V1 (the state's
+    record) with a sha the updater once had as the family's pin (a closed journal of the family: pin-write, pin-rule
+    or pin-before), also when V1 is not the release literal; at each rollback boundary (config edited, enable, pin
+    written) through RECOVER too."""
+
+    def win(self, journal=True):
+        self.assertNotIn(V1, (V0, V2))
+        w = rb_win(self, images={OLD: V1, NEW: V2})
+        w.u.pins(mac_golden='%s %s\n' % (V2, SHA2))
+        if journal:   # the candidate's switch window: it started on the pin of V1
+            archived(w, '20261020100000-11', FAM, 'version ' + V2, 'pin-before %s %s' % (V1, SHA1),
+                     'pin-write %s %s' % (V2, SHA2), 'pin-rule %s %s' % (V2, SHA2))
+        # a decoy: a later journal of ANOTHER family that names another sha for V1
+        archived(w, '20261021100000-12', 'linux-tart', 'pin-before %s %s' % (V1, '4' * 64))
+        return w
+
+    def assert_pin(self, w, key=None):
+        self.assertEqual(read_text(w.pin), '%s %s\n' % (V1, SHA1), key)
+        out = w.sb.run(['/bin/zsh', '-f', os.path.join(w.tools, 'golden-build'), '--print-runner']).stdout
+        self.assertEqual(out.strip(), 'host pin %s (release literal %s)' % (V1, V0), key)
+
+    def test_an_automatic_rollback(self):
+        w = self.win()
+        self.assertEqual(rollback(w).returncode, 0)
+        self.assertIsNone(w.family()['candidate'])
+        self.assert_pin(w)
+
+    def test_back(self):
+        w = self.win()
+        self.assertEqual(w.run('back').returncode, 0)
+        self.assert_pin(w)
+
+    def test_recover_at_each_boundary(self):
+        for key in ('installed', 'enable-start', 'enable-done', 'running', 'pin-rule'):
+            with self.subTest(key=key):
+                w = self.win()
+                self.assertEqual(rollback(w, env={'RU_KILL_AT': key}).returncode, KILLED)
+                w.r.cmd('pass', ok=False)
+                self.assertFalse(os.path.exists(w.u.window), key)
+                self.assertIsNone(w.family()['candidate'], key)
+                self.assert_pin(w, key)
+
+    def test_control_no_journal_of_the_family_names_its_sha(self):
+        w = self.win(journal=False)
+        res = rollback(w)
+        self.assertIn('the pin %s is removed: no sha256 of runner %s is known' % (w.pin, V1), res.stdout)
+        self.assertFalse(os.path.exists(w.pin))
+
+
+class TestDeleteOnlyARecordedImage(unittest.TestCase):
+    """S3b-4a r1 P3-1: the image a rollback (or `back`) leaves is deleted only when the state records it as the
+    family's (the candidate's lines, or an image the updater built or adopted: its image record). A person's hand image
+    stays."""
+
+    H = 'liveapp-mac-golden-20261025'
+
+    def test_back_after_accept_keeps_a_hand_image(self):
+        w = rb_win(self, cfg=config((('mac-a', self.H),)),
+                   families={FAM: fam(previous={'mac-a': OLD}, back_until=int(time.time()) + 86400)})
+        w.sb.write(os.path.join(w.vms, self.H), '')
+        res = w.run('back')
+        self.assertEqual(res.returncode, 0, res.stdout)
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+        self.assertTrue(os.path.exists(os.path.join(w.vms, self.H)))
+        self.assertIn('%s stays: the state does not record it' % self.H, res.stdout)
+        self.assertEqual(actions(w), [])
+
+    def test_control_back_after_accept_deletes_the_recorded_image(self):
+        w = rb_win(self, families={FAM: fam(previous={'mac-a': OLD}, back_until=int(time.time()) + 86400)})
+        self.assertEqual(w.run('back').returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(w.vms, NEW)))
+        self.assertEqual(actions(w), ['delete ' + NEW])
+
+
+class TestRecoverKeepsTheVerdict(unittest.TestCase):
+    """S3b-4a r1 P3-2: the ROLLED BACK that RECOVER holds keeps R1's failures and text (the verdict the window kept in
+    its folder, by the sha its journal names)."""
+
+    def test_killed_at_state_write(self):
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'state-write'}).returncode, KILLED)
+        w.r.cmd('pass', ok=False)
+        assert_closed(self, w)
+        (s,) = w.family()['stops']
+        self.assertEqual((s['stop'], len(s['detail']['failures']), s['detail']['text']),
+                         ('ROLLED BACK', 3, VERDICT['reason']))
+        self.assertIn('%s: STOP ROLLED BACK (runner %s): 3 counted failures, the last: Failed to start runner on '
+                      'runner-0003' % (FAM, V2), w.status())
+
+    def test_control_a_verdict_file_that_changed_is_not_read(self):
+        w = rb_win(self)
+        self.assertEqual(rollback(w, env={'RU_KILL_AT': 'state-write'}).returncode, KILLED)
+        (vf,) = [os.path.join(d, 'verdict.json') for d in
+                 (os.path.join(w.r.statedir, 'windows', n) for n in os.listdir(os.path.join(w.r.statedir, 'windows')))
+                 if os.path.isdir(d)]
+        w.sb.write(vf, json.dumps(dict(VERDICT, failures=FAILS[:1])) + '\n')
+        w.r.cmd('pass', ok=False)
+        (s,) = w.family()['stops']
+        self.assertEqual((s['stop'], s['detail'].get('failures'), s['detail']['text']),
+                         ('ROLLED BACK', None, VERDICT['reason']))
+
+
+class TestFutureMtimeInARollback(unittest.TestCase):
+    """S3b-4a r1 P3-4: A FUTURE MTIME in a rollback window is the rollback's failure, ROLLBACK FAILED (with its retry
+    line), not a switch's `check failed`."""
+
+    def test_a_target_dated_in_the_future(self):
+        w = rb_win(self)
+        w.hook('validate-hook.2', '/usr/bin/touch -t 203001010000 %s\n' % w.r.config)
+        res = rollback(w)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn("runner-updater: STOP ROLLBACK FAILED: the config's mtime ", res.stdout)
+        assert_runs(self, w, w.pre)
+        self.assertEqual(hands(w), {'ROLLBACK FAILED': RETRY})
+
+
+class TestHandChangeUnderTheLock(unittest.TestCase):
+    """S3b-4a r1 F6 (PLAN :236-243 as amended): a person's file found under the runner lock is not edited (STOP HAND
+    CHANGE) and gets CI only when a copy of it validates (the ONE VALIDATE RULE); else no runner-enable, FLAG absent,
+    the journal stays open with its `hand-change` line, and the next RECOVER validates it again."""
+
+    def win(self):
+        w = rb_win(self)
+        w.hook('disable-hook.1', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)
+        return w, w.pre + b'# a hand edit\n'
+
+    def test_a_file_that_does_not_validate_gets_no_ci(self):
+        w, found = self.win()
+        w.validate('refuse', call=2)                 # call 1: PRE-VALIDATE; call 2: the copy of the person's file
+        res = rollback(w)
+        self.assertEqual(res.returncode, 3, res.stdout)
+        self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
+        self.assertIn('runner-enable` by hand', res.stdout)
+        self.assertEqual(w.validates()[-1][2], sha(found))
+        self.assertEqual((w.enables(), os.path.exists(w.r.flag)), ([], False))
+        self.assertEqual(w.config_now(), found)
+        self.assertTrue(os.path.exists(w.u.window))
+        self.assertEqual(w.value('hand-change'), sha(found))
+        w.r.cmd('pass', ok=False)                    # RECOVER validates it again (PASS now): CI on it
+        assert_closed(self, w)
+        assert_runs(self, w, found)
+
+    def test_control_a_file_that_validates_gets_ci(self):
+        w, found = self.win()
+        res = rollback(w)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertEqual(w.validates()[-1][2], sha(found))
+        assert_runs(self, w, found)
+        assert_closed(self, w)
+        self.assertEqual(stops(w), ['HAND CHANGE'])
+
+
 if __name__ == '__main__':
     unittest.main()

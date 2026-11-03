@@ -92,10 +92,10 @@
 #            restored image's, and holds no ROLLED BACK. It refuses while the updater is OFF. Exit 0 rolled back, 1 a
 #            STOP or a REFUSE, 5 pending (CI disabled by a person, or the target's validate UNKNOWN: nothing changed).
 #   retry FAMILY       clears the family's rejection and every STOP it holds whose line (status.jq's: D7's lines) names
-#            `runner-updater retry FAMILY`: check failed, ROLLED BACK, JOBS FAIL ON THE NEW IMAGE, NO EVIDENCE, and a
-#            rollback's ROLLBACK FAILED (its hand line). A STOP whose line names another step, and another family's,
-#            stay; a version a PINNED RUNNER RETIRED STOP still holds stays rejected. It starts nothing (the next pass may
-#            proceed), and it runs while the updater is OFF too.
+#            `runner-updater retry FAMILY`: check failed, ROLLED BACK, JOBS FAIL ON THE NEW IMAGE, NO EVIDENCE, and
+#            ROLLBACK FAILED (its hand line, whatever step raised it). A STOP whose line names another step, and
+#            another family's, stay; a version a PINNED RUNNER RETIRED STOP still holds stays rejected. It starts
+#            nothing (the next pass may proceed), and it runs while the updater is OFF too.
 # RECOVER FIRST: an open window journal (WINDOW) that no run holds (the window holds the updater lock for its whole run,
 # so a run that took the lock and finds one found an interrupted window): pass, rebuild, switch-now, back, retry, on and
 # off end it
