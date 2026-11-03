@@ -12,7 +12,7 @@ inputs: no clock (the glue passes `now`), no file, no network. The glue measures
 | `status.jq` | the STOP table: each STOP's line, next step and properties; the evidence lines |
 | `lib/logfmt.jq` | runscaler's log text (charm log v2, text format) into records; shared by the programs |
 | `lib/core.jq` | the formats, the state's shape, provenance and the time format; shared |
-| `lib/stops.jq` | the STOP table (PLAN D7), ONE copy: status.jq prints its properties, keep.jq reads it |
+| `lib/stops.jq` | the STOP table (PLAN D7), ONE copy: status.jq prints its properties, keep.jq reads it, and so does the Studio's DUE (`bin/runner-updater-release`, rl_stop) |
 
 The jq builds they are tested with: [TESTED_JQ](TESTED_JQ). The glue refuses new work under another jq ("untested
 jq", a STOP).

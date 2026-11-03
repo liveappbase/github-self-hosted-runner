@@ -1,13 +1,14 @@
 """The release half of the runner-image updater on the Studio (S3b-2b): bin/runner-updater-release (which release a
-family may switch to: the TLS filter, the release checks, the recipe, REJECTED, the pass hook), bin/tls-excluded-lib
-(the ONE Mac reader of setup/tls-excluded-spki, which golden-emudhra and the filter source), and the warm-pool read of
-bin/runner-updater-lib (a pool-size KEY only).
+family may switch to: the TLS filter, the release checks, the recipe, REJECTED, the STOPs DUE reads, the pass hook and
+its no-action proof on a DUE pass), bin/tls-excluded-lib (the ONE Mac reader of setup/tls-excluded-spki, which
+golden-emudhra and the filter source), and the warm-pool read of bin/runner-updater-lib (a pool-size KEY only).
 
 The pass cells run bin/runner-updater in test_runner_updater's Rig (every path constant rewritten into a sandbox). The
 function cells source a copy of the file under test in a small zsh driver. GitHub is a curl stub (no network): it logs
 each call (its argv and the OPENSSL_X509_TEA_DISABLE it saw) and answers from files. The TLS filter runs the real
-/usr/bin/openssl on the real /etc/ssl/cert.pem plus test certificates this file makes. The LIVE cells reach GitHub:
-they skip unless RUNNER_UPDATER_LIVE_TLS=1.
+/usr/bin/openssl on the real /etc/ssl/cert.pem plus test certificates this file makes, and real public roots
+(tests/studio/fixtures/tls/). The LIVE cells reach GitHub and a public eMudhra test host: they skip unless
+RUNNER_UPDATER_LIVE_TLS=1.
 """
 import calendar
 import hashlib
@@ -24,7 +25,8 @@ from tests.hetzner.test_tls import read_data
 from tests.studio.support_emudhra import EXCLUDED_LINE, data_keys, emudhra_copy, guest_text, scenario, write as ewrite
 from tests.studio.support import REPO, Sandbox
 from tests.studio.test_runner_updater import IMG, P, Rig, config, read_text, the_jq
-from tests.studio.test_runner_updater_state import Paths, cand, fam, on_state, state
+from tests.studio.test_runner_updater_state import (DENIED, KILL, PASS_RUNS, Paths, actions_seen, cand, fam, on_state,
+                                                   only_these_start, state, stop)
 
 ZSH = '/bin/zsh'
 DATA = os.path.join(REPO, 'setup', 'tls-excluded-spki')
@@ -316,7 +318,7 @@ exit 0
 DRIVER = """set -u
 export LC_ALL=C TZ=UTC
 umask 077
-STATEDIR=%(statedir)s RELBIN=%(bin)s JQ=%(jq)s DD=/bin/dd CONFIG=%(config)s
+STATEDIR=%(statedir)s RELBIN=%(bin)s JQ=%(jq)s DD=/bin/dd CONFIG=%(config)s CORE=%(core)s
 source $RELBIN/runner-updater-lib || { print -r -- "cannot source the lib"; exit 9 }
 source $RELBIN/runner-updater-release || { print -r -- "cannot source the release file"; exit 9 }
 %(snippet)s
@@ -404,7 +406,7 @@ class Kit:
     def run(self, snippet, env=None):
         d = self.sb.write(self.sb.path('driver'), DRIVER % {
             'statedir': self.statedir, 'bin': self.bin, 'jq': the_jq(), 'config': self.sb.path('config.toml'),
-            'snippet': snippet}, 0o755)
+            'core': os.path.join(REPO, 'core'), 'snippet': snippet}, 0o755)
         return self.sb.run([ZSH, '-f', d], extra_env=env)
 
     def route(self, url, code=200, body='', exit=None):
@@ -537,6 +539,66 @@ class TestFilter(unittest.TestCase):
         rebuilt, k, r = change(lambda k: k.copy_release(read_text(os.path.join(REPO, 'bin', 'runner-updater-release'))
                                                          .replace('RL_FLOOR=100', 'RL_FLOOR=99')))
         self.assertTrue(rebuilt, 'a bundle made under another floor was kept')
+
+
+# the real roots, public certificates (tests/studio/fixtures/tls/, each file's first line names its source): the two
+# excluded roots on this Mac, by the data file's name and the key type LibreSSL must hash, and a real unlisted root
+TLS_FIXTURES = os.path.join(REPO, 'tests', 'studio', 'fixtures', 'tls')
+REAL_EXCLUDED = (('aaa-certificate-services.pem', 'AAA Certificate Services', 'rsaEncryption'),
+                 ('emsign-ecc-root-ca-g3.pem', 'emSign ECC Root CA - G3', 'id-ecPublicKey'))
+REAL_KEPT = 'telia-root-ca-v2.pem'
+
+
+def real_root(name):
+    """the one certificate of the fixture NAME"""
+    found = pems(read_text(os.path.join(TLS_FIXTURES, name)))
+    assert len(found) == 1, (name, len(found))
+    return found[0]
+
+
+class TestFilterRealRoots(unittest.TestCase):
+    """rl_bundle with the real data file on the REAL excluded roots (Opus r1 P3-1): AAA Certificate Services (an RSA
+    key) and emSign ECC Root CA - G3 (an EC key), appended to a copy of the system bundle, are each dropped by their
+    SPKI sha256 as the filter's real /usr/bin/openssl (LibreSSL) reads it. /etc/ssl/cert.pem holds neither, and this
+    Mac has no copy of the third excluded root (emSign Root TLS CA - G3). The control: Telia Root CA v2, a real RSA root
+    the file does not list and the system bundle does not hold, is kept."""
+
+    def setUp(self):
+        self.data = {name: h for h, name in read_data(DATA)}
+        self.system = [spki_sha256(p) for p in system_pems()]
+        self.kept = real_root(REAL_KEPT)
+        self.kept_spki = spki_sha256(self.kept)
+        self.assertNotIn(self.kept_spki, self.data.values())
+        self.assertNotIn(self.kept_spki, self.system)
+
+    def test_the_real_excluded_roots_are_dropped_by_their_keys(self):
+        extra = ''
+        for f, name, alg in REAL_EXCLUDED:
+            pem = real_root(f)
+            self.assertEqual(spki_sha256(pem), self.data[name], f)   # the fixture holds the key the file names
+            text = subprocess.run([OPENSSL, 'x509', '-noout', '-text'], input=pem, capture_output=True, text=True,
+                                  check=True).stdout
+            self.assertIn('Public Key Algorithm: %s\n' % alg, text, f)
+            extra += pem
+        k = Kit(self, source=read_text(SYSTEM_BUNDLE) + extra + self.kept)
+        r = k.run(BUNDLE)
+        self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+        got = k.keys()
+        for _, name, _ in REAL_EXCLUDED:
+            self.assertNotIn(self.data[name], got, name)
+        want = [s for s in self.system if s not in self.data.values()] + [self.kept_spki]
+        self.assertEqual(got, want)
+        dropped = len(REAL_EXCLUDED) + sum(s in self.data.values() for s in self.system)
+        self.assertIn('%d certificates of %s kept, %d dropped by their excluded keys' % (len(want), k.source, dropped),
+                      r.stdout)
+
+    def test_control_a_real_unlisted_root_is_kept(self):
+        k = Kit(self, source=read_text(SYSTEM_BUNDLE) + self.kept)
+        r = k.run(BUNDLE)
+        self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+        got = k.keys()
+        self.assertEqual(got[-1], self.kept_spki)
+        self.assertEqual(got.count(self.kept_spki), 1)
 
 
 class TestCurlLine(unittest.TestCase):
@@ -869,18 +931,21 @@ class TestUnreject(unittest.TestCase):
 class PassRig:
     """a Rig whose families file names mac-golden (its set mac-a: IMG), whose release bin/ holds the recipe's files
     (BUILDER), and whose release file answers from the GitHub stub and filters a copy of the system bundle. The state:
-    ON, mac-golden with the recipe of those files as its baseline, IMG recorded as runner V0."""
+    ON, mac-golden with the recipe of those files as its baseline, IMG recorded as runner V0. EXTRA_REWRITES go into the
+    runner-updater copy (after the clock's), RELEASE_REWRITES into the release file's copy."""
 
-    def __init__(self, test, **fam_kw):
+    def __init__(self, test, extra_rewrites=(), release_rewrites=(), **fam_kw):
         self.r = r = Rig(test, jq_wrap=True, families='mac-golden tart mac-a\n', extra_rewrites=[(
-            'now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')])
+            'now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')] + list(extra_rewrites))
         self.u = Paths(r)
         sb = r.sb
         self.gh = sb.mkdir('gh')
-        curl = sb.write(sb.path('tools-gh2', 'curl'), '#!/bin/zsh -f\n' + GH_STUB.replace('@D@', self.gh), 0o755)
+        self.curl = curl = sb.write(sb.path('tools-gh2', 'curl'), '#!/bin/zsh -f\n' + GH_STUB.replace('@D@', self.gh),
+                                    0o755)
         source = sb.write(sb.path('ca', 'cert.pem'), read_text(SYSTEM_BUNDLE))
         sb.copy_script('bin/runner-updater-release', [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + curl),
-                                                      ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + source)])
+                                                      ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + source)]
+                       + list(release_rewrites))
         # the recipe's files under the release folder, RELBIN/.. (the rig's RELBIN is tools/, so its bin/ is apart);
         # its setup/ also holds the filter's data file
         files = dict(BUILDER)
@@ -1060,10 +1125,190 @@ class TestPassHook(unittest.TestCase):
         self.assertEqual(p.urls()[n:], [API + '/releases/latest'])   # the tarball is verified once
 
 
+# ---- the STOPs a family holds (PLAN D7; the ONE table is core/lib/stops.jq)
+
+# The D7 rows, spelled here on purpose: test_the_rows_are_the_cores_table pins them to the core's table, both ways, so
+# a new row gets its cell. A newer release does NOT proceed alone past a STOP of NO_ROWS; past one of YES_ROWS it does,
+# so that STOP holds only its own version.
+NO_ROWS = ('JOBS FAIL ON THE NEW IMAGE', 'ROLLBACK FAILED', 'CI DISABLED', 'POOL DOWN', 'HAND CHANGE', 'recipe changed',
+           'NO BASELINE', 'NO EVIDENCE', 'NO IDLE', 'untested jq', 'SHIM REFUSED')
+YES_ROWS = ('check failed', 'ROLLED BACK', 'PINNED RUNNER RETIRED')
+UNKNOWN = 'A STOP THIS CORE DOES NOT KNOW'
+NO_PROCEED = 'a newer release does not proceed alone past it'
+NOT_KNOWN = 'a STOP this release does not know holds every release'
+NO_VERSION = 'a STOP that names no version holds every release'
+OF_ELIGIBLE = 'it is of the eligible release'
+
+
+def held(name, version, why, family='mac-golden'):
+    """the pass line of FAMILY held by the STOP NAME of VERSION"""
+    shown = 'no runner version' if version in (None, '') else 'runner ' + version
+    return 'runner-updater: pass: %s is not due: STOP %s (%s): %s; `runner-updater status` names its next step' % (
+        family, name, shown, why)
+
+
+class TestPassHookStops(unittest.TestCase):
+    """DUE reads the STOPs (PLAN D7, Opus r1 P1-1). A family is not due while a STOP holds it: one that a newer release
+    does not proceed alone past (the core's S::newer_proceeds from core/lib/stops.jq, never a table of this release's
+    own; a name the table does not know is one), one that names no version, or one of the eligible version. It holds
+    when it names the family, or names no family. The line names the STOP and its version. A STOP that holds whatever
+    the release is asks GitHub nothing; one of the eligible version is known only after the release check."""
+
+    def stopped(self, name, version, **kw):
+        p = PassRig(self, stops=[stop('mac-golden', name, version=version)], **kw)
+        p.latest()
+        return p, p.lines(p.pass_())
+
+    def test_the_rows_are_the_cores_table(self):
+        out = subprocess.run([the_jq(), '-n', '-c', '-L', os.path.join(REPO, 'core', 'lib'),
+                              'import "stops" as S; [S::table | keys[] | [., S::newer_proceeds(.)]]'],
+                             capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout
+        self.assertEqual(sorted(map(tuple, json.loads(out))),
+                         sorted([(n, False) for n in NO_ROWS] + [(n, True) for n in YES_ROWS]))
+
+    def test_a_stop_no_newer_release_proceeds_past_holds_and_asks_github_nothing(self):
+        for name in NO_ROWS:
+            with self.subTest(stop=name):
+                p, lines = self.stopped(name, V1)   # an OLDER version: only its row holds it
+                self.assertEqual(lines, [held(name, V1, NO_PROCEED)])
+                self.assertEqual(p.urls(), [])
+
+    def test_a_stop_the_table_does_not_know_holds(self):
+        p, lines = self.stopped(UNKNOWN, V1)
+        self.assertEqual(lines, [held(UNKNOWN, V1, NOT_KNOWN)])
+        self.assertEqual(p.urls(), [])
+
+    def test_a_stop_of_the_eligible_version_holds(self):
+        for name in YES_ROWS:
+            with self.subTest(stop=name):
+                p, lines = self.stopped(name, V2)
+                self.assertEqual(lines, [held(name, V2, OF_ELIGIBLE)])
+                self.assertEqual(p.urls(), [API + '/releases/latest'])   # the release check, and no download
+
+    def test_control_a_stop_of_an_older_version_lets_a_newer_release_proceed(self):
+        for name in YES_ROWS:
+            with self.subTest(stop=name):
+                self.assertEqual(self.stopped(name, V1)[1], [SWITCH])
+
+    def test_a_stop_that_names_no_version_holds_and_asks_github_nothing(self):
+        for v in (None, ''):
+            for name in (YES_ROWS[0], NO_ROWS[0]):
+                with self.subTest(version=v, stop=name):
+                    p, lines = self.stopped(name, v)
+                    self.assertEqual(lines, [held(name, v, NO_VERSION)])
+                    self.assertEqual(p.urls(), [])
+
+    def test_control_no_stop_is_due(self):
+        p = PassRig(self, stops=[])
+        p.latest()
+        self.assertEqual(p.lines(p.pass_()), [SWITCH])
+
+    def test_control_a_stop_of_another_family_does_not_hold_this_one(self):
+        p = PassRig(self)
+        p.r.sb.write(p.r.families, 'mac-golden tart mac-a\nfx tart mac-b\n')
+        p.latest()
+        s = json.loads(json.dumps(p.state))
+        s['families']['fx'] = fam(stops=[stop('fx', 'HAND CHANGE', version=V1)])
+        self.assertEqual(p.lines(p.pass_(s)), [SWITCH, held('HAND CHANGE', V1, NO_PROCEED, family='fx')])
+
+
+# rl_pass on a state set by hand (the updater's own load refuses a STOP whose family is not its family's key, so these
+# shapes reach rl_pass only from a later release's state): families mac-golden and fx, neither with a recipe tree here,
+# so a family no STOP holds prints "the recipe of FAMILY: cannot read ..."
+HAND_PASS = 'ru_fam_order=(mac-golden fx)\nru_state=$(<%s)\nrl_pass %d\nprint -r -- "rc $?"'
+
+
+class TestStopsOnAStateByHand(unittest.TestCase):
+    """A STOP that names no family (none, "", or not a string) holds every family, as keep.jq does; a STOP the jq
+    cannot read holds every family too (fail closed): the line says the STOPs could not be read."""
+
+    def pass_lines(self, s):
+        k = Kit(self)
+        p = k.sb.write(k.sb.path('state.json'), json.dumps(s))
+        r = k.run(HAND_PASS % (p, NOW))
+        self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+        return [l for l in r.stdout.splitlines() if l.startswith('runner-updater: pass: ')]
+
+    def a_state(self, s):
+        return state(on=True, families={'mac-golden': fam(), 'fx': fam(stops=[s])})
+
+    def test_a_stop_that_names_no_family_holds_every_family(self):
+        for how in ('absent', '', None, 5):
+            with self.subTest(family=how):
+                s = stop('fx', 'HAND CHANGE', version=V1)
+                if how == 'absent':
+                    del s['family']
+                else:
+                    s['family'] = how
+                self.assertEqual(self.pass_lines(self.a_state(s)), [
+                    held('HAND CHANGE', V1, NO_PROCEED), held('HAND CHANGE', V1, NO_PROCEED, family='fx')])
+
+    def test_control_a_stop_that_names_another_family_holds_only_it(self):
+        lines = self.pass_lines(self.a_state(stop('fx', 'HAND CHANGE', version=V1)))
+        self.assertEqual(lines[1], held('HAND CHANGE', V1, NO_PROCEED, family='fx'))
+        self.assertTrue(lines[0].startswith(NOT + 'the recipe of mac-golden: cannot read '), lines)
+
+    def test_stops_the_jq_cannot_read_hold_every_family(self):
+        s = stop('fx', 'HAND CHANGE', version=V1)
+        s['stop'] = 5   # S::newer_proceeds cannot index the table with a number: jq fails
+        why = 'jq could not read the STOPs of the state; a family is never due while they cannot be read'
+        self.assertEqual(self.pass_lines(self.a_state(s)), [NOT + why, 'runner-updater: pass: fx is not due: ' + why])
+
+
+# THE NO-ACTION PROOF OF A DUE PASS (Opus r1 P2-1). test_runner_updater_state's TestNoActionAnyPath runs a pass whose
+# family has an open candidate, so the hook stops at its first check. This one runs the hook to its end: the profile
+# lets start what a pass may start (PASS_RUNS) and exactly what the hook adds: the filter's openssl, mktemp, and the
+# GitHub stub (PassRig's curl).
+HOOK_RUNS = PASS_RUNS + ('/usr/bin/openssl', '/usr/bin/mktemp')
+WOULD_SWITCH_AT = '    ru_say "pass: would switch $f to $rl_version (this release takes no action)"\n'
+ABSOLUTE = '/bin/launchctl list > /dev/null'
+
+
+class TestNoActionDuePass(unittest.TestCase):
+    """A DUE pass, under macOS's sandbox (test_runner_updater_state, only_these_start): it prints "would switch"
+    (positive evidence that the hook ran to its end), its stderr is empty (no start was denied), and no action stub ran.
+    The controls, under the same profile: an action by its absolute path planted at the would-switch line is denied and
+    the cell sees the denial; without openssl in the allowlist the hook never reaches "would switch" (the profile binds
+    the hook)."""
+
+    def due_pass(self, runs, plant=None):
+        p = PassRig(self, extra_rewrites=[KILL],
+                    release_rewrites=[(WOULD_SWITCH_AT, '    %s\n%s' % (plant, WOULD_SWITCH_AT))] if plant else ())
+        p.latest()
+        p.u.put(p.state)
+        res = p.r.sb.run(['/usr/bin/sandbox-exec', '-p', only_these_start(p.r, runs + (p.curl,)), '/bin/zsh', '-f',
+                          p.r.script, 'pass'],
+                         extra_env={'RU_TEST_NOW': str(NOW), 'ACTIONS_LOG': p.r.sb.path('logs', 'actions.log')})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        return p, res
+
+    def test_a_due_pass_starts_only_what_it_may(self):
+        p, res = self.due_pass(HOOK_RUNS)
+        self.assertEqual(p.lines(res), [SWITCH])
+        self.assertEqual(res.stderr, '')                 # no denied start
+        self.assertEqual(actions_seen(p.r), [])          # no action stub reached
+        self.assertEqual(p.urls(), [API + '/releases/latest',
+                                    '%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (DL, V2, V2)])
+
+    def test_control_an_action_at_the_would_switch_line_is_denied_and_seen(self):
+        p, res = self.due_pass(HOOK_RUNS, plant=ABSOLUTE)
+        self.assertEqual(res.stderr.count(DENIED % '/bin/launchctl'), 1, res.stderr)
+        self.assertEqual(p.lines(res), [SWITCH])
+        self.assertEqual(actions_seen(p.r), [])          # the stub never ran: the call was by its path
+
+    def test_control_without_openssl_the_hook_does_not_switch(self):
+        p, res = self.due_pass(tuple(x for x in HOOK_RUNS if x != '/usr/bin/openssl'))
+        self.assertNotIn(SWITCH, p.lines(res))
+        self.assertEqual(p.lines(res), [NOT + 'STOP the filtered CA bundle: no /usr/bin/openssl'])
+        self.assertEqual(p.urls(), [])
+
+
 # ---- LIVE: real GitHub through the real filter (the operator runs these)
 
 LIVE = os.environ.get('RUNNER_UPDATER_LIVE_TLS') == '1'
-LIVE_WHY = 'LIVE: reaches api.github.com over the network; run with RUNNER_UPDATER_LIVE_TLS=1'
+LIVE_WHY = ('LIVE: reaches GitHub (its API and its download host) and a public eMudhra test host over the network; '
+            'run with RUNNER_UPDATER_LIVE_TLS=1')
+EMSIGN_PATH = 'https://dv-g3b-emudhra.we-have-a-problem.com/'   # its chain ends at emSign ECC Root CA - G3 (PLAN D2)
 
 
 @unittest.skipUnless(LIVE, LIVE_WHY)
@@ -1071,7 +1316,11 @@ class TestLiveTLS(unittest.TestCase):
     """The real /usr/bin/curl through rl_curl: api.github.com gives 200 through the filtered bundle of the real system
     bundle and the real data file. A one-root bundle (ISRG Root X1, which does not chain api.github.com; RL_FLOOR 1 for
     this cell) gives curl exit 60 WITH OPENSSL_X509_TEA_DISABLE=1, and 200 WITHOUT it (the measured control: Apple's
-    curl then falls back to the keychain)."""
+    curl then falls back to the keychain). PLAN D2's emSign test path gives curl exit 60 through the filtered bundle of
+    a source that holds its root (the real emSign ECC Root CA - G3, a fixture): the filter dropped it; the control,
+    the same source with that root's key not excluded, reaches the host (any HTTP answer). The release tarball's host
+    (a HEAD of a past darwin-arm64 asset, its redirect followed) gives 200. Run them on the Studio: the log does not
+    say which host ran it."""
 
     def kit(self, source=None, text=None):
         k = Kit(self, source=source, rewrites=[('RL_FLOOR=100', 'RL_FLOOR=1')] if source else ())
@@ -1079,10 +1328,13 @@ class TestLiveTLS(unittest.TestCase):
         k.copy_release(text if text is not None else read_text(os.path.join(REPO, 'bin', 'runner-updater-release')))
         return k
 
-    def get(self, k):
-        r = k.run('code=$(rl_curl --max-time 30 -o /dev/null -w "%{http_code}" https://api.github.com/); '
-                  'print -r -- "rc $? code $code"')
+    def get(self, k, url='https://api.github.com/', opts=''):
+        r = k.run('code=$(rl_curl %s--max-time 30 -o /dev/null -w "%%{http_code}" %s); print -r -- "rc $? code $code"'
+                  % (opts, url))
         return r.stdout.splitlines()[-1]
+
+    def emsign_source(self):
+        return read_text(SYSTEM_BUNDLE) + real_root('emsign-ecc-root-ca-g3.pem')
 
     def one_root(self):
         isrg = [p for p in system_pems() if spki_sha256(p) == ISRG_X1_SPKI]
@@ -1099,6 +1351,23 @@ class TestLiveTLS(unittest.TestCase):
         text = read_text(os.path.join(REPO, 'bin', 'runner-updater-release')).replace(
             'OPENSSL_X509_TEA_DISABLE=1 $RL_CURL', '$RL_CURL')
         self.assertEqual(self.get(self.kit(source=self.one_root(), text=text)), 'rc 0 code 200')
+
+    def test_the_emsign_test_path_gives_60_through_the_filtered_bundle(self):
+        k = self.kit(source=self.emsign_source())
+        self.assertTrue(self.get(k, EMSIGN_PATH).startswith('rc 60 '))
+        self.assertNotIn(spki_sha256(real_root('emsign-ecc-root-ca-g3.pem')), k.keys())
+
+    def test_control_the_emsign_test_path_with_its_root_kept_is_reached(self):
+        k = self.kit(source=self.emsign_source())
+        emsign = {h for h, name in read_data(DATA) if name == 'emSign ECC Root CA - G3'}
+        self.assertEqual(len(emsign), 1)
+        k.sb.write(k.data, ''.join(l for l in read_text(DATA).splitlines(True) if l.split(' ')[0] not in emsign))
+        self.assertTrue(self.get(k, EMSIGN_PATH).startswith('rc 0 code '))
+        self.assertIn(emsign.pop(), k.keys())
+
+    def test_the_release_tarball_host_gives_200(self):
+        url = '%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (DL, V0, V0)   # a past release, as rl_tarball asks it
+        self.assertEqual(self.get(self.kit(), url, opts='-L --max-redirs 5 --head '), 'rc 0 code 200')
 
 
 ISRG_X1_SPKI = '0b9fa5a59eed715c26c1020c711b4f6ec42d58b0015e14337a39dad301c5afc3'

@@ -5,7 +5,8 @@
 # (the filtered CA bundle and its stamp, the record of a verified release, a download's temporary file).
 #
 # The caller sets, before it calls a function of it: STATEDIR, RELBIN (the release's bin/: its ../setup holds the data
-# file, and tls-excluded-lib is beside this file), JQ, DD (ru_write) and CONFIG; it has sourced bin/runner-updater-lib
+# file, and tls-excluded-lib is beside this file), JQ, DD (ru_write), CONFIG and CORE (the release's core/: rl_stop asks
+# its lib/stops.jq, the ONE STOP table); it has sourced bin/runner-updater-lib
 # (ru_say, ru_write, and for rl_pass the pass's facts: ru_state, ru_fam, ru_fam_order, ru_lines) and exports TZ=UTC and
 # LC_ALL=C. Loading this file sources $RELBIN/tls-excluded-lib (the ONE Mac reader of setup/tls-excluded-spki).
 #
@@ -46,24 +47,35 @@
 #                         release builds no image for, or a file it cannot read.
 #   rl_unreject STATE FAMILY VERSION   REPLY = STATE (JSON) with VERSION no longer rejected for FAMILY (`retry FAMILY`,
 #                         a later release): 0; 1 + REPLY when it is not rejected for it (nothing to clear).
+#   rl_stop FAMILY [V]    the first STOP the state holds that holds FAMILY's DUE (PLAN D7; below): 0 + REPLY (the
+#                         STOP, its version and why); 1 none; 2 + REPLY when jq cannot read the STOPs (fail closed).
 #   rl_pass NOW           THE PASS HOOK: one line per family of the families file, in its order (below).
 #
-# THE PASS HOOK (rl_pass). A family is DUE when the eligible release is newer than the family's current version and the
-# family has no open candidate (one open release per family). Its current version: the image every set of the family
-# names in the config (one image), and the state's record of that image (images). It prints, per family, the first
-# that holds, in this order (what needs no network first, so a family held for a local reason asks GitHub nothing):
+# THE PASS HOOK (rl_pass). A family is DUE when the eligible release is newer than the family's current version, the
+# family has no open candidate (one open release per family) and no STOP holds it. Its current version: the image every
+# set of the family names in the config (one image), and the state's record of that image (images). A STOP the state
+# holds (in any family's stops) holds the family when it names the family or names no family, and: it names no
+# version; or a newer release does not proceed alone past it (D7's column, asked of the core's S::newer_proceeds in
+# core/lib/stops.jq, never a table of this file: a name the table does not know does not proceed); or it is of the
+# eligible version (check failed, ROLLED BACK and PINNED RUNNER RETIRED hold only their own version). keep.jq's rule,
+# for DUE. It prints, per family, the first that holds, in this order (what needs no network first, so a family held
+# for a local reason asks GitHub nothing):
 #   1. an open candidate: "FAMILY is not due: an open candidate (runner V): ...";
-#   2. no recipe for the family (this release builds no image for it), or one it cannot compute;
-#   3. "STOP NO BASELINE": the state holds no recipe for the family (`rebuild FAMILY`, a later release, sets it);
-#   4. "STOP recipe changed": the recipe is not the state's;
-#   5. its sets do not name one image, or the state has no record of that image's runner version;
-#   6. the latest release (read once per pass): "WAIT ..." (403, 429), or a check it fails (a refusal, under 2 days);
-#   7. "release vV is rejected for FAMILY";
-#   8. "release vV is not newer than its runner C";
-#   9. the tarball's digest check (once per pass): "WAIT ..." or why it failed;
-#   10. else "would switch FAMILY to V (this release takes no action)".
-# Each STOP is printed, never written into the state (`status` does not show it), and a later pass prints it again
-# while it holds. It never fails the pass: every line is "runner-updater: pass: ...".
+#   2. a STOP that holds whatever the release is (no version, or a newer release does not proceed alone past it), or
+#      STOPs jq cannot read: "STOP NAME (runner V): why; `runner-updater status` names its next step";
+#   3. no recipe for the family (this release builds no image for it), or one it cannot compute;
+#   4. "STOP NO BASELINE": the state holds no recipe for the family (`rebuild FAMILY`, a later release, sets it);
+#   5. "STOP recipe changed": the recipe is not the state's;
+#   6. its sets do not name one image, or the state has no record of that image's runner version;
+#   7. the latest release (read once per pass): "WAIT ..." (403, 429), or a check it fails (a refusal, under 2 days);
+#   8. a STOP of that release's version: "STOP NAME (runner V): it is of the eligible release; ...";
+#   9. "release vV is rejected for FAMILY";
+#   10. "release vV is not newer than its runner C";
+#   11. the tarball's digest check (once per pass): "WAIT ..." or why it failed;
+#   12. else "would switch FAMILY to V (this release takes no action)".
+# NO BASELINE and recipe changed of steps 4 and 5 are printed, never written into the state (`status` does not show
+# them), and a later pass prints them again while they hold. It never fails the pass: every line is
+# "runner-updater: pass: ...".
 # Constants:
 #   RL_CURL      the downloads' curl (above)
 #   RL_OPENSSL   the filter's openssl (above)
@@ -298,6 +310,35 @@ rl_unreject() {
   REPLY=$new
 }
 
+# FAMILY [VERSION] -> 0 + REPLY: the first STOP of the state (ru_state) that holds FAMILY's DUE, named with its version
+# and why; 1: none holds; 2 + REPLY: jq could not read the STOPs (the caller holds the family: fail closed). The rule is
+# keep.jq's, and the D7 property it asks is the core's own S::newer_proceeds (core/lib/stops.jq): a STOP of any
+# family's list holds FAMILY when it names FAMILY or names no family (none, "", or not a string), and it names no
+# version (none, "", or not a string), or a newer release does not proceed alone past it (a name the table does not
+# know: it does not), or it is of VERSION. With no VERSION (before the release check) only the first two hold. Every
+# STOP of the state is read first, so one the jq cannot read holds every family.
+rl_stop() {
+  local out
+  out=$(print -r -- $ru_state | $JQ -r -L $CORE/lib --arg f $1 --arg v "${2-}" '
+    import "stops" as S;
+    def shown: if type == "string" and test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$") then . else tojson end;
+    def noversion: (.version | type) != "string" or .version == "";
+    [.families[] | (.stops // [])[] | . + {proceeds: S::newer_proceeds(.stop), known: (S::props(.stop) != null)}]
+    | [.[] | select(.family == $f or (.family | type) != "string" or .family == "")
+           | select(noversion or ($v != "" and .version == $v) or (.proceeds | not))]
+    | first // empty
+    | "STOP \(.stop | shown) (\(if noversion then "no runner version" else "runner \(.version | shown)" end)): "
+      + (if noversion then "a STOP that names no version holds every release"
+         elif .proceeds | not then
+           (if .known then "a newer release does not proceed alone past it"
+            else "a STOP this release does not know holds every release" end)
+         else "it is of the eligible release" end)
+      + "; `runner-updater status` names its next step"' 2>/dev/null) \
+    || { REPLY="jq could not read the STOPs of the state; a family is never due while they cannot be read"; return 2 }
+  [[ -n $out ]] || return 1
+  REPLY=$out
+}
+
 # A B (N.N.N) -> 0 when A is newer than B
 rl_newer() {
   local -a a b
@@ -314,6 +355,7 @@ rl_pass() {
   for f in $ru_fam_order; do
     v=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].candidate.version // empty')
     [[ -z $v ]] || { rl_not $f "an open candidate (runner $v): one open release per family"; continue }
+    rl_stop $f; (( $? == 1 )) || { rl_not $f "$REPLY"; continue }   # a STOP that holds whatever the release is
     rl_recipe $f ${RELBIN:h} || { rl_not $f "$REPLY"; continue }
     rec=$REPLY
     base=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].recipe // empty')
@@ -341,6 +383,7 @@ rl_pass() {
     fi
     if (( erc == 75 )); then rl_not $f "WAIT $ewhy"; continue; fi
     (( erc == 0 )) || { rl_not $f "$ewhy"; continue }
+    rl_stop $f $rl_version; (( $? == 1 )) || { rl_not $f "$REPLY"; continue }   # a STOP of the eligible release
     if print -r -- $ru_state | $JQ -e --arg f $f --arg v $rl_version \
          '(.families[$f].rejected // []) | any(.[]; . == $v)' > /dev/null; then
       rl_not $f "release v$rl_version is rejected for $f"; continue
