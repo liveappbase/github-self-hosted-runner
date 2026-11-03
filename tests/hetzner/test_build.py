@@ -14,13 +14,15 @@ kill before the rename: no record. GitHub's 403 or 429: WAIT, exit 75. It never 
 Each cell runs a copy of the real 02-d1.sh and runner-release.sh (only their pin lines rewritten) against the stubs and
 the local HTTPS GitHub of tests/hetzner/support.py, in a container.
 """
+import calendar
 import hashlib
 import json
 import os
 import re
 import unittest
 
-from tests.hetzner.support import Sandbox, needs_container, pki, sha256_file, tarball, IMAGE_NAME, REGISTRY_PORT
+from tests.hetzner.support import (Sandbox, needs_container, pki, sha256_file, tarball, ARCH, IMAGE_NAME,
+                                   REGISTRY_PORT)
 
 VERSION = '2.339.0'
 OLD = '2.338.2'           # host.conf.example's RUNNER_VERSION
@@ -268,6 +270,36 @@ class Build(unittest.TestCase):
                 self.assertIn('FAIL', r.stdout, name)
                 self.assertIn('image/%s' % name, r.stdout, name)    # it failed AT the recipe's check
                 self.assertEqual(g.built(), [], name)
+
+
+@needs_container
+class Release(unittest.TestCase):
+    """rr_release latest, the updater's call (the same code as `tag`): the newest release's facts, read strictly."""
+    FACTS = 'rr_release "$@" && printf "%s\\n" "$RR_VERSION" "$RR_PUBLISHED" "$RR_DIGEST" "$RR_URL"'
+
+    def test_latest_reads_the_newest_release(self):
+        sb = Sandbox(self)
+        tgz = tarball(VERSION)
+        sb.gh.release(VERSION, tgz, latest=True, published='2026-10-20T12:00:00Z')
+        r = sb.lib(self.FACTS, 'latest')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        name = 'actions-runner-linux-%s-%s.tar.gz' % (ARCH, VERSION)
+        self.assertEqual(r.stdout.splitlines()[-4:], [
+            VERSION, str(calendar.timegm((2026, 10, 20, 12, 0, 0))), 'sha256:' + hashlib.sha256(tgz).hexdigest(),
+            sb.gh.base + '/actions/runner/releases/download/v%s/%s' % (VERSION, name)])
+        self.assertEqual(sb.gh.seen, ['/repos/actions/runner/releases/latest'])
+
+    def test_latest_refuses_what_tag_refuses(self):
+        for why, kw, args in (('a tag that is not vN.N.N', {'tag': 'v2.339.0-beta'}, ('latest',)),
+                              ('no published time', {'published': 'yesterday'}, ('latest',)),
+                              ('a version argument', {}, ('latest', VERSION))):
+            with self.subTest(why):
+                sb = Sandbox(self)
+                sb.gh.release(VERSION, tarball(VERSION), latest=True, **kw)
+                r = sb.lib(self.FACTS, *args)
+                self.assertEqual(r.returncode, 1, why)
+                self.assertIn('REFUSE', r.stderr, why)
+                self.assertEqual(r.stdout.count(VERSION), 0, why)
 
 
 @needs_container
