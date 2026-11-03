@@ -1089,12 +1089,18 @@ DENIED = ': operation not permitted: %s\n'
 ACTIONS_SEEN = ['runner-disable', 'runner-enable', 'golden-build', 'golden-gate', 'tart', 'launchctl', 'kill']
 
 
-def only_these_start(r, programs):
-    """a sandbox-exec profile: no program may start but PROGRAMS, the rig's jq and stubs, and the action stubs"""
+def only_these_start(r, programs, writes=False):
+    """a sandbox-exec profile: no program may start but PROGRAMS, the rig's jq and stubs, and the action stubs. WRITES:
+    also no file write but under STATEDIR, /dev/null and the stubs' own log folders (ps, curl, jq and logs/)"""
     allowed = set(programs) | {r.jq, the_jq(), r.sb.path('tools-ps', 'ps'), r.sb.path('tools-curl', 'curl')}
     allowed |= {os.path.realpath(p) for p in allowed}
-    return ('(version 1)(allow default)(deny process-exec*)(allow process-exec*%s (subpath "%s"))'
-            % (''.join(' (literal "%s")' % p for p in sorted(allowed)), r.sb.stubs))
+    profile = ('(version 1)(allow default)(deny process-exec*)(allow process-exec*%s (subpath "%s"))'
+               % (''.join(' (literal "%s")' % p for p in sorted(allowed)), r.sb.stubs))
+    if writes:
+        here = [r.statedir, r.psd, r.curld, r.jqd, r.sb.logs]
+        profile += ('(deny file-write*)(allow file-write* (literal "/dev/null")%s)'
+                    % ''.join(' (subpath "%s")' % os.path.realpath(d) for d in here))
+    return profile
 
 
 def sandboxed(test, r, profile, *args, env=None):
@@ -1115,7 +1121,9 @@ class TestNoActionAnyPath(unittest.TestCase):
     style) is denied, and zsh prints the denial. The action stubs, found through PATH, stay the second witness, and
     `kill` (a builtin) is a logging function. The controls, under the same profile: `/bin/launchctl list` by its
     absolute path is denied and the cell sees the denial (and the launchctl stub sees nothing); bare names reach their
-    stubs. Bound: a call whose stderr and exit status are both thrown away is seen by neither witness."""
+    stubs. The pass's profile also denies every file write outside STATEDIR (and the stubs' own log folders), so an edit
+    of the config by a builtin or by a program it may start (mv) is seen too; its control writes beside the config and
+    must be denied. Bound: a call whose stderr and exit status are both thrown away is seen by neither witness."""
 
     ABSOLUTE = '/bin/launchctl list > /dev/null'
     # where each command's planted call goes
@@ -1132,7 +1140,7 @@ class TestNoActionAnyPath(unittest.TestCase):
         """two passes, under the profile: the window opens, then three counted failures (R1: rollback)"""
         r = Rig(self, jq_wrap=True, extra_rewrites=self.plant(self.PASS_AT, calls) if calls else [KILL])
         Paths(r).put(on_state())
-        profile = only_these_start(r, PASS_RUNS)
+        profile = only_these_start(r, PASS_RUNS, writes=True)
         env = {'ACTIONS_LOG': r.sb.path('logs', 'actions.log')}
         r.write_log('')
         first = sandboxed(self, r, profile, 'pass', env=env)
@@ -1176,6 +1184,18 @@ class TestNoActionAnyPath(unittest.TestCase):
                 r, err = run(self.ABSOLUTE)
                 self.assertEqual(err.count(DENIED % '/bin/launchctl'), n, err)
                 self.assertEqual(actions_seen(r), [])      # the stub never ran: the call was by its path
+
+    # a write beside the config: a builtin redirect, and a rename by /bin/mv (a program pass may start)
+    BESIDE = 'print -r -- planted > ${CONFIG:h}/planted; /bin/mv -f -- $CONFIG ${CONFIG:h}/moved; '
+
+    def test_control_a_pass_that_writes_beside_the_config_is_denied(self):
+        # the pass's profile also denies every file write outside STATEDIR (and the stubs' own log folders): an edit of
+        # the config by a builtin or by mv is seen, though it starts no denied program
+        r, err = self.a_pass(self.BESIDE)
+        self.assertEqual(sorted(os.listdir(r.cfgdir)), ['config.toml', 'runner.log'])
+        self.assertEqual(read_text(r.config), config())
+        self.assertEqual(err.count(': operation not permitted: %s/planted\n' % r.cfgdir), 2, err)
+        self.assertEqual(err.count('mv: rename %s to %s/moved: Operation not permitted\n' % (r.config, r.cfgdir)), 2, err)
 
     def test_control_bare_names_reach_their_stubs_under_the_same_profile(self):
         for name, run, n in (('pass', self.a_pass, 2), ('report', self.a_report, 2), ('status', self.a_status, 1)):
