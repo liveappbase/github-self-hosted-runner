@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# validate-class RC OUTPUT_FILE — the ONE VALIDATE RULE on the Linux host: the class of one validate's result. RC is the
+# exit code of `runner-start validate` (which execs `runner validate`); OUTPUT_FILE holds its stdout and stderr together,
+# in order (runner-start's REFUSE lines are on stderr: a caller that keeps stdout alone reads a REFUSE as UNKNOWN). Every
+# validate of the Linux glue (03-runscaler.sh's, the updater's) is classified here. The same rule as bin/validate-class,
+# the Studio's copy in zsh; the two are pinned to agree by the shared fixtures (tests/studio/fixtures/validate/, the
+# class in each file name) and the cases of tests/hetzner/test_validate_class.py.
+# It prints exactly one of these on stdout:
+#   PASS      RC 0 and a line that is exactly "All checks passed.", with no "  ✗ " line and no "runner-start: REFUSE "
+#             line (runscaler returns after every ✗ line, and runner-start exits 1 after a REFUSE, so either line with
+#             RC 0 is a contradiction: UNKNOWN).
+#   API-ONLY  RC not 0, no line that starts with "runner-start: REFUSE ", and the FIRST line that starts with "  ✗ " is
+#             a GitHub API line: `  ✗ scaleset[N] "NAME" GitHub API: ` (NAME as Go's %q writes it). Every other line
+#             is ignored: the scaleset client's log records (INFO, ERRO), the token-scopes hint, cobra's "Error:" and
+#             its usage. The API part reads only the URLs and the tokens, which an image switch never changes.
+#   NON-API   RC not 0 and a line that starts with "runner-start: REFUSE " (anywhere), or a FIRST "  ✗ " line that is
+#             one of runscaler's config checks: "  ✗ config: ", "  ✗ global config: ", `  ✗ scaleset[N] "NAME": `,
+#             "  ✗ scale set collection: " (cmd/runner/cmd_validate.go, runscaler v0.9.5).
+#   UNKNOWN   anything else: RC 0 without the PASS line, an empty OUTPUT_FILE, RC not 0 with no "  ✗ " line (cobra's
+#             error alone: a config file that does not parse), or a first "  ✗ " line of another check (the Docker
+#             client, Docker connectivity: they test the host, not the config).
+# Exit: 0 with the class on stdout. 2 on a usage error (not two arguments, RC not a whole number 0-255 without a
+# leading zero, OUTPUT_FILE not a readable regular file): "validate-class: usage: ..." on stderr, nothing on stdout.
+# It reads OUTPUT_FILE and nothing else, and runs no other program. It has no constant. Lines are read as bytes; a NUL
+# byte is dropped by bash's read (zsh keeps it): runscaler and runner-start write none.
+set -u
+export LC_ALL=C   # bytes: "✗" is matched as its three UTF-8 bytes, whatever else the output holds
+
+usage() { printf 'validate-class: usage: validate-class RC OUTPUT_FILE%s\n' "${1:+ ($1)}" >&2; exit 2; }
+[ $# -eq 2 ] || usage "two arguments"
+{ [[ $1 =~ ^(0|[1-9][0-9]{0,2})$ ]] && (( $1 <= 255 )); } || usage "RC is not a whole number 0-255: '$1'"
+rc=$1 file=$2
+[[ -f $file && -r $file ]] || usage "OUTPUT_FILE is not a readable regular file: '$file'"
+
+# Go's %q: a quoted string whose inner quotes and backslashes are escaped
+api_re='^  ✗ scaleset\[[0-9]+\] "([^"\\]|\\.)*" GitHub API: '
+config_re='^  ✗ (config: |global config: |scale set collection: |scaleset\[[0-9]+\] "([^"\\]|\\.)*": )'
+
+refuse=0 passed=0 first=
+while IFS= read -r l || [ -n "$l" ]; do
+  [[ $l == 'runner-start: REFUSE '* ]] && refuse=1
+  [[ $l == 'All checks passed.' ]] && passed=1
+  [[ -z $first && $l == '  ✗ '* ]] && first=$l   # the FIRST failed check only: runscaler stops at it
+done < "$file"
+
+if (( rc == 0 )); then
+  if (( passed && ! refuse )) && [[ -z $first ]]; then echo PASS; else echo UNKNOWN; fi
+elif (( refuse )); then echo NON-API
+elif [[ $first =~ $api_re ]]; then echo API-ONLY
+elif [[ $first =~ $config_re ]]; then echo NON-API
+else echo UNKNOWN
+fi
+exit 0

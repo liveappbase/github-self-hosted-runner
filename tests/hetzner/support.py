@@ -552,3 +552,16 @@ class Sandbox:
     def excluded(self, *lines):
         """Replace ~/build/setup/tls-excluded-spki with these lines."""
         return self.write(os.path.join(self.build, 'setup', 'tls-excluded-spki'), ''.join(l + '\n' for l in lines))
+
+
+def bash5():
+    """The first bash on PATH whose major version is 5 or more (linux-docker/'s scripts run under the host's bash 5),
+    or None."""
+    for d in os.environ.get('PATH', '').split(os.pathsep):
+        b = os.path.join(d, 'bash')
+        if d and os.path.isfile(b) and os.access(b, os.X_OK):
+            r = subprocess.run([b, '-c', 'echo "${BASH_VERSINFO[0]}"'], capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL)
+            if r.returncode == 0 and r.stdout.strip().isdigit() and int(r.stdout) >= 5:
+                return b
+    return None
