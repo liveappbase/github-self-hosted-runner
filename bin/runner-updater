@@ -21,10 +21,14 @@
 #                recipe      "<sha256>" | null: the recipe baseline; null = NO BASELINE
 #                stops       [{family: FAMILY, stop: NAME, version, user, detail}]: the STOPs it holds
 #                            (core/README.md, facts.stops)}}
-#              absent members read as null or []; a member this release does not know is kept as it is
+#              absent members read as null or [].
 #   images     {IMAGE: "N.N.N"}: each image the updater built or adopted, and its runner version (D2's pin rule)
 #   core       the decision core's own state (the `state` that idle.jq and r1.jq return) | absent: a fresh core.
 #              report's core state is apart from it, in REPORT.
+#   A MEMBER THIS RELEASE DOES NOT READ (at the top, in a family, in a candidate or in a STOP): every command WAITs
+#   (exit 4), names it, and writes nothing. A later member that names an image or holds a STOP needs this rule: an
+#   older release (a rollback across one) then waits, and never writes a shorter protected list or prints a status that
+#   hides a STOP. So a later release may add such a member under format 1.
 #
 # COMMANDS. Every command but status holds the updater lock, LOCKFILE (zsh's zsystem flock, held by this process
 # until it exits): a command waits for it; a pass (the timer's) only tries it.
@@ -91,7 +95,8 @@
 # as fresh (OFF), the list as missing and a pin as absent.
 # Exit: 0 done; 1 a REFUSE (the state folder or its list, a state it does not read, a fact it cannot read, an --observe
 # it cannot do, off while a window is open) or a STOP (a write that failed, the core could not decide); 2 usage; 3 STOP
-# untested jq; 4 WAIT (a state of another format). A pass that finds the lock held, or the updater OFF: 0.
+# untested jq; 4 WAIT (a state of another format, or with a member this release does not read). A pass that finds the
+# lock held, or the updater OFF: 0.
 # Constants:
 #   RUNNER       runscaler, as runner-start execs it ("RUNNER run --config CONFIG" is the process it looks for)
 #   CONFIG       runscaler's config; RUNLOG, runscaler's own log, is runner.log beside it (runscaler 0.9.5 writes it

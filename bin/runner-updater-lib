@@ -385,7 +385,7 @@ ru_healthz() {
 # ---- the updater's state (STATE in bin/runner-updater; its header has the layout)
 # a fresh install: OFF, no family, no image record, no core state
 ru_fresh='{"format":1,"on":false,"families":{},"images":{}}'
-# format 1, checked member by member; a member this release does not know is kept as it is (jq edits in place)
+# format 1, checked member by member (the members it reads; ru_state_members lists any other)
 ru_state_check='
 def fam_ok: type == "string" and test("^[a-z][a-z0-9-]{0,40}$");
 def set_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$");
@@ -409,12 +409,27 @@ if type == "object" and .format == 1 and (.on | type) == "boolean"
    and (.images | type) == "object" and all(.images | to_entries[]; (.key | image_ok) and (.value | version_ok))
    and (.core == null or (.core | type) == "object")
 then . else error("not a state of format 1") end'
+# the members of a checked state that this release does not read, at each level it reads: the top, a family, its
+# candidate, each STOP ("" when none). A later member that names an image or holds a STOP needs this rule: the older
+# release (a rollback across one) then WAITs, and never writes a shorter protected list or prints a status that hides
+# a STOP. A name that is not plain is shown as JSON (no raw newline reaches the WAIT line)
+ru_state_members='
+def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
+[(keys - ["format", "on", "families", "images", "core"])[] | shown]
++ [.families | to_entries[] | .key as $f | .value
+   | ((keys - ["candidate", "previous", "back_until", "rejected", "recipe", "stops"])[] | "families.\($f).\(shown)"),
+     (if (.candidate | type) == "object" then (.candidate | keys - ["version", "lines", "closed_at"])[]
+        | "families.\($f).candidate.\(shown)" else empty end),
+     ((.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
+        | "families.\($f).stops[\($i)].\(shown)")]
+| join(", ")'
 
 # ru_state_load FILE -> ru_state (the state, compact JSON) and 0; a missing FILE is ru_fresh. 1 + REPLY when FILE is
-# not a state this reads; 2 + REPLY (the wait line) when it is of another format. FILE is opened ONCE, so a reader
-# that runs while a writer renames a new state in gets one of the two whole.
+# not a state this reads; 2 + REPLY (the wait line) when it is of another format, or holds a member this release does
+# not read (ru_state_members). FILE is opened ONCE, so a reader that runs while a writer renames a new state in gets
+# one of the two whole.
 ru_state_load() {
-  local f=$1 text fmt
+  local f=$1 text fmt st members
   # behind a folder it cannot search, a state would look absent (fresh: OFF): not read as fresh
   ru_reach $f || { REPLY="$REPLY: a state behind it would look absent"; return 1 }
   if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh; return 0; fi
@@ -425,8 +440,12 @@ ru_state_load() {
                                          else error("not one object") end' 2>/dev/null) \
     || { REPLY="$f is not one JSON object"; return 1 }
   [[ $fmt == 1 ]] || { REPLY="the state $f has format $fmt; this updater reads format 1: it waits and changes nothing"; return 2 }
-  ru_state=$(print -rn -- $text | $JQ -c $ru_state_check 2>/dev/null) && [[ -n $ru_state ]] \
+  st=$(print -rn -- $text | $JQ -c $ru_state_check 2>/dev/null) && [[ -n $st ]] \
     || { REPLY="$f is not a state of format 1 this reads"; return 1 }
+  members=$(print -r -- $st | $JQ -r $ru_state_members 2>/dev/null) \
+    || { REPLY="$f: jq could not list its members"; return 1 }
+  [[ -z $members ]] || { REPLY="the state $f holds members this release does not read ($members): a later release wrote them, and they may name an image to keep or hold a STOP; it waits and changes nothing"; return 2 }
+  ru_state=$st
 }
 
 # ru_write FILE TEXT: TEXT, byte for byte, into FILE by rename (FILE.new, synced to disk with DD as runner-journal does,

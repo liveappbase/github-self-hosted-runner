@@ -46,12 +46,12 @@ def state(on=False, families=None, images=None, **extra):
     return s
 
 
-# every member the state holds, and one this release does not know (it is kept as it is)
+# every member the state holds (a member this release does not read makes every command WAIT: TestUnknownMembers)
 FULL = state(on=False, families={
     'fx': fam(candidate=cand(), previous={'mac-a': IMG}, rejected=[V1], recipe='a' * 64,
               stops=[stop('fx', 'NO EVIDENCE', detail={'text': 'no job completed in 72 h'})]),
     'fy': fam(previous={'mac-c': IMG0}, back_until=T0 + 7 * 86400)},
-    images={IMG2: V2, IMG: V0}, core={'format': 1, 'not_ready_since': {}}, later={'kept': [1, 2]})
+    images={IMG2: V2, IMG: V0}, core={'format': 1, 'not_ready_since': {}})
 
 
 class Paths:
@@ -313,6 +313,70 @@ class TestState(unittest.TestCase):
 
 
 COMMANDS = ('status', 'on', 'off', 'pass', 'protect', 'report')
+WAIT_MEMBERS = ('runner-updater: WAIT the state %s holds members this release does not read (%s): a later release wrote '
+                'them, and they may name an image to keep or hold a STOP; it waits and changes nothing\n')
+
+
+class TestUnknownMembers(unittest.TestCase):
+    """A member of a format-1 state that this release does not read: a later release may use it to name an image the
+    protected list must keep, or to hold a STOP. This release would drop it from the list or from status, so every
+    command that reads the state WAITs (exit 4) and names the members; the state, the protected list and the pins stay
+    byte-equal, and no core program runs. The control: the same state with only the members it reads."""
+
+    HOSTWIDE = {'family': None, 'stop': 'CI DISABLED', 'version': None, 'user': None, 'detail': None}
+
+    def cases(self):
+        def with_(fn, shown):
+            s = on_state()
+            fn(s, s['families']['fx'])
+            return s, shown
+        return {
+            'a per-family checked member': with_(lambda s, fx: fx.update(checked={'mac-a': IMG3}), 'families.fx.checked'),
+            'a top-level stops member': with_(lambda s, fx: s.update(stops=[self.HOSTWIDE]), 'stops'),
+            'an unknown per-family key': with_(lambda s, fx: fx.update(zz=1), 'families.fx.zz'),
+            'an unknown top-level key': with_(lambda s, fx: s.update(later={'kept': [1, 2]}), 'later'),
+            'a candidate member': with_(lambda s, fx: fx['candidate'].update(checked=True), 'families.fx.candidate.checked'),
+            'a member of a STOP': with_(lambda s, fx: fx.update(stops=[dict(stop('fx', 'NO EVIDENCE'), scope='host')]),
+                                        'families.fx.stops[0].scope'),
+            'a name with a newline': with_(lambda s, fx: s.update({'a\nb': 1}), '"a\\nb"'),
+            'two at once': with_(lambda s, fx: (s.update(stops=[self.HOSTWIDE]), fx.update(checked={'mac-a': IMG3})),
+                                 'stops, families.fx.checked'),
+        }
+
+    def test_every_command_that_reads_the_state_waits(self):
+        for why, (s, shown) in self.cases().items():
+            for cmd in ('status', 'on', 'off', 'pass', 'protect'):
+                with self.subTest(why=why, cmd=cmd):
+                    r = Rig(self, jq_wrap=True)
+                    u = Paths(r)
+                    raw = u.put(s)
+                    r.sb.write(u.protected, IMG3 + '\n', 0o600)
+                    pins = u.pins(mac_golden='%s %s\n' % (V2, SHA2))
+                    res = r.cmd(cmd, ok=False)
+                    self.assertEqual((res.returncode, res.stdout), (4, WAIT_MEMBERS % (u.state, shown)), res.stderr)
+                    self.assertEqual(u.raw(), raw)
+                    self.assertEqual(read_text(u.protected), IMG3 + '\n')
+                    self.assertEqual(u.pin_files(), pins)
+                    self.assertIsNone(u.raw(u.actions))
+                    self.assertEqual((core_calls(r), r.ps_calls()), ([], 0))
+
+    def test_control_the_members_it_reads(self):
+        for cmd in ('status', 'on', 'off', 'pass', 'protect'):
+            with self.subTest(cmd=cmd):
+                r = Rig(self, jq_wrap=True)
+                u = Paths(r)
+                s = on_state()
+                s['families']['fx']['stops'] = [stop('fx', 'NO EVIDENCE')]
+                u.put(s)
+                r.sb.write(u.protected, IMG3 + '\n', 0o600)
+                res = r.cmd(cmd)
+                self.assertNotIn('WAIT', res.stdout)
+                if cmd in ('pass', 'protect'):
+                    self.assertEqual(lines_of(u.protected), [IMG0, IMG])
+                if cmd == 'status':
+                    self.assertIn(ON_LINE, res.stdout)
+                    self.assertIn('\nstatus: ok (1 STOPs)\n', res.stdout)
+
 
 
 class TestClosedFolders(unittest.TestCase):
@@ -974,7 +1038,7 @@ class TestPass(unittest.TestCase):
         s = state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': IMG}, closed_at=P[2] + 100),
                                                previous={'mac-a': IMG0}, rejected=[V1], stops=held),
                                      'fy': fam(previous={'mac-c': IMG3}, back_until=until)},
-                  images={IMG: V2}, later={'kept': True})
+                  images={IMG: V2})
         r, u = self.rig(s, cfg=config((('mac-a', IMG), ('mac-c', IMG2))), families='fx tart mac-a\nfy tart mac-c\n')
         res = r.cmd('pass')
         f = self.facts(u)
