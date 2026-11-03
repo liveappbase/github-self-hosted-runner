@@ -89,7 +89,7 @@ A new release of GitHub's runner ([actions/runner](https://github.com/actions/ru
    ```
    ssh <RUN_USER>@<host> 'bash ~/build/setup/02-d1.sh build <runner version>'
    ```
-2. **Put it into the pool (RS_USER), at a quiet time** (it waits for the pool to be idle before it restarts runscaler). Coming: in a later release, `up` reads the build record of that version. Until then `up` reads `~/run/image.ref`, which only the full run writes: set `RUNNER_VERSION` in the host config to the new version (Install step 1), run Install step 5 again instead of step 1 here, and then:
+2. **Put it into the pool (RS_USER), at a quiet time** (it waits for the pool to be idle before it restarts runscaler). Coming: in a later release, `up` reads the build record of that version. Until then `up` reads `~/run/image.ref`, which only the full run writes: set `RUNNER_VERSION` in the installed host config to the new version (the line of "Upgrading from a release before this one", step 2: it changes that key only), run Install step 5 again instead of step 1 here, and then:
    ```
    ssh -o ServerAliveInterval=60 <RS_USER>@<host> 'bash -s -- up <runner version>' < linux-docker/setup/pool-image.sh
    ```
@@ -103,23 +103,19 @@ A host installed from a release before this one: do "Upgrading from a release be
 
 ## Upgrading from a release before this one
 
-This release adds the host-config key `RUNNER_VERSION`: the runner version a full 02-d1.sh run builds. This release's 02-d1.sh refuses to run without it, with `02-d1.sh: REFUSE /etc/liveapp-ci/host.conf lacks RUNNER_VERSION`, before it changes anything. Set it to the runner version the pool runs now, before you run a script of this release:
+This release adds the host-config key `RUNNER_VERSION`: the runner version a full 02-d1.sh run builds. This release's 02-d1.sh refuses to run without it, with `02-d1.sh: REFUSE /etc/liveapp-ci/host.conf lacks RUNNER_VERSION`, before it changes anything. Set it to the runner version the pool runs now, before you run a script of this release. The lines below change that one key in the host config installed on the host; every other line stays as it is:
 
 1. Read that version (as RS_USER). It starts the image that config.toml names, with no network, and prints its runner's version, as `pool-image.sh up` reads it. It must print exactly one version; if it prints none or two, stop: config.toml does not name one image for both sets.
    ```
    ssh <RS_USER>@<host> 'sed -n "s/^runner-image = \"\(.*\)\"$/\1/p" ~/.config/runner/config.toml | sort -u | while read -r i; do DOCKER_HOST=unix:///home/<RUN_USER>/run/docker.sock docker run --rm --network none --memory 512m --cpus 1 "$i" ./config.sh --version < /dev/null | grep -xE "[0-9]+\.[0-9]+\.[0-9]+"; done'
    ```
-2. Add it to your copy of the host config (`<version>` is what step 1 printed):
+2. Set it in the installed host config (root; `<version>` is what step 1 printed). It keeps every other line, puts `RUNNER_VERSION=<version>` in place of a `RUNNER_VERSION` line it may have, and keeps the file as it was before as `host.conf.prev`:
    ```
-   printf '\nRUNNER_VERSION=%s\n' <version> >> host.conf
+   ssh root@<host> 'f=/etc/liveapp-ci/host.conf; cp -p "$f" "$f.prev" || exit 1; grep -v "^RUNNER_VERSION=" "$f.prev" > "$f.new"; [ $? -le 1 ] || exit 1; printf "RUNNER_VERSION=%s\n" "<version>" >> "$f.new" && chmod 644 "$f.new" && mv "$f.new" "$f" && echo "OK $f: RUNNER_VERSION=<version> (the file before: $f.prev)"'
    ```
-3. Install that host config (Install step 1's line):
+3. Check it against this release, from your checkout: the installed host config must hold each key of `linux-docker/host.conf.example` once (they are the keys this release's scripts read). It must print the one line `RUNNER_VERSION=<version>`. A line that starts with `WANT` names a key the installed file lacks or holds twice: stop, and compare it with `host.conf.prev` and with your own copy of the host config:
    ```
-   ssh root@<host> 'install -d -m 755 /etc/liveapp-ci && umask 022 && cat > /etc/liveapp-ci/host.conf.new && chmod 644 /etc/liveapp-ci/host.conf.new && mv /etc/liveapp-ci/host.conf.new /etc/liveapp-ci/host.conf' < host.conf
-   ```
-4. Check it: this must print the one line `RUNNER_VERSION=<version>`:
-   ```
-   ssh <RUN_USER>@<host> 'grep -xE "RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+" /etc/liveapp-ci/host.conf'
+   sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' linux-docker/host.conf.example | ssh <RUN_USER>@<host> 'f=/etc/liveapp-ci/host.conf; n=0; while read -r k; do c=$(grep -c "^$k=" "$f"); [ "$c" = 1 ] || { echo "WANT one $k line in $f, found $c"; n=1; }; done; [ "$n" = 0 ] && grep -xE "RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+" "$f"'
    ```
 
 Then install this release's files as for every release ("A new runner release", its first paragraph).
@@ -138,7 +134,7 @@ Until you do this, the host keeps running the files it has. The move installs th
    [ "$(grep -c '^runner-image = ' $R/config.toml)" = 2 ] && [ "$(printf '%s\n' "$c" | grep -c .)" = 1 ] || { echo "STOP config.toml does not name ONE runner image for both sets: read $R/config.toml and find out what changed it"; exit 1; }
    if [ "$c" = "$r" ]; then echo "OK   config.toml names $c for both sets; image.ref names it too"
    elif cmp -s $R/config.toml.pre-image $R/config.toml; then echo "OK   config.toml names $c for both sets; it is the kept config of a back (image.ref still names the rejected $r)"
-   else echo "STOP config.toml names $c, image.ref names $r, and config.toml is not the kept config of a back: a build that no up has put into the pool, or a file changed by hand. Put image.ref's image into the pool with this release's up (A new runner release, steps 3 and 4); do not edit image.ref to match config.toml, which would name an image that may never have run; then run this check again"; exit 1; fi
+   else echo "STOP config.toml names $c, image.ref names $r, and config.toml is not the kept config of a back: a build that no up has put into the pool, or a file changed by hand. Put image.ref's image into the pool with this release's up (A new runner release, step 2), then accept or back (its step 3); do not edit image.ref to match config.toml, which would name an image that may never have run; then run this check again"; exit 1; fi
    a=$(systemctl --user show runscaler -p ActiveEnterTimestamp --value --timestamp=unix); a=${a#@}; m=$(stat -c %Y $R/config.toml)
    [ "$(systemctl --user is-active runscaler)" = active ] && [[ $a =~ ^[0-9]+$ ]] || { echo "STOP runscaler is not active: read journalctl --user -u runscaler"; exit 1; }
    [ "$a" -gt "$m" ] || { echo "STOP config.toml was installed at $m, after runscaler started at $a: runscaler does not run this file. Restart it when no job runs (systemctl --user restart runscaler), then run this check again"; exit 1; }
@@ -150,7 +146,7 @@ Until you do this, the host keeps running the files it has. The move installs th
    ssh <RS_USER>@<host> 'bash ~/build/bin/pool-ready <MAIN_SET> <SMALL_SET>'
    ```
 
-Do not run 03-runscaler.sh by hand on the running pool: it installs config.toml again, with a new time, and then the next `pool-image.sh up` (and the `accept` of an open release) refuses until runscaler restarts. The next runner release's `up` runs 03 itself ("A new runner release", step 3): it installs this release's `runner-start`, `pool-ready` and unit, renders config.toml from the host config, and restarts runscaler when the pool is idle. If a value of the host config is not the one the pool runs, that `up` stops with config.toml as it was, and nothing restarts. If a release is still open (its `up` ran, and neither its `accept` nor its `back`), close it first with one of them ("A new runner release", step 4).
+Do not run 03-runscaler.sh by hand on the running pool: it installs config.toml again, with a new time, and then the next `pool-image.sh up` (and the `accept` of an open release) refuses until runscaler restarts. The next runner release's `up` runs 03 itself ("A new runner release", step 2): it installs this release's `runner-start`, `pool-ready` and unit, renders config.toml from the host config, and restarts runscaler when the pool is idle. If a value of the host config is not the one the pool runs, that `up` stops with config.toml as it was, and nothing restarts. If a release is still open (its `up` ran, and neither its `accept` nor its `back`), close it first with one of them ("A new runner release", step 3: `accept` or `back`).
 
 ## Uninstall
 

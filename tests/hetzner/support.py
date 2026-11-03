@@ -366,13 +366,14 @@ GOOD_MAIN = ('Seccomp: 2\nNoNewPrivs: 1\npid1=docker-init umask=0022\nkeyctl EPE
 class Sandbox:
     PIN_REWRITES = {
         'setup/02-d1.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        'bin/runner-start': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/runner-release.sh': [
             ('RR_API=https://api.github.com/repos/actions/runner\n', 'RR_API=@GH@/repos/actions/runner\n'),
             ('RR_DL=https://github.com/actions/runner/releases/download\n',
              'RR_DL=@GH@/actions/runner/releases/download\n'),
             ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n')],
     }
-    LEFT_OUT = {'setup/02-d1.sh': ('/etc/liveapp-ci',),
+    LEFT_OUT = {'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
 
     def __init__(self, test):
