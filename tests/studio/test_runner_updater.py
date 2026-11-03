@@ -111,6 +111,7 @@ class Rig:
         ]
         self.script = self.copy('runner-updater', extra_rewrites)
         self.lib = sb.copy_script('bin/runner-updater-lib', [])
+        self.journal = sb.copy_script('bin/runner-journal', [])   # beside the script, as in a release's bin/
         sb.write(self.config, cfg if cfg is not None else config())
         os.utime(self.config, (INSTALLED, INSTALLED))
         if families is not None:
@@ -1174,15 +1175,18 @@ class TestStateDir(unittest.TestCase):
 
 class TestUsage(unittest.TestCase):
     def test_usage(self):
-        for args in ([], ['status'], ['report', '--bogus'], ['report', '--observe'], ['report', '--observe', 'Fx'],
+        for args in ([], ['bogus'], ['status', 'x'], ['on', 'fx'], ['off', '--force'], ['report', '--bogus'],
+                     ['report', '--observe'], ['report', '--observe', 'Fx'],
                      ['report', '--observe', 'fx', '--observe-clear', 'fx'], ['report', 'fx']):
             with self.subTest(args=args):
                 r = Rig(self)
                 res = r.sb.run(['/bin/zsh', '-f', r.script] + args)
                 self.assertEqual((res.returncode, res.stdout), (2, ''), res.stderr)
-                self.assertTrue(res.stderr.startswith('runner-updater: usage: runner-updater report [--observe FAMILY]'),
+                self.assertTrue(res.stderr.startswith('runner-updater: usage: runner-updater status | on | off | '),
                                 res.stderr)
+                self.assertIn(' report [--observe FAMILY]... [--observe-clear FAMILY]...', res.stderr)
                 self.assertEqual(r.ps_calls(), 0)
+                self.assertEqual(sorted(os.listdir(r.statedir)), ['protected'])   # nothing made, nothing written
 
 
 if __name__ == '__main__':

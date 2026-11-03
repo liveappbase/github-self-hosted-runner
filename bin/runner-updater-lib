@@ -17,6 +17,13 @@
 #   The globals ru_observe_add and ru_observe_clear (arrays of family names) are the caller's --observe and
 #   --observe-clear: they change OBSERVEFILE in this pass (below).
 #
+# ru_state_load FILE — the updater's state (its layout: bin/runner-updater's header) into ru_state, compact JSON: 0;
+#   a missing FILE is a fresh state (OFF, no family). 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
+#   (the wait line): its format is not 1. It opens FILE once: a rename over FILE while it reads gives it one whole state.
+# ru_write FILE TEXT — TEXT, byte for byte, into FILE by rename: written to FILE.new, then renamed over FILE. 1 + REPLY
+#   when it cannot (FILE is then as it was). A kill before the rename leaves FILE as it was and a FILE.new that the next
+#   write replaces.
+#
 # What it measures, in this order (the order is the rule):
 #   1. proc before: the runscaler process. The Studio runs ONE: the RUNNER binary that runner-start execs, so its ps
 #      args are exactly "RUNNER run --config CONFIG", run by this user. Read with `PS -ax -ww -o pid=,uid=,lstart=,args=`
@@ -343,6 +350,61 @@ ru_healthz() {
   done
   ru_say "healthz: $reads of 2 reads (http://$addr:$port/healthz)"
   REPLY=$reads
+}
+
+# ---- the updater's state (STATE in bin/runner-updater; its header has the layout)
+# a fresh install: OFF, no family, no image record, no core state
+ru_fresh='{"format":1,"on":false,"families":{},"images":{}}'
+# format 1, checked member by member; a member this release does not know is kept as it is (jq edits in place)
+ru_state_check='
+def fam_ok: type == "string" and test("^[a-z][a-z0-9-]{0,40}$");
+def set_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$");
+def image_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+def version_ok: type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$");
+def epoch_ok: type == "number" and . >= 0 and . == floor;
+def lines_ok: type == "object" and length > 0 and all(to_entries[]; (.key | set_ok) and (.value | image_ok));
+def stop_ok($f): type == "object" and .family == $f and (.stop | type) == "string" and (.stop | length) > 0
+  and (.version == null or (.version | type) == "string") and (.user == null or (.user | type) == "string")
+  and (.detail == null or (.detail | type) == "object");
+def family_ok($f): type == "object"
+  and (.candidate == null or (.candidate | type == "object" and (.version | version_ok) and (.lines | lines_ok)
+                              and (.closed_at | epoch_ok)))
+  and (.previous == null or (.previous | lines_ok))
+  and (.back_until == null or (.back_until | epoch_ok))
+  and (.rejected == null or (.rejected | type == "array" and all(.[]; version_ok)))
+  and (.recipe == null or (.recipe | type == "string" and test("^[0-9a-f]{64}$")))
+  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok($f))));
+if type == "object" and .format == 1 and (.on | type) == "boolean"
+   and (.families | type) == "object" and all(.families | to_entries[]; .key as $f | ($f | fam_ok) and (.value | family_ok($f)))
+   and (.images | type) == "object" and all(.images | to_entries[]; (.key | image_ok) and (.value | version_ok))
+   and (.core == null or (.core | type) == "object")
+then . else error("not a state of format 1") end'
+
+# ru_state_load FILE -> ru_state (the state, compact JSON) and 0; a missing FILE is ru_fresh. 1 + REPLY when FILE is
+# not a state this reads; 2 + REPLY (the wait line) when it is of another format. FILE is opened ONCE, so a reader
+# that runs while a writer renames a new state in gets one of the two whole.
+ru_state_load() {
+  local f=$1 text fmt
+  if [[ ! -e $f && ! -L $f ]]; then ru_state=$ru_fresh; return 0; fi
+  [[ -f $f && ! -L $f && -r $f ]] || { REPLY="$f is not a readable regular file"; return 1 }
+  text=$(/bin/cat -- $f && print -rn -- .) || { REPLY="$f cannot be read"; return 1 }
+  text=${text%.}
+  fmt=$(print -rn -- $text | $JQ -s -r 'if length == 1 and (.[0] | type) == "object" then .[0].format | tojson
+                                         else error("not one object") end' 2>/dev/null) \
+    || { REPLY="$f is not one JSON object"; return 1 }
+  [[ $fmt == 1 ]] || { REPLY="the state $f has format $fmt; this updater reads format 1: it waits and changes nothing"; return 2 }
+  ru_state=$(print -rn -- $text | $JQ -c $ru_state_check 2>/dev/null) && [[ -n $ru_state ]] \
+    || { REPLY="$f is not a state of format 1 this reads"; return 1 }
+}
+
+# ru_write FILE TEXT: TEXT, byte for byte, into FILE by rename (FILE.new, then a rename over FILE). 1 + REPLY when it
+# cannot; FILE is then as it was.
+ru_write() {
+  local f=$1
+  [[ ! -d $f ]] || { REPLY="$f is a folder"; return 1 }
+  /bin/rm -f -- $f.new 2>/dev/null
+  { print -rn -- $2 > $f.new } 2>/dev/null || { /bin/rm -f -- $f.new 2>/dev/null; REPLY="cannot write $f.new"; return 1 }
+  /bin/mv -f -- $f.new $f || { /bin/rm -f -- $f.new; REPLY="cannot rename $f.new to $f"; return 1 }
 }
 
 # ---- the pass

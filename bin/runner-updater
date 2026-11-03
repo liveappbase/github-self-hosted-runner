@@ -1,14 +1,51 @@
 #!/bin/zsh -f
-# runner-updater report [--observe FAMILY]... [--observe-clear FAMILY]... — the runner-image updater on the Studio, as
-# ci. This release has one command, `report`: ONE pass that measures, asks the decision core (core/) and prints. It
-# TAKES NO ACTION: it stops, starts, edits, pins, deletes and enables nothing, and it runs none of runner-disable,
-# runner-enable, golden-build, golden-gate, tart, launchctl or kill. Design: docs/operations.md ("The updater's report
-# mode (no action)"); the core's contract: core/README.md.
-# The pass, in order:
-#   1. The updater lock, LOCKFILE (zsh's zsystem flock, held by this process until it exits). A second report WAITS
-#      for it (a command waits; only a timer pass, later work, exits).
+# runner-updater status | on | off | report [--observe FAMILY]... [--observe-clear FAMILY]... — the runner-image
+# updater on the Studio, as ci. Design: docs/operations.md ("The updater: status, on, off" and "The updater's report
+# mode (no action)"); the decision core's contract: core/README.md. Nothing in this release disables, enables, builds,
+# switches, rolls back, edits config.toml or deletes an image: its only writes are under STATEDIR.
+#
+# THE STATE, STATE (STATEDIR/state.json): ONE JSON object, written by rename (STATE.new, then a rename over STATE), read
+# under the updater lock (status alone reads it with no lock: ONE read, so a rename while it runs gives it the old or
+# the new state, whole). A missing STATE is a fresh install: OFF, no family, nothing held. Its members:
+#   format     1. A state of another format (or none): every command prints "runner-updater: WAIT ..." and exits 4,
+#              and nothing is written. A state of format 1 that is not the shape below: REFUSE, exit 1, left as it is.
+#   on         true | false (D11: a fresh install is OFF)
+#   families   {FAMILY: {
+#                candidate   {version: "N.N.N", lines: {SET: IMAGE, ...}, closed_at: EPOCH} | null: the release under
+#                            observation (switched, not accepted; closed_at = when its switch window closed)
+#                previous    {SET: IMAGE, ...} | null: the lines the family ran before its candidate: the rollback
+#                            target until ACCEPT, then what `back` restores until back_until
+#                back_until  EPOCH | null: after an ACCEPT, the end of the 7 days `back` restores `previous`
+#                rejected    ["N.N.N", ...]: the versions the updater never switches this family to again
+#                recipe      "<sha256>" | null: the recipe baseline; null = NO BASELINE
+#                stops       [{family: FAMILY, stop: NAME, version, user, detail}]: the STOPs it holds
+#                            (core/README.md, facts.stops)}}
+#              absent members read as null or []; a member this release does not know is kept as it is
+#   images     {IMAGE: "N.N.N"}: each image the updater built or adopted, and its runner version (D2's pin rule)
+#   core       the decision core's own state (the `state` that idle.jq and r1.jq return) | absent: a fresh core.
+#              report's core state is apart from it, in REPORT.
+#
+# COMMANDS. Every command but status holds the updater lock, LOCKFILE (zsh's zsystem flock, held by this process
+# until it exits), and waits for it.
+#   status   no lock, no write. It reads STATE once and calls status.jq with facts from it (each family's candidate
+#            and back_until, the STOPs it holds) and its core state. It prints ON or OFF; each family: its candidate
+#            or "no candidate", back_until, its rejected versions; status.jq's verdict and lines (the STOP lines with
+#            their next step, the evidence lines, each back_until); and per STOP its D7 properties, `known false` and
+#            "unknown" for a STOP this core does not know (never guessed). With no STATEDIR it creates nothing.
+#   on       sets on = true.
+#   off      refuses while WINDOW exists (an open window's journal: off never strands a window), and then changes
+#            nothing. Else it sets on = false, then removes every file of PINDIR (golden-build's host pins), each one
+#            journaled FIRST with runner-journal into ACTIONS (`pin-remove NAME VERSION SHA256`, or `pin-remove NAME
+#            (not one line VERSION SHA256)`): a journal it cannot write is a STOP before that removal (the pin stays;
+#            run off again). A PINDIR entry that is not a file, or a PINDIR that is not a folder: STOP.
+#   report   one pass that measures, asks the core and prints, with its own state (below).
+#
+# REPORT: ONE pass that measures, asks the decision core (core/) and prints. It TAKES NO ACTION: it stops, starts,
+# edits, pins, deletes and enables nothing, and it runs none of runner-disable, runner-enable, golden-build,
+# golden-gate, tart, launchctl or kill. The pass, in order:
+#   1. The updater lock. A second report WAITS for it.
 #   2. The jq it runs (JQ) must print a `jq --version` that core/TESTED_JQ lists for the area `core`. Else the STOP
-#      "untested jq" and exit 3: no core program runs.
+#      "untested jq" and exit 3: no core program runs. (status checks it too.)
 #   3. now = the UTC clock (date -u +%s). The facts (bin/runner-updater-lib, ru_collect: its header says what each
 #      fact is and the order they are read in) go into the pass folder REPORT/pass: facts.json, log.txt, healthz.json.
 #      A fact it cannot read: a REFUSE line, exit 1, no core program runs.
@@ -22,28 +59,34 @@
 # --observe FAMILY: from this pass on, FAMILY's CURRENT config lines are its candidate (version "observed", closed_at =
 # this pass's now), in REPORT/observe.json, until `report --observe-clear FAMILY`. A family already observed keeps its
 # record. Repeat the option for more families.
-# REPORT is never the real updater state (later work adds that). When STATEDIR does not exist, report creates it with
-# an EMPTY (0-byte) protected list in it: golden-prune reads an existing STATEDIR as "the updater is on this host" and
-# refuses without a protected list, and an empty list protects nothing, so golden-prune prints what it printed before.
+#
+# THE STATE FOLDER. When STATEDIR does not exist, every command but status creates it with an EMPTY (0-byte) protected
+# list in it: golden-prune reads an existing STATEDIR as "the updater is on this host" and refuses without a protected
+# list, and an empty list protects nothing, so golden-prune prints what it printed before.
 # The folder (0700) and its list (0600) come into being in ONE step, a rename, so a kill at any point leaves no
 # STATEDIR or STATEDIR with its list; a kill before the rename can leave the new folder beside STATEDIR,
-# runner-updater.new.XXXXXXXX, which nothing reads (remove it). Two reports that both find no STATEDIR: one makes it,
+# runner-updater.new.XXXXXXXX, which nothing reads (remove it). Two runs that both find no STATEDIR: one makes it,
 # and the other leaves it as it is. A STATEDIR without its list is a REFUSE that says what to do, and so is a list that
-# is not a readable regular file: report never writes a list into a STATEDIR it did not make, because it cannot tell a
-# list that was never made from one that was lost, and an empty list in place of a lost one would let golden-prune
+# is not a readable regular file: a command never writes a list into a STATEDIR it did not make, because it cannot tell
+# a list that was never made from one that was lost, and an empty list in place of a lost one would let golden-prune
 # print an image the updater protects. REPORT is made under the lock.
-# Exit: 0 the pass ran; 1 a REFUSE (the state folder or its list, a fact it cannot read, an --observe it cannot do) or
-# the core could not decide; 2 usage; 3 STOP untested jq.
+# Exit: 0 done; 1 a REFUSE (the state folder or its list, a state it does not read, a fact it cannot read, an --observe
+# it cannot do, off while a window is open) or a STOP (a write that failed, the core could not decide); 2 usage; 3 STOP
+# untested jq; 4 WAIT (a state of another format).
 # Constants:
 #   RUNNER       runscaler, as runner-start execs it ("RUNNER run --config CONFIG" is the process it looks for)
 #   CONFIG       runscaler's config; RUNLOG, runscaler's own log, is runner.log beside it (runscaler 0.9.5 writes it
 #                there when the config sets no log-file; at 10 MiB it renames it to runner.log.1, one backup)
-#   STATEDIR     the updater's state folder; REPORT = STATEDIR/report (this command's own state and pass folder),
-#                LOCKFILE = STATEDIR/lock (the updater lock), PROTECTED = STATEDIR/protected (golden-prune reads it)
+#   STATEDIR     the updater's state folder; in it: STATE (state.json, above); REPORT = report/ (report's own state and
+#                pass folder); LOCKFILE = lock (the updater lock); PROTECTED = protected (golden-prune reads it);
+#                PINDIR = pin/ (golden-build's host pins, one file per image family); WINDOW = window (the open
+#                window's journal, S3b-3's: absent when no window is open); ACTIONS = actions (the updater's action
+#                journal, written only through runner-journal)
 #   FAMILIES     the host's families file (bin/runner-updater-lib, ru_families)
 #   PATH         its own, set at the top (the system folders): it never depends on the caller's PATH, so the weekly
 #                watchdog's `runner-updater status` over a non-interactive ssh runs it as the timer does
-#   JQ PS CURL   the tools it runs (each by its absolute path); CORE, the release's core/ beside this file's bin/
+#   JQ PS CURL   the tools it runs (each by its absolute path); CORE, the release's core/ beside this file's bin/; BIN,
+#                this file's bin/ (runner-updater-lib and runner-journal, of the same release)
 #   HEALTHZ_GAP  seconds between the two /healthz reads
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
@@ -63,17 +106,149 @@ RUNLOG=${CONFIG:h}/runner.log
 REPORT=$STATEDIR/report
 LOCKFILE=$STATEDIR/lock
 PROTECTED=$STATEDIR/protected
+STATE=$STATEDIR/state.json
+PINDIR=$STATEDIR/pin
+WINDOW=$STATEDIR/window
+ACTIONS=$STATEDIR/actions
+BIN=${0:A:h}
 
 say() { print -r -- "runner-updater: $*" }
 refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
+stop() { print -r -- "runner-updater: STOP $*"; exit 1 }
 usage() {
-  print -u2 -r -- "runner-updater: usage: runner-updater report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
+  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
   exit 2
 }
 
 # ---- arguments
-(( $# >= 1 )) && [[ $1 == report ]] || usage "this release has one command: report"
+(( $# >= 1 )) || usage "no command"
+cmd=$1
 shift
+case $cmd in
+  (status|on|off) (( $# == 0 )) || usage "$cmd takes no argument" ;;
+  (report) ;;
+  (*) usage "unknown command '$cmd'" ;;
+esac
+source $BIN/runner-updater-lib || refuse "cannot load $BIN/runner-updater-lib"
+
+# the state, under the lock (status: with no lock, ONE read) -> ru_state; WAIT (exit 4) on a state of another format,
+# REFUSE on one this release does not read: either way the file stays as it is
+load_state() {
+  ru_state_load $STATE
+  case $? in
+    (0) return 0 ;;
+    (2) print -r -- "runner-updater: WAIT $REPLY"; exit 4 ;;
+    (*) refuse "$REPLY: it is left as it is" ;;
+  esac
+}
+# JQFILTER: the state changed by it, written by rename
+change_state() {
+  local new
+  new=$(print -r -- $ru_state | $JQ -c $1) && [[ -n $new ]] || stop "jq could not change the state: $STATE is as it was"
+  ru_write $STATE "$new"$'\n' || stop "the state cannot be written ($REPLY): $STATE is as it was"
+  ru_state=$new
+}
+
+# the jq under the core must be one core/TESTED_JQ lists for the area core; else the STOP "untested jq" and exit 3
+jq_tested() {
+  local jqv l tested=0
+  jqv=$($JQ --version 2>/dev/null) || jqv='(no version)'
+  if [[ -f $CORE/TESTED_JQ && -r $CORE/TESTED_JQ ]]; then
+    for l in "${(@f)$(<$CORE/TESTED_JQ)}"; do
+      [[ $l =~ '^([^#[:space:]]+)[[:space:]]+([a-z,]+)[[:space:]]+([^[:space:]]+)[[:space:]]*$' ]] || continue
+      [[ $match[1] == "$jqv" && ,$match[2], == *,core,* ]] && tested=1
+    done
+  fi
+  if (( ! tested )); then
+    print -r -- "runner-updater: STOP untested jq: $JQ prints '$jqv', which core/TESTED_JQ does not list for the core; no new work starts. Next, in the repository: \`JQ=$JQ python3 -I -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass"
+    exit 3
+  fi
+}
+
+# PROGRAM's output in DIR/PROGRAM.json is one decision: one JSON object with a verdict and lines
+decided() {
+  $JQ -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].verdict | type) == "string"
+             and (.[0].lines | type) == "array"' $1/$2.json > /dev/null 2>&1
+}
+
+# ---- status: no lock, no write. ONE read of the state; the facts status.jq needs come from it (each family's
+# candidate and back_until, the STOPs it holds), and the core's own state is its `core` member
+do_status() {
+  local now tmp rc
+  load_state   # ONE read of the renamed file: everything status prints comes from it
+  jq_tested
+  now=$(/bin/date -u +%s)
+  [[ $now =~ '^[0-9]+$' ]] || refuse "the clock gave '$now'"
+  tmp=$(/usr/bin/mktemp -d) || refuse "cannot create a temporary folder"
+  trap "/bin/rm -rf -- ${(q)tmp}" EXIT
+  print -r -- $ru_state | $JQ -c '.core // empty' > $tmp/state.json \
+    && print -r -- $ru_state | $JQ -c '{format: 1, host: "studio", sets: [], proc: null, position: null,
+         continuous: false, restart: null, config: null,
+         families: (.families | map_values({provider: "tart", sets: ((.candidate.lines // {}) | keys),
+                                             candidate: (.candidate // null), back_until: (.back_until // null)})),
+         stops: [.families[] | (.stops // [])[]]}' > $tmp/facts.json \
+    || refuse "jq could not build the facts of the state"
+  print -r -- $ru_state | $JQ -r 'def utc: strftime("%Y-%m-%d %H:%M UTC");
+    "runner-updater: status: the updater is \(if .on then "ON" else "OFF" end)",
+    if (.families | length) == 0 then "runner-updater: status: no family in the state"
+    else .families | to_entries | sort_by(.key)[] | .key as $f | .value
+      | "runner-updater: family \($f): "
+        + (if .candidate == null then "no candidate"
+           else "candidate runner \(.candidate.version) (\(.candidate.lines | to_entries | sort_by(.key)
+                 | map("\(.key)=\(.value)") | join(", "))), switched \(.candidate.closed_at | utc)" end)
+        + "; " + (if .back_until == null then "back: none" else "back until \(.back_until | utc)" end)
+        + "; rejected: " + (if (.rejected // []) == [] then "none" else (.rejected | join(", ")) end)
+    end' || refuse "jq could not print the state"
+  $JQ -n -L $CORE/lib -f $CORE/status.jq --slurpfile state $tmp/state.json --slurpfile facts $tmp/facts.json \
+      --arg now $now > $tmp/status.json 2> $tmp/status.err
+  rc=$?
+  if (( rc != 0 )) || ! decided $tmp status; then
+    stop "core could not decide (status): exit $rc${$(/usr/bin/head -n 1 $tmp/status.err 2>/dev/null):+: $(/usr/bin/head -n 1 $tmp/status.err)}"
+  fi
+  $JQ -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
+    "status: \(.verdict) (\(.reason))", .lines[],
+    (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")' \
+    $tmp/status.json
+  exit 0
+}
+
+# ---- on, off (D11), under the lock
+do_on() {
+  load_state
+  change_state '.on = true'
+  say "on: the updater is ON"
+  exit 0
+}
+
+# off: never while a window is open (it would strand it); then OFF, then every pin of PINDIR removed, each one
+# journaled first (runner-journal into ACTIONS: `pin-remove NAME VERSION SHA256`, or `pin-remove NAME (not one line
+# VERSION SHA256)`); a journal it cannot write is a STOP before that removal
+do_off() {
+  local p c v
+  [[ ! -e $WINDOW && ! -L $WINDOW ]] \
+    || refuse "a window is open ($WINDOW): off never strands a window, so nothing changed. Run off again when the window has ended"
+  load_state
+  change_state '.on = false'
+  say "off: the updater is OFF"
+  [[ -e $PINDIR || -L $PINDIR ]] || exit 0
+  [[ -d $PINDIR && ! -L $PINDIR ]] || stop "$PINDIR is not a folder: off removes the pins in it; look at what it is"
+  for p in $PINDIR/*(DN); do
+    [[ -f $p || -L $p ]] || stop "$p is not a file: off removes only pin files; look at what it is"
+    c=
+    if [[ -f $p && ! -L $p && -r $p ]]; then c=$(/bin/cat -- $p 2>/dev/null && print -rn -- .); c=${${c%.}%$'\n'}; fi
+    if [[ $c =~ '^[0-9]+\.[0-9]+\.[0-9]+ [0-9a-f]{64}$' && $c == "$MATCH" ]]; then v="${p:t} $c"
+    else v="${p:t} (not one line VERSION SHA256)"; fi
+    /bin/zsh -f $BIN/runner-journal $ACTIONS pin-remove $v \
+      || stop "the action journal could not record the removal of $p (above): the pin stays. The updater is OFF; run off again when the journal can be written"
+    /bin/rm -f -- $p || stop "cannot remove the pin $p (its removal is journaled in $ACTIONS)"
+    say "off: removed the pin $p (journaled first in $ACTIONS)"
+  done
+  exit 0
+}
+
+[[ $cmd == status ]] && do_status
+
+# ---- report's arguments
 ru_observe_add=() ru_observe_clear=()
 while (( $# )); do
   case $1 in
@@ -121,24 +296,16 @@ fi
 zmodload zsh/system || refuse "zsh/system cannot be loaded: the lock cannot be taken"
 [[ -e $LOCKFILE ]] || ( : >> $LOCKFILE ) || refuse "cannot create the lock file $LOCKFILE"
 zsystem flock -f lockfd $LOCKFILE || refuse "cannot take the updater lock $LOCKFILE"
+case $cmd in
+  (on) do_on ;;
+  (off) do_off ;;
+esac
 [[ -d $REPORT ]] || /bin/mkdir -m 700 $REPORT || refuse "cannot create $REPORT"
 
 # ---- 2. the jq
-jqv=$($JQ --version 2>/dev/null) || jqv='(no version)'
-tested=0
-if [[ -f $CORE/TESTED_JQ && -r $CORE/TESTED_JQ ]]; then
-  for l in "${(@f)$(<$CORE/TESTED_JQ)}"; do
-    [[ $l =~ '^([^#[:space:]]+)[[:space:]]+([a-z,]+)[[:space:]]+([^[:space:]]+)[[:space:]]*$' ]] || continue
-    [[ $match[1] == "$jqv" && ,$match[2], == *,core,* ]] && tested=1
-  done
-fi
-if (( ! tested )); then
-  print -r -- "runner-updater: STOP untested jq: $JQ prints '$jqv', which core/TESTED_JQ does not list for the core; no new work starts. Next, in the repository: \`JQ=$JQ python3 -I -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass"
-  exit 3
-fi
+jq_tested
 
 # ---- 3. the facts
-source ${0:A:h}/runner-updater-lib || refuse "cannot load ${0:A:h}/runner-updater-lib"
 now=$(/bin/date -u +%s)
 [[ $now =~ '^[0-9]+$' ]] || refuse "the clock gave '$now'"
 pass=$REPORT/pass
