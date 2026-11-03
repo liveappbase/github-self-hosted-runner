@@ -731,21 +731,36 @@ class TestOnOff(unittest.TestCase):
         self.assertEqual(sorted(u.pin_files()), ['linux-tart', 'mac-golden'])
         self.assertEqual(lines_of(u.actions), OFF_JOURNAL[:1])
 
-    def test_off_with_an_open_window_refuses_and_touches_no_pin(self):
-        for text in ('family fx\n', ''):
+    def test_off_with_a_window_that_stays_open_refuses_and_touches_no_pin(self):
+        # off runs RECOVER first (test_runner_updater_recover.py); a journal it leaves open (here: a line it does not
+        # read) stops off before anything changes
+        r = Rig(self)
+        u = Paths(r)
+        raw = u.put(dict(FULL, on=True))
+        pins = u.pins(**OFF_PINS)
+        r.sb.write(u.window, 'family fx\nsurprise x\n', 0o600)
+        res = r.cmd('off', ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP the window journal %s stays open: the next run\'s RECOVER tries again; '
+                      'nothing else starts\n' % u.window, res.stdout)
+        self.assertNotIn('off: the updater is OFF', res.stdout)
+        self.assertEqual(u.pin_files(), pins)
+        self.assertEqual(u.raw(), raw)
+        self.assertIsNone(u.raw(u.actions))
+
+    def test_control_off_after_recover_closed_the_journal(self):
+        for text in ('family fx\n', ''):              # it disabled nothing: RECOVER closes it, then off goes on
             with self.subTest(window=text):
                 r = Rig(self)
                 u = Paths(r)
-                raw = u.put(dict(FULL, on=True))
-                pins = u.pins(**OFF_PINS)
+                u.put(dict(FULL, on=True))
+                u.pins(**OFF_PINS)
                 r.sb.write(u.window, text, 0o600)
                 res = r.cmd('off', ok=False)
-                self.assertEqual((res.returncode, res.stdout), (1, (
-                    'runner-updater: REFUSE a window is open (%s): off never strands a window, so nothing changed. '
-                    'Run off again when the window has ended\n') % u.window), res.stderr)
-                self.assertEqual(u.pin_files(), pins)
-                self.assertEqual(u.raw(), raw)
-                self.assertIsNone(u.raw(u.actions))
+                self.assertEqual(res.returncode, 0, res.stdout)
+                self.assertIn('runner-updater: recover: nothing was disabled', res.stdout)
+                self.assertFalse(os.path.exists(u.window))
+                self.assertFalse(u.get()['on'])
 
     def test_on_and_off_wait_for_the_lock(self):
         for cmd, want in (('on', True), ('off', False)):

@@ -2,7 +2,8 @@
 to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-gate), STATEDIR (golden-build,
 golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune), DD (runner-updater,
 runner-journal), BIN (runner-updater, runner-enable), DF (runner-updater, tart-shim) and FLOOR_GIB (runner-updater,
-golden-build: the switch window's DISK check uses golden-build's floor). release-check runs on a temporary git repository with only the files the constants rule reads; it
+golden-build: the switch window's DISK check uses golden-build's floor) and LSOF (runner-updater's RECOVER, runner-lock-free:
+one lsof reads every open file). release-check runs on a temporary git repository with only the files the constants rule reads; it
 downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
@@ -38,7 +39,8 @@ class ReleaseCheckConstants(unittest.TestCase):
               'DD': ('/bin/dd', 'runner-updater', 'runner-journal'),
               'BIN': ('/Users/ci/bin', 'runner-updater', 'runner-enable'),
               'DF': ('/bin/df', 'runner-updater', 'tart-shim'),
-              'FLOOR_GIB': ('200', 'runner-updater', 'golden-build')}
+              'FLOOR_GIB': ('200', 'runner-updater', 'golden-build'),
+              'LSOF': ('/usr/sbin/lsof', 'runner-lock-free', 'runner-updater')}
 
     def check(self, name, value):
         line, changed, other = self.WIRING[name]
@@ -94,6 +96,9 @@ class ReleaseCheckConstants(unittest.TestCase):
 
     def test_two_values_of_floor_gib_are_red(self):
         self.two_values_are_red('FLOOR_GIB')
+
+    def test_two_values_of_lsof_are_red(self):
+        self.two_values_are_red('LSOF')
 
 
 class LockHolderMessages(unittest.TestCase):

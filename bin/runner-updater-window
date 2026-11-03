@@ -1,12 +1,14 @@
 #!/bin/zsh -f
 # runner-updater-window — the switch window of the runner-image updater on the Studio (PLAN D5, "STUDIO WINDOW"): zsh
-# functions that bin/runner-updater sources for `rebuild` and `switch-now` (never run on its own; it reads no argument).
-# ONE copy. A later release's pass calls ru_window with an eligible release's version.
+# functions that bin/runner-updater sources for `rebuild` and `switch-now` (never run on its own; it reads no argument),
+# and RECOVER (ru_recover), which ends an interrupted window. ONE copy. A later release's pass calls ru_recover first,
+# then ru_window with an eligible release's version.
 #
 # The caller holds the updater lock for the whole window, has loaded the state (ru_state), sourced
 # bin/runner-updater-lib, exports TZ=UTC and LC_ALL=C, and sets (bin/runner-updater's header has the values): RUNNER
 # CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP DD CORE STATE PROTECTED WINDOW WINDOWS PINDIR RELBIN FLAG REAL REALRUN
-# LOGDIR TARTDIR BIN LOCK DF DU FLOOR_GIB VALIDATE_GAP CLOSE_WAIT CLOSE_POLL MTIME_WAIT.
+# LOGDIR TARTDIR BIN LOCK DF DU FLOOR_GIB VALIDATE_GAP CLOSE_WAIT CLOSE_POLL MTIME_WAIT, and for RECOVER RECOVER_WAIT
+# RECOVER_POLL LSOF.
 #
 # ru_window FAMILY VERSION SHA256 MODE SINCE COMMAND — ONE switch window: FAMILY's sets go from the image they run (the
 #   old image) to a new image its builder makes with runner VERSION (the tarball's SHA256). MODE: idle (the idle pair
@@ -15,7 +17,7 @@
 #   (rebuild | switch-now | pass) is journaled. It prints its steps ("runner-updater: window: ...") and every STOP line.
 #   Returns 0: the window closed on the new image (switched). 1: a STOP (held in the state, the window ended) or a
 #   REFUSE (nothing changed, nothing held). 2: not now (START STATE or IDLE; nothing changed, nothing held). 3: the
-#   window journal stays open: a failure the window cannot end itself; RECOVER (S3b-4) ends it.
+#   window journal stays open: a failure the window cannot end itself; RECOVER ends it.
 #
 # THE ORDER. Before runner-disable (each failure: no journal, no runner-disable, NO drain):
 #   1. FAMILY LINES: the config is copied once (the window's BACKUP, WDIR/config.toml.backup); every set of the family
@@ -60,18 +62,21 @@
 #      the clock: A FUTURE MTIME, below), the config's sha still the one the window chose (on this path the edit's;
 #      else a HAND CHANGE AFTER THE INSTALL), `enable-start`, runner-enable, `enable-done`, then the TARGET runs: FLAG
 #      present, one runscaler started after the config's mtime, and the config's family lines = the last TARGET,
-#      within CLOSE_WAIT seconds (polled every CLOSE_POLL). That read is `to`.
+#      within CLOSE_WAIT seconds (polled every CLOSE_POLL; ru_w_wait_target). That read is `to`. EVERY runner-enable
+#      of the window passes the sha of the file it chose (ru_w_enable EXPECT; S3b-3 review r2 carry (1)): the edit; the
+#      backup after it went back; the file as found after a HAND CHANGE under the runner lock. Another sha at that
+#      point is A HAND CHANGE AFTER THE INSTALL.
 #      A PRE-CLOSE FAILURE (runner-enable refuses, or the target does not run in time) happens at most ONCE per
 #      journal: the first time, runner-disable, the backup back when the config is the window's edit, a STOP check
-#      failed (a switch's), and CI enabled on the config as it is then (a new TARGET); the second time, STOP POOL DOWN
-#      with the hand line, and no runner-disable follows.
+#      failed (a switch's), and CI enabled again on the file it chose (the backup when it went back; a new TARGET);
+#      the second time, STOP POOL DOWN with the hand line, and no runner-disable follows.
 # A failure in 9-13 (and 14's validate): STOP check failed, the backup back when the config is the window's edit, CI
 # enabled on the config (15). The window waits for its last TARGET to run (15) and closes in the same run: a later pass
 # could close it, but this release's pass ends at an open journal ("RECOVER needed"), so every switch would stop there.
 # A HAND CHANGE AFTER THE INSTALL (the config's sha changes before, during or between the post-edit validate tries, or
 # after the window chose the file to enable CI on): a person's file. Nothing goes over it and CI is not enabled on it
 # (it failed validate, or was never validated): STOP HAND CHANGE, CI stays down, and the journal stays open (return 3)
-# for RECOVER (S3b-4), which reads its `hand-change` line.
+# for RECOVER, which enables CI on that file only when it validates first.
 # A FUTURE MTIME (the config's mtime more than MTIME_WAIT s ahead of the clock: clock skew, a hand `touch`): the window
 # cannot prove that runscaler read the file, and does not wait for it. STOP check failed; the file as found is copied
 # to WDIR/config.toml.found (`found`), the backup goes back (`restore`) and CI is enabled on it. A second one in the
@@ -106,9 +111,10 @@
 #
 # THE WINDOW JOURNAL, WINDOW (STATEDIR/window; absent = no window open). One `KEY VALUE` line per fact, appended and
 # synced by bin/runner-journal BEFORE its side effect. The window's folder WDIR = WINDOWS/ID.d keeps its files; a
-# closed journal is renamed to WINDOWS/ID. S3b-4's RECOVER reads only this file, by these patterns (V = [0-9]+\.[0-9]+
-# \.[0-9]+, H = [0-9a-f]{64}, I = [A-Za-z0-9][A-Za-z0-9._-]*, S = [A-Za-z0-9][A-Za-z0-9._-]{0,99}, P = an absolute
-# path with no space), in this order (a key in [] may be absent; | = one of):
+# closed journal is renamed to WINDOWS/ID. RECOVER reads only this file, and each line only by these patterns (ru_rc_pat
+# holds them: ONE copy; V = [0-9]+\.[0-9]+\.[0-9]+, H = [0-9a-f]{64}, I = [A-Za-z0-9][A-Za-z0-9._-]*, S =
+# [A-Za-z0-9][A-Za-z0-9._-]{0,99}, P = an absolute path with no space), in this order (a key in [] may be absent; |
+# = one of):
 #   window ID                 ^window [0-9]{14}-[0-9]+$                      (UTC yyyymmddHHMMSS-pid)
 #   family FAMILY             ^family [a-z][a-z0-9-]{0,40}$
 #   kind switch               ^kind switch$
@@ -123,7 +129,8 @@
 #   pin-before none | V H     ^pin-before (none|V H)$
 #   target S=I...             ^target S=I( S=I)*$   (the family's lines a TARGET config names, sets in config order;
 #                                            appended, never rewritten: the LAST one is what must run)
-#   validate STEP N CLASS     ^validate (pre|target|post) [1-3] (PASS|API-ONLY|NON-API|UNKNOWN)$ (WDIR/validate-STEP-N.out)
+#   validate STEP N CLASS     ^validate (pre|target|post|recover) [1-3] (PASS|API-ONLY|NON-API|UNKNOWN)$
+#                                            (WDIR/validate-STEP-N.out; `recover`: RECOVER's validate of a copy)
 #   idle idle | skipped       ^idle (idle|skipped)$
 #   from PID START | none     ^from ([0-9]+ [0-9]+|none)$   (the runscaler read before the idle pair, when it is the
 #                                            state's boundary process: THE OWN RESTART's `from`)
@@ -152,17 +159,67 @@
 #   enable-done               ^enable-done $
 #   [pre-close-failure WHY]   ^pre-close-failure .+$   (at most once followed by runner-disable; the second: POOL DOWN)
 #   running PID START         ^running [0-9]+ [0-9]+$  (the last TARGET runs)
-#   stop NAME: TEXT           ^stop (check failed|HAND CHANGE|POOL DOWN|DISK|NO IDLE): .*$
+#   stop NAME: TEXT           ^stop (check failed|HAND CHANGE|POOL DOWN|DISK|NO IDLE|ROLLBACK FAILED|CI DISABLED|
+#                                    ROLLED BACK): .*$
 #   [delete I]                ^delete I$           (a held close whose gate did not pass: before tart deletes I)
 #   pin-rule V H | removed    ^pin-rule (removed|V H)$ (D2's ONE RULE, before the pin is written or removed)
 #   state-write switched|held ^state-write (switched|held)$ (before the state is written: the family's new candidate,
 #                                            or only this window's STOPs)
 #   closed EPOCH              ^closed [0-9]+$      (before the journal is renamed to WINDOWS/ID)
+#   RECOVER's own lines, after the window's:
+#   [recover-wait EPOCH]      ^recover-wait [0-9]+$  (before its first wait: the one bound starts here)
+#   [recover-target H S=I...] ^recover-target H S=I( S=I)*$  (RECOVER's own TARGET, BEFORE its `enable-start`: the sha
+#                                            and the family's lines of the config it leaves installed)
 # After a failure in the window, the steps from `disable-start` (a pre-close failure: no `stopped` follows its
 # runner-disable) or from `found`/`restore`/`target` on repeat in that order; `delete` lines come before `pin-rule`.
+# RECOVER appends its own lines (`stop`, `restore`, `delete`, `validate recover`, the enable steps) the same way.
 # A cut journal: its last line may be lost (runner-journal's residual); the step it names may or may not have started.
+# A last line with no newline was cut while it was written: RECOVER drops it.
+#
+# RECOVER (PLAN D5, RECOVER 1-5), ru_recover: an open window journal that no run holds (the window holds the updater
+# lock for its whole run) is ended by the next pass or command, under the updater lock, before anything else starts. It
+# reads the journal ONLY by the patterns above (a line no pattern reads, or a key it does not know: STOP, RECOVER
+# changes nothing) and the facts. No step on CI depends on jq: jq only reads and writes the state (the STOPs, the image
+# record of D2's ONE RULE), so an untested jq (new work only) never stops it; a jq that fails leaves the journal open
+# after CI is back. The family's sets are the journal's (its first TARGET), never the families file's. In order:
+#   0. The window had closed (its last line is `closed`): only the rename. No `disable-start`, or FLAG present and no
+#      `disable-done`: nothing was disabled: the journal closes, no STOP, and the state is not written. A journal that
+#      ended in POOL DOWN (a `stop POOL DOWN` line, or two `pre-close-failure` lines): it closes held, and RECOVER runs
+#      neither runner-disable nor runner-enable.
+#   1. FLAG present after the last `enable-start` (the updater's enable): the config's family lines must be the LAST
+#      TARGET (the window's `target` and RECOVER's `recover-target` lines, in order), else a person's config runs:
+#      STOP HAND CHANGE and no action. The target must run within CLOSE_WAIT s (ru_w_wait_target), and the journal
+#      closes; else a pre-close failure (at most once per journal: the second is STOP POOL DOWN, no runner-disable); the
+#      first runs runner-disable and RECOVER goes on at 3. FLAG present after the last `disable-done` with no
+#      `enable-start` after it: a person enabled CI: STOP HAND CHANGE, no action.
+#   2. FLAG absent: it waits until nothing is busy (ru_rc_busy): no process of this user has a journaled tool open (by
+#      the `tool` lines' dev+inode, over EVERY open file: `LSOF -n -P -a -u UID -F pDi`, never only the executables:
+#      zsh holds its script on a descriptor, so a builder whose lockf was killed alone still holds its tool while the
+#      lock reads free), no gold-*, n1-* or s1-* VM runs (tart's list), and the release's runner-lock-free says free.
+#      A read that fails is busy. ONE bound: RECOVER_WAIT s from the first `recover-wait` line (a run after it checks
+#      once): then STOP CI DISABLED (held; it is not held again at the close), the journal stays open, and the next
+#      pass checks again.
+#   3. A switch's builder names (the work VM, the output, the gate's clone) that tart lists, unless the gate passed
+#      (`gate green 0`), and only when no non-comment line of the config names them: deleted, each journaled first
+#      (ru_w_prune).
+#   4. The config (ru_rc_config): the `edited-sha` -> the backup goes back (`restore`); the `config-sha` -> left;
+#      another sha -> a person's file, left as found; CI goes on it only when it validates first (AFTER THE INSTALL: a
+#      copy, the ONE VALIDATE RULE, step `recover`) with STOP HAND CHANGE; when it does not validate, STOP HAND CHANGE,
+#      CI stays down and the journal stays open (the next pass validates it again). A sha an earlier RECOVER chose
+#      (`recover-target`) is enabled with no validate.
+#   Then RECOVER's own TARGET (D1): `recover-target` (the sha and the lines of the config it leaves), and
+#   5. ru_w_enable on that sha: `enable-start`, runner-enable, `enable-done`, the target runs (`running`); a pre-close
+#      failure there is the window's (at most once per journal).
+# Its close: the journal's STOPs held again (its CI DISABLED lines are not), then RECOVER's own; a switch whose FIRST
+# TARGET (the candidate's lines) ran, with no STOP, switched (the candidate is set: R1 stays armed); one that did not
+# and holds no STOP is `check failed` (it was interrupted). Then ru_w_close: the pin by D2's ONE RULE, THE STOP RULE as
+# a window that ran runner-disable (a held CI DISABLED is replaced), the protected list.
+# THE `restart` MEMBER beside an open journal (S3b-3 fix r1 carry (b)): a journal that disabled nothing (0) keeps it:
+# its runscaler, the member's `to`, was never stopped. Every other close writes `restart` from the journal's own `from`
+# and `stopped` lines and the `running` RECOVER saw, with no pre-close failure (THE OWN RESTART), or removes it: the
+# older member's `to` was stopped by this journal's runner-disable, and a gap is the safe default.
 
-typeset -g ru_W='["check failed","HAND CHANGE","POOL DOWN","NO IDLE","DISK"]'   # the STOPs a window raises
+typeset -g ru_W='["check failed","HAND CHANGE","POOL DOWN","NO IDLE","DISK","ROLLBACK FAILED","CI DISABLED"]'   # a window's
 # THE STOP RULE (the header): kept(...) = the family's STOPs after a window that raised $new; $disabled: it ran
 # runner-disable; $running: it saw its target run
 typeset -g ru_w_kept='def kept($W; $new; $disabled; $running):
@@ -203,16 +260,27 @@ ru_j() {
 # NAME TEXT [HAND]: a STOP this window raises; held in the state for the family when the window ends. Its detail: the
 # text, the release's sha (switch-now reruns a NO IDLE's release with it), a hand line for a STOP that needs one
 ru_w_stop() {
-  local o
-  o=$($JQ -n -c --arg f "$ru_w_fam" --arg s "$1" --arg v "$ru_w_ver" --arg t "$2" --arg h "${3-}" --arg sha "$ru_w_sha" \
-        '{family: $f, stop: $s, version: (if $v == "" then null else $v end), user: null,
-          detail: ({text: $t} + (if $sha != "" then {sha: $sha} else {} end) + (if $h != "" then {hand: $h} else {} end))}') \
-    || o="{\"family\":\"$ru_w_fam\",\"stop\":\"$1\",\"version\":null,\"user\":null,\"detail\":null}"
-  ru_w_stops+=($o)
+  ru_w_stopjson "$1" "$2" "${3-}"
+  ru_w_stops+=($REPLY)
   print -r -- "runner-updater: STOP $1: $2"
   # one journal line (ru_w_clean: a tab in a tool's output is a `?` there); the state keeps the text whole
   ru_w_clean "$1: $2"
   (( ! ru_w_open )) || ru_j stop $REPLY || true
+}
+
+# NAME TEXT [HAND] -> REPLY = the STOP as the state holds it (one JSON object; a jq that fails: the STOP with no detail)
+ru_w_stopjson() {
+  REPLY=$($JQ -n -c --arg f "$ru_w_fam" --arg s "$1" --arg v "$ru_w_ver" --arg t "$2" --arg h "${3-}" --arg sha "$ru_w_sha" \
+        '{family: $f, stop: $s, version: (if $v == "" then null else $v end), user: null,
+          detail: ({text: $t} + (if $sha != "" then {sha: $sha} else {} end) + (if $h != "" then {hand: $h} else {} end))}' \
+        2>/dev/null) && [[ -n $REPLY ]] \
+    || REPLY="{\"family\":\"$ru_w_fam\",\"stop\":\"$1\",\"version\":null,\"user\":null,\"detail\":null}"
+}
+# NAME: 0 when this run holds a STOP of that name already (ru_w_stops)
+ru_w_hasstop() {
+  local s
+  for s in $ru_w_stops; do [[ $s == *"\"stop\":\"$1\""* ]] && return 0; done
+  return 1
 }
 
 # FILTER [JQ OPTION...]: the state changed by FILTER, written by rename (ru_write); 1 + REPLY
@@ -307,10 +375,10 @@ ru_w_literal() {
 
 # IMAGE -> REPLY = its runner version (D2's ONE RULE): the state's image record; this window's output; else the
 # version golden-build's log LOGDIR/golden-<date>.log printed for it (the `start: IMAGE ..., runner V (` line of the
-# run that printed `DONE: IMAGE`). 1 when none is found
+# run that printed `DONE: IMAGE`). 1 when none is found; 2 when jq cannot read the state (that is not "no record")
 ru_w_version() {
   local img=$1 v l cand= found=
-  v=$(print -r -- $ru_state | $JQ -r --arg i $img '.images[$i] // empty' 2>/dev/null)
+  v=$(print -r -- $ru_state | $JQ -r --arg i $img '.images[$i] // empty' 2>/dev/null) || return 2
   [[ $v =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] && { REPLY=$v; return 0 }
   [[ -n ${ru_w_out-} && $img == "$ru_w_out" && -n $ru_w_ver ]] && { REPLY=$ru_w_ver; return 0 }
   [[ $img =~ '^liveapp-mac-golden-([0-9]{8})$' ]] || return 1
@@ -552,10 +620,10 @@ ru_w_restart() {
 
 # ---- a person's file, and a future mtime
 # A HAND CHANGE AFTER THE INSTALL (the header): FOUND WHEN. Nothing goes over the person's file and CI is not enabled
-# on it: STOP HAND CHANGE, CI stays down, the journal stays open for RECOVER (S3b-4). Returns 3
+# on it: STOP HAND CHANGE, CI stays down, the journal stays open for RECOVER. Returns 3
 ru_w_hand_after() {
   ru_j hand-change $1 || return 3
-  ru_w_stop "HAND CHANGE" "$CONFIG changed after the window installed its edit or chose the file to enable CI on ($2; sha $1): the window leaves it as it is and does not enable CI on it, so CI stays down. Check the file, then run \`$BIN/runner-enable\` by hand; the window journal $WINDOW stays open: RECOVER (S3b-4) ends it"
+  ru_w_stop "HAND CHANGE" "$CONFIG changed after the window installed its edit or chose the file to enable CI on ($2; sha $1): the window leaves it as it is and does not enable CI on it, so CI stays down. Check the file, then run \`$BIN/runner-enable\` by hand; the window journal $WINDOW stays open: the next run's RECOVER validates the file before it enables CI"
   return 3
 }
 # A FUTURE MTIME (the header): MTIME. STOP check failed, the file as found kept in WDIR, the backup back, CI enabled on
@@ -563,18 +631,18 @@ ru_w_hand_after() {
 ru_w_future() {
   local kept=$ru_w_dir/config.toml.found
   if (( ru_w_futured )); then
-    print -r -- "runner-updater: STOP the config's mtime $1 is ahead of the clock again, after the backup went back: the window journal stays open: RECOVER needed (S3b-4)"
+    print -r -- "runner-updater: STOP the config's mtime $1 is ahead of the clock again, after the backup went back: the window journal stays open: RECOVER ends it"
     return 3
   fi
   ru_w_futured=1
   ru_w_stop "check failed" "the config's mtime $1 is $(( $1 - EPOCHSECONDS )) s ahead of the clock (more than $MTIME_WAIT s: clock skew, or a hand touch): the window cannot prove that runscaler read it; the file as found is kept as $kept, the backup goes back, and CI is enabled on it"
   ru_j found $kept || return 3
-  /bin/cp -p -- $CONFIG $kept || { print -r -- "runner-updater: STOP cannot copy $CONFIG to $kept: the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+  /bin/cp -p -- $CONFIG $kept || { print -r -- "runner-updater: STOP cannot copy $CONFIG to $kept: the window journal stays open: RECOVER ends it"; return 3 }
   ru_j restore $ru_w_backup || return 3
   ru_w_bytes $ru_w_backup && ru_write $CONFIG $REPLY \
-    || { print -r -- "runner-updater: STOP the backup $ru_w_backup cannot go back over $CONFIG: the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+    || { print -r -- "runner-updater: STOP the backup $ru_w_backup cannot go back over $CONFIG: the window journal stays open: RECOVER ends it"; return 3 }
   ru_wsay "the backup is back: $CONFIG = $ru_w_backup"
-  ru_w_enable
+  ru_w_enable $ru_w_bsha
 }
 
 # A held close whose gate did not pass: the builder's names that tart lists are deleted, each journaled first, and only
@@ -590,7 +658,9 @@ ru_w_prune() {
   have=(${(f)t})
   ru_w_bytes $CONFIG || { ru_wsay "cannot read $CONFIG: the builder's names stay"; return 0 }
   cl=("${(@f)REPLY}")
-  for n in $ru_w_work $ru_w_out; do
+  local -a names=($ru_w_work $ru_w_out)
+  for l in ${(M)jl:#gate-clone *}; do [[ ${l#gate-clone } =~ '^s1-gate-[0-9]{14}$' ]] && names+=(${l#gate-clone }); done
+  for n in $names; do
     [[ -n $n && $n != "$ru_w_old" ]] && (( ${have[(Ie)$n]} )) || continue
     named=0
     for l in $cl; do
@@ -626,9 +696,12 @@ ru_w_pin_rule() {
     done
   fi
   v= s=
-  if [[ -n $img && $img != '?' ]] && ru_w_version $img; then
-    v=$REPLY
-    ru_w_sha_for $v && s=$REPLY
+  if [[ -n $img && $img != '?' ]]; then
+    ru_w_version $img
+    case $? in
+      (0) v=$REPLY; ru_w_sha_for $v && s=$REPLY ;;
+      (2) REPLY="jq cannot read the state's record of $img: the pin is not decided"; return 1 ;;
+    esac
   fi
   if [[ -n $v && -n $s ]]; then
     ru_j pin-rule "$v $s" || return 1
@@ -649,7 +722,7 @@ ru_w_pin_rule() {
 ru_w_close() {
   local switched=$1 oldv= rs running=false
   (( switched )) || ru_w_prune || return 3
-  ru_w_pin_rule || { print -r -- "runner-updater: STOP $REPLY: the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+  ru_w_pin_rule || { print -r -- "runner-updater: STOP $REPLY: the window journal stays open: RECOVER ends it"; return 3 }
   ru_w_version $ru_w_old && oldv=$REPLY
   ru_w_restart
   rs=$REPLY
@@ -665,23 +738,25 @@ ru_w_close() {
       --argjson now $EPOCHSECONDS --argjson W $ru_W --arg sets "${(j: :)ru_w_fsets}" --argjson rs $rs \
       --argjson sw ${${switched:#0}:+true}${${switched:#1}:+false} --argjson running $running \
       --argjson new "[${(j:,:)ru_w_stops}]" \
-    || { print -r -- "runner-updater: STOP the state cannot be written ($REPLY): the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+    || { print -r -- "runner-updater: STOP the state cannot be written ($REPLY): the window journal stays open: RECOVER ends it"; return 3 }
   ru_w_archive || return 3
   (( switched )) && return 0
   return 1
 }
 
-# ENABLE (step 15): CI on the config as it is now [EXPECT: only when its sha is EXPECT, the file the window chose]; its
-# family lines are the TARGET (a new TARGET line when they are not the last one). The file must not change until
-# runner-enable (else A HAND CHANGE AFTER THE INSTALL); an mtime more than MTIME_WAIT s ahead of the clock is A FUTURE
-# MTIME. 0 the target runs; 1 POOL DOWN (held at the close); 3 the journal stays open
+# ENABLE (step 15): EXPECT -> CI on the config only when its sha is EXPECT, the file the window (or RECOVER) chose
+# (ru_w_chosen: every enable passes it, the pre-close path's too); its family lines are the TARGET (a new TARGET line
+# when they are not the last one). The file must not change until runner-enable (else A HAND CHANGE AFTER THE
+# INSTALL); an mtime more than MTIME_WAIT s ahead of the clock is A FUTURE MTIME. 0 the target runs; 1 POOL DOWN (held
+# at the close); 3 the journal stays open
 ru_w_enable() {
-  local expect=${1-} esha lines mtime t rc deadline pid start
+  local expect=$1 esha lines mtime t rc
   typeset -A st
+  ru_w_chosen=$expect
   ru_w_csha
   esha=$REPLY
-  [[ -z $expect || $esha == "$expect" ]] || { ru_w_hand_after $esha "before runner-enable"; return 3 }
-  ru_w_lines_now $ru_w_fam || { print -r -- "runner-updater: STOP the config cannot be read ($REPLY): the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+  [[ -n $expect && $esha == "$expect" ]] || { ru_w_hand_after $esha "before runner-enable"; return 3 }
+  ru_w_lines_now $ru_w_fam || { print -r -- "runner-updater: STOP the config cannot be read ($REPLY): the window journal stays open: RECOVER ends it"; return 3 }
   lines=$REPLY
   if [[ $lines != "$ru_w_last_target" ]]; then ru_j target $lines || return 3; ru_w_last_target=$lines; fi
   zstat -H st $CONFIG || { print -r -- "runner-updater: STOP cannot stat $CONFIG: the window journal stays open"; return 3 }
@@ -701,25 +776,36 @@ ru_w_enable() {
   fi
   ru_j enable-done '' || return 3
   ru_wsay "enabled: waiting up to $CLOSE_WAIT s for runscaler to start on $lines"
+  ru_w_wait_target $lines $mtime
+  rc=$?
+  (( rc == 0 || rc == 3 )) && return $rc
+  ru_w_preclose "the target did not run within $CLOSE_WAIT s (FLAG, a runscaler started after $mtime, the lines $lines)"
+}
+
+# LINES MTIME: the TARGET runs: FLAG present, ONE runscaler started after MTIME (whole seconds), and the config's
+# family lines = LINES, within CLOSE_WAIT s (polled every CLOSE_POLL): `running`. 0 it runs; 1 not in time; 3 the
+# journal could not record it
+ru_w_wait_target() {
+  local lines=$1 mtime=$2 deadline pid start
   (( deadline = EPOCHSECONDS + CLOSE_WAIT ))
   while :; do
     if [[ -e $FLAG ]] && ru_proc && [[ $REPLY =~ '^\{"pid":([0-9]+),"start":([0-9]+)\}$' ]]; then
       pid=$match[1] start=$match[2]
       if (( start > mtime )) && ru_w_lines_now $ru_w_fam && [[ $REPLY == "$lines" ]]; then
         ru_j running "$pid $start" || return 3
-        ru_w_running=1 ru_w_to="$pid $start"   # THE OWN RESTART's `to`
+        ru_w_running=1 ru_w_to="$pid $start" ru_w_ran=$lines   # THE OWN RESTART's `to`
         ru_wsay "runscaler $pid started at $start, after the config's install ($mtime): the target runs"
         return 0
       fi
     fi
-    (( EPOCHSECONDS < deadline )) || break
+    (( EPOCHSECONDS < deadline )) || return 1
     /bin/sleep $CLOSE_POLL
   done
-  ru_w_preclose "the target did not run within $CLOSE_WAIT s (FLAG, a runscaler started after $mtime, the lines $lines)"
 }
 
 # a PRE-CLOSE FAILURE: WHY. At most once per journal: the first time runner-disable, the backup back when the config
-# is the window's edit, CI enabled again; the second time STOP POOL DOWN and no runner-disable
+# is the window's edit, CI enabled again on the file the window chose (the backup when it went back); the second time
+# STOP POOL DOWN and no runner-disable
 ru_w_preclose() {
   local why=$1
   local -a seen
@@ -732,11 +818,13 @@ ru_w_preclose() {
     return 1
   fi
   ru_j disable-start '' || return 3
-  $RELBIN/runner-disable || { ru_j disable-failed $? ; print -r -- "runner-updater: STOP runner-disable failed (above): the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+  $RELBIN/runner-disable || { ru_j disable-failed $? ; print -r -- "runner-updater: STOP runner-disable failed (above): the window journal stays open: RECOVER ends it"; return 3 }
   ru_j disable-done '' || return 3
+  ru_w_restored=0
   ru_w_unedit || return 3
-  (( ${#ru_w_stops} )) || ru_w_stop "check failed" "$why"
-  ru_w_enable
+  (( ru_w_restored )) && ru_w_chosen=$ru_w_bsha
+  (( ${#ru_w_stops} )) || ru_w_stop $ru_w_failname "$why"
+  ru_w_enable $ru_w_chosen
 }
 
 # the backup back over the config when the config is this window's edit (by rename): 0, or 3 (journal stays open)
@@ -744,7 +832,8 @@ ru_w_unedit() {
   [[ -n ${ru_w_tsha-} ]] && ru_w_sha $CONFIG && [[ $REPLY == "$ru_w_tsha" ]] || return 0
   ru_j restore $ru_w_backup || return 3
   ru_w_bytes $ru_w_backup && ru_write $CONFIG $REPLY \
-    || { print -r -- "runner-updater: STOP the backup $ru_w_backup cannot go back over $CONFIG: the window journal stays open: RECOVER needed (S3b-4)"; return 3 }
+    || { print -r -- "runner-updater: STOP the backup $ru_w_backup cannot go back over $CONFIG: the window journal stays open: RECOVER ends it"; return 3 }
+  ru_w_restored=1
   ru_wsay "the backup is back: $CONFIG = $ru_w_backup"
 }
 
@@ -753,7 +842,7 @@ ru_w_unedit() {
 ru_w_back() {
   ru_w_stop "check failed" "$1"
   ru_w_unedit || return 3
-  ru_w_enable
+  ru_w_enable $ru_w_bsha
   case $? in (0|1) ru_w_close 0; return $? ;; (*) return 3 ;; esac
 }
 
@@ -763,12 +852,14 @@ ru_window() {
   local -a work
   ru_w_fam=$fam ru_w_ver=$ver ru_w_sha=$sha ru_w_since=$5 ru_w_cmd=$cmd
   ru_w_stops=() ru_w_vals=() ru_w_open=0 ru_w_tsha= ru_w_last_target= ru_w_out= ru_w_old= ru_w_pinbefore= ru_w_work=
-  ru_w_from= ru_w_stopped= ru_w_to= ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0
+  ru_w_from= ru_w_stopped= ru_w_to= ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0 ru_w_ran= ru_w_chosen=
+  ru_w_restored=0 ru_w_kind=switch ru_w_failname="check failed" ru_w_bsha=
   ru_w_id="$(strftime '%Y%m%d%H%M%S' $EPOCHSECONDS)-$$"
   [[ $ver =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && $sha =~ '^[0-9a-f]{64}$' && $mode == (idle|now) && $5 =~ '^[0-9]+$' ]] \
     || { print -r -- "runner-updater: REFUSE the window's arguments: '$ver' '$sha' '$mode' '$5'"; return 1 }
   [[ $cmd == (rebuild|switch-now|pass) ]] || { print -r -- "runner-updater: REFUSE the window's command: '$cmd'"; return 1 }
-  [[ ! -e $WINDOW && ! -L $WINDOW ]] || { print -r -- "runner-updater: STOP RECOVER needed (S3b-4): the window journal $WINDOW is open"; return 1 }
+  [[ ! -e $WINDOW && ! -L $WINDOW ]] \
+    || { print -r -- "runner-updater: STOP RECOVER needed: the window journal $WINDOW is open (ru_recover ends it first)"; return 1 }
   [[ -d $WINDOWS ]] || /bin/mkdir -m 700 -- $WINDOWS || { print -r -- "runner-updater: REFUSE cannot create $WINDOWS"; return 1 }
   ru_w_dir=$WINDOWS/$ru_w_id.d
   /bin/mkdir -m 700 -- $ru_w_dir || { print -r -- "runner-updater: REFUSE cannot create $ru_w_dir"; return 1 }
@@ -778,7 +869,7 @@ ru_window() {
   # 1. FAMILY LINES, on the backup: one copy of the config, read once (its mtime kept)
   /bin/cp -p -- $CONFIG $ru_w_backup && ru_w_sha $ru_w_backup \
     || { print -r -- "runner-updater: REFUSE cannot copy $CONFIG to $ru_w_backup"; return 1 }
-  csha=$REPLY
+  csha=$REPLY ru_w_bsha=$REPLY
   CONFIG=$ru_w_backup ru_config && ru_families && ru_pools \
     || { print -r -- "runner-updater: REFUSE $REPLY: no window"; return 1 }
   (( ${+ru_fam[$fam]} )) || { print -r -- "runner-updater: REFUSE no family $fam in $FAMILIES: no window"; return 1 }
@@ -848,7 +939,7 @@ ru_window() {
   rc=$?
   if (( rc != 0 )); then
     ru_j disable-failed $rc
-    print -r -- "runner-updater: STOP runner-disable failed (exit $rc, above): FLAG is gone and runscaler may still drain; the window journal stays open: RECOVER needed (S3b-4)"
+    print -r -- "runner-updater: STOP runner-disable failed (exit $rc, above): FLAG is gone and runscaler may still drain; the window journal stays open: RECOVER ends it"
     return 3
   fi
   ru_j disable-done '' || return 3
@@ -946,3 +1037,350 @@ ru_window() {
   fi
   ru_w_close 0
 }
+
+# ---- RECOVER (the header, "RECOVER"): an open window journal that no run holds is ended
+typeset -gA ru_rc_pat
+() {
+  local V='[0-9]+\.[0-9]+\.[0-9]+' H='[0-9a-f]{64}' I='[A-Za-z0-9][A-Za-z0-9._-]*' S='[A-Za-z0-9][A-Za-z0-9._-]{0,99}'
+  local P='/[^[:space:]]*' T
+  T="$S=$I( $S=$I)*"
+  ru_rc_pat=(
+    window '[0-9]{14}-[0-9]+'           family '[a-z][a-z0-9-]{0,40}'      kind '(switch|rollback)'
+    command '(rebuild|switch-now|pass|back)'                              version "($V|none)"
+    runner-sha "$H"                     date '[0-9]{8}'                    reason '.+'
+    reject "($V|none)"                  image "$I"
+    tool "(golden-build|golden-emudhra|golden-gate|real-run) [0-9]+ [0-9]+ $P"
+    pin-before "(none|$V $H)"           target "$T"
+    validate '(pre|target|post|recover) [1-3] (PASS|API-ONLY|NON-API|UNKNOWN)'
+    idle '(idle|skipped)'               from '([0-9]+ [0-9]+|none)'        config-sha "$H"
+    backup "$P"                         disable-start ''                   disable-failed '[0-9]+'
+    disable-done ''                     stopped "([0-9]+ [0-9]+ $H|none)"  pin-write "$V $H"
+    build-start '[0-9]{8}'              build-failed '.+'                  build-done "$I"
+    gate-start "$I"                     gate-clone "$I"                    gate '(green|red|stop|other) [0-9]+'
+    enable-check '(pass|fail)'          edited-sha "$H"                    hand-change "($H|unreadable)"
+    found "$P"                          restore "$P"                       installed '[0-9]+'
+    enable-start ''                     enable-refused '[0-9]+'            enable-done ''
+    pre-close-failure '.+'              running '[0-9]+ [0-9]+'            delete "$I"
+    stop '(check failed|HAND CHANGE|POOL DOWN|DISK|NO IDLE|ROLLBACK FAILED|CI DISABLED|ROLLED BACK): .*'
+    pin-rule "(removed|$V $H)"          state-write '(switched|rolled|held)'  closed '[0-9]+'
+    recover-wait '[0-9]+'               recover-target "$H $T"
+  )
+}
+
+ru_rcsay() { print -r -- "runner-updater: recover: $*" }
+
+# THE JOURNAL as RECOVER reads it: WINDOW once; each line `KEY VALUE` by its KEY's pattern (ru_rc_pat, the header's
+# table) -> ru_rc_k (the keys) and ru_rc_v (the values), in order. A last line with no newline was cut while it was
+# written: dropped. 1 + REPLY: a line no pattern reads (RECOVER then changes nothing)
+ru_rc_read() {
+  local text l key val n=0
+  ru_rc_k=() ru_rc_v=()
+  [[ -f $WINDOW && ! -L $WINDOW && -r $WINDOW ]] || { REPLY="$WINDOW is not a readable regular file"; return 1 }
+  text=$(/bin/cat -- $WINDOW && print -rn -- .) || { REPLY="$WINDOW cannot be read"; return 1 }
+  text=${text%.}
+  if [[ -n $text && $text != *$'\n' ]]; then
+    if [[ $text == *$'\n'* ]]; then text=${text%$'\n'*}$'\n'; else text=; fi
+  fi
+  for l in "${(@f)${text%$'\n'}}"; do
+    [[ -n $text ]] || break
+    (( n++ ))
+    [[ $l =~ '^([a-z][a-z0-9-]{0,40}) (.*)$' ]] || { REPLY="line $n is not 'KEY VALUE'"; return 1 }
+    key=$match[1] val=$match[2]
+    (( ${+ru_rc_pat[$key]} )) || { REPLY="line $n: RECOVER does not read the key '$key'"; return 1 }
+    [[ $val =~ "^(${ru_rc_pat[$key]})\$" ]] || { REPLY="line $n: a '$key' value RECOVER does not read"; return 1 }
+    ru_rc_k+=($key) ru_rc_v+=("$val")
+  done
+  return 0
+}
+# KEY -> REPLY = its first value; 1 when the journal has none
+ru_rc_first() {
+  local i=${ru_rc_k[(i)$1]}
+  (( i <= ${#ru_rc_k} )) || return 1
+  REPLY=$ru_rc_v[i]
+}
+
+# the window's globals from the journal (ru_rc_read's), as ru_window sets them
+ru_rc_load() {
+  local i v
+  local -a img t
+  ru_w_id= ru_w_fam= ru_w_kind= ru_w_ver= ru_w_sha= ru_w_old= ru_w_work= ru_w_out= ru_w_rbt= ru_w_pinbefore=
+  ru_w_bsha= ru_w_tsha= ru_w_backup= ru_w_from= ru_w_stopped= ru_w_to= ru_w_ran= ru_w_chosen= ru_w_reject=
+  ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0 ru_w_restored=0 ru_w_open=1 ru_w_cmd=recover ru_w_jcmd=
+  ru_w_stops=() ru_w_vals=() ru_w_fsets=() ru_rc_targets=() ru_rc_ok=() ru_rc_tools=() ru_rc_jstops=()
+  ru_rc_first window && ru_w_id=$REPLY
+  ru_rc_first family && ru_w_fam=$REPLY
+  ru_rc_first kind && ru_w_kind=$REPLY
+  ru_rc_first command && ru_w_jcmd=$REPLY
+  ru_rc_first version && ru_w_ver=${REPLY:#none}
+  ru_rc_first runner-sha && ru_w_sha=$REPLY
+  ru_rc_first reject && ru_w_reject=${REPLY:#none}
+  ru_rc_first pin-before && ru_w_pinbefore=${REPLY:#none}
+  ru_rc_first config-sha && ru_w_bsha=$REPLY
+  ru_rc_first backup && ru_w_backup=$REPLY
+  ru_rc_first edited-sha && ru_w_tsha=$REPLY
+  ru_rc_first from && ru_w_from=${REPLY:#none}
+  ru_rc_first stopped && ru_w_stopped=${REPLY:#none}
+  for (( i = 1; i <= ${#ru_rc_k}; i++ )); do
+    v=$ru_rc_v[i]
+    case $ru_rc_k[i] in
+      (image) img+=($v) ;;
+      (target) ru_rc_targets+=($v) ;;
+      (recover-target) ru_rc_targets+=(${v#* }); ru_rc_ok+=(${v%% *}) ;;
+      (tool) t=(${(s: :)v}); ru_rc_tools+=("$(printf '0x%x' $t[2]):$t[3]") ;;
+      (stop) [[ $v == 'CI DISABLED: '* ]] || ru_rc_jstops+=($v) ;;   # CI DISABLED is RECOVER's wait: tried again
+      (pre-close-failure) ru_w_preclosed=1 ;;
+      (found) ru_w_futured=1 ;;
+    esac
+  done
+  if [[ $ru_w_kind == rollback ]]; then ru_w_old=${img[1]-} ru_w_rbt=${img[2]-}
+  else ru_w_old=${img[1]-} ru_w_work=${img[2]-} ru_w_out=${img[3]-}; fi
+  ru_w_last_target=${ru_rc_targets[-1]-}
+  for v in ${(s: :)${ru_rc_targets[1]-}}; do ru_w_fsets+=(${v%%=*}); done
+  # the family's sets are the journal's (its first TARGET), never the families file's now: ru_w_lines_now reads them
+  typeset -gA ru_fam
+  [[ -z $ru_w_fam ]] || ru_fam[$ru_w_fam]=${(j: :)ru_w_fsets}
+  ru_w_failname="check failed"
+  [[ $ru_w_kind == rollback ]] && ru_w_failname="ROLLBACK FAILED"
+  ru_w_dir=$WINDOWS/${ru_w_id:-recovered}.d
+  [[ -d $ru_w_dir ]] || /bin/mkdir -m 700 -p -- $ru_w_dir 2>/dev/null
+}
+
+# a journal RECOVER acts on names its family, its kind, the pre-window config and its backup (that file, whole), and
+# a TARGET: 0, or 1 + REPLY
+ru_rc_complete() {
+  local k
+  for k in family kind config-sha backup target; do
+    (( ${ru_rc_k[(Ie)$k]} )) || { REPLY="it has no '$k' line"; return 1 }
+  done
+  [[ $ru_w_kind == rollback || -n $ru_w_out ]] || { REPLY="it has no output image line"; return 1 }
+  ru_w_sha $ru_w_backup && [[ $REPLY == "$ru_w_bsha" ]] \
+    || { REPLY="its backup $ru_w_backup is not the config-sha it journaled"; return 1 }
+}
+
+# STEP 2 (FLAG absent): BUSY -> 0 + REPLY = what still runs; 1 nothing does. A process of this user that has a
+# journaled tool open (by its dev+inode, over EVERY open file: the REAL lsof, never only `-d txt`, as zsh holds its
+# script on a descriptor), a gold-*, n1-* or s1-* VM running (tart's list), or a runner lock that is not free (the
+# release's runner-lock-free). A read that fails is busy (never "free")
+ru_rc_busy() {
+  local out l p= d= lf
+  local -a hits vms w
+  if (( ${#ru_rc_tools} )); then
+    out=$(/usr/bin/env -i $LSOF -n -P -a -u $UID -F pDi 2>/dev/null) && [[ -n $out ]] \
+      || { REPLY="lsof failed: it cannot tell whether a tool of the window still runs"; return 0 }
+    for l in ${(f)out}; do
+      case $l in
+        (p*) p=${l#p} ;;
+        (D*) d=${l#D} ;;
+        (i*) (( ${ru_rc_tools[(Ie)$d:${l#i}]} )) && hits+=($p) ;;
+      esac
+    done
+    hits=(${(u)hits})
+    (( ${#hits} == 0 )) || { REPLY="a process has a tool of the window open (pid ${(j:, :)hits})"; return 0 }
+  fi
+  out=$(ru_tart list --source local 2>/dev/null) || { REPLY="tart list failed"; return 0 }
+  for l in ${${(f)out}[2,-1]}; do
+    w=(${=l})
+    (( ${#w} >= 3 )) && [[ $w[-1] == running && $w[2] == (gold|n1|s1)-* ]] && vms+=($w[2])
+  done
+  (( ${#vms} == 0 )) || { REPLY="a VM of a builder or the gate runs (${(j:, :)vms})"; return 0 }
+  lf=$($RELBIN/runner-lock-free 2>&1)
+  [[ $lf == free ]] || { REPLY="the runner lock $LOCK is not free (${lf:-no answer})"; return 0 }
+  return 1
+}
+# STEP 2: wait until nothing is busy. ONE bound: RECOVER_WAIT s from the journal's first `recover-wait` line (a later
+# run that finds it past checks once). At its end STOP CI DISABLED, held; the journal stays open and the next pass tries
+# again. 0 quiet; 3 not
+ru_rc_quiet() {
+  local since deadline why= last=
+  if ru_rc_first recover-wait; then since=$REPLY; else since=$EPOCHSECONDS; ru_j recover-wait $since || return 3; fi
+  (( deadline = since + RECOVER_WAIT ))
+  while ru_rc_busy; do
+    why=$REPLY
+    [[ $why == "$last" ]] || ru_rcsay "waits: $why (up to $(strftime '%Y-%m-%d %H:%M:%S UTC' $deadline))"
+    last=$why
+    (( EPOCHSECONDS < deadline )) || {
+      ru_w_stop "CI DISABLED" "RECOVER has waited since $(strftime '%Y-%m-%d %H:%M UTC' $since) for the window's tools, VMs and the runner lock: $why. CI stays disabled; the next pass checks again"
+      ru_w_hold_stops
+      return 3
+    }
+    /bin/sleep $RECOVER_POLL
+  done
+  return 0
+}
+
+# STEP 4: the config -> 0 + REPLY = the sha CI goes on: the pre-window config, the one an earlier RECOVER chose, or a
+# file RECOVER validated now; 1 (a rollback: the window's state is decided, REPLY too); 3 the journal stays open.
+# The window's edit (a switch's): the backup goes back. Another file is a person's: left as found, and (AFTER THE
+# INSTALL) CI goes on it only when it validates first under the ONE VALIDATE RULE, as a copy
+ru_rc_config() {
+  local now copy=$ru_w_dir/config.toml.recover
+  ru_w_csha; now=$REPLY
+  [[ $now != unreadable ]] || { print -r -- "runner-updater: STOP RECOVER cannot read $CONFIG: CI stays as it is"; return 3 }
+  if [[ $ru_w_kind == rollback && -n $ru_w_tsha && $now == "$ru_w_tsha" ]]; then
+    ru_rb_recover_target || return $?
+    ru_w_csha; now=$REPLY
+  elif [[ -n $ru_w_tsha && $now == "$ru_w_tsha" ]]; then
+    ru_j restore $ru_w_backup || return 3
+    ru_w_bytes $ru_w_backup && ru_write $CONFIG $REPLY \
+      || { print -r -- "runner-updater: STOP the backup $ru_w_backup cannot go back over $CONFIG: the window journal stays open"; return 3 }
+    ru_rcsay "the window's edit is undone: $CONFIG = its backup $ru_w_backup"
+    ru_w_csha; now=$REPLY
+  fi
+  if [[ $now == "$ru_w_bsha" ]] || (( ${ru_rc_ok[(Ie)$now]} )) || [[ $ru_w_kind == rollback && $now == "$ru_w_tsha" ]]; then
+    REPLY=$now
+    return 0
+  fi
+  # a person's file: validated as a copy, then CI only on that sha (ru_w_enable compares it again)
+  /bin/cp -p -- $CONFIG $copy && ru_w_sha $copy && [[ $REPLY == "$now" ]] \
+    || { print -r -- "runner-updater: STOP RECOVER cannot copy $CONFIG whole to $copy: CI stays as it is"; return 3 }
+  if ru_w_validate recover $copy; then
+    ru_w_hasstop "HAND CHANGE" || (( ${ru_rc_jstops[(I)HAND CHANGE: *]} )) \
+      || ru_w_stop "HAND CHANGE" "$CONFIG changed while the window had CI disabled (sha $now): RECOVER leaves it as found; it validates, so CI goes on it"
+    REPLY=$now
+    return 0
+  fi
+  ru_w_stop "HAND CHANGE" "$CONFIG changed while the window had CI disabled (sha $now), and it does not validate ($REPLY): RECOVER leaves it as found and does not enable CI on it, so CI stays down. Check the file, then run \`$BIN/runner-enable\` by hand; the window journal stays open and the next pass validates the file again"
+  ru_w_hold_stops
+  return 3
+}
+
+# STEP 1, FLAG present after the last `enable-start` (the updater's enable): the window closes when its LAST TARGET
+# runs; the config's family lines are another (a person's config runs): STOP HAND CHANGE, CI as it is. Not in CLOSE_WAIT
+# s: a pre-close failure, at most once per journal (the second: POOL DOWN, no runner-disable); the first runs
+# runner-disable and RECOVER goes on at step 3. -> the close's return, 3 open, 4 go on at step 3
+ru_rc_flagged() {
+  local lines why
+  typeset -A st
+  ru_w_lines_now $ru_w_fam || { print -r -- "runner-updater: STOP RECOVER cannot read the config ($REPLY): the window journal stays open"; return 3 }
+  lines=$REPLY
+  if [[ $lines != "$ru_w_last_target" ]]; then
+    ru_w_stop "HAND CHANGE" "CI runs $CONFIG with the family's lines $lines, not the window's last TARGET ($ru_w_last_target): a person's config; RECOVER leaves CI and the file as they are"
+    ru_rc_close
+    return $?
+  fi
+  zstat -H st $CONFIG || { print -r -- "runner-updater: STOP RECOVER cannot stat $CONFIG: the window journal stays open"; return 3 }
+  ru_rcsay "CI is enabled after the window's enable-start: waiting up to $CLOSE_WAIT s for its last TARGET to run ($lines)"
+  ru_w_wait_target $lines $st[mtime]
+  case $? in
+    (0) ru_rcsay "the target runs"; ru_rc_close; return $? ;;
+    (3) return 3 ;;
+  esac
+  why="the target did not run within $CLOSE_WAIT s (FLAG, a runscaler started after $st[mtime], the lines $lines)"
+  ru_w_clean $why
+  ru_j pre-close-failure $REPLY || return 3
+  if (( ru_w_preclosed )); then
+    ru_w_stop "POOL DOWN" "$why; a second pre-close failure in this window, so no runner-disable follows: CI is down on this host" "$BIN/runner-enable"
+    ru_rc_close
+    return $?
+  fi
+  ru_w_preclosed=1
+  ru_j disable-start '' || return 3
+  $RELBIN/runner-disable || { ru_j disable-failed $?; print -r -- "runner-updater: STOP runner-disable failed (above): the window journal stays open"; return 3 }
+  ru_j disable-done '' || return 3
+  ru_w_stop $ru_w_failname $why
+  return 4
+}
+
+# the close of a journal RECOVER ends: the journal's STOPs held again (its CI DISABLED lines are not: RECOVER's own
+# wait), then RECOVER's; a switch that did not reach its candidate and holds no STOP is `check failed` (interrupted).
+# -> ru_w_close's (or the rollback's) return
+ru_rc_close() {
+  local s n sw=0
+  local -a own=($ru_w_stops)
+  ru_w_stops=()
+  for s in $ru_rc_jstops $own; do
+    if [[ $s == '{'* ]]; then
+      [[ $s =~ '"stop":"([^"]*)"' ]] && ru_w_hasstop $match[1] && continue
+      ru_w_stops+=($s)
+    else
+      n=${s%%: *}
+      ru_w_hasstop $n && continue
+      if [[ $n == "POOL DOWN" ]]; then ru_w_stopjson $n "${s#*: }" "$BIN/runner-enable"; else ru_w_stopjson $n "${s#*: }"; fi
+      ru_w_stops+=($REPLY)
+    fi
+  done
+  # the window's own TARGET (its first) ran, and no STOP holds: it switched (a rollback: it rolled back)
+  (( ru_w_running && ${#ru_w_stops} == 0 )) && [[ $ru_w_ran == "${ru_rc_targets[1]}" ]] && sw=1
+  if [[ $ru_w_kind == rollback ]]; then ru_rb_close $sw; return $?; fi
+  if (( ! sw && ${#ru_w_stops} == 0 )); then
+    ru_w_stop "check failed" "the window was interrupted (its journal ends at \`${ru_rc_k[-1]-}\`): RECOVER ended it and CI runs the config it left"
+  fi
+  ru_w_close $sw
+}
+
+# the journal archived as it is (the window had closed, or nothing was disabled): no state write, so the `restart`
+# member stays (its runscaler, the member's `to`, still runs); 0, or 3 (it stays open)
+ru_rc_archive() {
+  [[ -n $ru_w_id ]] || ru_w_id="$(strftime '%Y%m%d%H%M%S' $EPOCHSECONDS)-$$"
+  if [[ ${ru_rc_k[-1]-} == closed ]]; then
+    /bin/mv -- $WINDOW $WINDOWS/$ru_w_id || { print -r -- "runner-updater: STOP cannot rename $WINDOW to $WINDOWS/$ru_w_id: the window journal stays open"; return 3 }
+    ru_w_open=0
+    ru_protect $ru_state $EPOCHSECONDS \
+      || print -r -- "runner-updater: STOP the protected list cannot be written ($REPLY): $PROTECTED is as it was; \`runner-updater protect\` writes it"
+    return 0
+  fi
+  ru_w_archive || return 3
+}
+
+# RECOVER (the header): -> 0 the journal closed (a window that switched or rolled back, or nothing was disabled); 1 it
+# closed with a STOP held; 3 it stays open (a STOP printed, held when the state can be written). The caller holds the
+# updater lock, loaded the state (ru_state) and sourced this file and the lib
+ru_recover() {
+  local flag=0 lds ldd le rc h lines
+  [[ -e $WINDOW || -L $WINDOW ]] || return 0
+  ru_rcsay "the window journal $WINDOW is open and no run holds the updater lock: RECOVER ends it"
+  ru_rc_read || { print -r -- "runner-updater: STOP RECOVER cannot read the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
+  ru_rc_load
+  if [[ ${ru_rc_k[-1]-} == closed ]]; then
+    ru_rcsay "the window had closed (its last line is \`closed\`): its journal goes to $WINDOWS"
+    ru_rc_archive
+    return $?
+  fi
+  lds=${ru_rc_k[(I)disable-start]} ldd=${ru_rc_k[(I)disable-done]} le=${ru_rc_k[(I)enable-start]}
+  [[ -e $FLAG ]] && flag=1
+  if (( ! lds )) || (( flag && ! ldd )); then
+    if (( lds )); then ru_rcsay "nothing was disabled (FLAG present and no disable-done): the journal closes, no STOP"
+    else ru_rcsay "nothing was disabled (no disable-start): the journal closes, no STOP"; fi
+    ru_rc_archive
+    return $?
+  fi
+  ru_rc_complete || { print -r -- "runner-updater: STOP RECOVER cannot act on the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
+  # a journal that ended in POOL DOWN (its second pre-close failure): it closes held, and nothing more runs
+  if (( ${ru_rc_jstops[(I)POOL DOWN: *]} )) || (( ${#${(M)ru_rc_k:#pre-close-failure}} >= 2 )); then
+    (( ${ru_rc_jstops[(I)POOL DOWN: *]} )) \
+      || ru_w_stop "POOL DOWN" "a second pre-close failure in this window (its journal), so no runner-disable follows: CI is down on this host" "$BIN/runner-enable"
+    ru_rcsay "the window ended in POOL DOWN: no runner-disable, no runner-enable"
+    ru_rc_close
+    return $?
+  fi
+  if (( flag )); then
+    if (( le > ldd )); then
+      ru_rc_flagged
+      rc=$?
+      (( rc == 4 )) || return $rc
+    else
+      ru_w_stop "HAND CHANGE" "CI was enabled while the window had it disabled (FLAG present after disable-done, no enable-start): RECOVER leaves CI and $CONFIG as they are"
+      ru_rc_close
+      return $?
+    fi
+  else
+    ru_rcsay "CI is disabled (FLAG absent): RECOVER waits for the window's tools, VMs and the runner lock"
+    ru_rc_quiet || return 3
+  fi
+  # STEP 3: a switch's builder names, unless its gate passed and no config line names them
+  if [[ $ru_w_kind == switch ]]; then ru_w_prune || return 3; fi
+  # STEP 4, then RECOVER's own TARGET (D1), then STEP 5
+  ru_rc_config
+  rc=$?
+  (( rc == 0 )) || return $rc
+  h=$REPLY
+  ru_w_lines_now $ru_w_fam || { print -r -- "runner-updater: STOP RECOVER cannot read the config ($REPLY): the window journal stays open"; return 3 }
+  lines=$REPLY
+  ru_j recover-target "$h $lines" || return 3
+  ru_w_last_target=$lines ru_rc_targets+=($lines) ru_rc_ok+=($h)
+  ru_rcsay "CI goes on $CONFIG (sha $h): its target $lines"
+  ru_w_enable $h
+  (( $? == 3 )) && return 3
+  ru_rc_close
+}
+

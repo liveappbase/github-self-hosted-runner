@@ -125,10 +125,14 @@ class Rig:
             ('VALIDATE_GAP=20', 'VALIDATE_GAP=0'),
             ('CLOSE_WAIT=600', 'CLOSE_WAIT=3'),
             ('CLOSE_POLL=5', 'CLOSE_POLL=0.1'),
+            ('RECOVER_WAIT=4500', 'RECOVER_WAIT=20'),
+            ('RECOVER_POLL=10', 'RECOVER_POLL=0.1'),
         ]
         self.script = self.copy('runner-updater', extra_rewrites)
         self.lib = sb.copy_script('bin/runner-updater-lib', [])
         self.journal = sb.copy_script('bin/runner-journal', [])   # beside the script, as in a release's bin/
+        # RECOVER's file (every command but status and report sources it when a window journal is open)
+        sb.copy_script('bin/runner-updater-window', [])
         # the pass hook's file and the reader it sources (bin/runner-updater-release; its cells: test_runner_updater_
         # release.py), beside the script; its GitHub never answers (exit 7, as with no network) unless a cell says so
         sb.copy_script('bin/tls-excluded-lib', [])

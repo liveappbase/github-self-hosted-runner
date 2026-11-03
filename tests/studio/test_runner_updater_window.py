@@ -16,6 +16,7 @@ caller right after it wrote one KEY (RU_KILL_AT), so a cell sees what a kill at 
 import hashlib
 import json
 import os
+import pwd
 import signal
 import subprocess
 import time
@@ -47,6 +48,7 @@ def today():
 DISABLE = '''F=%(flag)s PSD=%(psd)s S=%(scn)s LOG=%(log)s
 n=$(( $(/bin/cat $S/disable.n 2>/dev/null || print 0) + 1 )); print -r -- $n > $S/disable.n
 /bin/rm -f $F
+[[ -f $S/disable-hook.$n ]] && source $S/disable-hook.$n
 [[ -f $S/disable-fail ]] && { print -r -- "runner-disable: still held after 3700s"; exit 1 }
 [[ -f $S/drain.$n ]] && /bin/cat $S/drain.$n >> $LOG          # the stopped runscaler's last records, as it drains
 [[ -f $S/keep-proc.$n ]] || /bin/cp $PSD/background $PSD/out   # keep-proc: it did not stop the old runscaler
@@ -129,16 +131,40 @@ CLOCK = r'''
 if [[ $1 == +%%Y%%m%%d ]]; then print -r -- %(d)s; else exec /bin/date "$@"; fi
 '''
 
-KILL_AT = ('\nexit 0\n', '\n[[ $key == "${RU_KILL_AT-}" ]] && kill -KILL $PPID\nexit 0\n')
+# RU_KILL_AT=KEY: SIGKILL the caller right after the first KEY line; KEY:N, right after the Nth KEY line of the file.
+# RU_JQ_OFF_AT=KEY: after a KEY line, the file RU_JQ_OFF exists (a jq wrapper then fails every call)
+KILL_AT = ('\nexit 0\n', '''
+if [[ -n ${RU_JQ_OFF_AT-} && $key == "$RU_JQ_OFF_AT" ]]; then : > $RU_JQ_OFF; fi
+if [[ -n ${RU_KILL_AT-} ]]; then
+  kk=${RU_KILL_AT%%:*} kn=1
+  [[ $RU_KILL_AT == *:* ]] && kn=${RU_KILL_AT##*:}
+  if [[ $key == "$kk" ]]; then
+    seen=(${(M)${(f)"$(<$file)"}:#$key *})
+    (( ${#seen} == kn )) && kill -KILL $PPID
+  fi
+fi
+exit 0
+''')
+# the fake tart's list: `-q`, the names (as before); without it, tart's table (State last: scn/running-NAME = running)
+TART_LIST = ('  (list) /bin/ls -1 $VMS ;;\n', '''  (list)
+    if [[ " $* " == *" -q "* ]]; then /bin/ls -1 $VMS
+    else
+      print -r -- "Source Name Disk Size SizeOnDisk Accessed State"
+      for v in $VMS/*(N); do
+        st=stopped; [[ -e $SCN/running-${v:t} ]] && st=running
+        print -r -- "local ${v:t} 90 50 50 2 days ago $st"
+      done
+    fi ;;
+''')
 
 
 class Win:
     """the fake host and the release's bin/ beside the updater (the rig's tools/)"""
 
     def __init__(self, test, real_build=False, cfg=None, families='mac-golden tart mac-a\n', s=None, extra_rewrites=(),
-                 win_rewrites=()):
+                 win_rewrites=(), jq=None):
         self.test = test
-        r = self.r = Rig(test, cfg=cfg, families=families, extra_rewrites=extra_rewrites)
+        r = self.r = Rig(test, cfg=cfg, families=families, extra_rewrites=extra_rewrites, jq=jq)
         sb = self.sb = r.sb
         self.u = Paths(r)
         self.tools = os.path.dirname(r.script)
@@ -156,9 +182,17 @@ class Win:
         sb.stub('runner-start', START % v, folder=self.tools)
         sb.stub('golden-gate', GATE % v, folder=self.tools)
         sb.stub('golden-emudhra', 'exit 0', folder=self.tools)
+        # RECOVER's lock read: the REAL runner-lock-free (the real lsof and lockf) on the rig's lock, as this user
+        sb.copy_script('bin/runner-lock-free', [
+            ('LOCK=/tmp/runner.lock', 'LOCK=' + r.lock), ('RUNNER=/Users/ci/bin/runner', 'RUNNER=' + r.runner),
+            ('CI_USER=ci', 'CI_USER=' + pwd.getpwuid(os.getuid()).pw_name)],
+            allow=['Installed as /Users/ci/bin/runner-lock-free', 'can unlink /tmp/runner.lock under'],
+            dest=os.path.join(self.tools, 'runner-lock-free'))
         fake = sb.mkdir('fake')
-        sb.stub('tart', gb.TART % {'vms': gb.q(self.vms), 'scn': gb.q(self.scn), 'pidf': gb.q(sb.path('realrun.pid')),
-                                   'major': gb.MAJOR}, folder=fake)
+        self.test.assertIn(TART_LIST[0], gb.TART)
+        sb.stub('tart', gb.TART.replace(*TART_LIST) % {'vms': gb.q(self.vms), 'scn': gb.q(self.scn),
+                                                       'pidf': gb.q(sb.path('realrun.pid')), 'major': gb.MAJOR},
+                folder=fake)
         sb.stub('real-run', 'print -r -- $$ > %s\nexec /bin/sleep 600' % gb.q(sb.path('realrun.pid')), folder=fake)
         disk = sb.mkdir('tools-disk')
         sb.stub('df', 'print -r -- "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
@@ -776,8 +810,8 @@ class TestMtimeSecond(unittest.TestCase):
 
 
 class TestKillAtEachStep(unittest.TestCase):
-    """A kill at a step boundary: the journal's last line names that step, no side effect after it, and the next
-    command (rebuild, switch-now, pass) prints "RECOVER needed (S3b-4)" and starts nothing."""
+    """A kill at a step boundary: the journal's last line names that step, no side effect after it, and the next pass
+    runs RECOVER first (test_runner_updater_recover.py has its rules): it ends the journal and CI runs."""
 
     def killed(self, key, w=None):
         w = w or Win(self)
@@ -788,14 +822,13 @@ class TestKillAtEachStep(unittest.TestCase):
         return w
 
     def assert_recover_needed(self, w):
-        n = (len(w.calls('runner-disable')), len(w.calls('runner-enable')), len(w.calls('golden-build')), w.r.ps_calls())
-        for cmd in ('rebuild', 'switch-now', 'pass'):
-            res = w.r.cmd(*([cmd, FAM] if cmd != 'pass' else [cmd]), ok=False)
-            self.assertEqual(res.returncode, 1, res.stdout)
-            self.assertIn('runner-updater: STOP RECOVER needed (S3b-4): the window journal %s is open' % w.u.window,
-                          res.stdout)
-        self.assertEqual((len(w.calls('runner-disable')), len(w.calls('runner-enable')), len(w.calls('golden-build')),
-                          w.r.ps_calls()), n)
+        """the next pass runs RECOVER first: the journal closes and CI runs (FLAG present); no build starts"""
+        n = len(w.calls('golden-build'))
+        res = w.r.cmd('pass', ok=False)
+        self.assertIn('runner-updater: recover: the window journal %s is open' % w.u.window, res.stdout)
+        self.assertFalse(os.path.exists(w.u.window), res.stdout)
+        self.assertTrue(os.path.exists(w.r.flag))
+        self.assertEqual(len(w.calls('golden-build')), n)
 
     def test_disable_start(self):
         w = self.killed('disable-start')
@@ -903,8 +936,11 @@ class TestRealBuildInterrupted(unittest.TestCase):
         self.assertEqual(lines_of(w.u.protected), sorted([OLD, 'gold-' + d, 'liveapp-mac-golden-' + d]))
         self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
         self.assertNotIn(OLD, [a for c in w.calls('tart') if c[:1] in (['delete'], ['stop']) for a in c])
-        res = w.run()
-        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4)', res.stdout)
+        res = w.r.cmd('pass', ok=False)                 # RECOVER: the builder's names go (its gate never ran)
+        self.assertIn('runner-updater: recover: ', res.stdout)
+        self.assertFalse(os.path.exists(w.u.window), res.stdout)
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertFalse(os.path.exists(os.path.join(w.vms, 'liveapp-mac-golden-' + d)))
         return w, d
 
     def test_at_the_first_clone(self):
@@ -941,31 +977,29 @@ class TestPinRule(unittest.TestCase):
 
 
 class TestRecoverNeeded(unittest.TestCase):
-    """An open window journal that no run of this release started: a pass or a command prints "RECOVER needed (S3b-4)"
-    and starts nothing (no fact is read, no core program runs)."""
+    """An open window journal that no run of this release started: a pass or a command runs RECOVER first (a journal
+    that disabled nothing closes with no STOP and no runner-disable); status names it and runs no RECOVER."""
 
     def test_pass_and_the_commands_with_an_open_journal(self):
-        w = Win(self)
-        w.sb.write(w.u.window, 'window 20261101080000-1\nfamily %s\nkind switch\nimage %s\n' % (FAM, OLD), 0o600)
         for args in (('pass',), ('rebuild', FAM), ('switch-now', FAM)):
-            res = w.r.cmd(*args, ok=False)
-            self.assertEqual(res.returncode, 1, res.stdout)
-            self.assertIn('runner-updater: STOP RECOVER needed (S3b-4): the window journal %s is open' % w.u.window,
-                          res.stdout)
-        self.assertEqual((w.r.ps_calls(), w.calls('runner-disable')), (0, []))
-        self.assertIn('runner-updater: status: a window journal is open: %s' % w.u.window, w.status())
+            with self.subTest(args=args):
+                w = Win(self)
+                w.sb.write(w.u.window, 'window 20261101080000-1\nfamily %s\nkind switch\nimage %s\n' % (FAM, OLD),
+                           0o600)
+                self.assertIn('runner-updater: status: a window journal is open: %s' % w.u.window, w.status())
+                res = w.r.cmd(*args, ok=False)
+                self.assertIn('runner-updater: recover: nothing was disabled (no disable-start): the journal closes, '
+                              'no STOP\n', res.stdout)
+                self.assertFalse(os.path.exists(w.u.window))
+                self.assertEqual(w.windows()[0], '20261101080000-1')
 
     def test_an_open_journal_comes_before_every_other_refusal(self):
-        # the command's own check, first: a config the window would refuse still gives RECOVER needed
+        # RECOVER first: a config the window would refuse is read only after it
         w = Win(self, cfg=config(top='log-file = "/elsewhere.log"\n'))
         w.sb.write(w.u.window, 'window 20261101080000-1\nfamily %s\n' % FAM, 0o600)
         res = w.run()
         self.assertEqual(res.returncode, 1, res.stdout)
-        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4)', res.stdout)
-        self.assertNotIn('log-file', res.stdout)
-        os.remove(w.u.window)                    # the control: the same config, no journal
-        res = w.run()
-        self.assertIn('a top-level log-file key', res.stdout)
+        self.assertLess(res.stdout.index('runner-updater: recover: '), res.stdout.index('a top-level log-file key'))
 
     WINDOW_CALL = ('WINDOW=%(w)s WINDOWS=%(ws)s CONFIG=%(c)s\nsource %(win)s || exit 8\n'
                    'ru_window mac-golden %(v)s %(sha)s idle 0 pass\nprint -r -- "rc $?"\n'
@@ -984,7 +1018,7 @@ class TestRecoverNeeded(unittest.TestCase):
         # the function a later pass calls: its own check, before it makes or reads anything
         res = self.window_call(True)
         self.assertEqual(res.stdout.splitlines()[-1], 'rc 1', res.stdout + res.stderr)
-        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4): the window journal ', res.stdout)
+        self.assertIn('runner-updater: STOP RECOVER needed: the window journal ', res.stdout)
         self.assertNotIn('windows made', res.stdout)
 
     def test_control_ru_window_with_no_open_journal_goes_on(self):
@@ -1165,7 +1199,8 @@ class TestOwnRestart(unittest.TestCase):
 class TestTheTargetRuns(unittest.TestCase):
     """D1's close proof, each part on its own: FLAG present, ONE runscaler started after the config's install time
     (whole seconds), and the config's family lines = the last TARGET. In each cell the first runner-enable does not
-    prove it: no `running` for it, a pre-close failure follows, and the second runner-enable's runscaler (6002) runs."""
+    prove it: no `running` for it, a pre-close failure follows, and the second runner-enable's runscaler (6002) runs.
+    A config changed to other lines is a person's file: the pre-close path enables no CI on it (carried (1))."""
 
     def proven_only_after_the_pre_close_failure(self, w):
         res = w.run()
@@ -1188,11 +1223,19 @@ class TestTheTargetRuns(unittest.TestCase):
         self.proven_only_after_the_pre_close_failure(w)
 
     def test_a_new_runscaler_on_other_family_lines_is_not_the_target(self):
+        # the lines changed under it (a person's file): no `running`, and the pre-close path does not enable CI on a
+        # file it never chose: STOP HAND CHANGE, CI down, the journal open for RECOVER
         w = Win(self)
         w.hook('enable-hook.1', "/usr/bin/sed -i '' 's/runner-image = \"liveapp-mac-golden-[0-9]*\"/runner-image = "
                                 '"%s"/\' %s\n' % (IMG2, w.r.config))
-        self.proven_only_after_the_pre_close_failure(w)
-        self.assertEqual([l for l in w.journal() if l.startswith('target ')][-1], 'target mac-a=' + IMG2)
+        res = w.run()
+        self.assertEqual(res.returncode, 1, res.stdout)
+        k = w.keys()
+        self.assertEqual((k.count('pre-close-failure'), k.count('running')), (1, 0), k)
+        self.assertEqual(len(w.enables()), 1)
+        self.assertIn('runner-updater: STOP HAND CHANGE: %s changed after the window installed its edit' % w.r.config,
+                      res.stdout)
+        self.assertTrue(os.path.exists(w.u.window))
 
     def test_control_the_first_runscaler_is_the_target(self):
         w = Win(self)
@@ -1236,7 +1279,8 @@ class TestIdlePairLast(unittest.TestCase):
 class TestHandChangeAfterTheInstall(unittest.TestCase):
     """A person's edit after the window installed its edit (during the post-edit validate, between its tries, or while
     enable waits past the install second): the window restores nothing over the person's file and never enables CI on
-    it. STOP HAND CHANGE, CI stays down, and the window journal stays open (RECOVER, S3b-4, ends it)."""
+    it. STOP HAND CHANGE, CI stays down, and the window journal stays open: the next pass's RECOVER validates the file
+    before any runner-enable on it (test_runner_updater_recover.py, TestStep4Config)."""
 
     def hook_file(self, w, name, body):
         return w.sb.write(w.sb.path('hooks', name), '#!/bin/zsh -f\n' + body, 0o755)
@@ -1253,14 +1297,20 @@ class TestHandChangeAfterTheInstall(unittest.TestCase):
         self.assertEqual(w.keys()[-2:], ['hand-change', 'stop'])
         self.assertEqual(w.value('hand-change'), sha(found))
         self.assertNotIn('restore', w.keys())
-        self.assertIn('runner-updater: STOP RECOVER needed (S3b-4)', w.r.cmd('pass', ok=False).stdout)
+        w.window_validates = list(w.validates())                  # the window's own, before RECOVER's
+        n = len(w.validates())
+        res2 = w.r.cmd('pass', ok=False)
+        self.assertIn('runner-updater: recover: ', res2.stdout)
+        self.assertEqual(w.validates()[n][2], sha(found))         # RECOVER validated the person's file first
+        for e in w.enables():
+            self.assertEqual(e[2], sha(found))
         return res
 
     def test_an_edit_during_a_post_edit_validate_try(self):
         w = Win(self)
         w.validate('api', call=3)                 # post-edit try 1: API-ONLY, try again
         w.hook('validate-hook.3', 'print -r -- "# a hand edit" >> %s\n' % w.r.config)   # after try 1 read the config
-        w.validate('refuse', call=4)              # a try 2 would read the person's file: NON-API
+        w.validate('refuse', call=4)              # a try 2 would read the person's file (RECOVER's: NON-API, no CI)
         self.handed(w, switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n')
 
     def test_an_edit_before_a_try_reads_the_config(self):
@@ -1278,7 +1328,7 @@ class TestHandChangeAfterTheInstall(unittest.TestCase):
         w.validate('api', call=3)                 # post-edit try 1: API-ONLY; the edit lands before try 2
         found = switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n'
         self.handed(w, found, env={'RU_TEST_HOOK': hook})
-        self.assertNotIn(sha(found), [v[2] for v in w.validates()])
+        self.assertNotIn(sha(found), [v[2] for v in w.window_validates])
 
     def test_an_edit_while_enable_waits_past_the_install_second(self):
         w = Win(self, win_rewrites=[('/bin/sleep 0.2', '/bin/zsh -f $RU_TEST_HOOK')])
@@ -1288,7 +1338,7 @@ class TestHandChangeAfterTheInstall(unittest.TestCase):
                                   % w.r.config)
         self.handed(w, switched_config(w.pre, 'liveapp-mac-golden-' + today()) + b'# a hand edit\n',
                     env={'RU_TEST_HOOK': hook})
-        self.assertEqual(w.validates()[-1][2], sha(switched_config(w.pre, 'liveapp-mac-golden-' + today())))
+        self.assertEqual(w.window_validates[-1][2], sha(switched_config(w.pre, 'liveapp-mac-golden-' + today())))
 
     def test_control_a_non_api_post_validate_on_the_windows_own_edit_enables_the_backup(self):
         w = Win(self)
