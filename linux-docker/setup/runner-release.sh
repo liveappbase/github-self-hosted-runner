@@ -30,8 +30,11 @@
 # bash holds them: what runs, not the file, which a new release may replace mid-run), RR_FLOOR, and the bundle's own
 # sha256; any of them changed (the bundle edited too), and the bundle is rebuilt. EVERY download runs that check first
 # (rr_curl), so an input that changes between two downloads (a key added to the data file after the release was read)
-# holds for the next one, and a bundle that ~/.cache kept from another release of this file is rebuilt. RR_OPENSSL,
-# measured on the Linux host 2026-11-02: OpenSSL 3.5.5.
+# holds for the next one, and a bundle that ~/.cache kept from another release of this file is rebuilt. EACH INPUT IS
+# READ ONCE: the source and the data file are copied into a private folder first, and the stamp's hashes, the parse
+# and the filter all read those copies. Two reads of a path would let a file replaced between them (Install step 3
+# moves a new ~/build into place) leave a bundle made from one version under a stamp of the other, which every later
+# check calls current. RR_OPENSSL, measured on the Linux host 2026-11-02: OpenSSL 3.5.5.
 # THE UPDATER LOCK (plan D1): ONE per host user, RR_LOCK, named here once so that 02-d1.sh and the updater (which
 # sources this file too) take the same one. Held for a run's whole length: a second run waits for it (rr_lock, for a
 # command: a WAIT line names the lock first); a timer pass of the updater takes it with `flock -n` and exits instead.
@@ -61,19 +64,21 @@ rr_sha() {   # rr_sha FILE: its sha256, 64 hex, or rc 1
   printf '%s' "$s"
 }
 
-rr_excluded() {   # rr_excluded FILE: every hash, once all lines passed; one bad line REFUSES the whole file
+rr_excluded() {   # rr_excluded FILE [NAME]: every hash, once all lines passed; one bad line REFUSES the whole file.
+  # NAME (default FILE) is the name the REFUSE lines give it: rr_bundle reads its own copy of RR_EXCLUDED.
   local f=${1-} l h out= n=0
-  { [ -f "$f" ] && [ -r "$f" ]; } || { rr_no "cannot read the excluded keys [$f]"; return 1; }
-  if LC_ALL=C grep -q $'\r' -- "$f"; then rr_no "$f holds a CR byte"; return 1; fi
+  local nm=${2:-$f}
+  { [ -f "$f" ] && [ -r "$f" ]; } || { rr_no "cannot read the excluded keys [$nm]"; return 1; }
+  if LC_ALL=C grep -q $'\r' -- "$f"; then rr_no "$nm holds a CR byte"; return 1; fi
   while IFS= read -r l || [ -n "$l" ]; do
     case $l in ''|'#'*) continue ;; esac
     h=${l%% *}
-    [[ $h =~ ^[0-9a-f]{64}$ ]] || { rr_no "$f: a data line whose first field is not 64 lowercase hex"; return 1; }
-    case $out in *"$h"*) rr_no "$f names the key $h twice"; return 1 ;; esac
+    [[ $h =~ ^[0-9a-f]{64}$ ]] || { rr_no "$nm: a data line whose first field is not 64 lowercase hex"; return 1; }
+    case $out in *"$h"*) rr_no "$nm names the key $h twice"; return 1 ;; esac
     out+=$h$'\n'
     n=$((n + 1))
   done < "$f"
-  [ "$n" -gt 0 ] || { rr_no "$f has no data line: an empty list is refused, never read as nothing to exclude"; return 1; }
+  [ "$n" -gt 0 ] || { rr_no "$nm has no data line: an empty list is refused, never read as nothing to exclude"; return 1; }
   printf '%s' "$out"
 }
 
@@ -83,21 +88,27 @@ rr_bundle() {
   [ -x "$RR_OPENSSL" ] || { rr_no "no $RR_OPENSSL"; return 1; }
   { ov=$("$RR_OPENSSL" version < /dev/null) && [ -n "$ov" ]; } || { rr_no "$RR_OPENSSL version does not answer"; return 1; }
   [[ $RR_FLOOR =~ ^[1-9][0-9]*$ ]] || { rr_no "RR_FLOOR is not a count: [$RR_FLOOR]"; return 1; }
-  ex=$(rr_excluded "$RR_EXCLUDED") || return 1
-  src=$(rr_sha "$RR_SRC") || { rr_no "cannot read the CA bundle $RR_SRC"; return 1; }
-  exs=$(rr_sha "$RR_EXCLUDED") || { rr_no "cannot hash $RR_EXCLUDED"; return 1; }
-  fc=$(declare -f rr_sha rr_excluded rr_bundle | sha256sum) && fc=${fc%% *} && [[ $fc =~ ^[0-9a-f]{64}$ ]] \
-    || { rr_no "cannot hash the filter's own code"; return 1; }
   install -d -m 700 "$RR_DIR" "$d" "$d/capath" || { rr_no "cannot make $d"; return 1; }
   [ -z "$(ls -A "$d/capath")" ] || { rr_no "$d/capath, curl's CA folder, must be empty: something put a file there"; return 1; }
+  t=$(mktemp -d "$d/.new.XXXXXX") || { rr_no "cannot make a folder in $d"; return 1; }
+  # EACH INPUT READ ONCE (the header): the data file and the source are copied into $t first, and everything below
+  # (the stamp's hashes, the parse, the filter) reads those copies, never the paths again
+  { [ -f "$RR_EXCLUDED" ] && [ -r "$RR_EXCLUDED" ] && cat -- "$RR_EXCLUDED" > "$t/excluded"; } \
+    || { rm -rf -- "$t"; rr_no "cannot read the excluded keys [$RR_EXCLUDED]"; return 1; }
+  cat -- "$RR_SRC" > "$t/source" || { rm -rf -- "$t"; rr_no "cannot read the CA bundle $RR_SRC"; return 1; }
+  src=$(rr_sha "$t/source") || { rm -rf -- "$t"; rr_no "cannot read the CA bundle $RR_SRC"; return 1; }
+  exs=$(rr_sha "$t/excluded") || { rm -rf -- "$t"; rr_no "cannot hash $RR_EXCLUDED"; return 1; }
+  fc=$(declare -f rr_sha rr_excluded rr_bundle | sha256sum) && fc=${fc%% *} && [[ $fc =~ ^[0-9a-f]{64}$ ]] \
+    || { rm -rf -- "$t"; rr_no "cannot hash the filter's own code"; return 1; }
+  ex=$(rr_excluded "$t/excluded" "$RR_EXCLUDED") || { rm -rf -- "$t"; return 1; }
   want="source $src"$'\n'"excluded $exs"$'\n'"openssl $ov"$'\n'"filter $fc"$'\n'"floor $RR_FLOOR"
   if [ -f "$d/bundle.pem" ] && [ -f "$d/stamp" ] && b=$(rr_sha "$d/bundle.pem") \
      && [ "$(cat "$d/stamp")" = "$want"$'\n'"bundle $b" ]; then
+    rm -rf -- "$t"
     RR_BUNDLE=$d/bundle.pem RR_CAPATH=$d/capath
     echo "OK   the filtered CA bundle is current ($RR_BUNDLE)"
     return 0
   fi
-  t=$(mktemp -d "$d/.new.XXXXXX") || { rr_no "cannot make a folder in $d"; return 1; }
   : > "$t/bundle.pem" || { rm -rf -- "$t"; rr_no "cannot write in $t"; return 1; }
   while IFS= read -r l || [ -n "$l" ]; do
     if [ "$in" = 1 ]; then
@@ -119,7 +130,7 @@ rr_bundle() {
     elif [ "$l" = '-----BEGIN CERTIFICATE-----' ]; then
       in=1 pem=$l$'\n'
     fi
-  done < "$RR_SRC"
+  done < "$t/source"
   [ "$in" = 0 ] || { rm -rf -- "$t"; rr_no "$RR_SRC ends inside a certificate: no bundle"; return 1; }
   [ "$kept" -ge "$RR_FLOOR" ] || { rm -rf -- "$t"; rr_no "only $kept certificates of $RR_SRC kept ($dropped excluded), want $RR_FLOOR or more: no bundle"; return 1; }
   { b=$(rr_sha "$t/bundle.pem") && printf '%s\nbundle %s\n' "$want" "$b" > "$t/stamp" \

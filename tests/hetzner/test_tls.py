@@ -9,9 +9,12 @@ and the filter in linux-docker/setup/runner-release.sh that builds the CA bundle
 - The filter (rr_bundle) drops every certificate of the source bundle whose key the file names, keeps at least 100,
   and rebuilds the bundle when its source, the data file, the openssl, the filter's own code, its floor or the bundle
   file itself changed. Every download (rr_curl) runs it first, so a bundle another filter left in ~/.cache is rebuilt.
+  It reads each input the stamp names ONCE, so the stamp names the bytes the bundle was made from even when a file is
+  replaced while it runs.
 The data-file and pin cells read text and run anywhere; the reader and filter cells run the copied bash in a container
 (tests/hetzner/support.py).
 """
+import hashlib
 import os
 import re
 import shutil
@@ -303,6 +306,96 @@ class Filter(unittest.TestCase):
                 self.assertEqual(sb.gh.seen, [])
                 self.assertEqual(os.stat(paths[0]).st_ino != ino, other, 'rebuilt' if other else 'kept')
                 self.assertNotIn(pki().ca_spki, self.keys(paths[0]))
+
+    SWAP = '''#!/bin/sh
+# sha256sum, for one cell: at its Kth call (counted in hook.n) it writes inject over TARGET (the same file, as `cat >`
+# writes it), then runs the real sha256sum
+n=$(( $(cat @ROOT@/hook.n 2>/dev/null || echo 0) + 1 )); echo "$n" > @ROOT@/hook.n
+[ "$n" != @K@ ] || cat @ROOT@/inject > @TARGET@
+exec /usr/bin/sha256sum "$@"
+'''
+
+    def made_from(self, sb, versions):
+        """The stamp names one version of each input, and the bundle is exactly that source less that data file's
+        keys: (the source, the data file) it names."""
+        tls = os.path.join(sb.home, '.cache', 'liveapp-ci', 'tls')
+        with open(os.path.join(tls, 'stamp')) as f:
+            stamp = dict(l.split(' ', 1) for l in f.read().splitlines())
+        named = {}
+        for key, name in (('source', 'source'), ('excluded', 'data')):
+            m = [x for x in versions[name] if hashlib.sha256(x.encode()).hexdigest() == stamp[key]]
+            self.assertEqual(len(m), 1, 'the stamp names %s bytes that were never there' % name)
+            named[name] = m[0]
+        excluded = {l.split(' ', 1)[0] for l in named['data'].splitlines() if l and not l.startswith('#')}
+        want = [k for k in (spki_sha256(p) for p in pems(named['source'])) if k not in excluded]
+        self.assertEqual(self.keys(os.path.join(tls, 'bundle.pem')), want,
+                         'the bundle is not what the stamp names: made from other bytes than it hashed')
+        return named['source'], named['data']
+
+    def test_an_input_replaced_during_the_check_is_never_trusted_under_a_stamp_of_other_bytes(self):
+        """Each input the stamp names (the data file, the source) is read ONCE: the filter and the stamp use that one
+        read. The hook: a sha256sum substitute that writes a new version of one input over it at its Kth call of the
+        first rr_bundle (K 1-3: the calls that fall between two reads of a path). The new data file also excludes the
+        test CA that signs the local GitHub; the new source holds one more CA. Then the stamp names the bytes the bundle
+        was made from, and the next download (no hook) refuses the CA the data file now excludes: curl exit 60, no
+        request. Controls: no replacement -> the next check keeps the bundle (same inode); the new data file in place
+        from the start -> curl exit 60."""
+        url = '/repos/actions/runner/releases/latest'
+
+        def run(target, k=0, start=False):
+            sb = Sandbox(self)
+            paths = {'data': os.path.join(sb.build, 'setup', 'tls-excluded-spki'), 'source': sb.path('source.pem')}
+            versions = {}
+            for name, p in paths.items():
+                with open(p) as f:
+                    versions[name] = [f.read()]
+            new = {'data': versions['data'][0] + pki().ca_spki + ' the test CA (it signs the local GitHub)\n',
+                   'source': versions['source'][0] + pki().other_pem}
+            if target:
+                versions[target].append(new[target])
+            if start:
+                sb.write(paths[target], new[target])
+            elif target:
+                sb.write(sb.path('inject'), new[target])
+                sb.write(sb.path('stubs', 'sha256sum'), self.SWAP.replace('@ROOT@', sb.root).replace(
+                    '@K@', str(k)).replace('@TARGET@', paths[target]), 0o755)
+            r = sb.lib('rr_bundle')
+            if os.path.exists(sb.path('stubs', 'sha256sum')):
+                os.remove(sb.path('stubs', 'sha256sum'))
+                with open(paths[target]) as f:          # the hook ran: the input is the new version now
+                    self.assertEqual(f.read(), new[target], 'the hook did not replace the %s' % target)
+            bundle = os.path.join(sb.home, '.cache', 'liveapp-ci', 'tls', 'bundle.pem')
+            if r.returncode == 0:
+                self.made_from(sb, versions)
+                ino = os.stat(bundle).st_ino
+            else:                                          # it may refuse: then there is no bundle
+                self.assertFalse(os.path.exists(bundle), r.stdout + r.stderr)
+                ino = None
+            r2 = sb.lib('rr_curl -o /dev/null -w "%{http_code}" "$1"; echo " curl-rc=$?"', sb.gh.base + url)
+            return sb, versions, new, r2, ino, (os.stat(bundle).st_ino if os.path.exists(bundle) else None)
+
+        for target in ('data', 'source'):
+            for k in (1, 2, 3):
+                with self.subTest(replaced=target, at_call=k):
+                    sb, versions, new, r2, ino, ino2 = run(target, k)
+                    source, data = self.made_from(sb, versions)      # the next check: the stamp names what is there
+                    self.assertEqual((source, data), (new[target], versions['data'][0]) if target == 'source'
+                                     else (versions['source'][0], new[target]))
+                    if target == 'data':
+                        self.assertTrue(r2.stdout.endswith(' curl-rc=60\n'), r2.stdout + r2.stderr)
+                        self.assertEqual(sb.gh.seen, [])
+                    else:
+                        self.assertTrue(r2.stdout.endswith(' curl-rc=0\n'), r2.stdout + r2.stderr)
+        with self.subTest('the control: no replacement'):
+            sb, versions, new, r2, ino, ino2 = run(None)
+            self.assertIn('is current', r2.stderr)
+            self.assertEqual(ino2, ino)
+            self.assertTrue(r2.stdout.endswith(' curl-rc=0\n'), r2.stdout + r2.stderr)
+            self.assertEqual(sb.gh.seen, [url])
+        with self.subTest('the control: the new data file from the start'):
+            sb, versions, new, r2, ino, ino2 = run('data', start=True)
+            self.assertTrue(r2.stdout.endswith(' curl-rc=60\n'), r2.stdout + r2.stderr)
+            self.assertEqual(sb.gh.seen, [])
 
     def test_a_bundle_made_under_a_lower_floor_is_rebuilt(self):
         """The floor is part of what made a bundle: one made with RR_FLOOR 50 from 99 certificates is not current for
