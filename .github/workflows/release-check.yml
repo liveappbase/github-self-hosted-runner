@@ -40,7 +40,9 @@ jobs:
   jq-linux:
     name: jq ${{ matrix.jq }} (${{ matrix.image }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30, not 15: the ubuntu rows run tests/hetzner after core and watchdog; at 60 hetzner cells a row took 8 min in CI
+    # (run 41599539837), and S2b-2a takes them to 101 (6-9 min alone in a local container). A hang still ends here.
+    timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
