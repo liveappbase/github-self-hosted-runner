@@ -7,8 +7,8 @@
 #   RUNNER CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP (ru_collect), DD (ru_write), PROTECTED WINDOW (ru_protect), and
 #   exports TZ=UTC and LC_ALL=C (ps prints its start times in TZ; this file reads them back in the same zone).
 #
-# ru_collect PASSDIR STATEFILE OBSERVEFILE NOW — ONE pass's facts. It writes, into PASSDIR:
-#   facts.json    format 1, exactly as core/README.md says; host "studio"; restart null; stops [].
+# ru_collect PASSDIR STATEFILE OBSERVEFILE NOW [HELD] — ONE pass's facts. It writes, into PASSDIR:
+#   facts.json    format 1, exactly as core/README.md says; host "studio"; restart null; stops: HELD's (report: []).
 #   log.txt       runscaler's log text from the state's boundary to this pass's captured position, no byte past it.
 #   healthz.json  the /healthz reads of this pass, oldest first, one JSON object per line (a read that fails, or is
 #                 not one JSON object, is not added).
@@ -61,8 +61,12 @@
 #      [A-Za-z0-9][A-Za-z0-9._-]{0,99}, one space between), lines that start with # and empty lines skipped. Read as
 #      hostile: never sourced, every line must match exactly. No facts on any other line, a family named twice, a set
 #      named twice in a family, or a set in two families. No FAMILIES file: no family (a status line says so).
-#      facts.families.F = {provider: "tart", sets, candidate: the observed one or null, back_until: null}.
-#   7. observe (OBSERVEFILE, JSON {FAMILY: {version: "observed", lines: {SET: IMAGE}, closed_at: EPOCH}}): each
+#      facts.families.F = {provider: "tart", sets, candidate, back_until}, both from step 7.
+#   7. With HELD (a pass: JSON {families: {FAMILY: {candidate, back_until}}, stops: [...]}, from the updater's state):
+#      each family's candidate and back_until, and the STOPs, are HELD's. A family that HELD gives a candidate or a
+#      back_until and FAMILIES does not name: no facts. OBSERVEFILE is not read.
+#      Without HELD (report): back_until null, no STOP, and the candidates are OBSERVEFILE's (JSON {FAMILY: {version:
+#      "observed", lines: {SET: IMAGE}, closed_at: EPOCH}}), or null. In this pass, each
 #      ru_observe_add family is added with its CURRENT config lines and closed_at = NOW (a family already observed
 #      keeps its record: one window); each ru_observe_clear family is removed. A family that is not in FAMILIES, or a
 #      set of it with no config line: no facts. The file is written by rename. An OBSERVEFILE it cannot read: no facts.
@@ -449,7 +453,7 @@ ru_protect() {
 
 # ---- the pass
 ru_collect() {
-  local pass=$1 statefile=$2 obsfile=$3 now=$4 before after f lines_json sets_json fam_json
+  local pass=$1 statefile=$2 obsfile=$3 now=$4 held=${5-} before after f names lines_json sets_json fam_json
   local -a fargs
   ru_pass=$pass
   ru_boundary $statefile
@@ -463,7 +467,19 @@ ru_collect() {
   ru_say "log: ${RUNLOG:t} at offset $ru_offset; $ru_why"
   ru_config || return 1
   ru_families || return 1
-  ru_observe $obsfile $now || return 1
+  if [[ -n $held ]]; then   # a pass: the candidates, back_untils and STOPs the updater's state holds
+    names=$(print -r -- $held | $JQ -r '.families | to_entries[]
+              | select(.value.candidate != null or .value.back_until != null) | .key') \
+      || { REPLY="jq could not read the families of the state"; return 1 }
+    for f in ${(f)names}; do
+      (( ${+ru_fam[$f]} )) \
+        || { REPLY="the state holds a candidate or a back_until for the family $f, which $FAMILIES does not name"; return 1 }
+    done
+  else                      # report: the observed families, no back_until, no STOP
+    ru_observe $obsfile $now || return 1
+    held=$(print -r -- $ru_observed | $JQ -c '{families: map_values({candidate: ., back_until: null}), stops: []}') \
+      || { REPLY="jq could not read the observed families"; return 1 }
+  fi
   ru_healthz $pass/healthz.json || { REPLY="cannot write $pass/healthz.json"; return 1 }
   local -a pairs
   for f in ${(k)ru_lines}; do pairs+=($f $ru_lines[$f]); done
@@ -471,15 +487,16 @@ ru_collect() {
                  --args $pairs) || { REPLY="jq failed on the config lines"; return 1 }
   sets_json=$($JQ -n -c '$ARGS.positional' --args $ru_sets) || { REPLY="jq failed on the sets"; return 1 }
   for f in $ru_fam_order; do fargs+=("$f|$ru_fam[$f]"); done
-  fam_json=$($JQ -n -c --argjson obs $ru_observed '[$ARGS.positional[] | split("|") | {(.[0]): {provider: "tart",
-                 sets: (.[1] | split(" ")), candidate: ($obs[.[0]] // null), back_until: null}}] | add // {}' \
+  fam_json=$($JQ -n -c --argjson held $held '[$ARGS.positional[] | split("|") | {(.[0]): {provider: "tart",
+                 sets: (.[1] | split(" ")), candidate: ($held.families[.[0]].candidate // null),
+                 back_until: ($held.families[.[0]].back_until // null)}}] | add // {}' \
                  --args $fargs) || { REPLY="jq failed on the families"; return 1 }
   $JQ -n --argjson before $before --argjson after $after --arg inode $ru_inode --argjson offset $ru_offset \
       --arg sha $ru_sha_now --argjson continuous $ru_continuous --argjson installed $ru_installed \
-      --argjson lines $lines_json --argjson sets $sets_json --argjson families $fam_json \
+      --argjson lines $lines_json --argjson sets $sets_json --argjson families $fam_json --argjson held $held \
       '{format: 1, host: "studio", sets: $sets, proc: {before: $before, after: $after},
         position: {inode: $inode, offset: $offset, sha: $sha}, continuous: $continuous, restart: null,
-        config: {installed: $installed, lines: $lines}, families: $families, stops: []}' > $pass/facts.json \
+        config: {installed: $installed, lines: $lines}, families: $families, stops: $held.stops}' > $pass/facts.json \
     || { REPLY="jq could not write $pass/facts.json"; return 1 }
   exec {ru_fd}<&-
   return 0

@@ -10,7 +10,7 @@ import subprocess
 import time
 import unittest
 
-from tests.studio.test_runner_updater import IMG, IMG2, Rig, config, read_text
+from tests.studio.test_runner_updater import IMG, IMG2, P, Rig, config, core_calls, fixture, read_text
 
 SYSTEM = '/usr/bin:/bin:/usr/sbin:/sbin'
 V0, V1, V2 = '2.338.2', '2.338.9', '2.339.0'
@@ -139,6 +139,14 @@ class TestOwnPath(unittest.TestCase):
     def test_report_works_with_a_path_that_holds_nothing(self):
         r = Rig(self)
         r.report(env={'PATH': '/nonexistent'})
+        self.assertEqual(set(lines_of(os.path.join(r.psd, 'path'))), {r.sb.stubs + ':' + SYSTEM})
+
+    def test_status_and_pass_work_with_a_path_that_holds_nothing(self):
+        r = Rig(self, jq_wrap=True)
+        Paths(r).put(on_state())
+        for c in ('status', 'pass'):
+            r.cmd(c, env={'PATH': '/nonexistent'})
+        self.assertEqual(set(lines_of(os.path.join(r.jqd, 'path'))), {r.sb.stubs + ':' + SYSTEM})
         self.assertEqual(set(lines_of(os.path.join(r.psd, 'path'))), {r.sb.stubs + ':' + SYSTEM})
 
     def test_control_a_copy_that_sets_no_path_shows_the_callers(self):
@@ -666,6 +674,217 @@ class TestListRefusals(unittest.TestCase):
                     self.assertEqual((res.returncode, res.stdout), (1, self.NOT_FILE % {
                         'p': u.protected, 's': r.script, 'c': c}), res.stderr)
                     self.assertEqual(r.ps_calls(), 0)
+
+
+NOW = ('now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')   # the pass's clock, from the test
+KEEP = 72 * 3600
+SUCCESS = ('2026-11-01 09:30:00 INFO mac-a: Runner removed name=runner-0000aa03 instanceID=runner-0000aa03 '
+           'reason=job-completed jobId=5f8432ad-50ed-b843-40be-f42f87083259 repo=example-org/example '
+           'workflowRunId=39746588065 job="build (fef3)" result=succeeded\n'
+           '2026-11-01 09:31:00 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1\n')
+KILL = ('umask 077\n', 'umask 077\nkill() { print -r -- "kill $*" >> $ACTIONS_LOG }\n')   # kill is a builtin
+WOULD = '  pass_would   # what this pass would do'
+ACTION_CALLS = 'runner-disable; runner-enable; golden-build; golden-gate x; tart list; launchctl list; kill -0 $$; '
+
+
+def on_state(**kw):
+    """ON, family fx's candidate = the rig's config lines (mac-a: IMG), its old image IMG0"""
+    return state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': IMG}, closed_at=P[2] + 100),
+                                              previous={'mac-a': IMG0}, **kw)})
+
+
+class TestPass(unittest.TestCase):
+    """runner-updater pass, the timer's entry: it TRIES the lock (held: exit 0 at once); OFF: exit 0 at once, no core
+    call; ON: the facts from the real state, idle / r1 / keep / status, the core state written back into the state,
+    the protected list rewritten, the verdicts printed, and what it WOULD do. It takes no action."""
+
+    def rig(self, s=None, **kw):
+        r = Rig(self, jq_wrap=True, **kw)
+        u = Paths(r)
+        if s is not None:
+            u.put(s)
+        return r, u
+
+    def facts(self, u):
+        with open(os.path.join(u.passdir, 'facts.json')) as f:
+            return json.load(f)
+
+    def test_off_ends_the_pass_at_once_with_no_core_call(self):
+        for s in (None, dict(on_state(), on=False)):
+            with self.subTest(fresh=s is None):
+                r, u = self.rig(s)
+                raw, lst = u.raw(), u.raw(u.protected)
+                res = r.cmd('pass')
+                self.assertEqual(res.stdout, 'runner-updater: pass: the updater is OFF: nothing to do\n')
+                self.assertEqual(core_calls(r), [])
+                self.assertEqual(r.ps_calls(), 0)
+                self.assertEqual((u.raw(), u.raw(u.protected)), (raw, lst))
+                self.assertFalse(os.path.exists(u.passdir))
+
+    def test_control_on_the_pass_runs_the_core(self):
+        r, u = self.rig(on_state())
+        r.cmd('pass')
+        self.assertEqual(core_calls(r), ['idle', 'r1', 'keep', 'status'])
+
+    def test_a_held_lock_ends_the_pass_at_once(self):
+        r, u = self.rig(on_state())
+        raw = u.raw()
+        holder = hold_lock(r)
+        t0 = time.monotonic()
+        res = r.cmd('pass')
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertEqual(res.stdout, 'runner-updater: pass: another run holds the updater lock; this pass ends\n')
+        self.assertEqual(core_calls(r), [])
+        self.assertEqual(r.ps_calls(), 2)            # the holder's two
+        self.assertEqual(u.raw(), raw)
+        self.assertIsNone(holder.poll())
+        release(r, holder)
+
+    def test_a_pass_reads_the_state_and_writes_back_the_core_state_and_the_list(self):
+        held = [stop('fx', 'JOBS FAIL ON THE NEW IMAGE', detail={'counts': {'completions': 2, 'failed': 2}})]
+        until = int(time.time()) + 86400
+        s = state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': IMG}, closed_at=P[2] + 100),
+                                               previous={'mac-a': IMG0}, rejected=[V1], stops=held),
+                                     'fy': fam(previous={'mac-c': IMG3}, back_until=until)},
+                  images={IMG: V2}, later={'kept': True})
+        r, u = self.rig(s, cfg=config((('mac-a', IMG), ('mac-c', IMG2))), families='fx tart mac-a\nfy tart mac-c\n')
+        res = r.cmd('pass')
+        f = self.facts(u)
+        self.assertEqual(f['families'], {
+            'fx': {'provider': 'tart', 'sets': ['mac-a'], 'candidate': s['families']['fx']['candidate'], 'back_until': None},
+            'fy': {'provider': 'tart', 'sets': ['mac-c'], 'candidate': None, 'back_until': until}})
+        self.assertEqual(f['stops'], held)
+        new = u.get()
+        self.assertEqual(dict(new, core=None), dict(s, core=None))
+        self.assertEqual(new['core']['boundary']['position'], f['position'])
+        self.assertEqual(lines_of(u.protected), sorted([IMG, IMG0, IMG3]))
+        self.assertIn('\nkeep fx: held (JOBS FAIL ON THE NEW IMAGE stands: a person answers it; KEEP does not accept '
+                      'while it stands)\n', res.stdout)
+        self.assertIn('\nfx: STOP JOBS FAIL ON THE NEW IMAGE (runner %s): 2 completed, 0 succeeded, 2 failed, 0 canceled. '
+                      'Next: `runner-updater back fx` (until the keep date), or `runner-updater retry fx` to keep it\n'
+                      % V2, res.stdout)
+        self.assertFalse(os.path.exists(r.report_dir))   # report's state stays apart
+        r.cmd('pass')                                     # the next pass reads the boundary this one wrote
+        self.assertTrue(self.facts(u)['continuous'])
+
+    def test_the_next_pass_rewrites_a_missing_list(self):
+        r, u = self.rig(on_state())
+        os.remove(u.protected)
+        r.cmd('pass')
+        self.assertEqual(lines_of(u.protected), [IMG0, IMG])
+
+    def test_control_off_a_pass_leaves_a_missing_list_missing(self):
+        r, u = self.rig(dict(on_state(), on=False))
+        os.remove(u.protected)
+        r.cmd('pass')
+        self.assertFalse(os.path.lexists(u.protected))
+
+    def test_the_core_could_not_decide_leaves_the_state_and_the_list(self):
+        for prog in ('idle', 'r1', 'keep', 'status'):
+            with self.subTest(prog=prog):
+                r, u = self.rig(on_state())
+                r.cmd('pass')
+                r.sb.write(u.protected, 'marker-image\n', 0o600)   # a rewrite would drop it
+                raw, lst = u.raw(), u.raw(u.protected)
+                r.append_log('2026-11-01 05:00:00 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1\n')
+                r.sb.write(os.path.join(r.jqd, 'fail'), prog)
+                res = r.cmd('pass', ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: core could not decide (%s): exit 5: injected failure\n' % prog, res.stdout)
+                self.assertIn('runner-updater: the pass did nothing: %s is as it was\n' % u.state, res.stdout)
+                self.assertEqual((u.raw(), u.raw(u.protected)), (raw, lst))
+        # the control: a pass that decides rewrites the list
+        os.remove(os.path.join(r.jqd, 'fail'))
+        r.cmd('pass')
+        self.assertEqual(lines_of(u.protected), [IMG0, IMG])
+
+    def run_rollback(self, r, u):
+        log = r.sb.path('logs', 'actions.log')
+        r.write_log('')
+        r.cmd('pass', env={'ACTIONS_LOG': log})           # the window opens
+        r.append_log(fixture('studio-cut.log') + fixture('three-failures.log'))
+        res = r.cmd('pass', env={'ACTIONS_LOG': log})
+        self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
+                      '(connect-class only))\n', res.stdout)
+        return res, read_text(log) if os.path.exists(log) else ''
+
+    def test_a_pass_takes_no_action_and_says_what_it_would_do(self):
+        r, u = self.rig(on_state(), extra_rewrites=[KILL])
+        res, actions = self.run_rollback(r, u)
+        self.assertIn('runner-updater: pass: would roll back fx (this release takes no action)\n', res.stdout)
+        self.assertEqual(actions, '')
+
+    def test_control_the_harness_sees_each_action_of_a_pass(self):
+        r, u = self.rig(on_state(), extra_rewrites=[KILL, (WOULD, '  ' + ACTION_CALLS + WOULD.lstrip())])
+        res, actions = self.run_rollback(r, u)
+        self.assertEqual([l.split()[0] for l in actions.splitlines()],
+                         ['runner-disable', 'runner-enable', 'golden-build', 'golden-gate', 'tart', 'launchctl', 'kill'] * 2)
+
+    def accept_at(self, later):
+        r, u = self.rig(on_state(), extra_rewrites=[NOW])
+        t = P[2] + 3600
+        r.write_log('')
+        r.cmd('pass', env={'RU_TEST_NOW': str(t)})       # the window opens at t
+        r.append_log(SUCCESS)
+        return r.cmd('pass', env={'RU_TEST_NOW': str(t + later)})
+
+    def test_72_h_after_the_window_opened_with_a_success_it_would_accept(self):
+        res = self.accept_at(KEEP)
+        self.assertIn('\nkeep fx: accept (runner %s: 1 succeeded of 1 completed in 72 h)\n' % V2, res.stdout)
+        self.assertIn('runner-updater: pass: would accept fx (this release takes no action)\n', res.stdout)
+
+    def test_control_a_second_before_72_h_it_observes(self):
+        res = self.accept_at(KEEP - 1)
+        self.assertIn('\nkeep fx: observe (', res.stdout)
+        self.assertNotIn('would accept', res.stdout)
+
+    def test_a_config_whose_log_the_core_cannot_read_is_no_facts_in_a_pass_too(self):
+        for top, why in (('log-format = "json"\n', LOG_FORMAT), ('log-file = "/x.log"\n', LOG_FILE)):
+            with self.subTest(top=top):
+                r, u = self.rig(on_state(), cfg=config(top=top))
+                raw = u.raw()
+                res = r.cmd('pass', ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: REFUSE no facts: %s%s\n' % (r.config, why), res.stdout)
+                self.assertEqual(core_calls(r), [])
+                self.assertEqual(u.raw(), raw)
+
+    def test_a_held_family_the_families_file_does_not_name_is_no_facts(self):
+        for fz in (fam(candidate=cand()), fam(back_until=T0)):
+            with self.subTest(fz=fz):
+                r, u = self.rig(state(on=True, families={'fz': fz}))
+                res = r.cmd('pass', ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: REFUSE no facts: the state holds a candidate or a back_until for the '
+                              'family fz, which %s does not name\n' % r.families, res.stdout)
+                self.assertEqual(core_calls(r), [])
+
+    def test_control_a_held_family_the_families_file_names(self):
+        r, u = self.rig(state(on=True, families={'fz': fam(candidate=cand()), 'fw': fam(rejected=[V1])}),
+                        families='fx tart mac-a\nfz tart mac-b\n')
+        r.cmd('pass')
+        self.assertEqual(self.facts(u)['families']['fz']['candidate'], cand())
+
+    def test_a_state_of_another_format_waits_with_no_core_call(self):
+        r, u = self.rig(dict(FULL, on=True, format=2))
+        raw = u.raw()
+        res = r.cmd('pass', ok=False)
+        self.assertEqual((res.returncode, res.stdout), (4, WAIT % (u.state, '2')))
+        self.assertEqual(core_calls(r), [])
+        self.assertEqual(u.raw(), raw)
+
+    def test_untested_jq_stops_a_pass_that_is_on(self):
+        r, u = self.rig(on_state())
+        r.sb.write(os.path.join(r.jqd, 'version'), 'jq-1.6\n')
+        res = r.cmd('pass', ok=False)
+        self.assertEqual(res.returncode, 3, res.stdout)
+        self.assertTrue(res.stdout.startswith("runner-updater: STOP untested jq: %s prints 'jq-1.6'" % r.jq), res.stdout)
+        self.assertEqual((core_calls(r), r.ps_calls()), ([], 0))
+
+    def test_control_untested_jq_and_off_ends_at_once(self):
+        r, u = self.rig(dict(on_state(), on=False))
+        r.sb.write(os.path.join(r.jqd, 'version'), 'jq-1.6\n')
+        self.assertEqual(r.cmd('pass').stdout, 'runner-updater: pass: the updater is OFF: nothing to do\n')
 
 
 LOG_FILE = (' line 5: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside '

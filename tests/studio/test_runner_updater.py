@@ -720,6 +720,7 @@ class TestHealthz(unittest.TestCase):
 
 
 JQ_WRAP = '''d=%(d)s
+print -r -- "$PATH" >> $d/path
 if [[ $1 == --version && -f $d/version ]]; then print -r -- "$(<$d/version)"; exit 0; fi
 if [[ -f $d/fail ]]; then
   for a in "$@"; do [[ $a == */$(<$d/fail).jq ]] && { print -u2 -r -- "injected failure"; exit 5 }; done
