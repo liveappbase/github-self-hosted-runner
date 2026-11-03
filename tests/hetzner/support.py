@@ -11,8 +11,11 @@ A cell makes a Sandbox: a temporary folder, removed by the cell's cleanup. In it
   (the install line ships it there). Its scripts are the REAL ones with ONLY their pin lines rewritten (PIN_REWRITES):
   each rewrite must match exactly once, and the copy may then hold no host path (LEFT_OUT) at all;
 - host.conf is the host config (root's file, 0644): host.conf.example's values, RUN_USER=root (the cells run as root);
-- stubs/ holds the substitutes, each logging its calls to logs/: docker (driven by docker.json), systemctl, nsenter,
-  ip, and curl, which hands every https call to the REAL /usr/bin/curl and answers only the registry and rootlesskit;
+- stubs/ holds the substitutes, each logging its calls to logs/: docker (driven by docker.json; it keeps D1 in
+  docker-state.json: each build gets its own image ID, a tag names one image, a push gives that image a digest, and
+  the `runners` network and the registry container exist, or not, until a create, run or start makes them),
+  systemctl, nsenter, ip, and curl, which hands every https call to the REAL /usr/bin/curl and answers only the
+  registry and rootlesskit;
 - a local HTTPS server (FakeGitHub) stands in for GitHub's API and its downloads. Its certificate is signed by a test
   CA that the source CA bundle (the container's real bundle, plus that CA) holds.
 """
@@ -24,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
@@ -257,7 +261,8 @@ class FakeGitHub:
 # ---- the substitutes
 
 DOCKER_STUB = r'''#!/usr/bin/python3 -I
-# docker, for the cells: logs argv as one JSON line, answers from docker.json (see tests/hetzner/support.py)
+# docker, for the cells: logs argv as one JSON line, answers from docker.json, keeps D1's state in docker-state.json
+# (see tests/hetzner/support.py)
 import hashlib, json, os, sys
 SB = @SB@
 a = sys.argv[1:]
@@ -265,12 +270,22 @@ with open(SB + '/logs/docker.log', 'a') as f:
     f.write(json.dumps(a) + '\n')
 cfg = json.load(open(SB + '/docker.json'))
 j = ' '.join(a)
-IID = 'sha256:' + 'a' * 64
+SP = SB + '/docker-state.json'
+st = json.load(open(SP)) if os.path.exists(SP) else {
+    'n': 0, 'tags': {}, 'digests': {}, 'network': cfg.get('network', True), 'registry': cfg.get('registry', 'running')}
 
 
 def out(s='', rc=0):
+    with open(SP + '.new', 'w') as f:
+        json.dump(st, f)
+    os.replace(SP + '.new', SP)
     sys.stdout.write(s)
     sys.exit(rc)
+
+
+def new_id(why):
+    st['n'] += 1
+    return 'sha256:' + hashlib.sha256(('%s %d' % (why, st['n'])).encode()).hexdigest()
 
 
 cmd = a[0] if a else ''
@@ -284,20 +299,38 @@ if cmd == 'build':
     ctx = a[-1]
     names = sorted(os.listdir(ctx))
     files = {n: hashlib.sha256(open(os.path.join(ctx, n), 'rb').read()).hexdigest() for n in names}
+    iid = new_id(json.dumps(files, sort_keys=True))
+    st['tags'][a[a.index('-t') + 1]] = iid
     with open(SB + '/logs/build-ctx.json', 'a') as f:
-        f.write(json.dumps({'argv': a, 'files': files, 'mode': oct(os.stat(ctx).st_mode & 0o777)}) + '\n')
-    out(IID + '\n')
+        f.write(json.dumps({'argv': a, 'files': files, 'mode': oct(os.stat(ctx).st_mode & 0o777), 'id': iid}) + '\n')
+    out(iid + '\n')
 if cmd == 'push':
+    tag = a[-1]
+    if cfg.get('interleave'):    # another build of the same tag lands between this build's check and its push
+        st['tags'][tag] = new_id('another build')
+    iid = st['tags'][tag]
+    ref = cfg.get('repo_digest') or '%s@sha256:%s' % (tag.rsplit(':', 1)[0], hashlib.sha256(iid.encode()).hexdigest())
+    st['digests'][ref.split('@', 1)[1]] = iid
+    st.setdefault('repo_digests', {})[iid] = ref
     out('')
 if cmd == 'rm':
     out('')
+if cmd == 'start':
+    if a[-1] == 'runner-registry' and st['registry'] != 'absent':
+        st['registry'] = 'running'
+        out('runner-registry\n')
+    out('Error: no such container\n', 1)
 if cmd == 'inspect':
     if '{{.Id}}' in j:
-        out(IID + '\n')
+        x = a[-1]
+        iid = st['tags'].get(x) or ('@' in x and st['digests'].get(x.split('@', 1)[1]))
+        out(iid + '\n') if iid else out('Error: No such object: %s\n' % x, 1)
     if 'RepoDigests' in j:
-        out(cfg['repo_digest'] + '\n')
+        out(st.get('repo_digests', {}).get(st['tags'].get(a[-1]), '') + '\n')
+    if a[-1] == 'runner-registry' and st['registry'] == 'absent':
+        out('Error: No such object: runner-registry\n', 1)
     if '{{.State.Running}}' in j:
-        out('true\n')
+        out('%s\n' % str(st['registry'] == 'running').lower())
     if 'bridge.IPAddress' in j:
         out('198.51.100.2\n')
     if 'runners.IPAddress' in j:
@@ -305,6 +338,11 @@ if cmd == 'inspect':
     if a[-1] == 'runner-registry':
         out('[]\n')
 if cmd == 'network':
+    if a[1:3] == ['create', 'runners']:
+        st['network'] = True
+        out('n' * 64 + '\n')
+    if a[1:3] == ['inspect', 'runners'] and not st['network']:
+        out('Error: network runners not found\n', 1)
     if 'Driver' in j:
         out('bridge\n')
     if 'Gateway' in j:
@@ -312,6 +350,8 @@ if cmd == 'network':
     out('[]\n')
 if cmd == 'run':
     if '-d' in a:
+        if 'runner-registry' in a:
+            st['registry'] = 'running'
         out('c' * 64 + '\n')
     if './config.sh' in a:
         out(cfg['config_version'])
@@ -464,6 +504,34 @@ class Sandbox:
         self.write(self.path('curl.json'), json.dumps(self.curl))
         return subprocess.run(['bash', os.path.join(self.build, 'setup', '02-d1.sh')] + list(args), env=self.env(),
                               cwd=self.home, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
+
+    def d1_start(self, *args):
+        """d1, started: the Popen (stdout a pipe, stderr into it). The cell's cleanup kills it if it still runs."""
+        return self.start(['bash', os.path.join(self.build, 'setup', '02-d1.sh')] + list(args))
+
+    def start(self, argv):
+        """argv started as d1_start starts 02-d1.sh (the same env, files and cleanup)."""
+        self.write(self.path('docker.json'), json.dumps(self.docker))
+        self.write(self.path('curl.json'), json.dumps(self.curl))
+        p = subprocess.Popen(argv, env=self.env(), cwd=self.home, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, start_new_session=True)
+
+        def stop():   # the whole group: a waiting child (flock, a nested 02-d1.sh) dies with it
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            p.communicate()
+        self.test.addCleanup(stop)
+        return p
+
+    def state(self):
+        """The docker stub's D1: {'tags': {tag: image id}, 'digests': {digest: image id}, 'network', 'registry', …}."""
+        p = self.path('docker-state.json')
+        if not os.path.exists(p):
+            return {'tags': {}, 'digests': {}}
+        with open(p) as f:
+            return json.load(f)
 
     def lines(self, name):
         """The calls of a shell stub (systemctl, nsenter, ip): one line of its arguments each."""

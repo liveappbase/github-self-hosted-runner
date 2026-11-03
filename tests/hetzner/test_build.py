@@ -5,21 +5,24 @@ BUILD VERSION fetches release v<VERSION> of actions/runner (GitHub's API, then t
 filtered CA bundle and no CA folder), checks the tarball's sha256 against the asset's digest, puts the tarball into a
 fresh build context beside image/'s files (the RECIPE: the tarball is not part of it), builds on the pinned base with
 --no-cache, pushes, reads the runner version from the image, runs step 3's read-only checks and the image checks of
-steps 6 and 8 (never steps 1, 2, 4 or 7), and writes ONE BUILD RECORD per (version, recipe):
+steps 6 and 8 (never steps 1, 2, 4 or 7: BUILD makes nothing of D1's), and writes ONE BUILD RECORD per (version, recipe):
 ~/run/builds/<VERSION>-<RECIPE>, 0640, four strict `key value` lines (format, version, digest, recipe), written whole
 and renamed into place. A digest mismatch, another runner version in the image, a failed check, a hostile digest, or a
 kill before the rename: no record. GitHub's 403 or 429: WAIT, exit 75. It never writes ~/run/image.ref; the full run
-(no argument) builds the host config's RUNNER_VERSION the same way, and is image.ref's only writer. Every
-download checks the filtered CA bundle first.
+(no argument) builds the host config's RUNNER_VERSION the same way, and is image.ref's only writer. Both modes hold the
+host user's ONE updater lock for the whole run (a second run waits), give each build its own tag, and write a record
+only for the digest of the image just built. Every download checks the filtered CA bundle first.
 
 Each cell runs a copy of the real 02-d1.sh and runner-release.sh (only their pin lines rewritten) against the stubs and
 the local HTTPS GitHub of tests/hetzner/support.py, in a container.
 """
 import calendar
+import fcntl
 import hashlib
 import json
 import os
 import re
+import time
 import unittest
 
 from tests.hetzner.support import (Sandbox, needs_container, pki, sha256_file, tarball, ARCH, IMAGE_NAME,
@@ -64,6 +67,42 @@ class Rig:
     def image_ref(self):
         return os.path.exists(os.path.join(self.sb.home, 'run', 'image.ref'))
 
+    def recipes(self):
+        """{image ID: the recipe of the context the docker stub built it from} (the tarball is no part of a recipe)."""
+        out = {}
+        p = self.sb.path('logs', 'build-ctx.json')
+        if os.path.exists(p):
+            with open(p) as f:
+                for l in f.read().splitlines():
+                    b = json.loads(l)
+                    lines = ''.join('%s  %s\n' % (h, n) for n, h in sorted(b['files'].items()) if n != 'runner.tar.gz')
+                    out[b['id']] = hashlib.sha256(lines.encode()).hexdigest()
+        return out
+
+    def own_images(self, test):
+        """Every record names the image built from ITS recipe: the record's digest is, in the stub's registry, an image
+        that a build of that very recipe made. Returns the records' digests."""
+        digests, recipes = self.sb.state()['digests'], self.recipes()
+        out = []
+        for name in self.records():
+            text, _ = self.record(name)
+            m = RECORD_RE.fullmatch(text)
+            test.assertTrue(m, text)
+            iid = digests.get(m.group(2))
+            test.assertIn(iid, recipes, '%s names %s, an image no build of this run made' % (name, m.group(2)))
+            test.assertEqual(recipes[iid], m.group(3), '%s names the image of another recipe' % name)
+            out.append(m.group(2))
+        return out
+
+
+def full_rig(test, version=OLD):
+    """A Rig for the FULL run: D1's sockets and rootlesskit's pid file, as steps 2 and 7 read them."""
+    g = Rig(test, version=version)
+    os.makedirs(os.path.join(g.sb.home, 'run'), mode=0o750)
+    g.sb.write(os.path.join(g.sb.home, 'run', 'docker.sock'), '', 0o660)
+    g.sb.write(g.sb.path('xdg', 'dockerd-rootless', 'child_pid'), '1\n')
+    return g
+
 
 @needs_container
 class Build(unittest.TestCase):
@@ -92,11 +131,14 @@ class Build(unittest.TestCase):
         # the version was read from the pushed digest
         ref = 'localhost:%s/%s@%s' % (REGISTRY_PORT, IMAGE_NAME, DIGEST)
         self.assertTrue(any(ref in a and './config.sh' in a for a in g.sb.calls('docker')))
-        # never steps 1, 2, 4 or 7
+        # never steps 1, 2, 4 or 7: none of their calls. D1 is whole here, so step 4 would make nothing: its own reads
+        # (the network's driver, the registry's state) are what show it ran (BuildMakesNothingOfD1: a D1 it would fix)
         self.assertEqual(g.sb.lines('systemctl'), [])
         j = [' '.join(a) for a in g.sb.calls('docker')]
-        for never in ('network create', 'run -d', '/dev/tcp/', 'SCANNED', 'https://github.com'):
+        for never in ('network create', 'run -d', '{{.Driver}}', '{{.State.Running}}', 'Gateway', 'bridge.IPAddress',
+                      '/dev/tcp/', 'SCANNED', 'https://github.com'):
             self.assertFalse([c for c in j if never in c], never)
+        self.assertFalse([c for c in j if c.startswith('start ')])
         self.assertFalse(os.path.exists(os.path.join(g.sb.home, 'run', 'net.env')))
         self.assertIn('BUILD DONE', r.stdout)
 
@@ -274,6 +316,141 @@ class Build(unittest.TestCase):
 
 
 @needs_container
+class BuildMakesNothingOfD1(unittest.TestCase):
+    """BUILD's stand-in for step 4 is read only: the `runners` network and the registry must be there already (the full
+    run made them), and BUILD creates, runs or starts nothing of D1's. The stub's D1 here lacks them, so step 4's own
+    calls are possible: the full run with the same D1 makes them (the control)."""
+    MAKES = (['network', 'create'], ['run', '-d'], ['start'])
+
+    def makes(self, sb):
+        return [c for c in sb.calls('docker') if any(c[:len(m)] == m for m in self.MAKES)]
+
+    def test_no_runners_network_and_no_running_registry(self):
+        for registry in ('stopped', 'absent'):
+            with self.subTest(registry=registry):
+                g = Rig(self)
+                g.sb.docker.update(network=False, registry=registry)
+                r = g.sb.d1('build', VERSION)
+                self.assertEqual(self.makes(g.sb), [])
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('FAIL no runners network: run the full 02-d1.sh first', r.stdout)
+                self.assertEqual((g.built(), g.records()), ([], []))
+                f = full_rig(self)     # the control: the full run, the same D1
+                f.sb.docker.update(network=False, registry=registry)
+                r = f.sb.d1()
+                self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr)
+                made = [' '.join(c) for c in self.makes(f.sb)]
+                self.assertIn('network create runners', made)
+                if registry == 'stopped':
+                    self.assertIn('start runner-registry', made)
+                else:
+                    self.assertTrue([c for c in made if c.startswith('run -d --name runner-registry ')], made)
+
+    def test_a_registry_that_does_not_answer(self):
+        g = Rig(self)
+        g.sb.curl['registry_rc'] = 7
+        r = g.sb.d1('build', VERSION)
+        self.assertEqual(self.makes(g.sb), [])
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('FAIL the registry does not answer on 127.0.0.1:%s: run the full 02-d1.sh first' % REGISTRY_PORT,
+                      r.stdout)
+        self.assertEqual((g.built(), g.records()), ([], []))
+
+
+@needs_container
+class OneBuildAtATime(unittest.TestCase):
+    """Two builds never cross (plan D1, THE UPDATER LOCK): 02-d1.sh holds the host user's ONE updater lock (its path is
+    RR_LOCK of runner-release.sh, which the updater sources too) for its whole run, and a second run WAITS for it with a
+    line that names it. Each build's tag is its own beyond the second, and the pushed digest must be the image just
+    built, so a tag that moved before the push writes no record of another image."""
+
+    def lock_path(self, sb):
+        r = sb.lib('printf "%s\\n" "$RR_LOCK"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p = r.stdout.strip()
+        self.assertTrue(p.startswith(sb.home + '/'), p)
+        return p
+
+    def waiter_on(self, path):
+        """A process waits for a flock on path (/proc/locks: a `->` line on its inode)."""
+        ino = os.stat(path).st_ino
+        with open('/proc/locks') as f:
+            return [l for l in f.read().splitlines()
+                    if ' -> FLOCK ' in l and l.split()[-3].rsplit(':', 1)[-1] == str(ino)]
+
+    def test_a_second_run_waits_for_the_updater_lock(self):
+        g = Rig(self)
+        lock = self.lock_path(g.sb)
+        os.makedirs(os.path.dirname(lock), mode=0o700, exist_ok=True)
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)          # another run holds it
+        p = g.sb.d1_start('build', VERSION)
+        first = p.stdout.readline()
+        self.assertTrue(first.startswith('WAIT ') and lock in first, 'no WAIT line that names the lock: %r' % first)
+        for _ in range(600):                    # wait for the STATE (it waits for the lock), never for a time
+            if self.waiter_on(lock) or p.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertTrue(self.waiter_on(lock), 'the run does not wait for the lock')
+        self.assertEqual((g.sb.calls('docker'), g.sb.calls('curl')), ([], []))   # nothing ran while it waited
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        out, _ = p.communicate(timeout=600)
+        self.assertEqual(p.returncode, 0, out[-2000:])
+        self.assertIn('BUILD DONE', out)
+        self.assertEqual(len(g.records()), 1)
+        r = g.sb.d1('build', VERSION)            # the control: a free lock, no WAIT
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn('WAIT', r.stdout + r.stderr)
+
+    def test_a_child_of_the_lock_holder_shares_its_lock(self):
+        """The updater holds the lock for its whole pass and may run 02-d1.sh as its child, fd 9 passed on: the child
+        takes the lock there, at once, and builds. The control: a holder whose child gets no fd 9 makes it WAIT."""
+        for passed in (True, False):
+            with self.subTest(fd9_passed_on=passed):
+                g = Rig(self)
+                lock = self.lock_path(g.sb)
+                fd = 9 if passed else 8
+                holder = ('mkdir -p "${1%%/*}" && exec %d>> "$1" && flock -n %d || exit 9\n'
+                          'bash "$2" build "$3" %s; echo "child rc=$?"\n' % (fd, fd, '' if passed else '8>&-'))
+                p = g.sb.start(['bash', '-c', holder, 'holder', lock, os.path.join(g.sb.build, 'setup', '02-d1.sh'),
+                                VERSION])
+                first = p.stdout.readline()
+                if not passed:
+                    self.assertTrue(first.startswith('WAIT ') and lock in first, first)
+                    continue                     # the cleanup ends the holder and its waiting child
+                self.assertFalse(first.startswith('WAIT'), first)
+                out, _ = p.communicate(timeout=600)
+                self.assertIn('child rc=0', out, out[-2000:])
+                self.assertEqual(len(g.records()), 1)
+
+    def test_two_builds_in_one_second_get_their_own_tags_and_records(self):
+        g = Rig(self)
+        g.sb.docker['repo_digest'] = None        # each image its own digest
+        g.sb.write(g.sb.path('stubs', 'date'), '#!/bin/sh\necho 20261103T020000Z\n', 0o755)   # one second
+        self.assertEqual(g.sb.d1('build', VERSION).returncode, 0)
+        with open(os.path.join(g.sb.build, 'image', 'Dockerfile'), 'a') as f:
+            f.write('# another recipe\n')
+        self.assertEqual(g.sb.d1('build', VERSION).returncode, 0)
+        tags = [b[b.index('-t') + 1] for b in g.built()]
+        self.assertEqual(len(tags), 2)
+        self.assertNotEqual(tags[0], tags[1], 'two builds in one second got one tag')
+        self.assertEqual(len(set(g.own_images(self))), 2)    # two records, each its own image
+
+    def test_a_tag_moved_before_the_push_writes_no_record_of_the_other_image(self):
+        for moved in (True, False):
+            with self.subTest(moved=moved):
+                g = Rig(self)
+                g.sb.docker.update(repo_digest=None, interleave=moved)
+                r = g.sb.d1('build', VERSION)
+                self.assertEqual(r.returncode != 0, moved, r.stdout + r.stderr)
+                self.assertEqual(len(g.own_images(self)), 0 if moved else 1)
+                if moved:
+                    self.assertIn('is not the image just built', r.stdout)
+                    self.assertEqual(g.records(), [])
+
+
+@needs_container
 class TrustBeforeEveryDownload(unittest.TestCase):
     """EVERY download checks the filtered CA bundle first (rr_curl runs rr_bundle): an input that changes after the
     release was read and before the tarball's download (a key added to the data file, the file emptied or broken)
@@ -404,11 +581,8 @@ class HostConfig(unittest.TestCase):
 @needs_container
 class FullRun(unittest.TestCase):
     def test_the_full_run_builds_the_host_config_version_and_writes_image_ref(self):
-        g = Rig(self, version=OLD)
+        g = full_rig(self)
         sb = g.sb
-        os.makedirs(os.path.join(sb.home, 'run'), mode=0o750)
-        sb.write(os.path.join(sb.home, 'run', 'docker.sock'), '', 0o660)
-        sb.write(sb.path('xdg', 'dockerd-rootless', 'child_pid'), '1\n')
         r = sb.d1()
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertIn('B2 DONE (D1)', r.stdout)

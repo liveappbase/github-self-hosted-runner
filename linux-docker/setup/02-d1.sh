@@ -4,11 +4,16 @@
 # repository's setup/tls-excluded-spki in ~/build/setup/):
 #   ssh RUN_USER@<host> 'bash -s' < linux-docker/setup/02-d1.sh               the FULL run: a fresh host (re-runnable)
 #   ssh RUN_USER@<host> 'bash ~/build/setup/02-d1.sh build RUNNER_VERSION'     BUILD: a runner release's image
+# ONE RUN AT A TIME: both modes hold this user's ONE updater lock (runner-release.sh's RR_LOCK, the updater's too) for
+# the whole run; a second run (a build, or a pass of the updater) waits for it, with a WAIT line that names it, and
+# then goes on (that WAIT is no exit).
 # THE IMAGE (step 5, both modes): release v<VERSION> of actions/runner, read with setup/runner-release.sh (GitHub's API;
 # the tarball's sha256 must be the release asset's digest; every download with the filtered CA bundle and no CA
 # folder), built with --no-cache on the base image/Dockerfile pins, from a fresh 0700 context outside ~/build that holds
-# image/'s files (the RECIPE) and the checked tarball as runner.tar.gz (not part of the recipe). The runner version is
-# then read from the pushed image (pool-image.sh up's own read): it must be VERSION.
+# image/'s files (the RECIPE) and the checked tarball as runner.tar.gz (not part of the recipe), under a tag of its own
+# (the time and the context's unique name). The pushed digest must be the image ID that build printed (a tag can move
+# before the push); the runner version is then read from the image by that digest (pool-image.sh up's own read): it
+# must be VERSION.
 # FULL: steps 1-9 with VERSION = the host config's RUNNER_VERSION; step 9 writes the build record, then ~/run/image.ref:
 #   this run is image.ref's ONLY writer.
 # BUILD VERSION: ONE path for the updater and a person. Step 3's read-only checks, the image (5) and its checks (6 and
@@ -61,7 +66,6 @@ DEFAULT_SHA=785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334
 REGISTRY=registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
 RPORT=${REGISTRY_PORT}   # the local registry, host loopback only
 HPORT=${RS_HEALTH_PORT}   # runscaler's health port: recorded in net.env (nothing listens on it before runscaler runs)
-TAG=localhost:$RPORT/${IMAGE_NAME}:b$(date -u +%Y%m%dT%H%M%SZ)   # runs go by DIGEST; the tag only names the build
 PUBLIC_IP=${HOST_IP}
 say() { printf '\n== %s\n' "$*"; }
 ok() { echo "OK   $*"; }
@@ -70,6 +74,7 @@ wait_() { echo "WAIT $*"; exit 75; }
 sha() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ] || die "sha256 $1"; }
 quad() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ "$1" != 0.0.0.0 ]; }
 . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh: is this release's linux-docker/ ~/build?"
+rr_lock || die "the updater lock: nothing was done (the REFUSE line above says why)"
 REC_DIR=$HOME/run/builds
 record() {   # the BUILD RECORD (the header says its form): written whole under a temporary name, fsynced, renamed
   local t
@@ -128,6 +133,8 @@ say "   Its record (and, in the full run, image.ref) is written only at the END,
 install -d -m 700 "$RR_DIR" || die "cannot make $RR_DIR"
 CTX=$(mktemp -d "$RR_DIR/ctx.XXXXXX") || die "cannot make a build context in $RR_DIR"
 trap 'rm -rf -- "${CTX:?}"' EXIT
+# Runs go by DIGEST; the tag only names this build, and is its own: the second and the context's unique name
+TAG=localhost:$RPORT/${IMAGE_NAME}:b$(date -u +%Y%m%dT%H%M%SZ)-${CTX##*.}
 # The RECIPE: image/'s files, each a plain file, copied into the context; the hash is of these copies (the header).
 names=$(LC_ALL=C ls -A "$B/image") && [ -n "$names" ] || die "cannot list $B/image"
 lines=
@@ -149,6 +156,8 @@ rm -rf -- "${CTX:?}"; trap - EXIT
 docker push -q "$TAG" >/dev/null || die "docker push failed: no record, image.ref NOT changed"
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' "$TAG") || die "cannot read the digest of $TAG"
 [[ $IMAGE =~ ^localhost:$RPORT/${IMAGE_NAME}@sha256:[0-9a-f]{64}$ ]] || die "unexpected digest reference [$IMAGE]"
+[ "$(docker inspect -f '{{.Id}}' "$IMAGE")" = "$iid" ] \
+  || die "the pushed $IMAGE is not the image just built ($iid): $TAG moved before the push; no record"
 # The runner's version, from the image itself, as pool-image.sh up reads it: the one line that is a bare version
 # number (two such lines = no match). No network, bounded. Its labels do not carry it (measured).
 out=$(docker run --rm --network none --memory 512m --cpus 1 "$IMAGE" ./config.sh --version < /dev/null) \

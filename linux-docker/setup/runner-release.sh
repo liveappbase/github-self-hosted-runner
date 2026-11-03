@@ -10,6 +10,7 @@
 #   rr_release tag VERSION  release v<VERSION>; rr_release latest: the newest release. GitHub's API answer, checked:
 #                           sets RR_VERSION, RR_PUBLISHED (epoch seconds), RR_DIGEST (sha256:<64 hex>), RR_URL
 #   rr_tarball FILE         downloads RR_URL into FILE, then its sha256 must be RR_DIGEST
+#   rr_lock                 THE UPDATER LOCK (below), held on fd 9 until this process and its children end
 # Each returns 0, or 1 with a REFUSE line on stderr; rr_release returns 75 with a WAIT line on stderr when GitHub
 # answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its rr_bundle
 # refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own commands' exit
@@ -31,6 +32,12 @@
 # (rr_curl), so an input that changes between two downloads (a key added to the data file after the release was read)
 # holds for the next one, and a bundle that ~/.cache kept from another release of this file is rebuilt. RR_OPENSSL,
 # measured on the Linux host 2026-11-02: OpenSSL 3.5.5.
+# THE UPDATER LOCK (plan D1): ONE per host user, RR_LOCK, named here once so that 02-d1.sh and the updater (which
+# sources this file too) take the same one. Held for a run's whole length: a second run waits for it (rr_lock, for a
+# command: a WAIT line names the lock first); a timer pass of the updater takes it with `flock -n` and exits instead.
+# flock(2) ties the lock to the OPEN FILE, so a child that inherits fd 9 shares its parent's lock: when fd 9 already
+# is RR_LOCK, rr_lock takes it there (at once, if the parent holds it), and so a holder can run 02-d1.sh as its child.
+# A new open of RR_LOCK would be another holder, and that child would wait for its own parent.
 # THE DATA FILE: setup/tls-excluded-spki of the repository (the install line puts it into ~/build/setup/, beside this
 # file). Its own header gives the format and the refusals.
 
@@ -40,6 +47,7 @@ RR_SRC=/etc/ssl/certs/ca-certificates.crt
 RR_OPENSSL=/usr/bin/openssl
 RR_FLOOR=100
 RR_DIR=$HOME/.cache/liveapp-ci
+RR_LOCK=$HOME/.local/state/runner-updater/lock
 case ${BASH_SOURCE[0]} in */*) RR_EXCLUDED=${BASH_SOURCE[0]%/*}/tls-excluded-spki ;; *) RR_EXCLUDED=./tls-excluded-spki ;; esac
 case $(uname -m) in x86_64) RR_ARCH=x64 ;; aarch64) RR_ARCH=arm64 ;; *) RR_ARCH= ;; esac
 RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
@@ -207,4 +215,12 @@ rr_tarball() {   # rr_tarball FILE: after rr_release; a FILE that fails the dige
   s=$(rr_sha "$f") || { rm -f -- "$f"; rr_no "cannot hash $f"; return 1; }
   [ "sha256:$s" = "$RR_DIGEST" ] || { rm -f -- "$f"; rr_no "$RR_URL: its sha256 is $s, not the release asset's digest $RR_DIGEST"; return 1; }
   echo "OK   $RR_URL: its sha256 is the release asset's digest"
+}
+
+rr_lock() {   # rr_lock: THE UPDATER LOCK (the header), for a command: it waits, and says so first
+  install -d -m 700 "${RR_LOCK%/*}" || { rr_no "cannot make ${RR_LOCK%/*}"; return 1; }
+  [ /dev/fd/9 -ef "$RR_LOCK" ] || exec 9>> "$RR_LOCK" || { rr_no "cannot open the updater lock $RR_LOCK"; return 1; }
+  flock -n 9 && return 0
+  echo "WAIT another run holds the updater lock $RR_LOCK (a build, or a pass of the updater): waiting for it to end"
+  flock 9 || { rr_no "cannot take the updater lock $RR_LOCK"; return 1; }
 }
