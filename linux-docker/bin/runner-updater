@@ -1,0 +1,457 @@
+#!/bin/bash
+# runner-updater status | on | off | pass — the runner-image updater on the Linux host, as RS_USER (PLAN D1, D6, D7,
+# D11). The Studio's twin is bin/runner-updater (zsh); what DIFFERS from it is named below. Install: linux-docker/
+# README.md, "The updater: status, on, off, pass" (~/bin/runner-updater, a link to ~/build/bin/runner-updater, so it
+# always runs with this release's ~/build: its setup/runner-facts.sh, setup/runner-release.sh and core/).
+#
+# THIS RELEASE TAKES NO ACTION. A pass measures, asks the decision core (core/README.md) and prints what it WOULD do: it
+# runs no pool-image.sh, no 02-d1.sh and no `systemctl --user start|stop|restart`, and changes no config. Its only
+# writes are under STATEDIR: the state (by rename), a pass's files (PASSDIR) and the lock file. status writes nothing.
+#
+# THE STATE, STATE (STATEDIR/state.json): ONE JSON object, written by rename after a sync to disk (STATE.new, `dd
+# conv=notrunc,fsync`, then a rename over STATE; a write, sync or rename that fails is a STOP, and STATE is as it was),
+# read under the updater lock (status alone reads it with no lock: ONE read, so a rename while it runs gives it the
+# old state or the new one, whole). A missing STATE is a fresh install: OFF, nothing held (D11). Its members are the
+# Studio's that apply on this host, with the same names and shapes:
+#   format     1. A state of another format (or none): every command prints "runner-updater: WAIT ..." and exits 4,
+#              and nothing is written. Format 1 that is not the shape below: REFUSE, exit 1, and it is left as it is.
+#   on         true | false
+#   families   {"hz-docker": {
+#                candidate   {version: "N.N.N", lines: {SET: IMAGE, ...}, closed_at: EPOCH} | null: the release under
+#                            observation (switched, not accepted; closed_at: when its switch window closed)
+#                previous    {SET: IMAGE, ...} | null: the lines it ran before its candidate
+#                back_until  EPOCH | null: after an ACCEPT, the end of the 7 days `back` restores `previous`
+#                rejected    ["N.N.N", ...]: the versions the updater never switches it to again
+#                stops       [{family: "hz-docker", stop: NAME, version, user, detail}]: the STOPs it holds
+#                            (core/README.md, facts.stops)}}
+#              an absent member reads as null or []. SET: a scale set name; IMAGE: a digest reference, NAME@sha256:<64
+#              hex> (what 03-runscaler.sh renders).
+#   core       the decision core's own state (the `state` idle.jq and r1.jq return) | absent: a fresh core
+#   restart    {from: {pid, start}, to: {pid, start}, stopped: {inode: "N", offset: N, sha}} | absent: the updater's own
+#              restart of runscaler (a later release's window writes it), handed to the core ONCE as facts.restart and
+#              then removed
+#   A MEMBER THIS RELEASE DOES NOT READ (at the top, a family other than hz-docker, in hz-docker, in its candidate, in a
+#   STOP, in the restart): every command WAITs (exit 4), names it, and writes nothing. So a later release may add one
+#   under format 1, and an older one (a rollback across it) never writes a state that drops it or hides a STOP.
+# DIFFERS from the Studio's state: no `images` (this host has no host pin), no `recipe` (02-d1.sh's build record names
+#   the recipe), no protected list (this host deletes no image), and so no LOST state: a missing state is a fresh one.
+#   ONE family, hz-docker (the watchdog's name): its provider is docker and its sets are the host config's MAIN_SET and
+#   SMALL_SET; another family in the state is a member it does not read (WAIT).
+#
+# COMMANDS. on, off and pass hold THE UPDATER LOCK (runner-release.sh's rr_lock: RR_LOCK on fd 9) for their whole run:
+#   on and off wait for it (a WAIT line first); a pass only tries it.
+#   status   no lock, and it writes no file anywhere (the core's inputs come through pipes). ONE read of STATE; the jq
+#            check (below); status.jq with facts from the state (the family's candidate and back_until, the STOPs it
+#            holds) and its `core`. It prints ON or OFF; the family's candidate (or "no candidate"), back_until and
+#            rejected versions; an open window journal; status.jq's verdict and lines; per STOP its D7 properties
+#            (`known false` and "unknown" for a STOP this core does not know: never guessed). A status.jq that does
+#            not decide: a STOP.
+#   on       on = true.
+#   off      refuses while WINDOW is open (off never strands a window: D11), and changes nothing; else on = false.
+#   pass     the timer's entry (the timer is a later release's). The lock held: "another run holds the updater lock",
+#            exit 0 at once. OFF: "the updater is OFF", exit 0, no core call. An open window journal (WINDOW): "STOP
+#            RECOVER needed (S2b-3c)", exit 1, and nothing else (a window holds the lock for its whole run, so a pass
+#            that holds the lock and finds one found an interrupted window). ON: the jq check, now = the UTC clock, the
+#            FACTS (below) into PASSDIR, then idle.jq, r1.jq, keep.jq and status.jq with the same five inputs (state,
+#            facts, log, healthz, --arg now). The state they read is PASSDIR/state.json, a copy of the state's `core`,
+#            written back by rename after idle and after r1, so a later program reads it; only when all four decided
+#            does it go into STATE (`core`, with the `restart` member removed in the same write: it is handed over
+#            once). A program that exits non-zero, or prints no JSON object with a verdict and lines: "runner-updater:
+#            core could not decide (PROGRAM)", exit 1, and STATE is as it was. Then what it WOULD do: "would roll back
+#            hz-docker" (r1's rollback), "would accept hz-docker" (keep's accept), "would hold hz-docker: STOP JOBS FAIL
+#            ON THE NEW IMAGE" or "... STOP NO EVIDENCE" (keep), and ONE switch line: "would switch hz-docker" when it
+#            has no open candidate, no STOP of the state holds it and idle.jq said idle, else "would not switch" and
+#            the first of those that holds. No runner release is read here (the build pass is S2b-3b's), so the switch
+#            line says only that the pool could take one now. Each program's output stays in PASSDIR/PROGRAM.json.
+# THE JQ CHECK: `jq --version` must be a row of core/TESTED_JQ for the area core (runner-facts.sh's tested_jq), else
+#   "STOP untested jq" and exit 3: no core program runs (status, and a pass that is ON; an OFF pass ends before it).
+#
+# THE FACTS (core/README.md, "facts", host "hz"), in this ORDER (the Studio's, bin/runner-updater-lib's ru_collect):
+#   1. proc before: runscaler as systemd reports it, in ONE `systemctl --user show` read (runner-facts.sh's
+#      proc_now): {pid, start} (MainPID, ActiveEnterTimestamp), or null when its unit is not active. An answer it
+#      cannot read: no facts.
+#   2. the position: runner.log opened ONCE (runner-facts.sh's log_pos): its inode, its size (the offset) and the
+#      sha256 of the 64 bytes before it; and the log TEXT from the boundary the last pass left (the core state's
+#      boundary.position) to it, read through that open file (no byte past the position), and `continuous`: the
+#      same file, or runner.log.1 after ONE rotation, and the boundary's sha still there; else false and the text is
+#      runner.log from 0, which the core reads as an evidence gap. No runner.log: no facts.
+#   3. proc after: as 1, after the capture (core/README.md, "Ownership by position").
+#   4. config: config.toml through ONE open (runner-facts.sh's config_read): `sets` (every [[scaleset]] block's name)
+#      and lines {SET: IMAGE}; a config whose lines the core would read wrongly is no facts. installed = the `renamed`
+#      epoch of the newest closed window journal (WINDOWS) that renamed a file of config.toml's sha into place
+#      (runner-facts.sh's install_time; PLAN D1, the Hetzner install time), else config.toml's mtime (a hand install:
+#      pool-image.sh's hand path restarts only after that second). It is read after the process: a config installed
+#      after the process started has a later time then, which proves nothing (the safe direction).
+#   5. families: {"hz-docker": {provider: "docker", sets: [MAIN_SET, SMALL_SET], candidate, back_until}}, the last two
+#      the state's; stops: the state's STOPs of hz-docker; restart: the state's `restart` member, or null.
+#   6. healthz: runscaler's /healthz read twice, 3 s apart (runner-facts.sh's healthz_pair), one JSON line each.
+#   A fact it cannot read: "runner-updater: REFUSE no facts: WHY", exit 1, and no core program runs.
+# DIFFERS from the Studio's pass: no protected list to rewrite, no report command and no observe file, no release
+#   check; the process is systemd's MainPID and ActiveEnterTimestamp (one read), not ps; /healthz is the host
+#   config's port on 127.0.0.1, as pool-image.sh reads it, not the config's health keys; no pool-size rule (a Tart
+#   rule); the install time is a window's journaled `renamed` epoch when a window installed config.toml; no rule for a
+#   folder it cannot search (the Studio's guards the protected list and the pins, which this host has none of: here
+#   a state behind such a folder reads as fresh, OFF, and nothing acts while OFF); the lock is flock(1) on fd 9.
+#
+# Exit codes:
+#   0  done; also a pass that finds the lock held or the updater OFF
+#   1  a REFUSE (a state it does not read, a fact it cannot read, off while a window is open, not RS_USER) or a STOP (a
+#      state it cannot write, the core could not decide, RECOVER needed)
+#   2  usage
+#   3  STOP untested jq
+#   4  WAIT: a state of another format, or with a member this release does not read
+# Constants:
+#   PATH        its own, the system folders, set first: a caller's PATH (the watchdog's `ssh RS_USER@HOST PATH=...
+#               runner-updater status`, a timer, a terminal) changes nothing, and its #! line names /bin/bash, so no
+#               PATH is read even to find bash
+#   B           this release's linux-docker/, ~/build (pool-image.sh's): CORE = B/core, and the sourced
+#               B/setup/runner-release.sh (RR_LOCK, rr_lock) and B/setup/runner-facts.sh (the measuring helpers)
+#   R CFG       runscaler's folder, ~/.config/runner (runner.log, runner.log.1), and its config.toml
+#   STATEDIR    RR_LOCK's folder, ~/.local/state/runner-updater: STATE (state.json), PASSDIR (pass/: a pass's
+#               facts.json, log.txt, healthz.json, the core state copy state.json, each program's PROGRAM.json and
+#               PROGRAM.err), WINDOW (window: pool-image.sh's open window journal), WINDOWS (windows/: its closed ones)
+#   FAMILY      hz-docker, the one family of this host
+set -uo pipefail
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH LC_ALL=C TZ=UTC
+umask 077
+
+usage() { echo "runner-updater: usage: runner-updater status | on | off | pass${1:+ ($1)}" >&2; exit 2; }
+[ "$#" -ge 1 ] || usage "no command"
+cmd=$1
+shift
+case $cmd in
+  status|on|off|pass) [ "$#" = 0 ] || usage "$cmd takes no argument" ;;
+  *) usage "unknown command '$cmd'" ;;
+esac
+
+# THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
+# this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
+# is not KEY=value, any key twice (read or not) or a key missing: REFUSE on stderr, exit 1, before anything else runs.
+HOST_CONF=/etc/liveapp-ci/host.conf
+host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF sets that variable
+  local me=$1 l k o seen=" "; shift
+  o=$(stat -c '%a %U' "$HOST_CONF" 2>/dev/null) || { echo "$me: REFUSE no host config $HOST_CONF (linux-docker/README.md)" >&2; exit 1; }
+  [[ $o =~ ^[0-7][0145][0145]\ root$ ]] || { echo "$me: REFUSE $HOST_CONF must be root's and writable by root only: [$o]" >&2; exit 1; }
+  while IFS= read -r l || [ -n "$l" ]; do
+    case $l in ''|'#'*) continue ;; esac
+    [[ $l =~ ^([A-Z][A-Z0-9_]*)=([A-Za-z0-9][A-Za-z0-9._:/-]*)$ ]] || { echo "$me: REFUSE $HOST_CONF: want KEY=value, got [$l]" >&2; exit 1; }
+    k=${BASH_REMATCH[1]}; [[ $seen != *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF names $k twice" >&2; exit 1; }
+    seen="$seen$k "; [[ " $* " == *" $k "* ]] || continue
+    printf -v "$k" %s "${BASH_REMATCH[2]}"
+  done < "$HOST_CONF"
+  for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
+}
+host_conf runner-updater RS_USER RS_HEALTH_PORT MAIN_SET SMALL_SET
+
+say() { echo "runner-updater: $*"; }
+refuse() { echo "runner-updater: REFUSE $*"; exit 1; }
+stop() { echo "runner-updater: STOP $*"; exit 1; }
+wait4() { echo "runner-updater: WAIT $*"; exit 4; }
+
+[ "$(id -un)" = "${RS_USER}" ] || refuse "run me as ${RS_USER}"
+B=$HOME/build
+R=$HOME/.config/runner
+CFG=$R/config.toml
+CORE=$B/core
+FAMILY=hz-docker
+# shellcheck source=../setup/runner-release.sh
+. "$B/setup/runner-release.sh" || refuse "cannot read $B/setup/runner-release.sh (is this release's linux-docker/ ~/build?)"
+# shellcheck source=../setup/runner-facts.sh
+. "$B/setup/runner-facts.sh" || refuse "cannot read $B/setup/runner-facts.sh (is this release's linux-docker/ ~/build?)"
+STATEDIR=${RR_LOCK%/*}
+STATE=$STATEDIR/state.json
+PASSDIR=$STATEDIR/pass
+WINDOW=$STATEDIR/window
+WINDOWS=$STATEDIR/windows
+
+# ---- the state
+FRESH='{"format":1,"on":false,"families":{}}'
+# format 1, member by member (the members it reads; MEMBERS lists any other)
+CHECK='
+def set_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$");
+def image_ok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$");
+def version_ok: type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+$");
+def epoch_ok: type == "number" and . >= 0 and . == floor;
+def lines_ok: type == "object" and length > 0 and all(to_entries[]; (.key | set_ok) and (.value | image_ok));
+def proc_ok: type == "object" and (.pid | type) == "number" and .pid >= 1 and .pid == (.pid | floor) and (.start | epoch_ok);
+def position_ok: type == "object" and (.inode | type) == "string" and (.inode | test("^[0-9]+$")) and (.offset | epoch_ok)
+  and (.sha | type) == "string" and (.sha | test("^[0-9a-f]{64}$"));
+def stop_ok: type == "object" and .family == "hz-docker" and (.stop | type) == "string" and (.stop | length) > 0
+  and (.version == null or (.version | type) == "string") and (.user == null or (.user | type) == "string")
+  and (.detail == null or (.detail | type) == "object");
+def family_ok: type == "object"
+  and (.candidate == null or (.candidate | type == "object" and (.version | version_ok) and (.lines | lines_ok)
+                              and (.closed_at | epoch_ok)))
+  and (.previous == null or (.previous | lines_ok))
+  and (.back_until == null or (.back_until | epoch_ok))
+  and (.rejected == null or (.rejected | type == "array" and all(.[]; version_ok)))
+  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok)));
+if type == "object" and .format == 1 and (.on | type) == "boolean" and (.families | type) == "object"
+   and (.families["hz-docker"] == null or (.families["hz-docker"] | family_ok))
+   and (.core == null or (.core | type) == "object")
+   and (.restart == null or (.restart | type == "object" and (.from | proc_ok) and (.to | proc_ok) and (.stopped | position_ok)))
+then . else error("not a state of format 1") end'
+# the members of a checked state that this release does not read, at each level it reads ("" when none); a name that
+# is not plain is shown as JSON (no raw newline reaches the WAIT line)
+MEMBERS='
+def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
+[(keys - ["format", "on", "families", "core", "restart"])[] | shown]
++ [(.families | keys - ["hz-docker"])[] | "families.\(shown)"]
++ (if (.families["hz-docker"] | type) == "object" then .families["hz-docker"] as $h
+     | [($h | keys - ["candidate", "previous", "back_until", "rejected", "stops"])[] | "families.hz-docker.\(shown)"]
+       + (if ($h.candidate | type) == "object" then [($h.candidate | keys - ["version", "lines", "closed_at"])[]
+            | "families.hz-docker.candidate.\(shown)"] else [] end)
+       + [($h.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
+            | "families.hz-docker.stops[\($i)].\(shown)"]
+   else [] end)
++ (if (.restart | type) == "object" then .restart as $r
+     | [($r | keys - ["from", "to", "stopped"])[] | "restart.\(shown)"]
+       + [("from", "to") as $k | ($r[$k] | keys - ["pid", "start"])[] | "restart.\($k).\(shown)"]
+       + [($r.stopped | keys - ["inode", "offset", "sha"])[] | "restart.stopped.\(shown)"]
+   else [] end)
+| join(", ")'
+
+# STATE, read ONCE -> ST (compact JSON); a missing one is FRESH. WAIT (exit 4) on another format or a member this
+# release does not read, REFUSE on one it does not read: in each case nothing is written
+load_state() {
+  local text fmt m
+  if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then ST=$FRESH; return 0; fi
+  { [ -f "$STATE" ] && [ ! -L "$STATE" ] && [ -r "$STATE" ]; } || refuse "$STATE is not a readable regular file: it is left as it is"
+  text=$(cat -- "$STATE" && echo .) || refuse "$STATE cannot be read: it is left as it is"
+  text=${text%.}
+  fmt=$(printf '%s' "$text" | jq -s -r 'if length == 1 and (.[0] | type) == "object" then .[0].format | tojson
+                                         else error("not one object") end' 2> /dev/null) \
+    || refuse "$STATE is not one JSON object (or no jq reads it): it is left as it is"
+  [ "$fmt" = 1 ] || wait4 "the state $STATE has format $fmt; this updater reads format 1: it waits and changes nothing"
+  ST=$(printf '%s' "$text" | jq -c "$CHECK" 2> /dev/null) && [ -n "$ST" ] \
+    || refuse "$STATE is not a state of format 1 this reads: it is left as it is"
+  m=$(printf '%s\n' "$ST" | jq -r "$MEMBERS" 2> /dev/null) || refuse "jq could not list the members of $STATE: it is left as it is"
+  [ -z "$m" ] || wait4 "the state $STATE holds members this release does not read ($m): a later release wrote them, and they may hold a STOP; it waits and changes nothing"
+}
+
+# JSON: the new state into STATE by rename, after a sync to disk; a STOP when it cannot (STATE is then as it was)
+put_state() {
+  local out
+  rm -f -- "$STATE.new" 2> /dev/null
+  { printf '%s\n' "$1" > "$STATE.new"; } 2> /dev/null || { rm -f -- "$STATE.new"; stop "the state cannot be written ($STATE.new): $STATE is as it was"; }
+  out=$(dd if=/dev/null of="$STATE.new" conv=notrunc,fsync 2>&1 < /dev/null) \
+    || { rm -f -- "$STATE.new"; stop "the state cannot be synced to disk (dd: ${out%%$'\n'*}): $STATE is as it was"; }
+  mv -f -- "$STATE.new" "$STATE" || { rm -f -- "$STATE.new"; stop "the state cannot be renamed into place: $STATE is as it was"; }
+}
+# JQFILTER [JQ OPTION...]: ST changed by it, written by put_state
+change_state() {
+  local new
+  new=$(printf '%s\n' "$ST" | jq -c "$@") && [ -n "$new" ] || stop "jq could not change the state: $STATE is as it was"
+  put_state "$new"
+  ST=$new
+}
+
+# THE JQ CHECK (the header): exit 3 when the jq is not one core/TESTED_JQ lists for the core
+jq_check() {
+  tested_jq && return 0
+  if [ "$JQV" = "no jq" ]; then
+    echo "runner-updater: STOP untested jq: no jq answers \`jq --version\` here: install one that $CORE/TESTED_JQ lists for core (the jq package of Ubuntu 26.04 and of 24.04 is one); no new work starts"
+  else
+    echo "runner-updater: STOP untested jq: jq here prints [$JQV], which is no core row of $CORE/TESTED_JQ: the decision core is not tested with it, and no new work starts. Next, in the repository: \`JQ=$(command -v jq) python3 -I -B -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass"
+  fi
+  exit 3
+}
+
+window_open() { [ -e "$WINDOW" ] || [ -L "$WINDOW" ]; }
+
+# ---- status: no lock, no write; ONE read of the state, and the facts status.jq needs come from it
+do_status() {
+  local now core facts out rc
+  load_state
+  jq_check
+  now=$(date +%s)
+  [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
+  core=$(printf '%s\n' "$ST" | jq -c '.core // empty') \
+    && facts=$(printf '%s\n' "$ST" | jq -c --arg f "$FAMILY" --arg m "$MAIN_SET" --arg s "$SMALL_SET" '(.families[$f] // {}) as $h
+         | {format: 1, host: "hz", sets: [], proc: null, position: null, continuous: false, restart: null, config: null,
+            families: {($f): {provider: "docker", sets: [$m, $s], candidate: ($h.candidate // null),
+                              back_until: ($h.back_until // null)}},
+            stops: ($h.stops // [])}') \
+    || refuse "jq could not build the facts of the state"
+  printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" 'def utc: strftime("%Y-%m-%d %H:%M UTC");
+    (.families[$f] // {}) as $h
+    | "runner-updater: status: the updater is \(if .on then "ON" else "OFF" end)",
+      ("runner-updater: family \($f): "
+       + (if $h.candidate == null then "no candidate"
+          else "candidate runner \($h.candidate.version) (\($h.candidate.lines | to_entries | sort_by(.key)
+                | map("\(.key)=\(.value)") | join(", "))), switched \($h.candidate.closed_at | utc)" end)
+       + "; " + (if $h.back_until == null then "back: none" else "back until \($h.back_until | utc)" end)
+       + "; rejected: " + (if ($h.rejected // []) == [] then "none" else ($h.rejected | join(", ")) end))' \
+    || refuse "jq could not print the state"
+  ! window_open || say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, RECOVER (S2b-3c) ends it)"
+  # the core's inputs come through process substitutions (pipes, no file); its stderr goes with its output: anything
+  # but one decision is "could not decide"
+  out=$(jq -n -L "$CORE/lib" -f "$CORE/status.jq" --slurpfile state <(printf '%s' "$core") \
+          --slurpfile facts <(printf '%s\n' "$facts") --arg now "$now" 2>&1 < /dev/null)
+  rc=$?
+  if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | jq -e -s 'length == 1 and (.[0] | type) == "object"
+       and (.[0].verdict | type) == "string" and (.[0].lines | type) == "array"' > /dev/null 2>&1; then
+    stop "core could not decide (status): exit $rc: ${out%%$'\n'*}"
+  fi
+  printf '%s\n' "$out" | jq -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
+    "status: \(.verdict) (\(.reason))", .lines[],
+    (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")'
+  exit 0
+}
+
+# ---- on, off (D11), under the lock
+do_on() {
+  load_state
+  change_state '.on = true'
+  say "on: the updater is ON"
+  exit 0
+}
+do_off() {
+  ! window_open || refuse "a window is open ($WINDOW): off never strands a window, so nothing changed. Run off again when the window has ended"
+  load_state
+  change_state '.on = false'
+  say "off: the updater is OFF"
+  exit 0
+}
+
+# ---- the pass
+# an open window journal that no run of this release started: STOP, exit 1, nothing starts (RECOVER is S2b-3c's)
+recover_needed() {
+  window_open || return 0
+  echo "runner-updater: STOP RECOVER needed (S2b-3c): the window journal $WINDOW is open and no run holds the updater lock (an interrupted window): nothing starts until RECOVER ends it"
+  exit 1
+}
+
+pj() { if [ "$1" = none ]; then echo null; else echo "{\"pid\":${1% *},\"start\":${1#* }}"; fi; }   # "PID START" | none
+
+# THE FACTS (the header), in their order, into PASSDIR: 0, or 1 + REPLY = why there are none
+collect() {
+  local d=$PASSDIR b before after o inode offset psha cont why cr head js mtime sha inst
+  local re='^([0-9]+) ([0-9]+) ([0-9a-f]{64})'$'\n''(true|false) (.*)$'
+  b=$(jq -r 'if (.boundary.position | type) == "object" then .boundary.position
+             | "\(.inode | tostring) \(.offset | tostring) \(.sha | tostring)" else "" end' "$d/state.json" 2> /dev/null) || b=
+  [[ $b =~ ^[0-9]+\ [0-9]+\ [0-9a-f]{64}$ ]] || b=
+  # 1-3: proc before, the position (and the text through the same open file), proc after
+  before=$(proc_now) || { REPLY="systemd's answer for runscaler cannot be read (systemctl --user show runscaler)"; return 1; }
+  # shellcheck disable=SC2086
+  o=$(log_pos "$d/log.txt" $b) || { REPLY="cannot read runscaler's log $R/runner.log"; return 1; }
+  after=$(proc_now) || { REPLY="systemd's answer for runscaler cannot be read (systemctl --user show runscaler)"; return 1; }
+  [[ $o =~ $re ]] || { REPLY="cannot read runscaler's log $R/runner.log"; return 1; }
+  inode=${BASH_REMATCH[1]} offset=${BASH_REMATCH[2]} psha=${BASH_REMATCH[3]} cont=${BASH_REMATCH[4]} why=${BASH_REMATCH[5]}
+  if [ "$before" = none ]; then say "runscaler: none running (its unit is not active)"
+  elif [ "$before" = "$after" ]; then say "runscaler: pid ${before% *}, started ${before#* }"
+  else say "runscaler: $before before the log position, $after after it: the position is no boundary of one process"; fi
+  say "log: runner.log at offset $offset; $why"
+  # 4: the config, after the process reads
+  cr=$(config_read "$CFG") || { REPLY=${cr:-cannot read $CFG}; return 1; }
+  head=${cr%%$'\n'*} js=${cr#*$'\n'}
+  [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { REPLY="cannot read $CFG"; return 1; }
+  mtime=${BASH_REMATCH[1]} sha=${BASH_REMATCH[2]}
+  if inst=$(install_time "$sha" "$WINDOWS"); then say "config: installed at $inst (the window journal that renamed it into place)"
+  else inst=$mtime; say "config: installed at $inst (its mtime: no window journal renamed it into place)"; fi
+  # 6: the /healthz pair
+  : > "$d/healthz.json" || { REPLY="cannot write $d/healthz.json"; return 1; }
+  healthz_pair "$d/healthz.json"
+  say "healthz: $(grep -c . "$d/healthz.json") of 2 reads (http://127.0.0.1:${RS_HEALTH_PORT}/healthz)"
+  # 5 and the file: the family, the state's candidate, back_until, STOPs and restart
+  printf '%s\n' "$ST" | jq -c --argjson before "$(pj "$before")" --argjson after "$(pj "$after")" --arg inode "$inode" \
+      --argjson offset "$offset" --arg sha "$psha" --argjson continuous "$cont" --argjson installed "$inst" \
+      --argjson cfg "$js" --arg f "$FAMILY" --arg m "$MAIN_SET" --arg s "$SMALL_SET" '(.families[$f] // {}) as $h
+      | {format: 1, host: "hz", sets: $cfg.sets, proc: {before: $before, after: $after},
+         position: {inode: $inode, offset: $offset, sha: $sha}, continuous: $continuous, restart: (.restart // null),
+         config: {installed: $installed, lines: $cfg.lines},
+         families: {($f): {provider: "docker", sets: [$m, $s], candidate: ($h.candidate // null),
+                           back_until: ($h.back_until // null)}},
+         stops: ($h.stops // [])}' > "$d/facts.json" 2> /dev/null || { REPLY="jq could not write $d/facts.json"; return 1; }
+}
+
+# PROGRAM's output in PASSDIR is one decision: one JSON object with a verdict and lines
+decided() {
+  jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].verdict | type) == "string"
+            and (.[0].lines | type) == "array"' "$PASSDIR/$1.json" > /dev/null 2>&1
+}
+
+# NOW: idle, r1, keep and status on PASSDIR's five inputs (the header: pass); each one's verdict and reason printed (r1
+# and keep: each family's too), then status.jq's lines
+run_core() {
+  local d=$PASSDIR prog rc
+  for prog in idle r1 keep status; do
+    jq -n -L "$CORE/lib" -f "$CORE/$prog.jq" --slurpfile state "$d/state.json" --slurpfile facts "$d/facts.json" \
+      --rawfile log "$d/log.txt" --slurpfile healthz "$d/healthz.json" --arg now "$1" > "$d/$prog.json" 2> "$d/$prog.err" < /dev/null
+    rc=$?
+    if [ "$rc" != 0 ] || ! decided "$prog"; then
+      say "core could not decide ($prog): exit $rc$(head -n 1 "$d/$prog.err" 2> /dev/null | sed 's/^/: /')"
+      say "the pass did nothing: $STATE is as it was"
+      exit 1
+    fi
+    if [ "$prog" = idle ] || [ "$prog" = r1 ]; then   # the new core state, for the next program of this pass: by rename
+      jq -e '.state | if type == "object" then . else error("no state") end' "$d/$prog.json" > "$d/state.json.new" 2> /dev/null \
+        && mv -f -- "$d/state.json.new" "$d/state.json" \
+        || { say "core could not decide ($prog): its output has no state"; say "the pass did nothing: $STATE is as it was"; exit 1; }
+    fi
+    if [ "$prog" = status ]; then
+      jq -r '"status: \(.verdict) (\(.reason))", .lines[]' "$d/$prog.json"
+    else
+      jq -r --arg p "$prog" '"\($p): \(.verdict) (\(.reason))",
+          ((.families // {}) | to_entries[] | "\($p) \(.key): \(.value.verdict) (\(.value.reason))")' "$d/$prog.json"
+    fi
+  done
+}
+
+# what this pass WOULD do (the header: pass): it does none of it
+would_do() {
+  local d=$PASSDIR
+  jq -r '(.families // {}) | to_entries[] | select(.value.verdict == "rollback")
+         | "runner-updater: pass: would roll back \(.key) (this release takes no action)"' "$d/r1.json"
+  jq -r '(.families // {}) | to_entries[] | .key as $f | .value.verdict
+         | if . == "accept" then "runner-updater: pass: would accept \($f) (this release takes no action)"
+           elif . == "jobs-fail" then "runner-updater: pass: would hold \($f): STOP JOBS FAIL ON THE NEW IMAGE (this release takes no action)"
+           elif . == "no-evidence" then "runner-updater: pass: would hold \($f): STOP NO EVIDENCE (this release takes no action)"
+           else empty end' "$d/keep.json"
+  printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" --slurpfile idle "$d/idle.json" '(.families[$f] // {}) as $h
+    | "runner-updater: pass: "
+      + (if $h.candidate != null then
+           "would not switch \($f): it has an open candidate (runner \($h.candidate.version)): one open release per family"
+         elif ($h.stops // []) != [] then
+           "would not switch \($f): STOP \($h.stops[0].stop) holds it (`runner-updater status` names its next step)"
+         elif $idle[0].verdict == "idle" then
+           "would switch \($f): the pool is idle, it has no open candidate and no STOP holds it (this release takes no action, and reads no runner release: S2b-3b)"
+         else "would not switch \($f) now: not idle (\($idle[0].reason))" end)'
+}
+
+# the timer's entry, under the lock it tried (the header: pass)
+do_pass() {
+  local now
+  load_state
+  [ "$(printf '%s\n' "$ST" | jq -r '.on')" = true ] || { say "pass: the updater is OFF: nothing to do"; exit 0; }
+  recover_needed
+  jq_check
+  now=$(date +%s)
+  [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
+  install -d -m 700 "$PASSDIR" || refuse "cannot create $PASSDIR"
+  rm -f -- "$PASSDIR"/facts.json "$PASSDIR"/log.txt "$PASSDIR"/healthz.json "$PASSDIR"/{idle,r1,keep,status}.json \
+    "$PASSDIR"/{idle,r1,keep,status}.err
+  printf '%s\n' "$ST" | jq -c '.core // empty' > "$PASSDIR/state.json" || refuse "cannot copy the core's state into $PASSDIR"
+  say "pass: one pass at $(date -u -d "@$now" '+%Y-%m-%d %H:%M:%S UTC') ($now); it takes no action"
+  collect || refuse "no facts: $REPLY"
+  run_core "$now"
+  change_state '.core = $c[0] | del(.restart)' --slurpfile c "$PASSDIR/state.json"   # the restart: handed over once
+  would_do
+  exit 0
+}
+
+[ "$cmd" != status ] || do_status
+if [ "$cmd" = pass ]; then   # a timer pass only TRIES the lock: held, and it ends at once
+  rr_lock -n
+  case $? in
+    0) do_pass ;;
+    75) say "pass: another run holds the updater lock $RR_LOCK; this pass ends"; exit 0 ;;
+    *) refuse "cannot take the updater lock $RR_LOCK (runner-release.sh said why, above)" ;;
+  esac
+fi
+rr_lock || refuse "cannot take the updater lock $RR_LOCK (runner-release.sh said why, above)"
+case $cmd in
+  on) do_on ;;
+  off) do_off ;;
+esac

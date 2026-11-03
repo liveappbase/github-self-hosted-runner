@@ -9,7 +9,8 @@ CI row pass with no cell run (verdict, test_support.py). In a container that lac
 A cell makes a Sandbox: a temporary folder, removed by the cell's cleanup. In it
 - home/build is linux-docker/ (the host's ~/build) plus setup/tls-excluded-spki from the repository's top-level setup/
   and the decision core, core/ (the install line ships both there: ~/build/setup/ and ~/build/core/). Its scripts are
-  the REAL ones with ONLY their pin lines rewritten (PIN_REWRITES):
+  the REAL ones with ONLY their pin lines rewritten (PIN_REWRITES; bin/runner-updater's own PATH line among them, so
+  the substitutes come first):
   each rewrite must match exactly once, and the copy may then hold no host path (LEFT_OUT) at all;
 - host.conf is the host config (root's file, 0644): host.conf.example's values, RUN_USER=root (the cells run as root);
 - stubs/ holds the substitutes, each logging its calls to logs/: docker (driven by docker.json; it keeps D1 in
@@ -438,6 +439,9 @@ class Sandbox:
         'setup/pool-image.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'bin/runner-start': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'bin/pool-ready': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        # the updater sets its own PATH (the system folders): the copy puts the cell's substitutes first
+        'bin/runner-updater': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n'),
+                               ('PATH=/usr/bin:/bin:/usr/sbin:/sbin\n', 'PATH=@ROOT@/stubs:/usr/bin:/bin:/usr/sbin:/sbin\n')],
         'setup/runner-release.sh': [
             ('RR_API=https://api.github.com/repos/actions/runner\n', 'RR_API=@GH@/repos/actions/runner\n'),
             ('RR_DL=https://github.com/actions/runner/releases/download\n',
@@ -446,10 +450,11 @@ class Sandbox:
     }
     LEFT_OUT = {'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
                 'setup/03-runscaler.sh': ('/etc/liveapp-ci',), 'setup/pool-image.sh': ('/etc/liveapp-ci',),
-                'bin/pool-ready': ('/etc/liveapp-ci',),
+                'bin/pool-ready': ('/etc/liveapp-ci',), 'bin/runner-updater': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
     # The original lines a copy may differ in (pin_lines_only): the rewrites above, and the pins Pool rewrites
-    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA)=.*|PINS="\$S03=[0-9a-f]{64}'
+    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA)=.*|PATH=/usr/bin:/bin:/usr/sbin:/sbin'
+                          r'|PINS="\$S03=[0-9a-f]{64}'
                           r'|\$B/[A-Za-z0-9._/-]+=[0-9a-f]{64}"?')
 
     def __init__(self, test):
@@ -853,6 +858,10 @@ if cmd == 'is-enabled':
     print('enabled' if st['enabled'] else 'disabled')
     sys.exit(0 if st['enabled'] else 1)
 if cmd == 'show' and a[1:2] == ['runscaler']:
+    if 'show_answer' in st:                # an answer the cell planted ({rc, out}), for every show from here on
+        sys.stdout.write(st['show_answer']['out'])
+        sys.stdout.flush()
+        sys.exit(st['show_answer']['rc'])
     vals = {'ActiveEnterTimestamp': ('@%d' % st['start']) if '--timestamp=unix' in a else
             time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(st['start'])),
             'MainPID': str(st.get('pid', 0) if st['active'] else 0),
@@ -864,6 +873,11 @@ if cmd == 'show' and a[1:2] == ['runscaler']:
     for p in props:
         print(vals[p] if '--value' in a else '%s=%s' % (p, vals[p]))
     sys.stdout.flush()
+    if 'shows' in st:                      # the Nth read of a cell that counts them, once answered: "systemctl:show-N"
+        st['shows'] += 1
+        hzlib.save('systemd.json', st)
+        hzlib.fire('systemctl:show-%d' % st['shows'])
+        st = hzlib.load('systemd.json')
     if 'shows_since_stop' in st:           # the Nth read after a stop, once answered: "systemctl:show-after-stop-N"
         st['shows_since_stop'] += 1
         hzlib.save('systemd.json', st)
@@ -919,7 +933,8 @@ hzlib.event('sleep %s' % a[0])
 DD_STUB = r'''#!/usr/bin/python3 -I
 # dd, for the pool cells with hooks: the real dd, then, when it synced the window journal, the hooks of
 # "journal:KEY" (KEY: the journal's last line's key, now on disk). An injection "ddfail:KEY" makes the sync of that
-# line fail instead (exit 1, no dd)
+# line fail instead (exit 1, no dd). Any other file it syncs: the event "dd NAME" (NAME: its base name), and the
+# injection "ddfail-file:NAME" makes that sync fail (exit 1, no dd)
 import os, subprocess, sys
 SB = @SB@
 sys.path.insert(0, SB + '/stubs')
@@ -933,10 +948,14 @@ if of and of[0].endswith('/runner-updater/window') and os.path.exists(of[0]):
     k = last[0].split(b' ', 1)[0].decode() if last else ''
     if hzlib.take('ddfail:' + k):
         sys.exit(1)
+elif of and hzlib.take('ddfail-file:' + os.path.basename(of[0])):
+    sys.exit(1)
 r = subprocess.run(['/usr/bin/dd'] + a)
 if r.returncode == 0 and k is not None:
     hzlib.event('journal ' + k)
     hzlib.fire('journal:' + k)
+elif r.returncode == 0 and of:
+    hzlib.event('dd ' + os.path.basename(of[0]))
 sys.exit(r.returncode)
 '''
 
@@ -1206,7 +1225,8 @@ class Pool(Sandbox):
         STAGED), edit-prev (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for
         the next second of the REAL clock), probe-lock (is the updater lock held?), kill (SIGKILL of pool-image.sh's
         process group: only an unattended() run is one). An injection, AT with no ACTION: `ddfail:KEY` (the sync of
-        that journal line fails)."""
+        that journal line fails), `ddfail-file:NAME` (the sync of another file NAME fails). `systemctl:show-N` (after
+        the Nth `systemctl show`) needs count_shows() too."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
         sb = repr(self.root)
         self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)
@@ -1223,6 +1243,31 @@ class Pool(Sandbox):
         call is the image's jq."""
         self.write(self.path('jq.json'), json.dumps({'version': version}))
         self.write(self.path('stubs', 'jq'), JQ_STUB.replace('@SB@', repr(self.root)), 0o755)
+
+    def count_shows(self):
+        """From now on the systemctl substitute counts its `show` reads: the hooks of `systemctl:show-N` fire after
+        the Nth one is answered."""
+        self.set_unit(shows=0)
+
+    def show_answer(self, rc, out):
+        """Every `systemctl --user show` from now on prints OUT and exits RC (systemd's answer the cell plants)."""
+        self.set_unit(show_answer={'rc': rc, 'out': out})
+
+    def updater(self, *args, env=None, timeout=300, argv0=None):
+        """~/build/bin/runner-updater ARGS (or the program at ARGV0), run as the timer runs it: by its own #! line."""
+        return self.run([argv0 or os.path.join(self.build, 'bin', 'runner-updater')] + list(args), timeout=timeout,
+                        env=env)
+
+    def updater_start(self, *args):
+        """runner-updater ARGS, started (stdout a pipe, stderr into it), in a new session; the cleanup kills it."""
+        return self.start([os.path.join(self.build, 'bin', 'runner-updater')] + list(args))
+
+    def clock(self, now=None, plus=0):
+        """The fake clock (fake_clock): set it to NOW, or move it on by PLUS seconds; returns it (whole seconds)."""
+        c = json.loads(self.read(self.path('clock.json')))
+        c['now'] = (c['now'] if now is None else now) + plus
+        self.write(self.path('clock.json'), json.dumps(c))
+        return int(c['now'])
 
     def unattended(self, *args, prefix=()):
         """pool-image.sh ARGS (`up --unattended V D`, `back --unattended`) in a NEW SESSION (a `kill` hook kills its

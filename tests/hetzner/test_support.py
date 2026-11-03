@@ -6,7 +6,8 @@
   nor pass as skipped: a CI row whose container ever lacked the mark goes red, never green with every cell skipped.
 Pure; runs anywhere. So does Tools: a container that lacks a tool the cells need (jq among them: the unattended switch
 asks core/idle.jq) fails each cell by name. And (Copies, in a container): the copies a cell runs are the real scripts
-with only their pin lines rewritten (HOST_CONF, RR_API/RR_DL/RR_SRC, 03's TGZ_SHA and BIN_SHA, pool-image.sh's PINS):
+with only their pin lines rewritten (HOST_CONF, RR_API/RR_DL/RR_SRC, 03's TGZ_SHA and BIN_SHA, pool-image.sh's PINS,
+runner-updater's PATH):
 Sandbox.pin_lines_only finds any other difference, and a planted one is found.
 """
 import os

@@ -331,26 +331,6 @@ uhand() {   # SHA WHAT: A HAND CHANGE found after `rename-start` (the header): `
 utarget() {   # WHEN NOTE: config.toml must still be the TARGET (TSHA), right before the step after WHEN; else uhand
   sha_of "$CFG"; [ "$REPLY" = "$TSHA" ] || uhand "$REPLY" "$1 (sha256 ${REPLY:0:12}…, not the ${TSHA:0:12}… this window validated and installed): $2"
 }
-proc_now() {   # runscaler as systemd reports it, in ONE read: "PID START" (MainPID, ActiveEnterTimestamp) when active, else none
-  local o k v s= p= a=
-  o=$(systemctl --user show runscaler -p ActiveState -p MainPID -p ActiveEnterTimestamp --timestamp=unix 2> /dev/null < /dev/null) \
-    || { echo none; return 0; }
-  while IFS='=' read -r k v; do case $k in ActiveState) s=$v ;; MainPID) p=$v ;; ActiveEnterTimestamp) a=${v#@} ;; esac; done <<< "$o"
-  if [ "$s" = active ] && [[ $p =~ ^[1-9][0-9]*$ ]] && [[ $a =~ ^[0-9]+$ ]]; then echo "$p $a"; else echo none; fi
-}
-log_pos() {   # runscaler's log position now: "INODE OFFSET SHA" (inode and size from ONE open; the sha256 of the 64 bytes
-  # before OFFSET, or of all of them when fewer), the way the updater's pass captures one; rc 1 when it cannot be read
-  python3 -I -c '
-import hashlib, os, sys
-with open(sys.argv[1], "rb") as f:
-    st = os.fstat(f.fileno())
-    n = st.st_size
-    f.seek(max(0, n - 64))
-    b = f.read(min(64, n))
-if len(b) != min(64, n):
-    sys.exit(1)
-print("%d %d %s" % (st.st_ino, n, hashlib.sha256(b).hexdigest()))' "$R/runner.log" 2> /dev/null < /dev/null
-}
 sets_of() { grep -E '^name = ' "$1" 2> /dev/null | cut -d'"' -f2; }   # the sets a config names, in its order
 targets() {   # FILE: "SET=IMAGE SET=IMAGE": each set's runner-image line, in config order
   awk '/^name = "/ { n = $0; sub(/^name = "/, "", n); sub(/"$/, "", n) }
@@ -364,21 +344,13 @@ disk_ok() {   # RUN_USER's filesystem (D1's data and the registry's volume) has 
   DISK_WHY="the filesystem of /home/${RUN_USER} (D1's images and the registry) has ${BASH_REMATCH[2]} KiB free of ${BASH_REMATCH[1]}, less than ${DISK_PCT}% (runscaler's min_free): free disk first (the registry grows with each release), then the updater switches at its next pass"
   return 1
 }
-tested_jq() {   # `jq --version` is a core row of ~/build/core/TESTED_JQ (the core's own list); JQV = what it printed
-  JQV=$(jq --version 2> /dev/null < /dev/null) || JQV="no jq"
-  [[ $JQV =~ ^jq-[A-Za-z0-9.+-]+$ ]] || return 1
-  awk -v v="$JQV" '$1 == v && $2 ~ /(^|,)core(,|$)/ { f = 1 } END { exit !f }' "$CORE/TESTED_JQ" 2> /dev/null
-}
 uidle() {   # THE IDLE PAIR (the header): 0 idle; 1 not idle; 2 the core could not decide. IDLE_WHY = the core's reason
-  local h=$WDIR/idle-healthz.json f=$WDIR/idle-facts.json s=$WDIR/idle-state.json o=$WDIR/idle.json j i
+  local h=$WDIR/idle-healthz.json f=$WDIR/idle-facts.json s=$WDIR/idle-state.json o=$WDIR/idle.json
   : > "$h" && : > "$s" || { IDLE_WHY="cannot write $WDIR"; return 2; }
   # shellcheck disable=SC2046
   jq -n -c '{format: 1, sets: $ARGS.positional}' --args $(sets_of "$CFG") > "$f" 2> /dev/null < /dev/null \
     || { IDLE_WHY="cannot write $f"; return 2; }
-  for i in 1 2; do
-    [ "$i" = 1 ] || sleep 3   # between the reads: the last read is followed by the rename and the restart, at once
-    j=$(curl -fs -m 5 "http://127.0.0.1:${RS_HEALTH_PORT}/healthz" < /dev/null) && printf '%s\n' "$j" >> "$h"
-  done
+  healthz_pair "$h"   # 3 s apart, the pause between them: the last read is followed by the rename and the restart, at once
   jq -n -L "$CORE/lib" -f "$CORE/idle.jq" --slurpfile state "$s" --slurpfile facts "$f" --slurpfile healthz "$h" \
     --arg now "$(date +%s)" > "$o" 2> "$o.err" < /dev/null || { IDLE_WHY=$(head -n 1 "$o.err"); return 2; }
   IDLE_WHY=$(jq -r '.reason' "$o" 2> /dev/null) || { IDLE_WHY="no reason in $o"; return 2; }
@@ -571,6 +543,9 @@ un_back() {
 if [ "$UN" = 1 ]; then   # THE UPDATER LOCK first (fd 9: runner-release.sh's rr_lock), then this script's own
   # shellcheck source=runner-release.sh
   . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (is this release's linux-docker/ ~/build?): nothing changed"
+  # the measuring helpers (proc_now, log_pos, tested_jq, healthz_pair): ONE copy, shared with bin/runner-updater
+  # shellcheck source=runner-facts.sh
+  . "$B/setup/runner-facts.sh" || die "cannot read $B/setup/runner-facts.sh (is this release's linux-docker/ ~/build?): nothing changed"
   rr_lock || die "the updater lock (the REFUSE line above says why): nothing changed"
 fi
 # fd 8, never 9: an unattended run holds the updater lock on fd 9, which its parent may have handed it

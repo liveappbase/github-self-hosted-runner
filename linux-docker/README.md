@@ -6,7 +6,7 @@ This folder is the Linux half of the repository: a Linux host where [runscaler](
 - Jobs run on a `runners` network, with a pinned seccomp profile, no-new-privileges and an init process; `docker.dind` is always false. `runner-start` refuses to start runscaler with a config that would give a job a Docker socket.
 - Every value of the host (the users, ports, address, organization, token name, set names and labels) is in ONE host config file, `/etc/liveapp-ci/host.conf`. The scripts hold none of them, and each one refuses to run without that file.
 
-Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them, and except the release path (`02-d1.sh build VERSION`, then `pool-image.sh up VERSION` from its build record: "A new runner release" below), `03-runscaler.sh render`, and `pool-image.sh`'s unattended modes ("The updater's switch and rollback" below), which are new and have not yet run on that host. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
+Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They moved here unchanged except that the host values left them, and except the release path (`02-d1.sh build VERSION`, then `pool-image.sh up VERSION` from its build record: "A new runner release" below), `03-runscaler.sh render`, `pool-image.sh`'s unattended modes ("The updater's switch and rollback" below), and the updater's `bin/runner-updater` ("The updater: status, on, off, pass" below), which are new and have not yet run on that host. `runner-start` refuses any Docker version other than the one the seccomp profile was cut from (29.9.0).
 
 ## Files
 
@@ -18,7 +18,9 @@ Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They m
 | `setup/02-d1.sh` | RUN_USER | With no argument (the full run): the rootless Docker daemon and its hardening, the `runners` network, the local registry, and the runner image of the host config's `RUNNER_VERSION` (built, pushed, checked; then its build record, and its digest goes to `~/run/image.ref`). With `build VERSION`: only the runner image of that release, its checks and its build record. |
 | `setup/runner-release.sh` | RUN_USER, RS_USER | Read by 02-d1.sh and by pool-image.sh's unattended modes, never run: how a runner release is read from GitHub, the trust of every download (below), and the updater lock. |
 | `setup/03-runscaler.sh` | RS_USER | Installs runscaler (by sha256), `runner-start`, `pool-ready`, `validate-class` and the unit; renders, checks and installs the config (`real`, with the image config.toml runs unless it is given one). Never restarts runscaler. `render` (the updater's) renders and validates a config into a file of its own and installs nothing. |
+| `setup/runner-facts.sh` | RS_USER | Read by pool-image.sh's unattended modes and by `bin/runner-updater`, never run: the one copy of what the updater measures (runscaler's process as systemd reports it, its log position and the log text since the last pass, the config's sets and images, the jq check, the two `/healthz` reads). |
 | `setup/pool-image.sh` | RS_USER | Puts the image of a runner release's build record into the pool (`up VERSION`), rolls it back (`back`), or ends the release (`accept`). The updater's own switch and rollback are its unattended modes (`up --unattended`, `back --unattended`: "The updater's switch and rollback", below). |
+| `bin/runner-updater` | RS_USER | The runner-image updater: `status`, `on`, `off`, and `pass`, which measures, asks the decision core and prints what it would do, and takes no action in this release ("The updater: status, on, off, pass" below). Install step 10 links it into `~/bin`. |
 | `bin/runner-start` | RS_USER | The unit's start command: checks the config, D1, the registry and the token files, then starts runscaler. |
 | `bin/validate-class` | RS_USER | The class of one `runner-start validate` result (PASS, API-ONLY, NON-API or UNKNOWN): the same rule as the Mac's `bin/validate-class`. |
 | `bin/pool-ready` | RS_USER | Is runscaler serving exactly the named sets, each ready? |
@@ -82,6 +84,10 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
    ```
    ssh <RS_USER>@<host> 'systemctl --user enable --now runscaler && sleep 60 && ~/bin/pool-ready <MAIN_SET> <SMALL_SET>'
    ```
+10. **The updater (RS_USER).** It links `~/bin/runner-updater` to the copy in `~/build`, so after a release's step 3 it runs that release's files. A fresh install is OFF ("The updater: status, on, off, pass" below):
+   ```
+   ssh <RS_USER>@<host> 'install -d -m 700 ~/bin && ln -sfn ~/build/bin/runner-updater ~/bin/runner-updater'
+   ```
 
 ## A new runner release
 
@@ -118,6 +124,21 @@ A person rolls back an updater's switch with the same mode, as RS_USER. It refus
 ```
 ssh <RS_USER>@<host> 'bash ~/build/setup/pool-image.sh back --unattended'
 ```
+
+## The updater: status, on, off, pass
+
+The runner-image updater runs as RS_USER: `~/bin/runner-updater` (Install step 10). In this release it only looks: a pass measures, asks the decision core (`~/build/core/`) and prints what it would do, and it starts, stops, switches and edits nothing. It sets its own `PATH`, so it runs the same from a terminal, a timer (a later release) or a non-interactive ssh. Its state is `~/.local/state/runner-updater/state.json`: ON or OFF, the family `hz-docker` (both sets of this host) with its candidate (the runner version it switched to and is observing), its previous image, the date until which `back` restores that image, its rejected versions and the STOPs it holds, and the decision core's own state. A fresh install has no state file: the updater is OFF.
+
+- `status` prints ON or OFF, the family's candidate, back date and rejected versions, an open window journal, and the core's lines: each STOP with its next step, and the evidence it has. It takes no lock and writes nothing, so it runs at any time:
+  ```
+  ssh <RS_USER>@<host> '~/bin/runner-updater status'
+  ```
+- `runner-updater on` turns the updater on; `runner-updater off` turns it off. `off` refuses while a window journal is open (`~/.local/state/runner-updater/window`): it never leaves a window half done. Both wait while another run holds the updater lock (`~/.local/state/runner-updater/lock`), and say so:
+  ```
+  ssh <RS_USER>@<host> '~/bin/runner-updater on'
+  ```
+- `runner-updater pass` is what the timer will run. When another run holds the updater lock, or the updater is OFF, it ends at once. When a window journal is open, it prints `STOP RECOVER needed (S2b-3c)` and does nothing more: a later release's RECOVER ends that window, so do not delete the journal. When ON, it reads runscaler's process (from systemd), where runscaler's log ends and what it wrote since the last pass, the config runscaler runs and when it was installed, and two `/healthz` reads; it asks the core (idle, R1, KEEP, the STOP lines), keeps the core's state, and prints what it would do: `would roll back hz-docker`, `would accept hz-docker`, `would hold hz-docker: STOP …`, and whether it would switch now. Each pass's files are in `~/.local/state/runner-updater/pass/`.
+- Under a jq that `core/TESTED_JQ` does not list for `core`, `status` and a pass that is ON print `STOP untested jq` (exit 3) and the line that runs the core's tests with it. A state file of another format, or with an entry this release does not read (a newer release wrote it), makes every command print `WAIT` (exit 4) and change nothing; one it cannot read is `REFUSE` (exit 1), and it is left as it is.
 
 ## Upgrading from a release before this one
 
