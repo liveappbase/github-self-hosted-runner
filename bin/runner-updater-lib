@@ -58,7 +58,11 @@
 #      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read; a top-level
 #      log-file key (runscaler then writes elsewhere, or nowhere, and runner.log reads as a quiet log); a top-level
 #      log-format that is not exactly `log-format = "text"` (the core reads only the text format). Either of the
-#      last two would leave R1 blind while the facts look normal.
+#      last two would leave R1 blind while the facts look normal. pool-size: ONE spelling is read, `pool-size = N` in the
+#      top-level [tart] table, once (none: runscaler's default, 0); any other non-comment line that names pool-size (a
+#      scale set's tart.pool-size, a [scaleset.tart] table, a dotted key, a value that is not a number) is one it
+#      does not read. After step 6 (ru_pools): a family's set that the config has, with a [tart] pool-size > 0 or
+#      with such a line, is no facts (a warm pool: PLAN D6; `on` refuses it too).
 #      It reads CONFIG after the process reads: a config installed after the process started then has a later mtime,
 #      which proves nothing (the safe direction).
 #   6. families: FAMILIES, one line per family "FAMILY tart SET [SET ...]" (FAMILY [a-z][a-z0-9-]{0,40}, SET
@@ -217,13 +221,15 @@ ru_text() {
 }
 
 # ---- the config
-# -> ru_installed, ru_sets (names in file order), ru_lines (assoc SET -> IMAGE), ru_haddr, ru_hport; 1 + REPLY
+# -> ru_installed, ru_sets (names in file order), ru_lines (assoc SET -> IMAGE), ru_haddr, ru_hport, ru_tart_pool (the
+# [tart] table's `pool-size = N`, or "" when it has none: runscaler's default, 0) and ru_pool_bad (the number of the
+# first other line that names pool-size, or ""); 1 + REPLY
 ru_config() {
   typeset -gA ru_lines
   typeset -ga ru_sets
-  local text l n=0 top=1 inblock=0 bname= bimage= ws='[[:space:]]*' tail='[[:space:]]*(#.*)?$'
+  local text l n=0 top=1 inblock=0 intart=0 bname= bimage= ws='[[:space:]]*' tail='[[:space:]]*(#.*)?$'
   typeset -A s1 s2
-  ru_lines=() ru_sets=() ru_haddr= ru_hport= ru_installed=
+  ru_lines=() ru_sets=() ru_haddr= ru_hport= ru_installed= ru_tart_pool= ru_pool_bad=
   [[ -f $CONFIG && -r $CONFIG ]] || { REPLY="no readable config $CONFIG"; return 1 }
   zstat -H s1 $CONFIG || { REPLY="cannot stat $CONFIG"; return 1 }
   text=$(<$CONFIG) || { REPLY="cannot read $CONFIG"; return 1 }
@@ -242,12 +248,20 @@ ru_config() {
   for l in "${(@f)text}"; do
     (( n++ ))
     [[ $l =~ "^${ws}(#.*)?\$" ]] && continue
+    if [[ $l == *pool-size* ]]; then   # ONE spelling read: `pool-size = N` in [tart], once; any other names a pool it does not read
+      if (( intart )) && [[ -z $ru_tart_pool && $l =~ "^${ws}pool-size${ws}=${ws}([0-9]{1,9})${tail}" && $l == "$MATCH" ]]; then
+        ru_tart_pool=$match[1]
+      elif [[ -z $ru_pool_bad ]]; then
+        ru_pool_bad=$n
+      fi
+    fi
     if [[ $l =~ "^${ws}\\[\\[${ws}scaleset${ws}\\]\\]${tail}" ]]; then
       ru_endblock || return 1
-      inblock=1 top=0
+      inblock=1 top=0 intart=0
     elif [[ $l =~ "^${ws}\\[" ]]; then
       ru_endblock || return 1
-      top=0
+      top=0 intart=0
+      [[ $l =~ "^${ws}\\[${ws}tart${ws}\\]${tail}" ]] && intart=1
     elif [[ $l =~ "^${ws}[\"']?runner-image[\"']?${ws}[.=]" ]]; then
       (( inblock )) || { REPLY="$CONFIG line $n: a runner-image line outside a [[scaleset]] block"; return 1 }
       [[ -z $bimage ]] || { REPLY="$CONFIG line $n: a [[scaleset]] block has two runner-image lines"; return 1 }
@@ -278,6 +292,26 @@ ru_config() {
     fi
   done
   ru_endblock || return 1
+  return 0
+}
+
+# ---- the warm pool (PLAN D6: `on` refuses a Tart set with pool-size > 0): after ru_config and ru_families. A family
+# set the config has, with the [tart] pool-size > 0, or with a pool-size line ru_config does not read: 1 + REPLY
+ru_pools() {
+  local f s why="the updater's rules for a Tart set (R1, NOT SERVING) assume no warm pool, as config.toml.example sets it"
+  for f in $ru_fam_order; do
+    for s in ${(s: :)ru_fam[$f]}; do
+      (( ${ru_sets[(Ie)$s]} )) || continue   # no scale set of the config runs it
+      if [[ -n $ru_pool_bad ]]; then
+        REPLY="$CONFIG line $ru_pool_bad: a pool-size this does not read (it reads only \`pool-size = N\` in the [tart] table), and the family $f runs the Tart set $s: $why; set it in [tart] alone, to 0"
+        return 1
+      fi
+      if (( ${ru_tart_pool:-0} > 0 )); then
+        REPLY="$CONFIG: [tart] pool-size = $ru_tart_pool (a warm pool), and the family $f runs the Tart set $s: $why; set pool-size = 0 in [tart]"
+        return 1
+      fi
+    done
+  done
   return 0
 }
 
@@ -516,6 +550,7 @@ ru_collect() {
   ru_say "log: ${RUNLOG:t} at offset $ru_offset; $ru_why"
   ru_config || return 1
   ru_families || return 1
+  ru_pools || return 1
   if [[ -n $held ]]; then   # a pass: the candidates, back_untils and STOPs the updater's state holds
     names=$(print -r -- $held | $JQ -r '.families | to_entries[]
               | select(.value.candidate != null or .value.back_until != null) | .key') \

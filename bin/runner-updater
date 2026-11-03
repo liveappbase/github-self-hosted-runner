@@ -40,7 +40,9 @@
 #            or "no candidate", back_until, its rejected versions; status.jq's verdict and lines (the STOP lines with
 #            their next step, the evidence lines, each back_until); and per STOP its D7 properties, `known false` and
 #            "unknown" for a STOP this core does not know (never guessed). With no STATEDIR it creates nothing.
-#   on       sets on = true.
+#   on       sets on = true. It refuses, and changes nothing, a warm pool (PLAN D6): a set of the families file that the
+#            config has, with a [tart] pool-size > 0 or a pool-size line the lib does not read (ru_pools); so it also
+#            refuses a config or families file it cannot read (it cannot check them).
 #   off      refuses while WINDOW exists (an open window's journal: off never strands a window), and then changes
 #            nothing. Else it sets on = false, then removes every file of PINDIR (golden-build's host pins), each one
 #            journaled FIRST with runner-journal into ACTIONS (`pin-remove NAME VERSION SHA256`, or `pin-remove NAME
@@ -286,6 +288,8 @@ do_status() {
 # ---- on, off (D11), under the lock
 do_on() {
   load_state
+  # PLAN D6: `on` refuses a Tart set with a warm pool (the lib's ru_pools, after the config and the families file)
+  ru_config && ru_families && ru_pools || refuse "on: $REPLY: the updater is as it was"
   change_state '.on = true'
   say "on: the updater is ON"
   exit 0

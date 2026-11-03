@@ -1422,5 +1422,109 @@ class TestLogKeys(unittest.TestCase):
                 self.assertEqual(r.facts()['format'], 1)
 
 
+WHY_POOL = ("the updater's rules for a Tart set (R1, NOT SERVING) assume no warm pool, as config.toml.example sets it")
+POOL = '%(c)s: [tart] pool-size = %(n)s (a warm pool), and the family fx runs the Tart set mac-a: ' + WHY_POOL + \
+       '; set pool-size = 0 in [tart]'
+POOL_UNREAD = ('%(c)s line %(line)d: a pool-size this does not read (it reads only `pool-size = N` in the [tart] table), '
+               'and the family fx runs the Tart set mac-a: ' + WHY_POOL + '; set it in [tart] alone, to 0')
+
+
+class TestWarmPool(unittest.TestCase):
+    """PLAN D6: `on` refuses a Tart set with pool-size > 0. runscaler 0.9.5 reads pool-size in the [tart] table (every
+    scale set inherits it) or in a scale set's own tart table, and its default is 0. The updater reads ONE spelling,
+    `pool-size = N` in the top-level [tart] table; any other line that names pool-size is one it does not read. While a
+    family of the families file runs a set of the config, either one makes `on` REFUSE (the state byte-equal), and a
+    pass or a report no facts (no core call). The controls: pool-size = 0, no pool-size line, the same line as a
+    comment, no family."""
+
+    TART = 'pool-size = 0 '   # the example's [tart] line, from its start
+
+    def cfg(self, pool=None, swap=None):
+        c = config()
+        self.assertEqual(c.count(self.TART), 1)
+        if pool is not None:
+            c = c.replace(self.TART, 'pool-size = %s ' % pool)
+        if swap is not None:
+            c = swap(c)
+        return c
+
+    @staticmethod
+    def line_of(c, text):
+        return c.splitlines().index(text) + 1
+
+    def on(self, cfg, families='fx tart mac-a\n'):
+        r = Rig(self, jq_wrap=True, cfg=cfg, families=families)
+        u = Paths(r)
+        raw = u.put(dict(on_state(), on=False))
+        return r, u, raw, r.cmd('on', ok=False)
+
+    def test_on_refuses_a_warm_pool(self):
+        for n in ('1', '2', '01'):
+            with self.subTest(pool=n):
+                r, u, raw, res = self.on(self.cfg(pool=n))
+                self.assertEqual((res.returncode, res.stdout), (1, 'runner-updater: REFUSE on: %s: the updater is as it '
+                                 'was\n' % (POOL % {'c': r.config, 'n': n})), res.stderr)
+                self.assertEqual(u.raw(), raw)
+
+    UNREAD = {   # how -> (the config's change, the line it adds)
+        'in the scale set': (lambda c: c.replace('disable-update = false\n', 'disable-update = false\ntart.pool-size = 1\n'),
+                             'tart.pool-size = 1'),
+        'in the scale set, 0 too': (lambda c: c.replace('disable-update = false\n',
+                                                        'disable-update = false\ntart.pool-size = 0\n'), 'tart.pool-size = 0'),
+        'in a [scaleset.tart] table': (lambda c: c + '[scaleset.tart]\npool-size = 1\n', 'pool-size = 1'),
+        'a dotted key at the top': (lambda c: c.replace('log-level = "info"\n', 'log-level = "info"\ntart.pool-size = 1\n'),
+                                    'tart.pool-size = 1'),
+        'a value that is not a plain number': (lambda c: c.replace('pool-size = 0 ', 'pool-size = "1" '), None),
+        'a second pool-size in [tart]': (lambda c: c.replace('cache-budget = 60', 'pool-size = 0\ncache-budget = 60'),
+                                         'pool-size = 0'),
+    }
+
+    def test_on_refuses_a_pool_size_it_does_not_read(self):
+        for how, (swap, added) in self.UNREAD.items():
+            with self.subTest(how=how):
+                c = self.cfg(swap=swap)
+                if added is None:
+                    line = next(i for i, l in enumerate(c.splitlines(), 1) if l.startswith('pool-size = "1"'))
+                elif how == 'a second pool-size in [tart]':
+                    line = [i for i, l in enumerate(c.splitlines(), 1) if l == added][0]
+                else:
+                    line = self.line_of(c, added)
+                r, u, raw, res = self.on(c)
+                self.assertEqual((res.returncode, res.stdout), (1, 'runner-updater: REFUSE on: %s: the updater is as it '
+                                 'was\n' % (POOL_UNREAD % {'c': r.config, 'line': line})), res.stderr)
+                self.assertEqual(u.raw(), raw)
+
+    def test_control_on_with_no_warm_pool(self):
+        for how, c, families in (
+                ('pool-size = 0', self.cfg(), 'fx tart mac-a\n'),
+                ('no pool-size line (runscaler: 0)', self.cfg(swap=lambda c: '\n'.join(
+                    l for l in c.splitlines() if not l.startswith('pool-size')) + '\n'), 'fx tart mac-a\n'),
+                ('the line as a comment', self.cfg(swap=lambda c: c.replace(
+                    'disable-update = false\n', 'disable-update = false\n# tart.pool-size = 1\n')), 'fx tart mac-a\n'),
+                ('a warm pool, but no family', self.cfg(pool='1'), None),
+                ('a warm pool, but no family runs a set of the config', self.cfg(pool='1'), 'fz tart mac-z\n')):
+            with self.subTest(how=how):
+                r, u, raw, res = self.on(c, families=families)
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertTrue(u.get()['on'])
+
+    def test_a_pass_and_a_report_are_no_facts_with_a_warm_pool(self):
+        for cmd in ('pass', 'report'):
+            with self.subTest(cmd=cmd):
+                r = Rig(self, jq_wrap=True, cfg=self.cfg(pool='1'))
+                u = Paths(r)
+                raw = u.put(on_state())
+                res = r.cmd(cmd, ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: REFUSE no facts: %s\n' % (POOL % {'c': r.config, 'n': '1'}), res.stdout)
+                self.assertEqual(core_calls(r), [])
+                self.assertEqual(u.raw(), raw)
+        # the control: the same pass with pool-size = 0 runs the core (and every other pass cell runs on the example)
+        r = Rig(self, jq_wrap=True, cfg=self.cfg())
+        Paths(r).put(on_state())
+        r.cmd('pass')
+        self.assertEqual(core_calls(r), ['idle', 'r1', 'keep', 'status'])
+
+
 if __name__ == '__main__':
     unittest.main()

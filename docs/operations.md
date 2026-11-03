@@ -171,6 +171,7 @@ The runner-image updater is not complete yet: this release takes no action on wh
 - A state with a member this release does not read (a later release wrote it) also gives `WAIT` (exit 4), for every command, `status` too: the line names each such member. That member may name an image to keep or hold a STOP, so this release changes nothing. Install the release that wrote it again.
 - When ci cannot search `/Users/ci/.local/state/runner-updater` or a folder above it, every command refuses (exit 1): the files in it would look absent, and a lost state must not read as a fresh, OFF one. `off` also stops when it cannot read and search the pin folder: the pins stay. Look at the folder's mode, then run the command again.
 - The updater refuses a `config.toml` with a top-level `log-file`, or a `log-format` other than `"text"`: the core reads only runscaler's own `runner.log` beside the config, in the text format.
+- It also refuses a warm pool for a set of a family: a `pool-size` other than 0 in the `[tart]` table, or a `pool-size` anywhere else (it reads only the one in `[tart]`). Its rules for a Tart set assume no warm pool, as `config/config.toml.example` sets it. `on` refuses it, and a pass or a report then has no facts.
 
 ## The updater's report mode (no action)
 
