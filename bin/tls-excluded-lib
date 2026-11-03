@@ -1,7 +1,8 @@
 #!/bin/zsh -f
 # tls-excluded-lib — the ONE Mac reader of setup/tls-excluded-spki, the CA keys this repository's hosts never trust
 # (that file's header gives its format). zsh functions, SOURCED, never run: bin/golden-emudhra sources it (the keys it
-# fills into its guest part). It reads no constant and writes nothing. linux-docker/setup/runner-release.sh reads the same file in bash with the same rules: the cells of
+# fills into its guest part) and so does bin/runner-updater-release (the Studio's TLS filter). It reads no constant and
+# writes nothing. linux-docker/setup/runner-release.sh reads the same file in bash with the same rules: the cells of
 # tests/studio/test_runner_updater_release.py run this reader on the cases tests/hetzner/test_tls.py runs on that one.
 #
 #   tls_excluded FILE  0, and tls_keys = every key, in file order, once every line passed. 1, tls_keys empty and REPLY

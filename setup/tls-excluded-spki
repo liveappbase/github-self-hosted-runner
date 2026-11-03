@@ -1,8 +1,8 @@
 # tls-excluded-spki — the CA keys this repository's hosts never trust for a download: per data line, the SHA-256 of a
 # certificate's public key (its DER SubjectPublicKeyInfo), ONE space, and the certificate's name.
 # ONE copy: linux-docker/setup/runner-release.sh reads it on the Linux host (the install line puts it into ~/build/setup/);
-# on the Mac, bin/tls-excluded-lib reads it for bin/golden-emudhra, which puts the keys into the build VM and holds no
-# key of its own (tests/hetzner/test_tls.py).
+# on the Mac, bin/tls-excluded-lib reads it for bin/golden-emudhra (which puts the keys into the build VM and holds no
+# key of its own: tests/hetzner/test_tls.py) and for the updater's TLS filter (bin/runner-updater-release).
 # Format: a line that starts with # is a comment, an empty line is ignored, any other line is a data line whose first
 # field (the text before the first space) is 64 lowercase hex. A reader REFUSES the whole file on a data line whose first
 # field is not, on a CR byte, on a hash that appears twice, or when there is no data line: an empty list never means

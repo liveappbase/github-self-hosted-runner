@@ -1,0 +1,355 @@
+#!/bin/zsh -f
+# runner-updater-release — the release half of the runner-image updater on the Studio (PLAN D2): WHICH runner release a
+# family may switch to. zsh functions that bin/runner-updater sources in a pass (never run on its own). ONE copy. It
+# acts on nothing on CI: it disables, builds, pins, switches and edits nothing. Its only writes are under STATEDIR/release
+# (the filtered CA bundle and its stamp, the record of a verified release, a download's temporary file).
+#
+# The caller sets, before it calls a function of it: STATEDIR, RELBIN (the release's bin/: its ../setup holds the data
+# file, and tls-excluded-lib is beside this file), JQ, DD (ru_write) and CONFIG; it has sourced bin/runner-updater-lib
+# (ru_say, ru_write, and for rl_pass the pass's facts: ru_state, ru_fam, ru_fam_order, ru_lines) and exports TZ=UTC and
+# LC_ALL=C. Loading this file sources $RELBIN/tls-excluded-lib (the ONE Mac reader of setup/tls-excluded-spki).
+#
+# TRUST (PLAN D2). EVERY download of the updater is rl_curl:
+#   OPENSSL_X509_TEA_DISABLE=1 RL_CURL -q --proto =https --proto-redir =https --tlsv1.2 --cacert <the filtered bundle>
+# RL_CURL is Apple's /usr/bin/curl 8.7.1 (LibreSSL 3.3.6 + SecureTransport). Measured 11-03 on macOS 26A434 (the
+# Studio's build): with --cacert <one root that does not chain api.github.com> and no variable, it still gets 200: its
+# trust check falls back to the keychain, and --capath <an empty folder> changes nothing. With the variable, that bundle
+# gives curl exit 60 and the full filtered bundle 200. So the variable IS the exclusion here; with it, curl adds no CA
+# folder of its own beside --cacert (the LIVE cells: tests/studio/test_runner_updater_release.py, TestLiveTLS).
+# THE FILTERED BUNDLE (rl_bundle): RL_SRC, the host bundle, less every certificate whose key the data file names (the
+# SHA-256 of its DER SubjectPublicKeyInfo: RL_OPENSSL x509 -pubkey, then pkey -pubin -outform DER, homebrew-core's
+# reading). RL_OPENSSL is /usr/bin/openssl, LibreSSL 3.3.6 on the Studio (measured 11-03, macOS 26A434). At least
+# RL_FLOOR certificates kept, else a STOP and no bundle; a certificate it cannot read, or a data file the reader refuses:
+# a STOP. It lives in STATEDIR/release (0700): bundle.pem and bundle.stamp, which names the sha256 of the source and of
+# the data file, RL_OPENSSL's version, the sha256 of the filter's own code (as this shell holds it), RL_FLOOR and the
+# bundle's own sha256; any of them changed, and the bundle is rebuilt. rl_curl runs that check before EVERY download.
+# Each input is read ONCE: the source and the data file are copied into a private folder first, and the stamp's hashes,
+# the parse and the filter all read those copies.
+#
+#   rl_bundle             RL_BUNDLE = the current filtered bundle: 0; 1 + REPLY ("STOP the filtered CA bundle: ...")
+#   rl_curl ARG...        ONE download (above). Exit: curl's, or 126 when rl_bundle refused (REPLY says why)
+#   rl_release latest     GitHub's latest release (RL_API/releases/latest); rl_release tag V: release v<V>
+#                         (releases/tags/v<V>). Checked: its tag is v<N.N.N> (tag: V itself); it has ONE asset
+#                         actions-runner-osx-arm64-<N.N.N>.tar.gz, with a sha256 digest and its release's own download
+#                         address (golden-build's runner_url); it has a published_at time. Sets rl_version,
+#                         rl_published (epoch), rl_digest (sha256:<64 hex>) and rl_url: 0. 403 or 429 (a rate limit):
+#                         75 + REPLY, a WAIT, never a refusal. Anything else: 1 + REPLY.
+#   rl_eligible NOW       rl_release latest, and at least RL_AGE (2 days) old at NOW (the glue's UTC clock): 0, 1, 75
+#   rl_tarball            after rl_release: the darwin-arm64 tarball's sha256 equals the asset's digest. It downloads it
+#                         (rl_curl) into STATEDIR/release, hashes it and removes it, and records the version and digest it
+#                         verified in STATEDIR/release/verified (by ru_write); while that record names the same version
+#                         and digest, it downloads nothing. 0; 403 or 429: 75 + REPLY; else 1 + REPLY.
+#   rl_recipe FAMILY ROOT REPLY = the family's RECIPE (PLAN D2): the sha256 of one line `<sha256>  <path>` per recipe
+#                         file under ROOT (the release folder), in RL_RECIPE's order: its builder files, the node-diff
+#                         file and the base pin (BASE=, a line of golden-build), with the runner lines masked (golden-
+#                         build's RUNNER_VERSION and RUNNER_SHA values become "(runner)"). 1 + REPLY for a family this
+#                         release builds no image for, or a file it cannot read.
+#   rl_unreject STATE FAMILY VERSION   REPLY = STATE (JSON) with VERSION no longer rejected for FAMILY (`retry FAMILY`,
+#                         a later release): 0; 1 + REPLY when it is not rejected for it (nothing to clear).
+#   rl_pass NOW           THE PASS HOOK: one line per family of the families file, in its order (below).
+#
+# THE PASS HOOK (rl_pass). A family is DUE when the eligible release is newer than the family's current version and the
+# family has no open candidate (one open release per family). Its current version: the image every set of the family
+# names in the config (one image), and the state's record of that image (images). It prints, per family, the first
+# that holds, in this order (what needs no network first, so a family held for a local reason asks GitHub nothing):
+#   1. an open candidate: "FAMILY is not due: an open candidate (runner V): ...";
+#   2. no recipe for the family (this release builds no image for it), or one it cannot compute;
+#   3. "STOP NO BASELINE": the state holds no recipe for the family (`rebuild FAMILY`, a later release, sets it);
+#   4. "STOP recipe changed": the recipe is not the state's;
+#   5. its sets do not name one image, or the state has no record of that image's runner version;
+#   6. the latest release (read once per pass): "WAIT ..." (403, 429), or a check it fails (a refusal, under 2 days);
+#   7. "release vV is rejected for FAMILY";
+#   8. "release vV is not newer than its runner C";
+#   9. the tarball's digest check (once per pass): "WAIT ..." or why it failed;
+#   10. else "would switch FAMILY to V (this release takes no action)".
+# Each STOP is printed, never written into the state (`status` does not show it), and a later pass prints it again
+# while it holds. It never fails the pass: every line is "runner-updater: pass: ...".
+# Constants:
+#   RL_CURL      the downloads' curl (above)
+#   RL_OPENSSL   the filter's openssl (above)
+#   RL_SRC       the host bundle the filter reads
+#   RL_FLOOR     the fewest certificates a filtered bundle may keep
+#   RL_API RL_DL GitHub's API for actions/runner, and its download address
+#   RL_AGE       seconds a latest release must be old (2 days)
+#   RL_RECIPE    per family, its recipe files under the release folder; golden-build's runner lines are masked
+RL_CURL=/usr/bin/curl
+RL_OPENSSL=/usr/bin/openssl
+RL_SRC=/etc/ssl/cert.pem
+RL_FLOOR=100
+RL_API=https://api.github.com/repos/actions/runner
+RL_DL=https://github.com/actions/runner/releases/download
+RL_AGE=172800
+typeset -gA RL_RECIPE
+RL_RECIPE=(mac-golden 'bin/golden-build bin/golden-emudhra bin/node-diff-compare bin/real-run bin/tls-excluded-lib setup/emudhra.node-diff setup/tls-excluded-spki')
+
+source $RELBIN/tls-excluded-lib || { print -r -- "runner-updater-release: cannot load $RELBIN/tls-excluded-lib"; return 1 }
+
+# FILE -> REPLY = its sha256 (64 hex); 1 when it cannot be read
+rl_sha() {
+  local s
+  s=$(/usr/bin/shasum -a 256 < $1 2>/dev/null) || return 1
+  [[ $s =~ '^[0-9a-f]{64}  -$' ]] || return 1
+  REPLY=${s[1,64]}
+}
+
+# STATEDIR/release, 0700 -> RL_DIR; 1 + REPLY
+rl_dir() {
+  RL_DIR=$STATEDIR/release
+  [[ -d $RL_DIR && ! -L $RL_DIR ]] || /bin/mkdir -m 700 -- $RL_DIR 2>/dev/null \
+    || { REPLY="cannot make $RL_DIR"; return 1 }
+}
+
+rl_bundle() {
+  local t ov src exs fc want b l n=0 kept=0 dropped=0 in=0 i
+  local -a blocks keys
+  local -A spki
+  RL_BUNDLE=
+  rl_dir || { REPLY="STOP the filtered CA bundle: $REPLY"; return 1 }
+  [[ -x $RL_OPENSSL ]] || { REPLY="STOP the filtered CA bundle: no $RL_OPENSSL"; return 1 }
+  { ov=$($RL_OPENSSL version < /dev/null 2>/dev/null) && [[ -n $ov ]] } \
+    || { REPLY="STOP the filtered CA bundle: $RL_OPENSSL version does not answer"; return 1 }
+  [[ $RL_FLOOR =~ '^[1-9][0-9]*$' ]] || { REPLY="STOP the filtered CA bundle: RL_FLOOR is not a count: '$RL_FLOOR'"; return 1 }
+  t=$(/usr/bin/mktemp -d $RL_DIR/.new.XXXXXX) || { REPLY="STOP the filtered CA bundle: cannot make a folder in $RL_DIR"; return 1 }
+  # EACH INPUT READ ONCE (the header): everything below reads these copies, never the paths again
+  rl_bundle_no() { /bin/rm -rf -- $t; REPLY="STOP the filtered CA bundle: $1"; return 1 }
+  /bin/cat -- ${RELBIN:h}/setup/tls-excluded-spki > $t/excluded 2>/dev/null \
+    || { rl_bundle_no "cannot read the excluded keys ${RELBIN:h}/setup/tls-excluded-spki"; return 1 }
+  /bin/cat -- $RL_SRC > $t/source 2>/dev/null || { rl_bundle_no "cannot read the CA bundle $RL_SRC"; return 1 }
+  rl_sha $t/source || { rl_bundle_no "cannot hash the CA bundle $RL_SRC"; return 1 }
+  src=$REPLY
+  rl_sha $t/excluded || { rl_bundle_no "cannot hash the excluded keys"; return 1 }
+  exs=$REPLY
+  fc=$(functions rl_sha rl_bundle tls_excluded | /usr/bin/shasum -a 256) && fc=${fc[1,64]} && [[ $fc =~ '^[0-9a-f]{64}$' ]] \
+    || { rl_bundle_no "cannot hash the filter's own code"; return 1 }
+  tls_excluded $t/excluded || { rl_bundle_no "$REPLY"; return 1 }
+  keys=($tls_keys)
+  want="source $src"$'\n'"excluded $exs"$'\n'"openssl $ov"$'\n'"filter $fc"$'\n'"floor $RL_FLOOR"
+  if [[ -f $RL_DIR/bundle.pem && -f $RL_DIR/bundle.stamp ]] && rl_sha $RL_DIR/bundle.pem \
+     && [[ "$(<$RL_DIR/bundle.stamp)" == "$want"$'\n'"bundle $REPLY" ]]; then
+    /bin/rm -rf -- $t
+    RL_BUNDLE=$RL_DIR/bundle.pem
+    return 0
+  fi
+  # the certificates of the source copy, one block per BEGIN..END pair; each key read by RL_OPENSSL
+  /bin/mkdir -- $t/c || { rl_bundle_no "cannot write in $t"; return 1 }
+  for l in "${(@f)$(<$t/source)}"; do
+    if (( in )); then
+      blocks[n]+=$l$'\n'
+      [[ $l == '-----END CERTIFICATE-----' ]] && in=0
+    elif [[ $l == '-----BEGIN CERTIFICATE-----' ]]; then
+      (( n++ )); blocks[n]=$l$'\n' in=1
+    fi
+  done
+  (( in == 0 )) || { rl_bundle_no "$RL_SRC ends inside a certificate"; return 1 }
+  for (( i = 1; i <= n; i++ )); do
+    print -rn -- $blocks[i] > $t/c/$i.pem \
+      && $RL_OPENSSL x509 -in $t/c/$i.pem -noout -pubkey > $t/c/$i.pub 2>/dev/null < /dev/null \
+      && $RL_OPENSSL pkey -pubin -in $t/c/$i.pub -outform DER -out $t/c/$i.der 2>/dev/null < /dev/null \
+      && [[ -s $t/c/$i.der ]] \
+      || { rl_bundle_no "$RL_SRC holds a certificate whose key $RL_OPENSSL cannot read"; return 1 }
+  done
+  if (( n )); then
+    for l in ${(f)"$(cd $t/c && /usr/bin/shasum -a 256 *.der)"}; do
+      [[ $l =~ '^([0-9a-f]{64})  ([0-9]+)\.der$' ]] && spki[$match[2]]=$match[1]
+    done
+  fi
+  : > $t/bundle.pem || { rl_bundle_no "cannot write in $t"; return 1 }
+  for (( i = 1; i <= n; i++ )); do
+    (( ${+spki[$i]} )) || { rl_bundle_no "$RL_SRC holds a certificate whose key $RL_OPENSSL cannot read"; return 1 }
+    if (( ${keys[(Ie)$spki[$i]]} )); then (( dropped++ ))
+    else print -rn -- $blocks[i] >> $t/bundle.pem || { rl_bundle_no "cannot write in $t"; return 1 }; (( kept++ )); fi
+  done
+  (( kept >= RL_FLOOR )) \
+    || { rl_bundle_no "only $kept certificates of $RL_SRC kept ($dropped excluded), want $RL_FLOOR or more"; return 1 }
+  { rl_sha $t/bundle.pem && print -r -- "$want"$'\n'"bundle $REPLY" > $t/bundle.stamp \
+      && /bin/mv -f -- $t/bundle.pem $RL_DIR/bundle.pem && /bin/mv -f -- $t/bundle.stamp $RL_DIR/bundle.stamp } \
+    || { rl_bundle_no "cannot install the bundle in $RL_DIR"; return 1 }
+  /bin/rm -rf -- $t
+  RL_BUNDLE=$RL_DIR/bundle.pem
+  ru_say "tls: the filtered CA bundle: $kept certificates of $RL_SRC kept, $dropped dropped by their excluded keys ($RL_BUNDLE)"
+}
+
+rl_curl() {
+  rl_bundle >&2 || return 126
+  OPENSSL_X509_TEA_DISABLE=1 $RL_CURL -q --proto '=https' --proto-redir '=https' --tlsv1.2 --cacert $RL_BUNDLE -sS "$@" \
+    < /dev/null   # '=https' quoted: zsh expands a bare =word to a command's path
+}
+
+rl_release() {
+  local kind=${1-} want=${2-} url j code rc facts
+  rl_version= rl_published= rl_digest= rl_url=
+  case $kind:$# in
+    (tag:2) [[ $want =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && $want == "$MATCH" ]] || { REPLY="not a runner version: '$want'"; return 1 }
+            url=$RL_API/releases/tags/v$want ;;
+    (latest:1) url=$RL_API/releases/latest ;;
+    (*) REPLY="usage: rl_release latest | rl_release tag VERSION"; return 1 ;;
+  esac
+  rl_dir || return 1
+  j=$(/usr/bin/mktemp $RL_DIR/release.XXXXXX) || { REPLY="cannot make a file in $RL_DIR"; return 1 }
+  code=$(rl_curl --max-time 60 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+           -o $j -w '%{http_code}' $url)
+  rc=$?
+  if (( rc )); then
+    /bin/rm -f -- $j
+    (( rc == 126 )) || REPLY="GitHub's API did not answer $url (curl exit $rc)"
+    return 1
+  fi
+  case $code in
+    (200) ;;
+    (403|429) /bin/rm -f -- $j; REPLY="GitHub answered $code (a rate limit) for $url"; return 75 ;;
+    (*) /bin/rm -f -- $j; REPLY="GitHub answered $code for $url"; return 1 ;;
+  esac
+  facts=$($JQ -r --arg kind $kind --arg want "$want" --arg dl $RL_DL '   # "$want": empty for latest, and zsh drops an empty bare word
+    def no($w): "no \($w)";
+    if type != "object" then no("the answer is not a JSON object")
+    else .tag_name as $tag
+    | if ($tag | type) != "string" or ($tag | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$") | not)
+      then no("its tag \($tag | tojson | .[0:80]) is not v<N.N.N>")
+      else ($tag | .[1:]) as $v | ("actions-runner-osx-arm64-\($v).tar.gz") as $name
+      | [(.assets // [])[]? | select(type == "object" and .name == $name)] as $a
+      | if $kind == "tag" and $v != $want then no("the answer is release v\($v), not v\($want)")
+        elif ($a | length) != 1 then no("release v\($v) has \($a | length) assets named \($name), want 1")
+        elif ($a[0].digest | type) != "string" or ($a[0].digest | test("^sha256:[0-9a-f]{64}$") | not)
+          then no("the asset \($name) has no sha256 digest")
+        elif $a[0].browser_download_url != "\($dl)/v\($v)/\($name)"
+          then no("the asset \($name) is not downloaded from its release'"'"'s own address")
+        elif (.published_at | type) != "string"
+             or (.published_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") | not)
+          then no("release v\($v) has no published_at time")
+        else "ok \($v) \(.published_at | fromdateiso8601) \($a[0].digest) \($a[0].browser_download_url)" end end end' \
+    $j 2>/dev/null)
+  rc=$?
+  /bin/rm -f -- $j
+  (( rc == 0 )) && [[ -n $facts && $facts != *$'\n'* ]] || { REPLY="$url: the answer could not be read"; return 1 }
+  [[ $facts == ok\ * ]] || { REPLY="$url: ${facts#no }"; return 1 }
+  [[ $facts =~ '^ok ([0-9]+\.[0-9]+\.[0-9]+) ([0-9]+) (sha256:[0-9a-f]{64}) (https://[^[:space:]]+)$' && $facts == "$MATCH" ]] \
+    || { REPLY="$url: the answer's facts are not of their form"; return 1 }
+  rl_version=$match[1] rl_published=$match[2] rl_digest=$match[3] rl_url=$match[4]
+}
+
+rl_eligible() {
+  local now=$1 rc
+  rl_release latest; rc=$?
+  (( rc == 0 )) || return $rc
+  (( now - rl_published >= RL_AGE )) && return 0
+  REPLY="release v$rl_version is younger than 2 days: published $(strftime '%Y-%m-%d %H:%M:%S UTC' $rl_published), eligible from $(strftime '%Y-%m-%d %H:%M:%S UTC' $(( rl_published + RL_AGE )))"
+  return 1
+}
+
+rl_tarball() {
+  local f code rc
+  [[ -n $rl_version && -n $rl_url && $rl_digest =~ '^sha256:[0-9a-f]{64}$' ]] \
+    || { REPLY="usage: rl_tarball, after rl_release"; return 1 }
+  rl_dir || return 1
+  if [[ -f $RL_DIR/verified && ! -L $RL_DIR/verified ]] && [[ "$(<$RL_DIR/verified)" == "$rl_version $rl_digest" ]]; then
+    return 0
+  fi
+  f=$(/usr/bin/mktemp $RL_DIR/runner.XXXXXX) || { REPLY="cannot make a file in $RL_DIR"; return 1 }
+  code=$(rl_curl -L --max-redirs 5 --max-time 900 --max-filesize 2147483648 -o $f -w '%{http_code}' $rl_url)
+  rc=$?
+  if (( rc )); then
+    /bin/rm -f -- $f
+    (( rc == 126 )) || REPLY="the download of $rl_url failed (curl exit $rc)"
+    return 1
+  fi
+  case $code in
+    (200) ;;
+    (403|429) /bin/rm -f -- $f; REPLY="GitHub answered $code (a rate limit) for $rl_url"; return 75 ;;
+    (*) /bin/rm -f -- $f; REPLY="GitHub answered $code for $rl_url"; return 1 ;;
+  esac
+  rl_sha $f || { /bin/rm -f -- $f; REPLY="cannot hash the download of $rl_url"; return 1 }
+  /bin/rm -f -- $f
+  [[ sha256:$REPLY == "$rl_digest" ]] \
+    || { REPLY="$rl_url: its sha256 is $REPLY, not the release asset's digest $rl_digest"; return 1 }
+  ru_write $RL_DIR/verified "$rl_version $rl_digest"$'\n' || { REPLY="cannot record the verified release ($REPLY)"; return 1 }
+}
+
+rl_recipe() {
+  local fam=$1 root=$2 p text lines= l
+  local -a out
+  (( ${+RL_RECIPE[$fam]} )) || { REPLY="this release builds no image for the family $fam (no recipe)"; return 1 }
+  for p in ${(s: :)RL_RECIPE[$fam]}; do
+    [[ -f $root/$p && -r $root/$p ]] || { REPLY="the recipe of $fam: cannot read $root/$p"; return 1 }
+    if [[ $p == bin/golden-build ]]; then   # the runner lines masked: their values, never the rest of the line
+      text=$(/bin/cat -- $root/$p && print -rn -- .) || { REPLY="the recipe of $fam: cannot read $root/$p"; return 1 }
+      out=()
+      for l in "${(@f)${text%.}}"; do
+        if [[ $l =~ '^RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+' ]]; then l="RUNNER_VERSION=(runner)${l[$#MATCH+1,-1]}"
+        elif [[ $l =~ '^RUNNER_SHA=[0-9a-f]{64}' ]]; then l="RUNNER_SHA=(runner)${l[$#MATCH+1,-1]}"; fi
+        out+=("$l")
+      done
+      REPLY=$(print -rn -- ${(pj:\n:)out} | /usr/bin/shasum -a 256) && REPLY=${REPLY[1,64]}
+    else
+      rl_sha $root/$p
+    fi
+    [[ $REPLY =~ '^[0-9a-f]{64}$' ]] || { REPLY="the recipe of $fam: cannot hash $root/$p"; return 1 }
+    lines+="$REPLY  $p"$'\n'
+  done
+  REPLY=$(print -rn -- $lines | /usr/bin/shasum -a 256) && REPLY=${REPLY[1,64]} && [[ $REPLY =~ '^[0-9a-f]{64}$' ]] \
+    || { REPLY="the recipe of $fam: cannot hash it"; return 1 }
+}
+
+rl_unreject() {
+  local st=$1 fam=$2 v=$3 new
+  print -r -- $st | $JQ -e --arg f $fam --arg v $v '(.families[$f].rejected // []) | any(.[]; . == $v)' > /dev/null 2>&1 \
+    || { REPLY="$v is not rejected for $fam: nothing to clear"; return 1 }
+  new=$(print -r -- $st | $JQ -c --arg f $fam --arg v $v '.families[$f].rejected -= [$v]' 2>/dev/null) && [[ -n $new ]] \
+    || { REPLY="jq could not clear the rejection of $v for $fam"; return 1 }
+  REPLY=$new
+}
+
+# A B (N.N.N) -> 0 when A is newer than B
+rl_newer() {
+  local -a a b
+  a=(${(s:.:)1}) b=(${(s:.:)2})
+  (( a[1] != b[1] )) && { (( a[1] > b[1] )); return }
+  (( a[2] != b[2] )) && { (( a[2] > b[2] )); return }
+  (( a[3] > b[3] ))
+}
+
+rl_pass() {
+  local now=$1 f s v rec base cur erc= ewhy= trc= twhy=
+  local -a imgs
+  rl_not() { ru_say "pass: $1 is not due: $2" }
+  for f in $ru_fam_order; do
+    v=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].candidate.version // empty')
+    [[ -z $v ]] || { rl_not $f "an open candidate (runner $v): one open release per family"; continue }
+    rl_recipe $f ${RELBIN:h} || { rl_not $f "$REPLY"; continue }
+    rec=$REPLY
+    base=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].recipe // empty')
+    if [[ -z $base ]]; then
+      rl_not $f "STOP NO BASELINE: the family has no recipe baseline (its recipe now: $rec); \`runner-updater rebuild $f\` sets it (a later release)"
+      continue
+    fi
+    if [[ $base != "$rec" ]]; then
+      rl_not $f "STOP recipe changed: its recipe is $rec, its baseline $base (a builder file, the node-diff file or the base pin changed); \`runner-updater rebuild $f\`"
+      continue
+    fi
+    imgs=()
+    for s in ${(s: :)ru_fam[$f]}; do
+      (( ${+ru_lines[$s]} )) || { rl_not $f "its set $s has no runner-image line in $CONFIG"; continue 2 }
+      imgs+=($ru_lines[$s])
+    done
+    imgs=(${(u)imgs})
+    (( ${#imgs} == 1 )) || { rl_not $f "its sets name ${#imgs} images (${(j:, :)imgs}), not one"; continue }
+    cur=$(print -r -- $ru_state | $JQ -r --arg i $imgs[1] '.images[$i] // empty')
+    [[ -n $cur ]] || { rl_not $f "the runner version of its image $imgs[1] is not known (the updater has no record of it)"; continue }
+    if [[ -z $erc ]]; then   # GitHub's latest release: once per pass, the filtered bundle checked first
+      rl_bundle; erc=$?
+      if (( erc == 0 )); then rl_eligible $now; erc=$?; fi
+      ewhy=$REPLY
+    fi
+    if (( erc == 75 )); then rl_not $f "WAIT $ewhy"; continue; fi
+    (( erc == 0 )) || { rl_not $f "$ewhy"; continue }
+    if print -r -- $ru_state | $JQ -e --arg f $f --arg v $rl_version \
+         '(.families[$f].rejected // []) | any(.[]; . == $v)' > /dev/null; then
+      rl_not $f "release v$rl_version is rejected for $f"; continue
+    fi
+    rl_newer $rl_version $cur || { rl_not $f "release v$rl_version is not newer than its runner $cur"; continue }
+    if [[ -z $trc ]]; then rl_tarball; trc=$? twhy=$REPLY; fi
+    if (( trc == 75 )); then rl_not $f "WAIT $twhy"; continue; fi
+    (( trc == 0 )) || { rl_not $f "$twhy"; continue }
+    ru_say "pass: would switch $f to $rl_version (this release takes no action)"
+  done
+  return 0
+}

@@ -361,6 +361,9 @@ do_pass() {
   change_state '.core = $c[0]' --slurpfile c $PASSDIR/state.json
   write_protected $now
   pass_would   # what this pass would do: no action in this release
+  # which release each family may switch to, or why not: bin/runner-updater-release (its header: THE PASS HOOK)
+  source $RELBIN/runner-updater-release || refuse "cannot load $RELBIN/runner-updater-release"
+  rl_pass $now
   exit 0
 }
 pass_would() {

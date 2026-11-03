@@ -112,6 +112,11 @@ class Rig:
         self.script = self.copy('runner-updater', extra_rewrites)
         self.lib = sb.copy_script('bin/runner-updater-lib', [])
         self.journal = sb.copy_script('bin/runner-journal', [])   # beside the script, as in a release's bin/
+        # the pass hook's file and the reader it sources (bin/runner-updater-release; its cells: test_runner_updater_
+        # release.py), beside the script; its GitHub never answers (exit 7, as with no network) unless a cell says so
+        sb.copy_script('bin/tls-excluded-lib', [])
+        self.release = sb.copy_script('bin/runner-updater-release', [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + sb.stub(
+            'curl', 'exit 7', folder=sb.mkdir('tools-gh'), log=sb.path('logs', 'gh-curl.log')))])
         sb.write(self.config, cfg if cfg is not None else config())
         os.utime(self.config, (INSTALLED, INSTALLED))
         if families is not None:

@@ -9,15 +9,22 @@ each call (its argv and the OPENSSL_X509_TEA_DISABLE it saw) and answers from fi
 /usr/bin/openssl on the real /etc/ssl/cert.pem plus test certificates this file makes. The LIVE cells reach GitHub:
 they skip unless RUNNER_UPDATER_LIVE_TLS=1.
 """
+import calendar
+import hashlib
+import json
 import os
+import re
+import shlex
+import subprocess
+import time
 import unittest
 
+from tests.hetzner.support import pems, spki_sha256
 from tests.hetzner.test_tls import read_data
-from tests.studio.support_emudhra import (EXCLUDED_LINE, GUEST_W, data_keys, emudhra_copy, guest_text, scenario,
-                                          write as ewrite)
+from tests.studio.support_emudhra import EXCLUDED_LINE, data_keys, emudhra_copy, guest_text, scenario, write as ewrite
 from tests.studio.support import REPO, Sandbox
-from tests.studio.test_runner_updater import Rig, config
-from tests.studio.test_runner_updater_state import Paths, on_state
+from tests.studio.test_runner_updater import IMG, P, Rig, config, read_text, the_jq
+from tests.studio.test_runner_updater_state import Paths, cand, fam, on_state, state
 
 ZSH = '/bin/zsh'
 DATA = os.path.join(REPO, 'setup', 'tls-excluded-spki')
@@ -267,6 +274,834 @@ class TestGoldenEmudhraKeys(unittest.TestCase):
     def test_control_a_filled_guest_part_runs_its_step(self):
         r = self.guest_run(True)
         self.assertEqual((r.returncode, r.stdout), (2, "STOP unknown step 'no-such-step'\n"))
+
+
+# ---- the release half: bin/runner-updater-release
+
+OPENSSL = '/usr/bin/openssl'
+SYSTEM_BUNDLE = '/etc/ssl/cert.pem'   # read, never written
+API = 'https://api.github.com/repos/actions/runner'
+DL = 'https://github.com/actions/runner/releases/download'
+V0, V1, V2 = '2.338.2', '2.338.9', '2.339.0'
+DAY = 86400
+NOW = calendar.timegm((2026, 11, 3, 12, 0, 0, 0, 0, 0))
+
+# GitHub: a curl stub. It logs its argv (one line, quoted) to D/calls and the OPENSSL_X509_TEA_DISABLE it saw to D/tea,
+# needs its --cacert to be a file, then answers the URL (its last operand) from D/<key>.code and D/<key>.body (key: the
+# URL with every other character than a letter or digit made _), or exits D/<key>.exit. A URL with no route: exit 7 (no
+# connection), as with no network.
+GH_STUB = r"""D=@D@
+print -r -- "${(qq)@}" >> $D/calls
+print -r -- "${OPENSSL_X509_TEA_DISABLE-unset}" >> $D/tea
+out= fmt= url= ca=
+while (( $# )); do
+  case $1 in
+    (-o) out=$2; shift 2 ;;
+    (-w) fmt=$2; shift 2 ;;
+    (--cacert) ca=$2; shift 2 ;;
+    (-H|--max-time|--max-redirs|--max-filesize|--proto|--proto-redir|--capath) shift 2 ;;
+    (-*) shift ;;
+    (*) url=$1; shift ;;
+  esac
+done
+[[ -f $ca ]] || { print -u2 -r -- "stub curl: --cacert is not a file: '$ca'"; exit 77 }
+k=${url//[^A-Za-z0-9]/_}
+[[ -f $D/$k.exit ]] && exit $(<$D/$k.exit)
+[[ -f $D/$k.code ]] || exit 7
+[[ -n $out ]] && { if [[ -f $D/$k.body ]]; then /bin/cat $D/$k.body > $out; else : > $out; fi }
+[[ -n $fmt ]] && print -rn -- $(<$D/$k.code)
+exit 0
+"""
+
+DRIVER = """set -u
+export LC_ALL=C TZ=UTC
+umask 077
+STATEDIR=%(statedir)s RELBIN=%(bin)s JQ=%(jq)s DD=/bin/dd CONFIG=%(config)s
+source $RELBIN/runner-updater-lib || { print -r -- "cannot source the lib"; exit 9 }
+source $RELBIN/runner-updater-release || { print -r -- "cannot source the release file"; exit 9 }
+%(snippet)s
+"""
+
+
+def key(url):
+    return re.sub(r'[^A-Za-z0-9]', '_', url)
+
+
+def tarball_bytes(v):
+    return ('a runner tarball of v%s\n' % v).encode()
+
+
+def digest_of(data):
+    return 'sha256:' + hashlib.sha256(data).hexdigest()
+
+
+def iso(epoch):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(epoch))
+
+
+def release(v=V2, published=NOW - 3 * DAY, digest=None, tag=None, assets=None, **drop):
+    """GitHub's answer for release v: the Linux asset and the darwin-arm64 one (DIGEST: the stub tarball's)"""
+    name = 'actions-runner-osx-arm64-%s.tar.gz' % v
+    r = {'tag_name': tag or 'v' + v, 'name': 'v' + v, 'published_at': iso(published) if published is not None else None,
+         'assets': assets if assets is not None else [
+             {'name': 'actions-runner-linux-x64-%s.tar.gz' % v, 'digest': 'sha256:' + 'e' * 64,
+              'browser_download_url': '%s/v%s/actions-runner-linux-x64-%s.tar.gz' % (DL, v, v)},
+             {'name': name, 'digest': digest if digest is not None else digest_of(tarball_bytes(v)),
+              'browser_download_url': '%s/v%s/%s' % (DL, v, name)}]}
+    for k in drop:
+        r.pop(k)
+    return json.dumps(r)
+
+
+def make_ca(d, name):
+    """a self-signed test CA (EC P-256) made with the filter's openssl -> (its PEM, the SHA-256 of its SPKI)"""
+    os.makedirs(d, exist_ok=True)
+    subprocess.run([OPENSSL, 'req', '-x509', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+                    '-nodes', '-keyout', name + '.key', '-out', name + '.pem', '-days', '3', '-subj',
+                    '/CN=liveapp test ' + name], cwd=d, check=True, capture_output=True, stdin=subprocess.DEVNULL)
+    pem = read_text(os.path.join(d, name + '.pem'))
+    return pem, spki_sha256(pem)
+
+
+def system_pems():
+    return pems(read_text(SYSTEM_BUNDLE))
+
+
+class Kit:
+    """runner-updater-lib, tls-excluded-lib and runner-updater-release copied into a release bin/ of a sandbox (its
+    setup/ holds a copy of the data file), RL_CURL rewritten to the GitHub stub and RL_SRC to SOURCE (a file of the
+    sandbox: a copy of the system bundle unless given); run(SNIPPET) runs a zsh driver that sources the two files."""
+
+    def __init__(self, test, source=None, rewrites=(), release_text=None):
+        sb = self.sb = Sandbox(test)
+        self.test = test
+        self.root = sb.mkdir('rel')
+        self.bin = sb.mkdir('rel', 'bin')
+        self.statedir = sb.path('state', 'runner-updater')
+        os.makedirs(self.statedir)
+        self.rdir = os.path.join(self.statedir, 'release')
+        self.bundle = os.path.join(self.rdir, 'bundle.pem')
+        self.gh = sb.mkdir('gh')
+        self.curl = sb.write(sb.path('tools-gh', 'curl'), '#!/bin/zsh -f\n' + GH_STUB.replace('@D@', self.gh), 0o755)
+        self.source = sb.write(sb.path('ca', 'cert.pem'), source if source is not None else read_text(SYSTEM_BUNDLE))
+        self.data = sb.write(os.path.join(self.root, 'setup', 'tls-excluded-spki'), read_text(DATA))
+        sb.copy_script('bin/runner-updater-lib', [], dest=os.path.join(self.bin, 'runner-updater-lib'))
+        sb.copy_script('bin/tls-excluded-lib', [], dest=os.path.join(self.bin, 'tls-excluded-lib'))
+        self.rewrites = [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + self.curl),
+                         ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + self.source)] + list(rewrites)
+        self.release = self.copy_release(release_text)
+
+    def copy_release(self, text=None):
+        """the release file (or TEXT: a mutant of it) with the kit's rewrites"""
+        if text is None:
+            return self.sb.copy_script('bin/runner-updater-release', self.rewrites,
+                                       dest=os.path.join(self.bin, 'runner-updater-release'))
+        for old, new in self.rewrites:
+            self.test.assertIn(old, text)
+            text = text.replace(old, new)
+        return self.sb.write(os.path.join(self.bin, 'runner-updater-release'), text)
+
+    def run(self, snippet, env=None):
+        d = self.sb.write(self.sb.path('driver'), DRIVER % {
+            'statedir': self.statedir, 'bin': self.bin, 'jq': the_jq(), 'config': self.sb.path('config.toml'),
+            'snippet': snippet}, 0o755)
+        return self.sb.run([ZSH, '-f', d], extra_env=env)
+
+    def route(self, url, code=200, body='', exit=None):
+        k = key(url)
+        if exit is not None:
+            self.sb.write(os.path.join(self.gh, k + '.exit'), '%d\n' % exit)
+            return
+        self.sb.write(os.path.join(self.gh, k + '.code'), '%d\n' % code)
+        with open(os.path.join(self.gh, k + '.body'), 'wb') as f:
+            f.write(body if isinstance(body, bytes) else body.encode())
+
+    def latest(self, body=None, code=200, v=V2, tarball=None, tcode=200):
+        """the latest release answers BODY (default: release(v)), and its darwin-arm64 tarball TARBALL"""
+        self.route(API + '/releases/latest', code, body if body is not None else release(v))
+        name = 'actions-runner-osx-arm64-%s.tar.gz' % v
+        self.route('%s/v%s/%s' % (DL, v, name), tcode, tarball if tarball is not None else tarball_bytes(v))
+
+    def calls(self):
+        p = os.path.join(self.gh, 'calls')
+        return [shlex.split(l) for l in read_text(p).splitlines()] if os.path.exists(p) else []
+
+    def urls(self):
+        return [c[-1] for c in self.calls()]
+
+    def tea(self):
+        p = os.path.join(self.gh, 'tea')
+        return read_text(p).splitlines() if os.path.exists(p) else []
+
+    def keys(self, path=None):
+        return [spki_sha256(p) for p in pems(read_text(path or self.bundle))]
+
+
+# ---- the TLS filter
+
+BUNDLE = 'rl_bundle; rc=$?; print -r -- "rc $rc"; (( rc == 0 )) && print -r -- "bundle $RL_BUNDLE" || print -r -- "why $REPLY"'
+
+
+class TestFilter(unittest.TestCase):
+    """rl_bundle: the filtered bundle = the host bundle (RL_SRC) less every certificate whose SPKI sha256 the data file
+    names, in the source's order; at least RL_FLOOR (100) kept, else a STOP and no bundle; a certificate openssl cannot
+    read: a STOP. Rebuilt when its source, the data file, the openssl, the filter's code, the floor or the bundle
+    itself changed; else kept (the same file). The filter's openssl is /usr/bin/openssl (LibreSSL)."""
+
+    def test_a_planted_test_ca_is_dropped_and_every_other_kept_in_order(self):
+        d = Sandbox(self).path('pki')
+        ca, ca_spki = make_ca(d, 'ca')
+        k = Kit(self, source=read_text(SYSTEM_BUNDLE) + ca)
+        k.sb.write(k.data, read_text(DATA) + ca_spki + ' liveapp test ca\n')
+        r = k.run(BUNDLE)
+        self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+        got = k.keys()
+        self.assertNotIn(ca_spki, got)
+        excluded = {h for h, _ in read_data(DATA)}
+        self.assertEqual(got, [s for s in (spki_sha256(p) for p in system_pems()) if s not in excluded])
+        self.assertGreaterEqual(len(got), 100)
+        self.assertIn('runner-updater: tls: the filtered CA bundle: %d certificates of %s kept, 1 dropped'
+                      % (len(got), k.source), r.stdout)
+
+    def test_control_an_unlisted_test_ca_is_kept(self):
+        d = Sandbox(self).path('pki')
+        ca, ca_spki = make_ca(d, 'ca')
+        other, other_spki = make_ca(d, 'other')
+        k = Kit(self, source=read_text(SYSTEM_BUNDLE) + ca)
+        k.sb.write(k.data, read_text(DATA) + other_spki + ' liveapp test other (in no bundle)\n')
+        r = k.run(BUNDLE)
+        self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+        self.assertEqual(k.keys()[-1], ca_spki)
+
+    def test_fewer_than_100_kept_stops_and_writes_no_bundle(self):
+        first = system_pems()[:100]
+        for listed, ok in ((spki_sha256(first[0]), False), ('f' * 64, True)):
+            with self.subTest(ok=ok):
+                k = Kit(self, source=''.join(first))
+                k.sb.write(k.data, listed + ' one key\n')
+                r = k.run(BUNDLE)
+                if ok:
+                    self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+                    self.assertEqual(len(k.keys()), 100)
+                else:
+                    self.assertIn('rc 1\nwhy STOP the filtered CA bundle: only 99 certificates of %s kept (1 '
+                                  'excluded), want 100 or more\n' % k.source, r.stdout)
+                    self.assertFalse(os.path.exists(k.bundle))
+
+    def test_a_certificate_openssl_cannot_read_stops(self):
+        bad = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n'
+        for extra, ok in ((bad, False), ('', True)):
+            with self.subTest(ok=ok):
+                k = Kit(self, source=read_text(SYSTEM_BUNDLE) + extra)
+                r = k.run(BUNDLE)
+                self.assertIn('rc %d\n' % (0 if ok else 1), r.stdout, r.stdout + r.stderr)
+                if not ok:
+                    self.assertIn('a certificate whose key %s cannot read' % OPENSSL, r.stdout)
+                    self.assertFalse(os.path.exists(k.bundle))
+
+    def test_a_data_file_the_reader_refuses_stops(self):
+        for text, ok in (('# nothing\n', False), (GOOD + '\r\n', False), (GOOD + '\n', True)):
+            with self.subTest(text=text):
+                k = Kit(self)
+                k.sb.write(k.data, text)
+                r = k.run(BUNDLE)
+                self.assertIn('rc %d\n' % (0 if ok else 1), r.stdout, r.stdout + r.stderr)
+                if not ok:
+                    self.assertIn('why STOP the filtered CA bundle: ', r.stdout)
+
+    def test_the_bundle_is_rebuilt_only_when_an_input_or_the_bundle_changed(self):
+        d = Sandbox(self).path('pki')
+        other, other_spki = make_ca(d, 'other')
+
+        def change(how):
+            k = Kit(self)
+            r = k.run(BUNDLE)
+            self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+            ino = os.stat(k.bundle).st_ino
+            how(k)
+            r = k.run(BUNDLE)
+            self.assertIn('rc 0\n', r.stdout, r.stdout + r.stderr)
+            return os.stat(k.bundle).st_ino != ino, k, r
+
+        rebuilt, k, r = change(lambda k: None)
+        self.assertFalse(rebuilt, 'the same inputs rebuilt the bundle')     # the control
+        self.assertNotIn('runner-updater: tls:', r.stdout)                   # a current bundle says nothing
+        rebuilt, k, r = change(lambda k: k.sb.write(k.source, read_text(k.source) + other))
+        self.assertTrue(rebuilt, 'a changed source did not rebuild the bundle')
+        self.assertEqual(k.keys()[-1], other_spki)
+        rebuilt, k, r = change(lambda k: k.sb.write(k.data, read_text(k.data) + 'e' * 64 + ' one more\n'))
+        self.assertTrue(rebuilt, 'a changed data file did not rebuild the bundle')
+        rebuilt, k, r = change(lambda k: k.sb.write(k.bundle, read_text(k.bundle) + other, 0o600))
+        self.assertTrue(rebuilt, 'a bundle changed by hand was used as it was')
+        self.assertNotIn(other_spki, k.keys())
+        rebuilt, k, r = change(lambda k: k.copy_release(read_text(os.path.join(REPO, 'bin', 'runner-updater-release'))
+                                                         .replace('RL_FLOOR=100', 'RL_FLOOR=99')))
+        self.assertTrue(rebuilt, 'a bundle made under another floor was kept')
+
+
+class TestCurlLine(unittest.TestCase):
+    """EVERY download of the release half is rl_curl: OPENSSL_X509_TEA_DISABLE=1 /usr/bin/curl --cacert <the filtered
+    bundle> (measured 11-03: without the variable, Apple's curl falls back to the keychain and ignores the bundle). The
+    pure cell reads the stub's log of each call the release check makes; the mutant without the variable goes red."""
+
+    def calls_of_a_check(self, text=None):
+        k = Kit(self, release_text=text)
+        k.latest()
+        r = k.run('rl_release latest; print -r -- "rc $?"; rl_tarball; print -r -- "rc $?"')
+        self.assertEqual(r.stdout.count('rc 0\n'), 2, r.stdout + r.stderr)
+        return k
+
+    def test_every_call_carries_the_variable_and_the_bundle(self):
+        k = self.calls_of_a_check()
+        self.assertEqual(k.urls(), [API + '/releases/latest', '%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (DL, V2, V2)])
+        self.assertEqual(k.tea(), ['1', '1'])
+        for c in k.calls():
+            self.assertEqual(c[c.index('--cacert') + 1], k.bundle)
+            self.assertEqual(c[:6], ['-q', '--proto', '=https', '--proto-redir', '=https', '--tlsv1.2'])
+
+    def test_mutant_without_the_variable_is_seen(self):
+        text = read_text(os.path.join(REPO, 'bin', 'runner-updater-release'))
+        self.assertEqual(text.count('OPENSSL_X509_TEA_DISABLE=1 $RL_CURL'), 1)
+        k = self.calls_of_a_check(text.replace('OPENSSL_X509_TEA_DISABLE=1 $RL_CURL', '$RL_CURL'))
+        self.assertEqual(k.tea(), ['unset', 'unset'])   # what the cell above would see: it goes red
+
+
+# ---- release eligibility
+
+CHECK = 'rl_release %s; rc=$?; print -r -- "rc $rc"; (( rc == 0 )) && print -r -- "facts $rl_version $rl_published $rl_digest $rl_url" || print -r -- "why $REPLY"'
+
+
+class TestRelease(unittest.TestCase):
+    """rl_release latest | tag V: GitHub's answer (releases/latest, releases/tags/v<V>) through rl_curl, checked: the
+    tag is v<N.N.N> (tag: the version asked), ONE darwin-arm64 asset with a sha256 digest and its release's own
+    download address, a published_at time. 403 and 429: WAIT (rc 75), never a refusal; any other answer: refused."""
+
+    def check(self, body, code=200, kind='latest', v=V2):
+        k = Kit(self)
+        url = API + ('/releases/latest' if kind == 'latest' else '/releases/tags/v' + v)
+        k.route(url, code, body)
+        r = k.run(CHECK % ('latest' if kind == 'latest' else 'tag ' + v))
+        lines = r.stdout.splitlines()
+        self.assertIn(lines[0], ('rc 0', 'rc 1', 'rc 75'), r.stdout + r.stderr)
+        self.assertEqual(k.urls(), [url])
+        return int(lines[0].split()[1]), lines[1]
+
+    def test_a_good_latest_release(self):
+        rc, line = self.check(release())
+        self.assertEqual((rc, line), (0, 'facts %s %d %s %s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (
+            V2, NOW - 3 * DAY, digest_of(tarball_bytes(V2)), DL, V2, V2)))
+
+    BAD = {   # each check: (the answer, the refusal); its control is test_a_good_latest_release
+        'a tag that is not v<N.N.N>': (release(tag='v2.339'), "its tag \"v2.339\" is not v<N.N.N>"),
+        'a tag with a suffix': (release(tag='v2.339.0-beta'), 'is not v<N.N.N>'),
+        'a tag with no v': (release(tag='2.339.0'), 'is not v<N.N.N>'),
+        'no tag': (release(tag_name=None), 'is not v<N.N.N>'),
+        'no darwin-arm64 asset': (release(assets=[]), 'has 0 assets named actions-runner-osx-arm64-2.339.0.tar.gz, want 1'),
+        'two darwin-arm64 assets': (json.dumps(dict(json.loads(release()), assets=json.loads(release())['assets'] * 2)),
+                                    'has 2 assets named'),
+        'no digest': (release(digest=''), 'has no sha256 digest'),
+        'a digest of another kind': (release(digest='sha512:' + 'a' * 64), 'has no sha256 digest'),
+        'a download from elsewhere': (json.dumps(dict(json.loads(release()), assets=[
+            dict(json.loads(release())['assets'][1], browser_download_url='https://example.com/x.tar.gz')])),
+            "is not downloaded from its release's own address"),
+        'no published_at': (release(published=None), 'has no published_at time'),
+        'not JSON': ('<html>', 'the answer could not be read'),
+        'not an object': ('[1]', 'not a JSON object'),
+    }
+
+    def test_each_check_refuses(self):
+        for why, (body, said) in self.BAD.items():
+            with self.subTest(why):
+                rc, line = self.check(body)
+                self.assertEqual(rc, 1, line)
+                self.assertTrue(line.startswith('why %s/releases/latest: ' % API), line)
+                self.assertIn(said, line)
+
+    def test_403_and_429_wait(self):
+        for code in (403, 429):
+            with self.subTest(code=code):
+                rc, line = self.check('{"message": "API rate limit exceeded"}', code=code)
+                self.assertEqual((rc, line), (75, 'why GitHub answered %d (a rate limit) for %s/releases/latest'
+                                              % (code, API)))
+
+    def test_control_other_answers_refuse_and_never_wait(self):
+        for code in (404, 500, 401):
+            with self.subTest(code=code):
+                rc, line = self.check('{}', code=code)
+                self.assertEqual((rc, line), (1, 'why GitHub answered %d for %s/releases/latest' % (code, API)))
+
+    def test_no_answer_refuses(self):
+        k = Kit(self)
+        k.route(API + '/releases/latest', exit=6)
+        r = k.run(CHECK % 'latest')
+        self.assertIn("rc 1\nwhy GitHub's API did not answer %s/releases/latest (curl exit 6)\n" % API, r.stdout)
+
+    def test_a_named_release_reads_its_tag(self):
+        rc, line = self.check(release(), kind='tag')
+        self.assertEqual(rc, 0, line)
+        self.assertTrue(line.startswith('facts %s ' % V2), line)
+
+    def test_a_named_release_must_answer_its_own_version(self):
+        rc, line = self.check(release(v=V1), kind='tag')
+        self.assertEqual(rc, 1)
+        self.assertIn('the answer is release v%s, not v%s' % (V1, V2), line)
+
+    def test_a_named_version_that_is_not_one_is_refused_before_any_call(self):
+        k = Kit(self)
+        r = k.run(CHECK % 'tag 2.339')
+        self.assertIn("rc 1\nwhy not a runner version: '2.339'\n", r.stdout)
+        self.assertEqual(k.calls(), [])
+
+
+ELIGIBLE = 'rl_eligible %d; rc=$?; print -r -- "rc $rc"; (( rc == 0 )) && print -r -- "v $rl_version" || print -r -- "why $REPLY"'
+
+
+class TestAge(unittest.TestCase):
+    """rl_eligible NOW: the latest release, at least 2 days old against NOW (the glue's UTC clock)."""
+
+    def at(self, published, now=NOW):
+        k = Kit(self)
+        k.latest(release(published=published))
+        r = k.run(ELIGIBLE % now)
+        return r.stdout.splitlines()
+
+    def test_two_days_old_is_eligible(self):
+        self.assertEqual(self.at(NOW - 2 * DAY), ['rc 0', 'v ' + V2])
+
+    def test_a_second_younger_is_not(self):
+        out = self.at(NOW - 2 * DAY + 1)
+        self.assertEqual(out[0], 'rc 1')
+        self.assertEqual(out[1], 'why release v%s is younger than 2 days: published %s, eligible from %s'
+                         % (V2, '2026-11-01 12:00:01 UTC', '2026-11-03 12:00:01 UTC'))
+
+    def test_a_release_from_the_future_is_not(self):
+        self.assertEqual(self.at(NOW + 60)[0], 'rc 1')
+
+
+TARBALL = 'rl_release latest; rl_tarball; rc=$?; print -r -- "rc $rc"; (( rc == 0 )) || print -r -- "why $REPLY"'
+
+
+class TestTarball(unittest.TestCase):
+    """rl_tarball: the darwin-arm64 tarball's sha256 equals the asset's digest. It downloads it (through rl_curl) into
+    STATEDIR/release, hashes it and removes it; a version and digest it has verified are recorded (release/verified),
+    so a later pass does not download them again. 403 and 429: WAIT."""
+
+    def test_a_tarball_that_matches_its_digest(self):
+        k = Kit(self)
+        k.latest()
+        r = k.run(TARBALL)
+        self.assertEqual(r.stdout, 'rc 0\n', r.stderr)
+        self.assertEqual(read_text(os.path.join(k.rdir, 'verified')), '%s %s\n' % (V2, digest_of(tarball_bytes(V2))))
+        self.assertEqual(sorted(os.listdir(k.rdir)), ['bundle.pem', 'bundle.stamp', 'verified'])   # the download is gone
+
+    def test_a_tarball_that_does_not_match_is_refused_and_removed(self):
+        k = Kit(self)
+        k.latest(tarball=b'other bytes\n')
+        r = k.run(TARBALL)
+        self.assertEqual(r.stdout.splitlines()[0], 'rc 1')
+        self.assertIn('its sha256 is %s, not the release asset\'s digest %s' % (
+            hashlib.sha256(b'other bytes\n').hexdigest(), digest_of(tarball_bytes(V2))), r.stdout)
+        self.assertEqual(sorted(os.listdir(k.rdir)), ['bundle.pem', 'bundle.stamp'])   # no record, no download left
+
+    def test_a_verified_release_is_not_downloaded_again(self):
+        k = Kit(self)
+        k.latest()
+        k.run(TARBALL)
+        n = len(k.calls())
+        r = k.run(TARBALL)
+        self.assertEqual(r.stdout, 'rc 0\n')
+        self.assertEqual(k.urls()[n:], [API + '/releases/latest'])   # the API only
+
+    def test_control_a_record_of_another_digest_downloads(self):
+        k = Kit(self)
+        k.latest()
+        os.makedirs(k.rdir, mode=0o700)
+        k.sb.write(os.path.join(k.rdir, 'verified'), '%s sha256:%s\n' % (V2, 'a' * 64), 0o600)
+        r = k.run(TARBALL)
+        self.assertEqual(r.stdout, 'rc 0\n')
+        self.assertEqual(len(k.urls()), 2)
+
+    def test_403_and_429_on_the_download_wait(self):
+        for code, rc in ((403, 75), (429, 75), (404, 1)):
+            with self.subTest(code=code):
+                k = Kit(self)
+                k.latest(tcode=code)
+                r = k.run(TARBALL)
+                self.assertEqual(r.stdout.splitlines()[0], 'rc %d' % rc, r.stdout)
+                self.assertFalse(os.path.exists(os.path.join(k.rdir, 'verified')))
+
+
+# ---- the recipe
+
+BUILDER = {   # a fixture tree of the mac-golden family's recipe files (hashed, never run)
+    'bin/golden-build': ('#!/bin/zsh -f\nBASE=ghcr.io/cirruslabs/macos-golden-gate-base@sha256:%s\n'
+                         'RUNNER_SHA=%s\nRUNNER_VERSION=%s   # with RUNNER_SHA, the release literal\nsay build\n'
+                         % ('5' * 64, '2' * 64, V0)),
+    'bin/golden-emudhra': '#!/bin/zsh -f\nsay emudhra\n',
+    'bin/node-diff-compare': '#!/bin/zsh -f\nsay compare\n',
+    'bin/real-run': '#!/bin/zsh -f\nsay run\n',
+    'bin/tls-excluded-lib': '#!/bin/zsh -f\ntls_excluded() { :; }\n',
+    'setup/emudhra.node-diff': '# named\n',
+    'setup/tls-excluded-spki': GOOD + '\n',
+}
+RECIPE = 'rl_recipe %s %s; rc=$?; print -r -- "rc $rc"; print -r -- "$REPLY"'
+
+
+def recipe_of(files):
+    """the recipe's definition, independently: the sha256 of one line `<sha256>  <path>` per file in the family's
+    order, golden-build's RUNNER_VERSION and RUNNER_SHA values masked"""
+    text = ''
+    for path in ('bin/golden-build', 'bin/golden-emudhra', 'bin/node-diff-compare', 'bin/real-run',
+                 'bin/tls-excluded-lib', 'setup/emudhra.node-diff', 'setup/tls-excluded-spki'):
+        data = files[path]
+        if path == 'bin/golden-build':
+            data = re.sub(r'(?m)^RUNNER_VERSION=[0-9]+\.[0-9]+\.[0-9]+', 'RUNNER_VERSION=(runner)', data)
+            data = re.sub(r'(?m)^RUNNER_SHA=[0-9a-f]{64}', 'RUNNER_SHA=(runner)', data)
+        text += '%s  %s\n' % (hashlib.sha256(data.encode()).hexdigest(), path)
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+class TestRecipe(unittest.TestCase):
+    """rl_recipe FAMILY ROOT: per family, the sha256 of its builder files, the node-diff file and the base pin (BASE=,
+    a line of golden-build), with the runner lines (golden-build's RUNNER_VERSION and RUNNER_SHA values) masked. Only
+    mac-golden has one in this release."""
+
+    def tree(self, k, files):
+        for path, text in files.items():
+            k.sb.write(os.path.join(k.root, 'x', path), text)
+        return os.path.join(k.root, 'x')
+
+    def recipe(self, files, family='mac-golden'):
+        k = Kit(self)
+        r = k.run(RECIPE % (family, self.tree(k, files)))
+        rc, reply = r.stdout.splitlines()[:2]
+        return int(rc.split()[1]), reply
+
+    def test_the_definition(self):
+        self.assertEqual(self.recipe(BUILDER), (0, recipe_of(BUILDER)))
+
+    def test_a_runner_version_only_change_keeps_the_recipe(self):
+        f = dict(BUILDER)
+        f['bin/golden-build'] = f['bin/golden-build'].replace('RUNNER_SHA=' + '2' * 64, 'RUNNER_SHA=' + '9' * 64).replace(
+            'RUNNER_VERSION=' + V0, 'RUNNER_VERSION=' + V2)
+        self.assertNotEqual(f, BUILDER)
+        self.assertEqual(self.recipe(f), self.recipe(BUILDER))
+
+    CHANGES = {
+        'a builder line': ('bin/golden-build', 'say build\n', 'say build twice\n'),
+        'the base pin': ('bin/golden-build', '5' * 64, '6' * 64),
+        'a runner line beyond its value': ('bin/golden-build', 'the release literal', 'the literal'),
+        'golden-emudhra': ('bin/golden-emudhra', 'emudhra', 'emudhra!'),
+        'node-diff-compare': ('bin/node-diff-compare', 'compare', 'compare!'),
+        'real-run': ('bin/real-run', 'run', 'run!'),
+        'the keys reader': ('bin/tls-excluded-lib', ':;', ': ;'),
+        'the node-diff file': ('setup/emudhra.node-diff', 'named', 'named, one more'),
+        'the excluded keys': ('setup/tls-excluded-spki', 'the good line', 'the good line, renamed'),
+    }
+
+    def test_a_builder_change_changes_the_recipe(self):
+        base = self.recipe(BUILDER)
+        for why, (path, old, new) in self.CHANGES.items():
+            with self.subTest(why):
+                f = dict(BUILDER)
+                self.assertIn(old, f[path])
+                f[path] = f[path].replace(old, new)
+                rc, r = self.recipe(f)
+                self.assertEqual(rc, 0)
+                self.assertNotEqual(r, base[1], why)
+
+    def test_the_real_tree_masks_its_runner_lines(self):
+        files = {}
+        for path in BUILDER:   # the real files, hashed, never run (its host paths rewritten in every copy alike)
+            files[path] = read_text(os.path.join(REPO, path)).replace('/Users/ci', '/private/var/ci-test')
+        rc, real = self.recipe(files)
+        self.assertEqual((rc, real), (0, recipe_of(files)))
+        f = dict(files)
+        f['bin/golden-build'] = re.sub(r'(?m)^RUNNER_VERSION=[0-9.]+', 'RUNNER_VERSION=9.9.9',
+                                       re.sub(r'(?m)^RUNNER_SHA=[0-9a-f]{64}', 'RUNNER_SHA=' + '0' * 64, f['bin/golden-build']))
+        self.assertNotEqual(f['bin/golden-build'], files['bin/golden-build'])
+        self.assertEqual(self.recipe(f), (0, real))
+
+    def test_no_recipe_for_another_family(self):
+        self.assertEqual(self.recipe(BUILDER, family='fx'),
+                         (1, 'this release builds no image for the family fx (no recipe)'))
+
+    def test_a_missing_file_has_no_recipe(self):
+        f = dict(BUILDER)
+        del f['setup/emudhra.node-diff']
+        rc, why = self.recipe(f)
+        self.assertEqual(rc, 1)
+        self.assertIn('the recipe of mac-golden: cannot read ', why)
+
+
+# ---- REJECTED
+
+UNREJECT = 'rl_unreject "$(<%s)" %s %s; rc=$?; print -r -- "rc $rc"; print -r -- "$REPLY"'
+
+
+class TestUnreject(unittest.TestCase):
+    """rl_unreject STATE FAMILY VERSION: the state with VERSION no longer rejected for FAMILY (`retry FAMILY` uses it in
+    a later release); 1 when VERSION is not rejected for it (nothing to clear)."""
+
+    def unreject(self, s, family, v):
+        k = Kit(self)
+        p = k.sb.write(k.sb.path('state.json'), json.dumps(s))
+        r = k.run(UNREJECT % (p, family, v))
+        rc, reply = r.stdout.splitlines()[:2]
+        return int(rc.split()[1]), reply
+
+    def test_it_clears_one_version_and_keeps_the_rest(self):
+        s = state(on=True, families={'mac-golden': fam(rejected=[V1, V2]), 'fy': fam(rejected=[V2])})
+        rc, new = self.unreject(s, 'mac-golden', V2)
+        self.assertEqual(rc, 0)
+        want = json.loads(json.dumps(s))
+        want['families']['mac-golden']['rejected'] = [V1]
+        self.assertEqual(json.loads(new), want)
+
+    def test_control_a_version_that_is_not_rejected(self):
+        s = state(on=True, families={'mac-golden': fam(rejected=[V1])})
+        self.assertEqual(self.unreject(s, 'mac-golden', V2), (1, '%s is not rejected for mac-golden: nothing to clear' % V2))
+        self.assertEqual(self.unreject(s, 'fz', V1)[0], 1)
+
+
+# ---- the pass hook
+
+class PassRig:
+    """a Rig whose families file names mac-golden (its set mac-a: IMG), whose release bin/ holds the recipe's files
+    (BUILDER), and whose release file answers from the GitHub stub and filters a copy of the system bundle. The state:
+    ON, mac-golden with the recipe of those files as its baseline, IMG recorded as runner V0."""
+
+    def __init__(self, test, **fam_kw):
+        self.r = r = Rig(test, jq_wrap=True, families='mac-golden tart mac-a\n', extra_rewrites=[(
+            'now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')])
+        self.u = Paths(r)
+        sb = r.sb
+        self.gh = sb.mkdir('gh')
+        curl = sb.write(sb.path('tools-gh2', 'curl'), '#!/bin/zsh -f\n' + GH_STUB.replace('@D@', self.gh), 0o755)
+        source = sb.write(sb.path('ca', 'cert.pem'), read_text(SYSTEM_BUNDLE))
+        sb.copy_script('bin/runner-updater-release', [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + curl),
+                                                      ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + source)])
+        # the recipe's files under the release folder, RELBIN/.. (the rig's RELBIN is tools/, so its bin/ is apart);
+        # its setup/ also holds the filter's data file
+        files = dict(BUILDER)
+        files['setup/tls-excluded-spki'] = read_text(DATA)
+        for path, text in files.items():
+            sb.write(sb.path(path), text)
+        self.recipe = recipe_of(files)
+        kw = dict(recipe=self.recipe)
+        kw.update(fam_kw)
+        self.state = state(on=True, families={'mac-golden': fam(**kw)}, images={IMG: V0})
+
+    def route(self, url, code=200, body=''):
+        with open(os.path.join(self.gh, key(url) + '.code'), 'w') as f:
+            f.write('%d\n' % code)
+        with open(os.path.join(self.gh, key(url) + '.body'), 'wb') as f:
+            f.write(body if isinstance(body, bytes) else body.encode())
+
+    def latest(self, body=None, code=200, v=V2, tcode=200, tarball=None):
+        self.route(API + '/releases/latest', code, body if body is not None else release(v))
+        self.route('%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (DL, v, v), tcode,
+                   tarball if tarball is not None else tarball_bytes(v))
+
+    def urls(self):
+        p = os.path.join(self.gh, 'calls')
+        return [shlex.split(l)[-1] for l in read_text(p).splitlines()] if os.path.exists(p) else []
+
+    def pass_(self, s=None, now=NOW):
+        self.u.put(s or self.state)
+        return self.r.cmd('pass', env={'RU_TEST_NOW': str(now)})
+
+    def lines(self, res):
+        return [l for l in res.stdout.splitlines() if l.startswith('runner-updater: pass: ') and
+                ('mac-golden' in l or ' fx ' in l)]
+
+
+SWITCH = 'runner-updater: pass: would switch mac-golden to %s (this release takes no action)' % V2
+NOT = 'runner-updater: pass: mac-golden is not due: '
+
+
+class TestPassHook(unittest.TestCase):
+    """The pass hook: for each family of the families file, what it would switch to, or why not. DUE: the eligible
+    latest release is newer than the family's current version (the updater's record of the image its lines name) and
+    the family has no open candidate. Not due, each printed: an open candidate, NO BASELINE, recipe changed, WAIT,
+    rejected, not newer, a release check. The order is the rule: what needs no network comes first."""
+
+    def test_due_would_switch(self):
+        p = PassRig(self)
+        p.latest()
+        res = p.pass_()
+        self.assertEqual(p.lines(res), [SWITCH])
+        self.assertEqual(p.urls(), [API + '/releases/latest', '%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (DL, V2, V2)])
+        self.assertIn('runner-updater: tls: the filtered CA bundle: ', res.stdout)
+
+    def test_an_open_candidate_is_not_due_and_asks_github_nothing(self):
+        p = PassRig(self, candidate=cand(version=V1, lines={'mac-a': IMG}, closed_at=P[2] + 100))
+        p.latest()
+        res = p.pass_()
+        self.assertEqual(p.lines(res), [NOT + 'an open candidate (runner %s): one open release per family' % V1])
+        self.assertEqual(p.urls(), [])
+
+    def test_no_baseline_is_a_stop_and_asks_github_nothing(self):
+        p = PassRig(self, recipe=None)
+        p.latest()
+        res = p.pass_()
+        self.assertEqual(p.lines(res), [NOT + 'STOP NO BASELINE: the family has no recipe baseline (its recipe now: %s); '
+                                        '`runner-updater rebuild mac-golden` sets it (a later release)' % p.recipe])
+        self.assertEqual(p.urls(), [])
+
+    def test_a_changed_recipe_is_a_stop(self):
+        p = PassRig(self, recipe='a' * 64)
+        p.latest()
+        res = p.pass_()
+        self.assertEqual(p.lines(res), [NOT + 'STOP recipe changed: its recipe is %s, its baseline %s (a builder file, '
+                                        'the node-diff file or the base pin changed); `runner-updater rebuild '
+                                        'mac-golden`' % (p.recipe, 'a' * 64)])
+        self.assertEqual(p.urls(), [])
+
+    def test_a_builder_change_after_the_baseline_is_a_stop(self):
+        p = PassRig(self)
+        p.latest()
+        p.r.sb.write(p.r.sb.path('bin', 'golden-emudhra'), BUILDER['bin/golden-emudhra'] + 'say more\n')
+        res = p.pass_()
+        self.assertTrue(p.lines(res)[0].startswith(NOT + 'STOP recipe changed: '), res.stdout)
+
+    def test_control_a_runner_line_change_after_the_baseline_is_due(self):
+        p = PassRig(self)
+        p.latest()
+        p.r.sb.write(p.r.sb.path('bin', 'golden-build'), BUILDER['bin/golden-build'].replace(
+            'RUNNER_VERSION=' + V0, 'RUNNER_VERSION=' + V1))
+        self.assertEqual(p.lines(p.pass_()), [SWITCH])
+
+    def test_wait_on_403_and_429(self):
+        for code in (403, 429):
+            with self.subTest(code=code):
+                p = PassRig(self)
+                p.latest(code=code)
+                self.assertEqual(p.lines(p.pass_()), [NOT + 'WAIT GitHub answered %d (a rate limit) for %s/releases/latest'
+                                                      % (code, API)])
+
+    def test_a_rejected_release_is_never_due(self):
+        p = PassRig(self, rejected=[V2])
+        p.latest()
+        self.assertEqual(p.lines(p.pass_()), [NOT + 'release v%s is rejected for mac-golden' % V2])
+
+    def test_control_another_rejected_version_is_due(self):
+        p = PassRig(self, rejected=[V1])
+        p.latest()
+        self.assertEqual(p.lines(p.pass_()), [SWITCH])
+
+    def test_cleared_by_rl_unreject_it_is_due_again(self):
+        p = PassRig(self, rejected=[V2])
+        p.latest()
+        self.assertEqual(p.lines(p.pass_())[0], NOT + 'release v%s is rejected for mac-golden' % V2)
+        k = Kit(self)
+        sp = k.sb.write(k.sb.path('s.json'), json.dumps(p.u.get()))
+        r = k.run(UNREJECT % (sp, 'mac-golden', V2))
+        self.assertEqual(r.stdout.splitlines()[0], 'rc 0')
+        self.assertEqual(p.lines(p.pass_(json.loads(r.stdout.splitlines()[1]))), [SWITCH])
+
+    def test_not_newer_than_its_current_version(self):
+        for cur in (V2, '2.340.0'):
+            with self.subTest(cur=cur):
+                p = PassRig(self)
+                p.latest()
+                s = dict(p.state, images={IMG: cur})
+                self.assertEqual(p.lines(p.pass_(s)), [NOT + 'release v%s is not newer than its runner %s' % (V2, cur)])
+
+    def test_a_current_version_the_updater_has_no_record_of(self):
+        p = PassRig(self)
+        p.latest()
+        self.assertEqual(p.lines(p.pass_(dict(p.state, images={}))),
+                         [NOT + 'the runner version of its image %s is not known (the updater has no record of it)' % IMG])
+        self.assertEqual(p.urls(), [])
+
+    def test_younger_than_two_days(self):
+        p = PassRig(self)
+        p.latest(body=release(published=NOW - DAY))
+        self.assertTrue(p.lines(p.pass_())[0].startswith(NOT + 'release v%s is younger than 2 days' % V2))
+
+    def test_a_tarball_that_does_not_match_its_digest(self):
+        p = PassRig(self)
+        p.latest(tarball=b'other bytes\n')
+        line = p.lines(p.pass_())[0]
+        self.assertTrue(line.startswith(NOT), line)
+        self.assertIn("not the release asset's digest", line)
+
+    def test_a_bundle_under_the_floor_is_a_stop_and_downloads_nothing(self):
+        for n, ok in ((99, False), (100, True)):
+            with self.subTest(kept=n):
+                p = PassRig(self)
+                p.r.sb.write(p.r.sb.path('ca', 'cert.pem'), ''.join(system_pems()[:n]))
+                p.latest()
+                lines = p.lines(p.pass_())
+                if ok:
+                    self.assertEqual(lines, [SWITCH])
+                else:
+                    self.assertEqual(lines, [NOT + 'STOP the filtered CA bundle: only 99 certificates of %s kept (0 '
+                                             'excluded), want 100 or more' % p.r.sb.path('ca', 'cert.pem')])
+                    self.assertEqual(p.urls(), [])
+
+    def test_a_family_with_no_builder_asks_github_nothing(self):
+        p = PassRig(self)
+        p.r.sb.write(p.r.families, 'mac-golden tart mac-a\nfx tart mac-b\n')
+        p.latest()
+        res = p.pass_()
+        self.assertEqual(p.lines(res), [SWITCH, 'runner-updater: pass: fx is not due: this release builds no image for '
+                                                'the family fx (no recipe)'])
+        self.assertEqual(len(p.urls()), 2)   # mac-golden's check alone
+
+    def test_a_verified_tarball_is_not_downloaded_by_the_next_pass(self):
+        p = PassRig(self)
+        p.r.sb.write(p.r.families, 'mac-golden tart mac-a\n')
+        p.latest()
+        p.pass_()
+        n = len(p.urls())
+        p.pass_()
+        self.assertEqual(p.urls()[n:], [API + '/releases/latest'])   # the tarball is verified once
+
+
+# ---- LIVE: real GitHub through the real filter (the operator runs these)
+
+LIVE = os.environ.get('RUNNER_UPDATER_LIVE_TLS') == '1'
+LIVE_WHY = 'LIVE: reaches api.github.com over the network; run with RUNNER_UPDATER_LIVE_TLS=1'
+
+
+@unittest.skipUnless(LIVE, LIVE_WHY)
+class TestLiveTLS(unittest.TestCase):
+    """The real /usr/bin/curl through rl_curl: api.github.com gives 200 through the filtered bundle of the real system
+    bundle and the real data file. A one-root bundle (ISRG Root X1, which does not chain api.github.com; RL_FLOOR 1 for
+    this cell) gives curl exit 60 WITH OPENSSL_X509_TEA_DISABLE=1, and 200 WITHOUT it (the measured control: Apple's
+    curl then falls back to the keychain)."""
+
+    def kit(self, source=None, text=None):
+        k = Kit(self, source=source, rewrites=[('RL_FLOOR=100', 'RL_FLOOR=1')] if source else ())
+        k.rewrites[0] = ('RL_CURL=/usr/bin/curl', 'RL_CURL=/usr/bin/curl')   # the real curl
+        k.copy_release(text if text is not None else read_text(os.path.join(REPO, 'bin', 'runner-updater-release')))
+        return k
+
+    def get(self, k):
+        r = k.run('code=$(rl_curl --max-time 30 -o /dev/null -w "%{http_code}" https://api.github.com/); '
+                  'print -r -- "rc $? code $code"')
+        return r.stdout.splitlines()[-1]
+
+    def one_root(self):
+        isrg = [p for p in system_pems() if spki_sha256(p) == ISRG_X1_SPKI]
+        self.assertEqual(len(isrg), 1, 'ISRG Root X1 is not in %s' % SYSTEM_BUNDLE)
+        return isrg[0]
+
+    def test_api_github_com_through_the_filtered_bundle(self):
+        self.assertEqual(self.get(self.kit()), 'rc 0 code 200')
+
+    def test_a_one_root_bundle_gives_60_with_the_variable(self):
+        self.assertTrue(self.get(self.kit(source=self.one_root())).startswith('rc 60 '))
+
+    def test_control_the_same_bundle_without_the_variable_gives_200(self):
+        text = read_text(os.path.join(REPO, 'bin', 'runner-updater-release')).replace(
+            'OPENSSL_X509_TEA_DISABLE=1 $RL_CURL', '$RL_CURL')
+        self.assertEqual(self.get(self.kit(source=self.one_root(), text=text)), 'rc 0 code 200')
+
+
+ISRG_X1_SPKI = '0b9fa5a59eed715c26c1020c711b4f6ec42d58b0015e14337a39dad301c5afc3'
 
 
 if __name__ == '__main__':

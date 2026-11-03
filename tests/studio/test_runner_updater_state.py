@@ -103,9 +103,12 @@ class Paths:
 
 def pair(r, name, lib_rewrites=(), script_rewrites=(), journal_body=None):
     """a release bin/ of its own, sandbox/NAME/: runner-updater (the rig's rewrites), runner-updater-lib (with
-    LIB_REWRITES) and runner-journal (the real one, or a stub with JOURNAL_BODY); -> the script's path"""
+    LIB_REWRITES), the rig's runner-updater-release and tls-excluded-lib, and runner-journal (the real one, or a stub
+    with JOURNAL_BODY); -> the script's path"""
     d = r.sb.mkdir(name)
     r.sb.copy_script('bin/runner-updater-lib', list(lib_rewrites), dest=os.path.join(d, 'runner-updater-lib'))
+    for f in ('tls-excluded-lib', 'runner-updater-release'):   # the pass hook's files, as the rig has them
+        r.sb.write(os.path.join(d, f), read_text(r.sb.path('tools', f)))
     if journal_body is None:
         r.sb.copy_script('bin/runner-journal', [], dest=os.path.join(d, 'runner-journal'))
     else:
