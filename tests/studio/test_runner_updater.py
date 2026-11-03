@@ -1133,17 +1133,20 @@ class TestStateDir(unittest.TestCase):
         self.assert_prune_as_before(r)
 
     def test_a_statedir_without_its_list_is_refused_with_what_to_do(self):
+        # what to do never empties a list that protects images: `protect` writes it from the updater's state
+        # (tests/studio/test_runner_updater_state.py, TestListRefusals: with a state that holds images)
         r = Rig(self, protected=False)
         protected = os.path.join(r.statedir, 'protected')
         res = r.report(ok=False)
         self.assertEqual((res.returncode, res.stdout), (1, (
-            'runner-updater: REFUSE %s has no protected list %s, and golden-prune refuses until it has one. Nothing '
-            'in this release writes an image name into it, so create it empty: `/usr/bin/touch %s; /bin/chmod 600 '
-            '%s`, then run report again\n') % (r.statedir, protected, protected, protected)), res.stderr)
+            'runner-updater: REFUSE %s has no protected list %s, and golden-prune refuses until it has one. Do not '
+            'create it empty: it lists the images the updater keeps. `%s protect` writes it from the updater\'s state '
+            '(a pass does too, while the updater is ON); then run report again\n') % (r.statedir, protected, r.script)),
+            res.stderr)
         self.assertEqual(r.ps_calls(), 0)
         self.assertEqual(os.listdir(r.statedir), [])
         # what it says to do
-        subprocess.run(['/bin/zsh', '-fc', '/usr/bin/touch %s; /bin/chmod 600 %s' % (protected, protected)], check=True)
+        r.cmd('protect')
         r.report()
         self.assert_prune_as_before(r)
 
@@ -1160,9 +1163,10 @@ class TestStateDir(unittest.TestCase):
                     r.sb.write(protected, '', 0o000)
                 res = r.report(ok=False)
                 self.assertEqual((res.returncode, res.stdout), (1, (
-                    'runner-updater: REFUSE %s is not a readable regular file, and golden-prune refuses it too: look at '
-                    'what it is, then make it an empty regular file (0600) and run report again\n') % protected),
-                    res.stderr)
+                    'runner-updater: REFUSE %s is not a readable regular file, and golden-prune refuses it too. Do not '
+                    'make it an empty file: it lists the images the updater keeps. Look at what it is and move it '
+                    'aside, then `%s protect` writes it from the updater\'s state (a pass does too, while the updater '
+                    'is ON); then run report again\n') % (protected, r.script)), res.stderr)
                 self.assertEqual(r.ps_calls(), 0)
 
     def test_control_a_statedir_with_its_list(self):

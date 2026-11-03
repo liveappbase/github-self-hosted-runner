@@ -442,6 +442,232 @@ class TestOnOff(unittest.TestCase):
                 self.assertEqual(u.get()['on'], want)
 
 
+IMG3 = 'liveapp-mac-golden-20261020'
+G = 'liveapp-mac-golden-'
+
+
+def prune(r, names):
+    """the REAL golden-prune, its STATEDIR the rig's: (rc, stdout, stderr)"""
+    script = r.sb.copy_script('bin/golden-prune', [('STATEDIR=/Users/ci/.local/state/runner-updater',
+                                                    'STATEDIR=' + r.statedir)], dest=r.sb.path('prune', 'golden-prune'))
+    p = r.sb.run(['/bin/zsh', '-f', script] + names)
+    return p.returncode, p.stdout, p.stderr
+
+
+class TestProtected(unittest.TestCase):
+    """The protected list (D6), PROTECTED: computed from the state, written by rename, one image name per line in name
+    order. Its sources: each family's candidate (a checked candidate); the window's old image, `previous`, until
+    ACCEPT + 7 days (while there is a candidate, and after an ACCEPT until back_until); an open window's journaled
+    names (WINDOW's `image NAME` lines). `protect` runs the writer under the lock."""
+
+    def written(self, s, window=None):
+        r = Rig(self)
+        u = Paths(r)
+        u.put(s)
+        if window is not None:
+            r.sb.write(u.window, window, 0o600)
+        res = r.cmd('protect')
+        self.assertEqual(os.stat(u.protected).st_mode & 0o777, 0o600)
+        return r, u, lines_of(u.protected), res
+
+    def test_a_candidates_images(self):
+        r, u, got, res = self.written(state(families={'fx': fam(candidate=cand(lines={'mac-a': IMG2, 'mac-b': IMG3}))}))
+        self.assertEqual(got, [IMG2, IMG3])
+        self.assertIn('runner-updater: protect: %s holds 2 image names\n' % u.protected, res.stdout)
+
+    def test_control_no_candidate_no_image(self):
+        r, u, got, res = self.written(state(families={'fx': fam(rejected=[V1], recipe='a' * 64)}))
+        self.assertEqual(got, [])
+        self.assertEqual(os.path.getsize(u.protected), 0)
+
+    def test_the_old_image_while_a_candidate_is_observed(self):
+        r, u, got, res = self.written(state(families={'fx': fam(candidate=cand(), previous={'mac-a': IMG})}))
+        self.assertEqual(got, [IMG, IMG2])
+
+    def test_control_the_old_image_with_no_candidate_and_no_back_until(self):
+        r, u, got, res = self.written(state(families={'fx': fam(previous={'mac-a': IMG})}))
+        self.assertEqual(got, [])
+
+    def test_the_old_image_until_back_until(self):
+        now = int(time.time())
+        r, u, got, res = self.written(state(families={'fy': fam(previous={'mac-c': IMG0}, back_until=now + 86400)}))
+        self.assertEqual(got, [IMG0])
+
+    def test_control_the_old_image_after_back_until(self):
+        now = int(time.time())
+        r, u, got, res = self.written(state(families={'fy': fam(previous={'mac-c': IMG0}, back_until=now - 60)}))
+        self.assertEqual(got, [])
+
+    WINDOW = 'id w1\nfamily fx\nkind switch\ntarget mac-a=%s\nimage %s\nimage gold-20261020\n' % (IMG3, IMG3)
+
+    def test_an_open_windows_journaled_names(self):
+        r, u, got, res = self.written(state(), window=self.WINDOW)
+        self.assertEqual(got, ['gold-20261020', IMG3])
+
+    def test_control_no_open_window(self):
+        r, u, got, res = self.written(state())
+        self.assertEqual(got, [])
+
+    def test_every_source_at_once_in_name_order_each_once(self):
+        now = int(time.time())
+        s = state(families={'fx': fam(candidate=cand(lines={'mac-a': IMG3}), previous={'mac-a': IMG}),
+                            'fy': fam(candidate=cand(lines={'mac-c': IMG3}), previous={'mac-c': IMG0}),
+                            'fz': fam(previous={'mac-d': G + '20260101'}, back_until=now + 60)})
+        r, u, got, res = self.written(s, window=self.WINDOW)
+        self.assertEqual(got, ['gold-20261020', G + '20260101', IMG0, IMG, IMG3])   # byte order
+
+    def test_a_window_line_that_is_not_an_image_name_stops_and_the_old_list_stays(self):
+        for line in ('image a b', 'image ', 'image', 'image -x'):
+            with self.subTest(line=line):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(state(families={'fx': fam(candidate=cand())}))
+                r.sb.write(u.protected, IMG + '\n', 0o600)
+                r.sb.write(u.window, 'family fx\n%s\nimage %s\n' % (line, IMG3), 0o600)
+                res = r.cmd('protect', ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: STOP the protected list cannot be written (%s holds an image line that is '
+                              'not an image name): %s is as it was\n' % (u.window, u.protected), res.stdout)
+                self.assertEqual(read_text(u.protected), IMG + '\n')
+
+    def test_golden_prune_reads_the_list_and_never_prints_what_it_holds(self):
+        names = [G + d for d in ('20261001', '20260901', '20260815', '20260801')]
+        r, u, got, res = self.written(state(families={'fx': fam(candidate=cand(lines={'mac-a': G + '20260815'}))}))
+        self.assertEqual(prune(r, [G + '20261001'] + names), (0, G + '20260801\n', ''))
+        # the control: the same names, the list empty
+        r.sb.write(u.protected, '', 0o600)
+        self.assertEqual(prune(r, [G + '20261001'] + names), (0, G + '20260801\n' + G + '20260815\n', ''))
+
+    def test_a_list_that_cannot_be_written_stops_and_the_old_list_stays(self):
+        for how in ('new is a folder', 'list is a folder'):
+            with self.subTest(how=how):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(state(families={'fx': fam(candidate=cand())}))
+                if how == 'new is a folder':
+                    r.sb.write(u.protected, IMG + '\n', 0o600)
+                    os.makedirs(os.path.join(u.protected + '.new', 'x'))
+                else:
+                    os.remove(u.protected)
+                    os.makedirs(os.path.join(u.protected, 'x'))
+                before = sorted(os.listdir(r.statedir))
+                res = r.cmd('protect', ok=False)
+                self.assertEqual(res.returncode, 1, res.stdout)
+                self.assertIn('runner-updater: STOP the protected list cannot be written (', res.stdout)
+                self.assertIn('): %s is as it was\n' % u.protected, res.stdout)
+                if how == 'new is a folder':
+                    self.assertEqual(read_text(u.protected), IMG + '\n')
+                else:
+                    self.assertEqual(os.listdir(u.protected), ['x'])
+                self.assertEqual(sorted(os.listdir(r.statedir)), sorted(before + ['lock']))
+
+    def test_protect_with_a_state_of_another_format_waits(self):
+        r = Rig(self)
+        u = Paths(r)
+        u.put(dict(FULL, format=2))
+        r.sb.write(u.protected, IMG + '\n', 0o600)
+        res = r.cmd('protect', ok=False)
+        self.assertEqual((res.returncode, res.stdout), (4, WAIT % (u.state, '2')))
+        self.assertEqual(read_text(u.protected), IMG + '\n')
+
+    def test_protect_writes_a_missing_or_unreadable_list(self):
+        for how in ('missing', 'symlink', 'unreadable'):
+            with self.subTest(how=how):
+                r = Rig(self)
+                u = Paths(r)
+                u.put(state(families={'fx': fam(candidate=cand())}))
+                if how == 'missing':
+                    os.remove(u.protected)
+                elif how == 'symlink':
+                    os.remove(u.protected)
+                    os.symlink(r.sb.write(r.sb.path('elsewhere'), ''), u.protected)
+                else:
+                    os.chmod(u.protected, 0)
+                r.cmd('protect')
+                self.assertTrue(os.path.isfile(u.protected) and not os.path.islink(u.protected))
+                self.assertEqual(lines_of(u.protected), [IMG2])
+
+    # the writer syncs the new file to disk before it renames it: a power cut after the rename must not leave an empty
+    # list (golden-prune would then print what it protects). The dd stub notes what the new file and the list hold
+    DD_BODY = ('f=${2#of=}; print -r -- "$f $(/bin/cat $f | /usr/bin/tr \'\\n\' +) list=$(/bin/cat %s 2>/dev/null | '
+               '/usr/bin/tr \'\\n\' +)" >> %s\n%s')
+
+    def dd_rig(self, fail):
+        r = Rig(self)
+        u = Paths(r)
+        u.put(state(families={'fx': fam(candidate=cand())}))
+        r.sb.write(u.protected, IMG + '\n', 0o600)
+        seen = r.sb.path('logs', 'dd-saw')
+        stub = r.sb.stub('dd', self.DD_BODY % (u.protected, seen, 'exit 1' if fail else 'exec /bin/dd "$@"'),
+                         folder=r.sb.mkdir('dd'))
+        script = pair(r, 'with-dd', script_rewrites=[('DD=/bin/dd', 'DD=' + stub)])
+        return r, u, seen, r.cmd('protect', script=script, ok=False)
+
+    def test_the_new_list_is_synced_before_the_rename(self):
+        r, u, seen, res = self.dd_rig(fail=False)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(lines_of(seen), ['%s.new %s+ list=%s+' % (u.protected, IMG2, IMG)])
+        self.assertEqual(lines_of(u.protected), [IMG2])
+
+    def test_a_sync_that_fails_stops_and_the_old_list_stays(self):
+        r, u, seen, res = self.dd_rig(fail=True)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP the protected list cannot be written (cannot sync %s.new to disk): %s is as '
+                      'it was\n' % (u.protected, u.protected), res.stdout)
+        self.assertEqual(lines_of(u.protected), [IMG])
+        self.assertFalse(os.path.lexists(u.protected + '.new'))
+
+
+class TestListRefusals(unittest.TestCase):
+    """A STATEDIR without its list, or a list that is not a readable regular file: report, on and off refuse, and say
+    how to get the list back WITHOUT emptying it: `protect` writes it from the state (S3b-1 review r2 P3)."""
+
+    MISSING = ('runner-updater: REFUSE %(d)s has no protected list %(p)s, and golden-prune refuses until it has one. Do '
+               'not create it empty: it lists the images the updater keeps. `%(s)s protect` writes it from the '
+               'updater\'s state (a pass does too, while the updater is ON); then run %(c)s again\n')
+    NOT_FILE = ('runner-updater: REFUSE %(p)s is not a readable regular file, and golden-prune refuses it too. Do not '
+                'make it an empty file: it lists the images the updater keeps. Look at what it is and move it aside, '
+                'then `%(s)s protect` writes it from the updater\'s state (a pass does too, while the updater is ON); '
+                'then run %(c)s again\n')
+
+    def test_following_the_text_gives_the_list_back_with_what_it_protects(self):
+        for c in ('report', 'on', 'off'):
+            with self.subTest(cmd=c):
+                r = Rig(self)
+                u = Paths(r)
+                raw = u.put(state(on=True, families={'fx': fam(candidate=cand(lines={'mac-a': G + '20260815'}))}))
+                os.remove(u.protected)
+                res = r.cmd(c, ok=False)
+                self.assertEqual((res.returncode, res.stdout), (1, self.MISSING % {
+                    'd': r.statedir, 'p': u.protected, 's': r.script, 'c': c}), res.stderr)
+                self.assertEqual(u.raw(), raw)
+                self.assertEqual(r.ps_calls(), 0)
+                r.cmd('protect')                        # what it says to do
+                self.assertEqual(lines_of(u.protected), [G + '20260815'])
+                r.cmd(c)
+                names = [G + d for d in ('20261001', '20260901', '20260815', '20260801')]
+                self.assertEqual(prune(r, [G + '20261001'] + names), (0, G + '20260801\n', ''))
+
+    def test_a_list_that_is_not_a_readable_regular_file(self):
+        for kind in ('symlink', 'folder', 'unreadable'):
+            for c in ('report', 'on', 'off'):
+                with self.subTest(kind=kind, cmd=c):
+                    r = Rig(self)
+                    u = Paths(r)
+                    u.put(state(on=True, families={'fx': fam(candidate=cand())}))
+                    os.remove(u.protected)
+                    if kind == 'symlink':
+                        os.symlink(r.sb.write(r.sb.path('elsewhere'), ''), u.protected)
+                    elif kind == 'folder':
+                        os.mkdir(u.protected)
+                    else:
+                        r.sb.write(u.protected, IMG + '\n', 0o000)
+                    res = r.cmd(c, ok=False)
+                    self.assertEqual((res.returncode, res.stdout), (1, self.NOT_FILE % {
+                        'p': u.protected, 's': r.script, 'c': c}), res.stderr)
+                    self.assertEqual(r.ps_calls(), 0)
+
+
 LOG_FILE = (' line 5: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside '
             'the config reads as a quiet, continuous log, so R1 would be blind while the facts look normal; remove the key')
 LOG_FORMAT = (' line 5: log-format is not "text": runscaler then writes records that the core\'s log reader ignores, so R1 '

@@ -3,9 +3,9 @@
 # bin/runner-updater sources (never run on its own; it reads no argument). ONE copy. It measures and writes; it acts on
 # nothing. The format it writes is the decision core's contract: core/README.md ("The call", "facts (format 1)").
 #
-# The caller sets, before it calls ru_collect (bin/runner-updater's header has the values):
-#   RUNNER CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP, and exports TZ=UTC and LC_ALL=C (ps prints its start times in
-#   TZ; this file reads them back in the same zone).
+# The caller sets, before it calls a function of it (bin/runner-updater's header has the values):
+#   RUNNER CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP (ru_collect), DD (ru_write), PROTECTED WINDOW (ru_protect), and
+#   exports TZ=UTC and LC_ALL=C (ps prints its start times in TZ; this file reads them back in the same zone).
 #
 # ru_collect PASSDIR STATEFILE OBSERVEFILE NOW — ONE pass's facts. It writes, into PASSDIR:
 #   facts.json    format 1, exactly as core/README.md says; host "studio"; restart null; stops [].
@@ -20,9 +20,12 @@
 # ru_state_load FILE — the updater's state (its layout: bin/runner-updater's header) into ru_state, compact JSON: 0;
 #   a missing FILE is a fresh state (OFF, no family). 1 + REPLY: FILE is not a state of format 1 this reads. 2 + REPLY
 #   (the wait line): its format is not 1. It opens FILE once: a rename over FILE while it reads gives it one whole state.
-# ru_write FILE TEXT — TEXT, byte for byte, into FILE by rename: written to FILE.new, then renamed over FILE. 1 + REPLY
+# ru_write FILE TEXT — TEXT, byte for byte, into FILE by rename: written to FILE.new, synced to disk (DD, as
+#   runner-journal does: so a power cut after the rename cannot leave FILE empty), then renamed over FILE. 1 + REPLY
 #   when it cannot (FILE is then as it was). A kill before the rename leaves FILE as it was and a FILE.new that the next
-#   write replaces.
+#   write replaces. Named residual: macOS fsync does not flush the drive's own cache (runner-journal's header).
+# ru_protect STATE NOW — the protected list (PLAN D6), from the state at NOW and the open window's journal WINDOW,
+#   into PROTECTED by ru_write; its rule is at the function.
 #
 # What it measures, in this order (the order is the rule):
 #   1. proc before: the runscaler process. The Studio runs ONE: the RUNNER binary that runner-start execs, so its ps
@@ -397,14 +400,51 @@ ru_state_load() {
     || { REPLY="$f is not a state of format 1 this reads"; return 1 }
 }
 
-# ru_write FILE TEXT: TEXT, byte for byte, into FILE by rename (FILE.new, then a rename over FILE). 1 + REPLY when it
-# cannot; FILE is then as it was.
+# ru_write FILE TEXT: TEXT, byte for byte, into FILE by rename (FILE.new, synced to disk with DD as runner-journal does,
+# then a rename over FILE). 1 + REPLY when it cannot; FILE is then as it was.
 ru_write() {
-  local f=$1
+  local f=$1 out
   [[ ! -d $f ]] || { REPLY="$f is a folder"; return 1 }
   /bin/rm -f -- $f.new 2>/dev/null
   { print -rn -- $2 > $f.new } 2>/dev/null || { /bin/rm -f -- $f.new 2>/dev/null; REPLY="cannot write $f.new"; return 1 }
+  out=$($DD if=/dev/null of=$f.new conv=notrunc,fsync 2>&1) \
+    || { /bin/rm -f -- $f.new; REPLY="cannot sync $f.new to disk${${(f)out}[1]:+: ${${(f)out}[1]}}"; return 1 }
   /bin/mv -f -- $f.new $f || { /bin/rm -f -- $f.new; REPLY="cannot rename $f.new to $f"; return 1 }
+}
+
+# ---- the protected list (PLAN D6)
+# ru_protect STATE NOW: the list, from the state STATE (JSON) at NOW and the open window's journal WINDOW, written to
+# PROTECTED by ru_write: one image name per line, in byte order, each once (no name: an empty file). ru_protected_n =
+# how many. 1 + REPLY when it cannot (PROTECTED is then as it was). The names:
+#   - each family's candidate lines (a candidate in the state is a checked one);
+#   - each family's `previous` lines (the window's old image) while it has a candidate, and after an ACCEPT while NOW is
+#     before its back_until: until ACCEPT + 7 days;
+#   - an open window's journaled names: each `image NAME` line of WINDOW (the window journals every image name it
+#     makes or needs kept on such a line, BEFORE it makes it). An `image` line whose NAME is not an image name: 1.
+ru_protect() {
+  local names text l v
+  local -a list
+  names=$(print -r -- $1 | $JQ -r --argjson now $2 '.families[] | (.candidate.lines // {} | .[]),
+            (if .candidate != null or (.back_until != null and $now < .back_until) then .previous // {} | .[]
+             else empty end)') \
+    || { REPLY="jq could not read the images of the state"; return 1 }
+  list=(${(f)names})
+  if [[ -e $WINDOW || -L $WINDOW ]]; then
+    [[ -f $WINDOW && ! -L $WINDOW && -r $WINDOW ]] || { REPLY="$WINDOW is not a readable regular file"; return 1 }
+    text=$(/bin/cat -- $WINDOW && print -rn -- .) || { REPLY="$WINDOW cannot be read"; return 1 }
+    for l in "${(@f)${text%.}}"; do
+      if [[ $l == image ]]; then v=
+      elif [[ $l == 'image '* ]]; then v=${l#image }
+      else continue; fi
+      [[ $v =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' && $v == "$MATCH" ]] \
+        || { REPLY="$WINDOW holds an image line that is not an image name"; return 1 }
+      list+=($v)
+    done
+  fi
+  list=(${(ou)list})
+  ru_protected_n=${#list}
+  if (( ${#list} )); then text="${(F)list}"$'\n'; else text=; fi
+  ru_write $PROTECTED "$text"
 }
 
 # ---- the pass
