@@ -59,9 +59,10 @@
 #      log-file key (runscaler then writes elsewhere, or nowhere, and runner.log reads as a quiet log); a top-level
 #      log-format that is not exactly `log-format = "text"` (the core reads only the text format). Either of the
 #      last two would leave R1 blind while the facts look normal. pool-size: ONE spelling is read, `pool-size = N` in the
-#      top-level [tart] table, once (none: runscaler's default, 0); any other non-comment line that names pool-size (a
-#      scale set's tart.pool-size, a [scaleset.tart] table, a dotted key, a value that is not a number) is one it
-#      does not read. After step 6 (ru_pools): a family's set that the config has, with a [tart] pool-size > 0 or
+#      top-level [tart] table, once (none: runscaler's default, 0); any other line whose KEY names pool-size (a scale
+#      set's tart.pool-size, a [scaleset.tart] table, a dotted or quoted key, a key of an inline table, a value that is
+#      not a number) is one it does not read (ru_pool_key: the text in a string value, such as a URL, or in a comment
+#      is no key). After step 6 (ru_pools): a family's set that the config has, with a [tart] pool-size > 0 or
 #      with such a line, is no facts (a warm pool: PLAN D6; `on` refuses it too).
 #      It reads CONFIG after the process reads: a config installed after the process started then has a later mtime,
 #      which proves nothing (the safe direction).
@@ -221,9 +222,34 @@ ru_text() {
 }
 
 # ---- the config
+# LINE -> 0 when the line names a pool-size KEY: the text pool-size outside every string and the comment (a bare or a
+# dotted key, a key of an inline table, a table name), or in a quoted key (a string followed by = or .). Also 0 for a
+# line it cannot read: a string that does not end on it (fail closed). 1 when the text is only in a string value (a URL,
+# a label) or in the comment. A key spelled with an escape ("pool-size") is not seen (named residual).
+ru_pool_key() {
+  local l=$1 out= q s i=1 n=${#1}
+  while (( i <= n )); do
+    if [[ $l[i] == '#' ]]; then break
+    elif [[ $l[i] == \" || $l[i] == \' ]]; then
+      q=$l[i] s=
+      (( i++ ))
+      while (( i <= n )) && [[ $l[i] != "$q" ]]; do
+        if [[ $q == '"' && $l[i] == '\' ]]; then s+=$l[i]; (( i++ )); fi
+        s+=$l[i]; (( i++ ))
+      done
+      (( i <= n )) || return 0
+      (( i++ ))
+      [[ ${l[i,n]} =~ '^[[:space:]]*[=.]' && $s == *pool-size* ]] && return 0
+      out+=' '
+    else
+      out+=$l[i]; (( i++ ))
+    fi
+  done
+  [[ $out == *pool-size* ]]
+}
 # -> ru_installed, ru_sets (names in file order), ru_lines (assoc SET -> IMAGE), ru_haddr, ru_hport, ru_tart_pool (the
 # [tart] table's `pool-size = N`, or "" when it has none: runscaler's default, 0) and ru_pool_bad (the number of the
-# first other line that names pool-size, or ""); 1 + REPLY
+# first other line whose KEY names pool-size, ru_pool_key, or ""); 1 + REPLY
 ru_config() {
   typeset -gA ru_lines
   typeset -ga ru_sets
@@ -248,7 +274,7 @@ ru_config() {
   for l in "${(@f)text}"; do
     (( n++ ))
     [[ $l =~ "^${ws}(#.*)?\$" ]] && continue
-    if [[ $l == *pool-size* ]]; then   # ONE spelling read: `pool-size = N` in [tart], once; any other names a pool it does not read
+    if [[ $l == *pool-size* ]] && ru_pool_key $l; then   # ONE spelling read: `pool-size = N` in [tart], once; any other KEY names a pool it does not read
       if (( intart )) && [[ -z $ru_tart_pool && $l =~ "^${ws}pool-size${ws}=${ws}([0-9]{1,9})${tail}" && $l == "$MATCH" ]]; then
         ru_tart_pool=$match[1]
       elif [[ -z $ru_pool_bad ]]; then
