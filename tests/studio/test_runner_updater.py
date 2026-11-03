@@ -86,6 +86,10 @@ class Rig:
         self.pass_dir = os.path.join(self.report_dir, 'pass')
         self.families = sb.path('families')
         self.runner = sb.path('fake', 'runner')
+        self.flag = os.path.join(self.cfgdir, 'enabled')
+        self.logdir = sb.mkdir('logdir')
+        self.tartdir = sb.path('home', '.tart')
+        self.lock = sb.path('runner.lock')
         self.psd = sb.mkdir('ps')
         self.curld = sb.mkdir('curl')
         sb.stub('ps', PS_STUB % {'d': self.psd, 'log': self.runlog, 'config': self.config}, folder=sb.mkdir('tools-ps'))
@@ -108,6 +112,19 @@ class Rig:
             ('CURL=/usr/bin/curl', 'CURL=' + sb.path('tools-curl', 'curl')),
             ('HEALTHZ_GAP=3', 'HEALTHZ_GAP=' + gap),
             ('CORE=${0:A:h:h}/core', 'CORE=' + os.path.join(REPO, 'core')),
+            # the switch window's (test_runner_updater_window.py makes what these name)
+            ('FLAG=/Users/ci/.config/runner/enabled', 'FLAG=' + self.flag),
+            ('REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart', 'REAL=' + sb.path('fake', 'tart')),
+            ('REALRUN=/Users/ci/bin/real-run', 'REALRUN=' + sb.path('fake', 'real-run')),
+            ('LOGDIR=/Users/ci/Library/Logs/mac-runner', 'LOGDIR=' + self.logdir),
+            ('TARTDIR=/Users/ci/.tart', 'TARTDIR=' + self.tartdir),
+            ('BIN=/Users/ci/bin', 'BIN=' + sb.path('cibin')),
+            ('LOCK=/tmp/runner.lock', 'LOCK=' + self.lock),
+            ('DF=/bin/df', 'DF=' + sb.path('tools-disk', 'df')),
+            ('DU=/usr/bin/du', 'DU=' + sb.path('tools-disk', 'du')),
+            ('VALIDATE_GAP=20', 'VALIDATE_GAP=0'),
+            ('CLOSE_WAIT=600', 'CLOSE_WAIT=3'),
+            ('CLOSE_POLL=5', 'CLOSE_POLL=0.1'),
         ]
         self.script = self.copy('runner-updater', extra_rewrites)
         self.lib = sb.copy_script('bin/runner-updater-lib', [])

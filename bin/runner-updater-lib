@@ -81,7 +81,7 @@
 #      keeps its record: one window); each ru_observe_clear family is removed. A family that is not in FAMILIES, or a
 #      set of it with no config line: no facts. The file is written by rename. An OBSERVEFILE it cannot read, or one
 #      behind a folder it cannot search (ru_reach): no facts.
-#   8. healthz: two reads, HEALTHZ_GAP seconds apart: `CURL -fsS --noproxy '*' --max-time 5
+#   8. healthz (ru_healthz): two reads, HEALTHZ_GAP seconds apart: `CURL -fsS --noproxy '*' --max-time 5
 #      http://ADDRESS:PORT/healthz`, ADDRESS and PORT from the config's top-level health-address and health-port
 #      (runscaler's defaults when absent: 127.0.0.1 and 8080). A health-port of 0 (no health server), or an address or
 #      port it does not read: no reads. A status line says how many reads came.
@@ -420,17 +420,18 @@ ru_observe() {
   ru_observed=$obs
 }
 
-# ---- /healthz: OUTFILE -> REPLY = the number of reads
+# ---- /healthz: OUTFILE [N] -> REPLY = the number of reads (N reads, HEALTHZ_GAP apart; default 2, the pass's pair;
+# the switch window's START STATE reads once)
 ru_healthz() {
-  local out=$1 i body one addr=${ru_haddr:-127.0.0.1} port=${ru_hport:-8080} reads=0
+  local out=$1 n=${2:-2} i body one addr=${ru_haddr:-127.0.0.1} port=${ru_hport:-8080} reads=0
   : > $out || return 1
   if [[ ! $addr =~ '^(localhost|[0-9]{1,3}(\.[0-9]{1,3}){3})$' ]]; then
-    ru_say "healthz: 0 of 2 reads (health-address '$addr' is not one this reads)"; REPLY=0; return 0
+    ru_say "healthz: 0 of $n reads (health-address '$addr' is not one this reads)"; REPLY=0; return 0
   fi
   if [[ ! $port =~ '^[0-9]{1,5}$' ]] || (( port < 1 || port > 65535 )); then
-    ru_say "healthz: 0 of 2 reads (health-port '$port': no health server this reads)"; REPLY=0; return 0
+    ru_say "healthz: 0 of $n reads (health-port '$port': no health server this reads)"; REPLY=0; return 0
   fi
-  for i in 1 2; do
+  for (( i = 1; i <= n; i++ )); do
     (( i == 1 )) || /bin/sleep $HEALTHZ_GAP
     body=$($CURL -fsS --noproxy '*' --max-time 5 "http://$addr:$port/healthz" 2>/dev/null) || continue
     one=$(print -r -- $body | $JQ -c -s 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one object") end' \
@@ -439,7 +440,7 @@ ru_healthz() {
     print -r -- $one >> $out || return 1
     (( reads++ ))
   done
-  ru_say "healthz: $reads of 2 reads (http://$addr:$port/healthz)"
+  ru_say "healthz: $reads of $n reads (http://$addr:$port/healthz)"
   REPLY=$reads
 }
 

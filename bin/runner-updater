@@ -1,9 +1,12 @@
 #!/bin/zsh -f
-# runner-updater status | on | off | pass | protect | report [--observe FAMILY]... [--observe-clear FAMILY]...
+# runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY
+#                | report [--observe FAMILY]... [--observe-clear FAMILY]...
 # The runner-image updater on the Studio, as ci. Design: docs/operations.md ("The updater: status, on, off, pass,
-# protect" and "The updater's report mode (no action)"); the decision core's contract: core/README.md. Nothing in this
-# release disables, enables, builds, switches, rolls back, edits config.toml or deletes an image: its only writes are
-# under STATEDIR (the state, the pins off removes, the protected list, the action journal, the pass folders).
+# protect", "The switch window: rebuild and switch-now" and "The updater's report mode (no action)"); the decision
+# core's contract: core/README.md. Only `rebuild` and `switch-now` act on CI: each runs ONE switch window
+# (bin/runner-updater-window: it disables CI, builds, edits config.toml and enables CI). Nothing in this release rolls
+# back or deletes an image, and a pass takes no action. Every other write is under STATEDIR (the state, the pins, the
+# protected list, the journals, the pass folders).
 #
 # THE STATE, STATE (STATEDIR/state.json): ONE JSON object, written by rename (STATE.new, then a rename over STATE), read
 # under the updater lock (status alone reads it with no lock: ONE read, so a rename while it runs gives it the old or
@@ -63,6 +66,19 @@
 #            A list it cannot write: STOP, the old list stays. It is how to get a lost list back without emptying it,
 #            so it and pass run when the list is missing or is not a readable regular file.
 #   report   one pass that measures, asks the core and prints, with its own state (below).
+#   rebuild FAMILY     ONE switch window (bin/runner-updater-window, ru_window: its header has the order, the journal
+#            and the STOPs) that builds FAMILY's CURRENT runner version anew: the version of the image its sets run
+#            (the state's image record, else the version golden-build's log printed for it; else REFUSE), its sha256
+#            the host pin's or the release literal's (else REFUSE), with the idle pair. It is the D10 rehearsal and the
+#            recipe baseline's path. Only the families of BUILDERS have a builder wired: another is "no builder wired".
+#   switch-now FAMILY  the same window with no idle pair (D5 NO IDLE's override), and it says so; its release is the
+#            one FAMILY's NO IDLE STOP holds (its version and sha256), else FAMILY's current version (as rebuild).
+#            Both refuse while the updater is OFF. Their release is due from now, so they never raise NO IDLE (a pass
+#            of a later release gives ru_window the release's eligibility date). Exit 0 switched (the window closed on
+#            the new image), 1 a STOP or a REFUSE, 5 not now (START STATE or IDLE: nothing changed).
+# RECOVER NEEDED: an open window journal (WINDOW) that no run of this release started (the window holds the updater lock
+# for its whole run, so a run that took the lock and finds one found an interrupted window): pass, rebuild and
+# switch-now print "STOP RECOVER needed (S3b-4)", exit 1, and start nothing; status names it.
 #
 # REPORT: ONE pass that measures, asks the decision core (core/) and prints. It TAKES NO ACTION: it stops, starts,
 # edits, pins, deletes and enables nothing, and it runs none of runner-disable, runner-enable, golden-build,
@@ -98,9 +114,9 @@
 # command, status too, refuses before it reads anything (the lib's ru_reach, ONE rule): behind it the state would read
 # as fresh (OFF), the list as missing and a pin as absent.
 # Exit: 0 done; 1 a REFUSE (the state folder or its list, a state it does not read, a fact it cannot read, an --observe
-# it cannot do, off while a window is open) or a STOP (a write that failed, the core could not decide); 2 usage; 3 STOP
-# untested jq; 4 WAIT (a state of another format, or with a member this release does not read). A pass that finds the
-# lock held, or the updater OFF: 0.
+# it cannot do, off while a window is open) or a STOP (a write that failed, the core could not decide, a window's STOP,
+# RECOVER needed); 2 usage; 3 STOP untested jq; 4 WAIT (a state of another format, or with a member this release does
+# not read); 5 not now (rebuild, switch-now). A pass that finds the lock held, or the updater OFF: 0.
 # Constants:
 #   RUNNER       runscaler, as runner-start execs it ("RUNNER run --config CONFIG" is the process it looks for)
 #   CONFIG       runscaler's config; RUNLOG, runscaler's own log, is runner.log beside it (runscaler 0.9.5 writes it
@@ -115,9 +131,16 @@
 #   PATH         its own, set at the top (the system folders): it never depends on the caller's PATH, so the weekly
 #                watchdog's `runner-updater status` over a non-interactive ssh runs it as the timer does
 #   JQ PS CURL DD the tools it runs (each by its absolute path; DD syncs a file to disk before its rename); CORE, the
-#                release's core/ beside this file's bin/; RELBIN, this file's bin/ (runner-updater-lib and runner-journal,
-#                of the same release); INVOKED, this file as it was run (the refusal texts name it)
+#                release's core/ beside this file's bin/; RELBIN, this file's bin/ (runner-updater-lib,
+#                runner-updater-window, runner-journal, validate-class, and the tools the window runs: runner-disable,
+#                runner-enable (this release's: it has --check), runner-start, golden-build, golden-gate, all of the same
+#                release); INVOKED, this file as it was run (the refusal texts name it)
 #   HEALTHZ_GAP  seconds between the two /healthz reads
+#   the window's: FLAG (the agent's flag), REAL (tart), REALRUN, LOGDIR (golden-build's logs), TARTDIR (Tart's home:
+#                its volume's free disk, TARTDIR/vms/IMAGE's size), BIN (the installed tools: the hand lines), LOCK (the
+#                runner lock: the config edit holds it), DF DU, FLOOR_GIB (golden-build's floor), VALIDATE_GAP,
+#                CLOSE_WAIT, CLOSE_POLL (seconds), WINDOWS (STATEDIR/windows: the closed journals, and each window's
+#                folder ID.d), BUILDERS (the families whose builder is wired)
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
 export LC_ALL=C
@@ -144,12 +167,29 @@ ACTIONS=$STATEDIR/actions
 DD=/bin/dd
 RELBIN=${0:A:h}
 INVOKED=${0:a}
+# the switch window's (bin/runner-updater-window): the host's paths, and its bounds
+FLAG=/Users/ci/.config/runner/enabled
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+REALRUN=/Users/ci/bin/real-run
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+TARTDIR=/Users/ci/.tart
+BIN=/Users/ci/bin
+LOCK=/tmp/runner.lock
+DF=/bin/df
+DU=/usr/bin/du
+# golden-build's free-disk floor (release-check: one value across the scripts)
+FLOOR_GIB=200
+VALIDATE_GAP=20     # seconds between two validate tries (the ONE VALIDATE RULE)
+CLOSE_WAIT=600      # seconds the window waits for its target to run (D1: 10 min)
+CLOSE_POLL=5        # seconds between two reads of that wait
+WINDOWS=$STATEDIR/windows
+BUILDERS=(mac-golden)   # the families whose builder is wired (mac-golden: golden-build)
 
 say() { print -r -- "runner-updater: $*" }
 refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
 stop() { print -r -- "runner-updater: STOP $*"; exit 1 }
 usage() {
-  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass | protect | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
+  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
   exit 2
 }
 
@@ -159,6 +199,11 @@ cmd=$1
 shift
 case $cmd in
   (status|on|off|pass|protect) (( $# == 0 )) || usage "$cmd takes no argument" ;;
+  (rebuild|switch-now)
+    (( $# == 1 )) || usage "$cmd takes one FAMILY"
+    [[ $1 =~ '^[a-z][a-z0-9-]{0,40}$' ]] || usage "not a family name: '$1'"
+    family=$1
+    shift ;;
   (report) ;;
   (*) usage "unknown command '$cmd'" ;;
 esac
@@ -270,6 +315,7 @@ do_status() {
         + "; " + (if .back_until == null then "back: none" else "back until \(.back_until | utc)" end)
         + "; rejected: " + (if (.rejected // []) == [] then "none" else (.rejected | join(", ")) end)
     end' || refuse "jq could not print the state"
+  status_window
   # the core's inputs come through process substitutions (pipes, no file): status writes nothing anywhere. Its
   # stderr goes with its output: anything but one decision is "could not decide"
   out=$($JQ -n -L $CORE/lib -f $CORE/status.jq --slurpfile state <(print -rn -- $core) \
@@ -283,6 +329,67 @@ do_status() {
     "status: \(.verdict) (\(.reason))", .lines[],
     (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")'
   exit 0
+}
+
+# status's window lines: an open window journal, and each family's host pin (D2's ONE RULE removes a pin when the
+# version of the image the family runs is not known: status says so). It reads, and writes nothing
+status_window() {
+  local f c
+  [[ ! -e $WINDOW && ! -L $WINDOW ]] \
+    || say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, RECOVER (S3b-4) ends it)"
+  for f in ${(f)"$(print -r -- $ru_state | $JQ -r '.families | keys[]')"}; do
+    (( ${BUILDERS[(Ie)$f]} )) || continue
+    if [[ -f $PINDIR/$f && ! -L $PINDIR/$f && -r $PINDIR/$f ]]; then
+      c=$(/bin/cat -- $PINDIR/$f 2>/dev/null)
+      if [[ $c =~ '^([0-9]+\.[0-9]+\.[0-9]+) [0-9a-f]{64}$' ]]; then say "family $f: host pin $match[1]"
+      else say "family $f: host pin: $PINDIR/$f is not one line VERSION SHA256 (golden-build stops on it)"; fi
+    elif [[ -e $PINDIR/$f || -L $PINDIR/$f ]]; then say "family $f: host pin: $PINDIR/$f is not a readable file (golden-build stops on it)"
+    else say "family $f: host pin: none (a hand golden-build uses the release literal)"; fi
+  done
+}
+
+# an open window journal that no run of this release started: STOP, exit 1, nothing starts (RECOVER is S3b-4's)
+recover_needed() {
+  [[ ! -e $WINDOW && ! -L $WINDOW ]] && return 0
+  print -r -- "runner-updater: STOP RECOVER needed (S3b-4): the window journal $WINDOW is open and no run holds the updater lock (an interrupted window): nothing starts until RECOVER ends it"
+  exit 1
+}
+
+# ---- rebuild FAMILY, switch-now FAMILY: ONE switch window (bin/runner-updater-window, ru_window), under the lock
+do_window() {
+  local now since v= s= mode=idle rc
+  load_state
+  [[ $(print -r -- $ru_state | $JQ -r '.on') == true ]] \
+    || refuse "the updater is OFF: $cmd runs only while it is ON (\`$INVOKED on\`); nothing changed"
+  recover_needed
+  (( ${BUILDERS[(Ie)$family]} )) \
+    || refuse "no builder wired for $family: this release builds only ${(j:, :)BUILDERS} (the Studio Linux families come with their builder's move)"
+  jq_tested
+  source $RELBIN/runner-updater-window || refuse "cannot load $RELBIN/runner-updater-window"
+  now=$EPOCHSECONDS
+  since=$now   # the commands' release is due from now: never NO IDLE (a pass gives its eligibility)
+  ru_config && ru_families && ru_pools || refuse "$REPLY: no window"
+  (( ${+ru_fam[$family]} )) || refuse "no family $family in $FAMILIES: no window"
+  if [[ $cmd == switch-now ]]; then
+    mode=now
+    if ru_w_due $family; then v=$reply[1] s=$reply[2]; say "switch-now $family: the release of its NO IDLE STOP: runner $v"; fi
+  fi
+  if [[ -z $v ]]; then
+    ru_w_current $family
+    case $? in
+      (0) v=$reply[1] s=$reply[2] ;;
+      (2) ru_w_fam=$family ru_w_ver= ru_w_sha= ru_w_open=0 ru_w_stops=()
+          ru_w_stop "check failed" "pre-window: $REPLY"
+          ru_w_hold_stops
+          exit 1 ;;
+      (*) refuse "$REPLY: no window" ;;
+    esac
+  fi
+  ru_window $family $v $s $mode $since $cmd
+  rc=$?
+  if (( rc == 0 )); then say "$cmd $family: switched to $ru_w_out (runner $v); the window closed"; exit 0; fi
+  (( rc == 2 )) && exit 5
+  exit 1
 }
 
 # ---- on, off (D11), under the lock
@@ -346,6 +453,7 @@ do_pass() {
   load_state
   on=$(print -r -- $ru_state | $JQ -r '.on')
   [[ $on == true ]] || { say "pass: the updater is OFF: nothing to do"; exit 0 }
+  recover_needed
   jq_tested
   now=$(/bin/date -u +%s)
   [[ $now =~ '^[0-9]+$' ]] || refuse "the clock gave '$now'"
@@ -444,6 +552,7 @@ case $cmd in
   (on) do_on ;;
   (off) do_off ;;
   (protect) do_protect ;;
+  (rebuild|switch-now) do_window ;;
 esac
 [[ -d $REPORT ]] || /bin/mkdir -m 700 $REPORT || refuse "cannot create $REPORT"
 
