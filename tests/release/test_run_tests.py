@@ -3,8 +3,9 @@ runs, one unittest process per module, N at a time. Each cell builds a small tre
 temporary folder and runs the runner there (and, where a cell compares, the plain discover line too): the same test
 count as plain discover (a module's and a package's load_tests included); a failing module is rc 1 and named; a module
 killed by SIGKILL, one that does not report, one whose report is not a pass, one that fails to import, and one that
-loads more or fewer tests than discovery found each count as failed and are named; a discovery that fails or finds
-nothing is red; -j 1 and -j 4 give the same
+loads more or fewer tests than discovery found each count as failed and are named; the tests the modules loaded must
+add up to discovery's total (a package's load_tests that loads its own modules again is red, a class skipped in
+setUpClass is not); a discovery that fails or finds nothing is red; -j 1 and -j 4 give the same
 results (and -j 4 runs modules at once, -j 1 never); the module with the most tests starts first; each module runs
 with the caller's env and -I; a SIGTERM ends the run red and ends the module it was running; the mutant that ignores a
 module's rc goes red."""
@@ -93,6 +94,31 @@ T_PKG_LOAD_TESTS = '''import unittest
 def load_tests(loader, tests, pattern):
     from tests.a import test_one
     return unittest.TestSuite([test_one.T('test_a')])
+'''
+# a package's load_tests in the shape the unittest docs give: it loads the package's own modules with discover. The plain
+# line runs each of their tests once, inside the package. The runner loads them inside the package and again in each
+# module's own process: 5 tests run where discovery found 3
+T_PKG_DISCOVER = T_IN_INIT + '''
+
+def load_tests(loader, standard_tests, pattern):
+    import os
+    standard_tests.addTests(loader.discover(start_dir=os.path.dirname(__file__), pattern=pattern))
+    return standard_tests
+'''
+# a class whose setUpClass skips it: both lines run none of its 2 tests and count one skip
+T_CLASS_SKIP = '''import unittest
+
+
+class T(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        raise unittest.SkipTest('planted class skip')
+
+    def test_a(self):
+        pass
+
+    def test_b(self):
+        pass
 '''
 # a module whose tests depend on what ran before it in the one process: in discovery tests.a.test_one is imported
 # first and it has 1 test; alone in its own process it has 2
@@ -246,6 +272,44 @@ class TestSameTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(sorted(r.modules), ['tests.a', 'tests.b', 'tests.b.test_three'])
         self.assertEqual([s[:2] for s in r.summary], [('3', '3')])
+
+    def package(self, init):
+        return Tree(self, {'tests/__init__.py': '', 'tests/a/__init__.py': init, 'tests/a/test_one.py': T_ONE,
+                           'tests/a/test_two.py': T_ONE}, base=False)
+
+    def test_a_package_load_tests_that_loads_its_modules_again_fails(self):
+        t = self.package(T_PKG_DISCOVER)
+        self.assertEqual(t.plain()[:2], (0, 3))
+        r = t.run()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn('run-tests: tests: 3 tests in 3 modules, ', r.stdout)
+        # each module loaded what discovery found for it, so each passes; their sum is not discovery's total
+        self.assertEqual(sorted(v[:2] + v[3:] for v in r.modules.values()),
+                         [('tests.a', 'OK', '3', '0', '0', '0'), ('tests.a.test_one', 'OK', '1', '0', '0', '0'),
+                          ('tests.a.test_two', 'OK', '1', '0', '0', '0')])
+        self.assertEqual([s[:2] for s in r.summary], [('5', '3')])
+        self.assertEqual(r.last, 'run-tests: FAILED: the modules loaded 5 tests in all, discovery found 3')
+
+    def test_control_the_same_package_with_no_load_tests_passes(self):
+        t = self.package(T_IN_INIT)
+        self.assertEqual(t.plain()[:2], (0, 3))
+        r = t.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([s[:2] for s in r.summary], [('3', '3')])
+        self.assertEqual(r.last, 'run-tests: OK')
+
+    def test_a_class_skipped_in_setupclass_passes_the_total_check(self):
+        # the total that must match discovery's counts the tests each module LOADED: here they run none
+        t = Tree(self, {'tests/a/test_cs.py': T_CLASS_SKIP})
+        rc, ran, err = t.plain()
+        self.assertEqual((rc, ran), (0, 7), err)
+        self.assertIn('OK (skipped=2)', err)
+        r = t.run()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn('run-tests: tests: 9 tests in 5 modules, ', r.stdout)
+        self.assertEqual(r.modules['tests.a.test_cs'][1:], ('OK', '', '0', '0', '0', '1'))
+        self.assertEqual([s[0] for s in r.summary], ['7'])
+        self.assertEqual(r.last, 'run-tests: OK')
 
     def test_a_module_that_loads_other_tests_than_discovery_found_fails(self):
         t = Tree(self, {'tests/a/test_order.py': T_ORDER})

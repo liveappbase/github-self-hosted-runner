@@ -21,8 +21,12 @@
 #   `run-tests: FAILED: ...` naming each failed module and why.
 #
 # A module passes only when its process exits 0, it wrote its report, the report is a pass, and it loaded as many
-# tests as discovery found for it. So a module that crashes, is killed (SIGKILL included), or does not report counts
-# as failed. A discovery that exits non-zero, writes no report, or finds no test is a failure too.
+# tests as discovery found for it. So a module that crashes, is killed (SIGKILL included), fails to import, or does
+# not report counts as failed. A discovery that exits non-zero, writes no report, or finds no test is a failure too.
+# When every module passed, the tests they loaded must add up to discovery's total, or the run fails and names both
+# numbers: a package's load_tests that loads the package's own modules makes their tests run twice. (The total counts
+# the tests each module loaded, not the ones it ran: a class that skips itself in setUpClass runs none of its tests,
+# in both lines.)
 #
 # Exit: 0 only when every module passed; 1 otherwise (also on SIGINT or SIGTERM: it ends the module processes it
 # started, prints what they wrote so far, and names them); 2 on a usage error.
@@ -268,6 +272,12 @@ def main(argv):
         out(line)
         if failed:
             out('run-tests: FAILED: %d of %d modules: %s' % (len(failed), len(mods), ', '.join(failed)))
+            return 1
+        # each module passed, so each loaded what discovery found for it. Their sum must be discovery's total: else a
+        # test ran twice or not at all (a package's load_tests that loads the package's own modules runs them twice)
+        loaded = sum(r['loaded'] for r in reports)
+        if loaded != found['total']:
+            out('run-tests: FAILED: the modules loaded %d tests in all, discovery found %d' % (loaded, found['total']))
             return 1
         out('run-tests: OK')
         return 0
