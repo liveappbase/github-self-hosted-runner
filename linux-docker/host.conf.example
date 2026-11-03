@@ -21,9 +21,9 @@ REGISTRY_PORT=27500
 RS_HEALTH_PORT=27080
 # The runner image's name in the local registry.
 IMAGE_NAME=linux-runner
-# The runner version (actions/runner, N.N.N) a FULL 02-d1.sh run builds; set it to the version the pool runs. Until
-# `pool-image.sh up` reads the build record (a later release), a runner release sets it to the new version and then
-# runs the full 02-d1.sh, whose image.ref `up` reads (linux-docker/README.md, "A new runner release", step 2).
+# The runner version (actions/runner, N.N.N) a FULL 02-d1.sh run builds: a fresh host's first image. A runner release
+# does not change it: `02-d1.sh build VERSION`, then `pool-image.sh up VERSION` (linux-docker/README.md, "A new runner
+# release").
 RUNNER_VERSION=2.338.2
 
 # Where the scale sets register: an organization (https://github.com/ORG) or a repository (https://github.com/ORG/REPO).

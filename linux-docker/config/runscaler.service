@@ -8,6 +8,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# runscaler stamps its log in local time with no zone, and the updater's decision core reads it as UTC (core/README.md,
+# TZ): so runscaler runs in UTC whatever zone the host has.
+Environment=TZ=UTC
 ExecStart=%h/bin/runner-start run
 Restart=always
 RestartSec=30s

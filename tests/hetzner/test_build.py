@@ -596,22 +596,24 @@ class FullRun(unittest.TestCase):
 
 class Header(unittest.TestCase):
     def test_the_header_says_what_follows_a_build_as_the_readme_does(self):
-        """What a person does after BUILD: until `pool-image.sh up` reads the build record (a later release), up reads
-        ~/run/image.ref, which BUILD never writes, so README "A new runner release" step 2 sets RUNNER_VERSION and runs
-        the full 02-d1.sh before up. 02-d1.sh's header said BUILD, then `up VERSION`, which up refuses. The two say the
-        same; the release whose up reads the record changes this cell with both. Text only: it runs anywhere."""
+        """What a person does after BUILD: `pool-image.sh up VERSION` as RS_USER, which reads the build record of
+        VERSION (README "A new runner release", step 2). The release before this one's up read ~/run/image.ref, so the
+        header and step 2 sent a person through RUNNER_VERSION and the full run first; neither says so now. Text only:
+        it runs anywhere."""
         with open(os.path.join(REPO, 'linux-docker', 'README.md')) as f:
             sec = f.read().split('\n## A new runner release\n', 1)[1].split('\n## ', 1)[0]
         step2 = re.search(r'^2\. .*$', sec, re.M).group(0)
-        for w in ('Until then', '~/run/image.ref', 'RUNNER_VERSION', 'Install step 5'):
-            self.assertIn(w, step2)
+        self.assertIn('build record', step2)
+        for w in ('Until then', 'image.ref', 'RUNNER_VERSION', 'Install step 5'):
+            self.assertNotIn(w, step2)
         with open(os.path.join(REPO, 'linux-docker', 'setup', '02-d1.sh')) as f:
             text = f.read()
         para = re.search(r'^# BUILD VERSION:.*?(?=^# [A-Z][A-Z ]*:)', text, re.M | re.S).group(0)
         lo = para.lower()
-        for w in ('runner_version', 'image.ref', 'full run', 'pool-image.sh up'):
+        for w in ('pool-image.sh up', 'build record'):
             self.assertIn(w, lo, para)
-        self.assertLess(lo.index('full run'), lo.index('pool-image.sh up'), para)
+        for w in ('runner_version in the host', 'until then', 'does the full run'):
+            self.assertNotIn(w, lo, para)
 
 
 if __name__ == '__main__':

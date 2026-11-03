@@ -34,6 +34,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -288,9 +289,12 @@ def new_id(why):
     return 'sha256:' + hashlib.sha256(('%s %d' % (why, st['n'])).encode()).hexdigest()
 
 
+if a[:1] == ['-H']:              # docker -H D1 …: the one daemon of these cells
+    a = a[2:]
+    j = ' '.join(a)
 cmd = a[0] if a else ''
 if cmd == 'version':
-    out('Server: 29.9.0\n')
+    out('29.9.0\n' if '--format' in a else 'Server: 29.9.0\n')
 if cmd == 'info':
     out(cfg['info'].replace('@HOME@', os.environ['HOME']) + '\n')
 if cmd == 'build':
@@ -353,8 +357,8 @@ if cmd == 'run':
         if 'runner-registry' in a:
             st['registry'] = 'running'
         out('c' * 64 + '\n')
-    if './config.sh' in a:
-        out(cfg['config_version'])
+    if './config.sh' in a:          # the runner version of THAT image (docker.json's versions), else config_version
+        out(cfg.get('versions', {}).get(a[a.index('./config.sh') - 1], cfg['config_version']))
     if 'seccomp=unconfined' in j:
         out('ALLOWED\n')
     if any(x.startswith('seccomp=') and x.endswith('.json') for x in a):
@@ -395,6 +399,17 @@ if '--unix-socket' in a:
     sys.exit(0)
 if urls and urls[0].startswith('http://127.0.0.1:') and urls[0].endswith('/v2/'):
     sys.exit(json.load(open(SB + '/curl.json')).get('registry_rc', 0))
+if urls and urls[0].startswith('http://127.0.0.1:') and '/manifests/' in urls[0]:
+    c = json.load(open(SB + '/curl.json'))      # the registry: 0 = it serves that digest, 22 = it does not
+    if c.get('registry_rc', 0):
+        sys.exit(c['registry_rc'])
+    sys.exit(0 if urls[0].rsplit('/', 1)[1] in c.get('served', []) else 22)
+if urls and urls[0].startswith('http://127.0.0.1:') and urls[0].endswith('/healthz'):
+    h = json.load(open(SB + '/curl.json')).get('healthz')     # runscaler's /healthz; None = no answer
+    if h is None:
+        sys.exit(7)
+    sys.stdout.write(json.dumps(h))
+    sys.exit(0)
 sys.stderr.write('curl stub: no answer for: %s\n' % ' '.join(a))
 sys.exit(99)
 '''
@@ -406,7 +421,10 @@ GOOD_MAIN = ('Seccomp: 2\nNoNewPrivs: 1\npid1=docker-init umask=0022\nkeyctl EPE
 class Sandbox:
     PIN_REWRITES = {
         'setup/02-d1.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        'setup/03-runscaler.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        'setup/pool-image.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'bin/runner-start': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        'bin/pool-ready': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/runner-release.sh': [
             ('RR_API=https://api.github.com/repos/actions/runner\n', 'RR_API=@GH@/repos/actions/runner\n'),
             ('RR_DL=https://github.com/actions/runner/releases/download\n',
@@ -414,7 +432,12 @@ class Sandbox:
             ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n')],
     }
     LEFT_OUT = {'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
+                'setup/03-runscaler.sh': ('/etc/liveapp-ci',), 'setup/pool-image.sh': ('/etc/liveapp-ci',),
+                'bin/pool-ready': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
+    # The original lines a copy may differ in (pin_lines_only): the rewrites above, and the pins Pool rewrites
+    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA)=.*|PINS="\$S03=[0-9a-f]{64}'
+                          r'|\$B/[A-Za-z0-9._/-]+=[0-9a-f]{64}"?')
 
     def __init__(self, test):
         v = verdict()
@@ -498,10 +521,14 @@ class Sandbox:
                               env=self.env(), cwd=self.home, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=300)
 
-    def d1(self, *args):
-        """Run the copied 02-d1.sh with args, docker.json and curl.json written from self.docker and self.curl."""
+    def files(self):
+        """docker.json and curl.json, the stubs' answers, written from self.docker and self.curl."""
         self.write(self.path('docker.json'), json.dumps(self.docker))
         self.write(self.path('curl.json'), json.dumps(self.curl))
+
+    def d1(self, *args):
+        """Run the copied 02-d1.sh with args, docker.json and curl.json written from self.docker and self.curl."""
+        self.files()
         return subprocess.run(['bash', os.path.join(self.build, 'setup', '02-d1.sh')] + list(args), env=self.env(),
                               cwd=self.home, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
 
@@ -509,10 +536,29 @@ class Sandbox:
         """d1, started: the Popen (stdout a pipe, stderr into it). The cell's cleanup kills it if it still runs."""
         return self.start(['bash', os.path.join(self.build, 'setup', '02-d1.sh')] + list(args))
 
+    def pin_lines_only(self):
+        """[(file, line number, the shipped line)] of every line in which a copy of ~/build differs from the shipped
+        linux-docker/ file and that is no pin line (PIN_LINE), and of every copy whose line count differs: [] = the
+        copies are the real scripts with only their pin lines rewritten."""
+        out = []
+        for d, _, names in os.walk(os.path.join(REPO, 'linux-docker')):
+            for n in names:
+                rel = os.path.relpath(os.path.join(d, n), os.path.join(REPO, 'linux-docker'))
+                with open(os.path.join(d, n), 'rb') as f:
+                    a = f.read().split(b'\n')
+                with open(os.path.join(self.build, rel), 'rb') as f:
+                    b = f.read().split(b'\n')
+                if len(a) != len(b):
+                    out.append((rel, 0, 'the line count'))
+                    continue
+                for i, (x, y) in enumerate(zip(a, b), 1):
+                    if x != y and not self.PIN_LINE.fullmatch(x.decode('utf-8', 'replace')):
+                        out.append((rel, i, x.decode('utf-8', 'replace')))
+        return out
+
     def start(self, argv):
         """argv started as d1_start starts 02-d1.sh (the same env, files and cleanup)."""
-        self.write(self.path('docker.json'), json.dumps(self.docker))
-        self.write(self.path('curl.json'), json.dumps(self.curl))
+        self.files()
         p = subprocess.Popen(argv, env=self.env(), cwd=self.home, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, start_new_session=True)
 
@@ -565,3 +611,293 @@ def bash5():
             if r.returncode == 0 and r.stdout.strip().isdigit() and int(r.stdout) >= 5:
                 return b
     return None
+
+
+# ---- the pool side (RS_USER): 03-runscaler.sh, pool-image.sh, runner-start, pool-ready, validate-class
+
+def digest(n):
+    """A digest of the registry, sha256:<64 hex>, one per number."""
+    return 'sha256:' + ('%02d' % n) * 32
+
+
+def ref(d):
+    """The image reference runscaler pulls for digest d (03's and pool-image.sh's IMGRE)."""
+    return 'localhost:%s/%s@%s' % (REGISTRY_PORT, IMAGE_NAME, d)
+
+
+POOL_RUNNER = r'''#!/usr/bin/python3 -I
+# runscaler, for the pool cells (03-runscaler.sh extracts it from the download whose pins the cell rewrote): `version`;
+# `validate --config FILE` answers as runner.json says ({rc, out}), except that a config with the bogus log-level of 03's
+# control fails runscaler's own check; `run` prints the UTC offset its clock reads. Logs argv, the names of the token
+# variables it got (never a value) and the config's sha256 (see tests/hetzner/support.py, Pool).
+import hashlib, json, os, subprocess, sys
+SB = @SB@
+a = sys.argv[1:]
+conf = a[a.index('--config') + 1] if '--config' in a else None
+with open(SB + '/logs/runner.log', 'a') as f:
+    f.write(json.dumps({'argv': a, 'tokens': sorted(k for k in os.environ if k.startswith('RUNNER_TOKEN_')),
+                        'config': hashlib.sha256(open(conf, 'rb').read()).hexdigest() if conf else None}) + '\n')
+
+
+def say(text, rc):
+    sys.stdout.buffer.write(text.encode())
+    sys.stdout.flush()
+    sys.exit(rc)
+
+
+if a[:1] == ['version']:
+    say('runscaler v0.9.5 (a test substitute)\n', 0)
+if a[:1] == ['validate']:
+    with open(conf) as f:
+        if 'log-level = "liveapp-bogus"' in f.read():
+            say('  ✗ global config: log-level must be one of debug, info, warn, error\nError: validation failed\n', 1)
+    v = json.load(open(SB + '/runner.json'))
+    say(v['out'], v['rc'])
+if a[:1] == ['run']:
+    say('TZ-CHECK ' + subprocess.run(['date', '+%z'], capture_output=True, text=True).stdout, 0)
+say('runner stub: no answer for: %s\n' % ' '.join(a), 99)
+'''
+
+SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
+# systemctl --user, for the pool cells: runscaler's unit as systemd.json holds it ({active, enabled, start}); logs each
+# call, one line of its arguments. restart: active, start = now (see tests/hetzner/support.py, Pool).
+import json, os, sys, time
+SB = @SB@
+a = sys.argv[1:]
+with open(SB + '/logs/systemctl.log', 'a') as f:
+    f.write(' '.join(a) + '\n')
+P = SB + '/systemd.json'
+st = json.load(open(P))
+if a[:1] == ['--user']:
+    a = a[1:]
+cmd = a[0] if a else ''
+if cmd == 'daemon-reload':
+    sys.exit(0)
+if cmd == 'is-active':
+    print('active' if st['active'] else 'inactive')
+    sys.exit(0 if st['active'] else 3)
+if cmd == 'is-enabled':
+    print('enabled' if st['enabled'] else 'disabled')
+    sys.exit(0 if st['enabled'] else 1)
+if cmd == 'show' and 'ActiveEnterTimestamp' in a:
+    print(('@%d' % st['start']) if '--timestamp=unix' in a else
+          time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(st['start'])))
+    sys.exit(0)
+if cmd == 'restart':
+    st.update(active=True, start=int(time.time()), restarts=st.get('restarts', 0) + 1)
+    with open(P + '.new', 'w') as f:
+        json.dump(st, f)
+    os.replace(P + '.new', P)
+    sys.exit(0)
+sys.stderr.write('systemctl stub: no answer for: %s\n' % ' '.join(sys.argv[1:]))
+sys.exit(99)
+'''
+
+PASS_OUT = ('  ✓ scaleset[0] "linux-ci-main" — provider=docker url=https://github.com/your-org max=3 min=0\n'
+            '  ✓ scaleset[1] "linux-ci-small" — provider=docker url=https://github.com/your-org max=1 min=0\n'
+            '  ✓ Docker connectivity\n\nAll checks passed.\n')
+
+
+def healthz(**over):
+    """runscaler's /healthz: the two sets of host.conf.example, ready and idle; over: {set name: fields to change}."""
+    sets = []
+    for n in ('linux-ci-main', 'linux-ci-small'):
+        s = {'name': n, 'ready': True, 'idle': 0, 'busy': 0, 'metrics': {}}
+        s.update(over.get(n, {}))
+        sets.append(s)
+    return {'scale_sets': sets}
+
+
+_LINKED = set()   # the homes a Pool of this process linked /home/root to
+
+
+class Pool(Sandbox):
+    """A Sandbox for the pool side, run as RS_USER: 03-runscaler.sh, pool-image.sh and the files 03 installs
+    (runner-start, pool-ready, validate-class, the unit). RS_USER = RUN_USER = root: pool-image.sh runs only as RS_USER,
+    and runner-start reads /home/RS_USER/…, so the scripts' HOME is /home/root, a symlink to this sandbox's home that only
+    a container has (the cell's cleanup removes it; a /home/root that is already there fails the cell). The pin lines
+    rewritten on top of HOST_CONF: 03's TGZ_SHA and BIN_SHA (the download ~/build/dl/runner-linux-amd64.tar.gz holds the
+    runscaler substitute POOL_RUNNER) and pool-image.sh's PINS (each the sha256 of the copy it pins). Substitutes: the
+    docker and curl of Sandbox (D1, the registry, which serves the digests in curl['served'], and /healthz,
+    curl['healthz']), systemctl (systemd.json, self.unit), ss. pool.env holds 4/4/4096/3/2/2048; the token file is in."""
+    HOME = '/home/root'
+
+    def __init__(self, test):
+        super().__init__(test)
+        if os.path.lexists(self.HOME):   # an earlier Pool of this cell (a subtest) may hold it: only that is replaced
+            if not (os.path.islink(self.HOME) and os.readlink(self.HOME) in _LINKED):
+                test.fail('%s is already there: the pool cells need it as their own home (this is no throwaway '
+                          'container, or something else made it)' % self.HOME)
+            os.remove(self.HOME)
+        os.symlink(self.home, self.HOME)
+        _LINKED.add(self.home)
+
+        def unlink():
+            if os.path.islink(self.HOME) and os.readlink(self.HOME) == self.home:
+                os.remove(self.HOME)
+        test.addCleanup(unlink)
+        p = self.path('host.conf')
+        with open(p) as f:
+            conf = f.read()
+        if conf.count('\nRS_USER=%s\n' % RS_USER) != 1:
+            raise AssertionError('host.conf: no single RS_USER=%s line' % RS_USER)
+        self.write(p, conf.replace('\nRS_USER=%s\n' % RS_USER, '\nRS_USER=root\n'), 0o644)
+        runner = POOL_RUNNER.replace('@SB@', repr(self.root)).encode()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as t:
+            i = tarfile.TarInfo('runner')
+            i.size, i.mode, i.mtime = len(runner), 0o755, 1761955200
+            t.addfile(i, io.BytesIO(runner))
+        tgz = buf.getvalue()
+        os.makedirs(os.path.join(self.build, 'dl'))
+        with open(os.path.join(self.build, 'dl', 'runner-linux-amd64.tar.gz'), 'wb') as f:
+            f.write(tgz)
+        self.pin('setup/03-runscaler.sh', 'TGZ_SHA', hashlib.sha256(tgz).hexdigest())
+        self.pin('setup/03-runscaler.sh', 'BIN_SHA', hashlib.sha256(runner).hexdigest())
+        self.rewrite_pins()
+        sb = repr(self.root)
+        self.write(self.path('stubs', 'systemctl'), SYSTEMCTL_STUB.replace('@SB@', sb), 0o755)
+        self.write(self.path('stubs', 'ss'), '#!/bin/sh\nexit 0\n', 0o755)
+        self.unit = {'active': False, 'enabled': False, 'start': 0}
+        self.set_unit()
+        self.runner = {'rc': 0, 'out': PASS_OUT}
+        self.curl.update(served=[], healthz=healthz())
+        self.docker['versions'] = {}
+        self.R = os.path.join(self.HOME, '.config', 'runner')
+        os.makedirs(self.R, mode=0o700)
+        os.makedirs(os.path.join(self.HOME, 'run'), mode=0o750)
+        self.pool_env()
+        self.write(os.path.join(self.R, 'token-owner'), 'a-test-token-not-a-secret\n', 0o600)
+
+    def env(self):
+        return dict(super().env(), HOME=self.HOME)
+
+    def pin(self, rel, name, value):
+        """The pin line NAME=<64 hex> of ~/build/REL (exactly one) becomes NAME=value."""
+        p = os.path.join(self.build, rel)
+        with open(p) as f:
+            text = f.read()
+        lines = re.findall(r'^%s=[0-9a-f]{64}$' % name, text, re.M)
+        if len(lines) != 1:
+            raise AssertionError('%s: %d pin lines %s=, want 1' % (rel, len(lines), name))
+        with open(p, 'w') as f:
+            f.write(text.replace(lines[0] + '\n', '%s=%s\n' % (name, value)))
+
+    def rewrite_pins(self):
+        """pool-image.sh's PINS: each hash becomes the sha256 of the copy in ~/build it pins."""
+        p = os.path.join(self.build, 'setup', 'pool-image.sh')
+        with open(p) as f:
+            text = f.read()
+        m = re.search(r'^PINS="(.*?)"$', text, re.M | re.S)
+        if not m:
+            raise AssertionError('pool-image.sh has no PINS="…" block')
+        rows = []
+        for l in m.group(1).split('\n'):
+            mm = re.fullmatch(r'(\$S03|\$B/([A-Za-z0-9._/-]+))=[0-9a-f]{64}', l)
+            if not mm:
+                raise AssertionError('pool-image.sh: a PINS line of another shape: %r' % l)
+            rel = 'setup/03-runscaler.sh' if mm.group(1) == '$S03' else mm.group(2)
+            rows.append('%s=%s' % (mm.group(1), sha256_file(os.path.join(self.build, rel))))
+        with open(p, 'w') as f:
+            f.write(text[:m.start(1)] + '\n'.join(rows) + text[m.end(1):])
+
+    def set_unit(self, **kw):
+        """runscaler's unit, as the systemctl substitute answers: active, enabled, start (epoch)."""
+        self.unit.update(kw)
+        self.write(self.path('systemd.json'), json.dumps(self.unit))
+
+    def unit_now(self):
+        with open(self.path('systemd.json')) as f:
+            return json.load(f)
+
+    def files(self):
+        super().files()
+        self.write(self.path('runner.json'), json.dumps(self.runner))
+
+    def run(self, argv, timeout=600, env=None):
+        self.files()
+        return subprocess.run(argv, env=env or self.env(), cwd=self.HOME, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=timeout)
+
+    def s03(self, *args):
+        return self.run(['bash', os.path.join(self.build, 'setup', '03-runscaler.sh')] + list(args))
+
+    def pool(self, *args):
+        return self.run(['bash', os.path.join(self.build, 'setup', 'pool-image.sh')] + list(args))
+
+    def rpath(self, name):
+        return os.path.join(self.R, name)
+
+    def read(self, path):
+        """The text of path, or None when there is none."""
+        if not os.path.lexists(path):
+            return None
+        with open(path) as f:
+            return f.read()
+
+    def config(self, name='config.toml'):
+        return self.read(self.rpath(name))
+
+    def images(self, name='config.toml'):
+        return re.findall(r'^runner-image = "(.*)"$', self.config(name) or '', re.M)
+
+    def image_ref(self, d):
+        self.write(os.path.join(self.HOME, 'run', 'image.ref'), ref(d) + '\n')
+
+    def pool_env(self, **over):
+        n = dict(CONCURRENT=4, CPU=4, MEMORY=4096, MAX=3, SMALL_CPU=2, SMALL_MEMORY=2048)
+        n.update(over)
+        self.write(self.rpath('pool.env'), ''.join('%s=%s\n' % kv for kv in n.items()), 0o600)
+
+    def rejected(self, text):
+        """RS_USER's rejected file (the updater writes it): text, or None for no file."""
+        p = os.path.join(self.HOME, '.local', 'state', 'runner-updater', 'rejected')
+        if text is None:
+            if os.path.lexists(p):
+                os.remove(p)
+            return p
+        os.makedirs(os.path.dirname(p), mode=0o700, exist_ok=True)
+        return self.write(p, text, 0o600)
+
+    def production(self, d):
+        """A host whose pool runs digest d: no config.toml, image.ref = d, a fresh `03 real` with the unit stopped and
+        disabled, then the unit enabled and started after that install (in a later second, and not in the future)."""
+        self.image_ref(d)
+        r = self.s03('real')
+        if r.returncode != 0 or self.images() != [ref(d)] * 2:
+            raise AssertionError('the production setup failed: ' + r.stdout[-3000:] + r.stderr)
+        m = int(os.stat(self.rpath('config.toml')).st_mtime)
+        while int(time.time()) <= m:     # the start comes after the install's second, and is never in the future:
+            time.sleep(0.05)              # wait for the clock (a state), never for a set time
+        self.set_unit(active=True, enabled=True, start=int(time.time()))
+        return r
+
+    def snapshot(self):
+        """{path: (sha256, mtime_ns, mode)} of every file in the home but ~/build: what an install would change."""
+        out = {}
+        for d, dirs, names in os.walk(self.home):
+            if d == self.home:
+                dirs[:] = [x for x in dirs if x != 'build']
+            for n in names:
+                p = os.path.join(d, n)
+                if os.path.islink(p) or not os.path.isfile(p):
+                    out[p] = ('not a file', 0, 0)
+                    continue
+                s = os.stat(p)
+                out[p] = (sha256_file(p), s.st_mtime_ns, s.st_mode)
+        return out
+
+    def recipe(self):
+        """02-d1.sh's RECIPE of this ~/build/image/: the sha256 of its `sha256sum` lines, names in byte order."""
+        d = os.path.join(self.build, 'image')
+        lines = ''.join('%s  %s\n' % (sha256_file(os.path.join(d, n)), n) for n in sorted(os.listdir(d)))
+        return hashlib.sha256(lines.encode()).hexdigest()
+
+    def record(self, version, d, recipe=None, text=None, name=None):
+        """RUN_USER's build record ~/run/builds/<version>-<recipe> (0640), in 02-d1.sh's form unless text is given."""
+        recipe = recipe or self.recipe()
+        if text is None:
+            text = 'format 1\nversion %s\ndigest %s\nrecipe %s\n' % (version, d, recipe)
+        b = os.path.join(self.HOME, 'run', 'builds')
+        os.makedirs(b, mode=0o750, exist_ok=True)
+        return self.write(os.path.join(b, name or '%s-%s' % (version, recipe)), text, 0o640)

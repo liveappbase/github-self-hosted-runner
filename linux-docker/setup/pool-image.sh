@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# pool-image.sh — a RUNNER RELEASE, the POOL half: AS RS_USER, after 02-d1.sh (as RUN_USER) built the new runner image
-# and wrote its digest to /home/RUN_USER/run/image.ref. Needs this release's linux-docker/ as ~/build.
+# pool-image.sh — a RUNNER RELEASE, the POOL half: AS RS_USER, after `02-d1.sh build VERSION` (as RUN_USER) built the
+# runner image of VERSION and wrote its build record. Needs this release's linux-docker/ as ~/build.
 #   up:     ssh -o ServerAliveInterval=60 RS_USER@<host> 'bash -s -- up 2.338.2' < linux-docker/setup/pool-image.sh
 #   back:   the same line with `back` — the rollback to the image the pool ran before this release's `up`.
 #   accept: the same line with `accept` — ends the release once a job passed on the new image: the kept rollback is
 #           removed, so the NEXT release's `up` keeps this config. Until then an `up` to another image refuses. It
-#           closes the release whose image config.toml RUNS, whatever image.ref says by then (a rebuild or the next
-#           release's 02 may have moved it).
+#           closes the release whose image config.toml RUNS, whatever build records there are by then.
+# THE BUILD RECORD (02-d1.sh's header gives its form): `up VERSION` reads RUN_USER's ~/run/builds/<VERSION>-<RECIPE>,
+# RECIPE being 02-d1.sh's recipe of this release's image/ (this ~/build/image/: the same release's files as RUN_USER's
+# ~/build), ONCE: a private copy, parsed by one exact pattern of 02-d1.sh's four lines, never sourced. A record that is
+# missing, not a plain file, of another form, version or recipe, or whose digest the local registry does not serve:
+# REFUSED, nothing changed, and the line names the fix (`02-d1.sh build VERSION` as RUN_USER). Its digest is the image
+# up puts into the pool (`03-runscaler.sh real DIGEST`).
 # THE ROLLBACK FILE (config.toml.pre-image) belongs to ONE release: `up` writes it only when it is absent or names the
-# image config.toml runs now (image.ref moves, so "differs from image.ref" would keep an unproven config).
+# image config.toml runs now (each up names its own new image, so "differs from the new image" would keep an unproven
+# config).
 # up:   refuses unless pool.env holds the numbers config.toml runs (03 renders from pool.env, so others would go live
-#       with the image) and the new image's runner is RUNNER_VERSION; keeps the rollback; 03 real (the same sets and
-#       numbers, the new image: it installs with the pool running and restarts nothing; if it fails, config.toml is
+#       with the image) and the record's image's runner is VERSION; keeps the rollback; 03 real DIGEST (the same sets and
+#       numbers, the record's image: it installs with the pool running and restarts nothing; if it fails, config.toml is
 #       unchanged); if config.toml then differs from the rollback in more than the image, the rollback goes back with
-#       config.toml's old mtime and nothing restarts. config.toml already on image.ref with a restart pending (a run cut
-#       off before its restart, or a bare 03 run) restarts only when the rollback was kept while the running process ran.
+#       config.toml's old mtime and nothing restarts. config.toml already on the record's image with a restart pending (a
+#       run cut off before its restart, or a bare 03 run) restarts only when the rollback was kept while the running
+#       process ran.
 # back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes and the
 #       registry still serves the old digest (runscaler pulls it at every runner start, so a dead registry stops both
-#       images alike). image.ref keeps the new digest, so a later 03 renders it again: fix the image (or put the old
-#       Dockerfile back and run 02-d1.sh) first.
+#       images alike). `03 real` with no digest renders the image config.toml runs NOW, so a later 03 (a change of the
+#       numbers) keeps the old image; only an `up` puts a new one in.
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
 # Then, up and back: the restart. restart() re-reads the start time just before it restarts, so it never restarts a
@@ -55,15 +62,16 @@ case $MODE in
   *) usage ;;
 esac
 R=$HOME/.config/runner; CFG=$R/config.toml; KEEPC=$R/config.toml.pre-image; POOL=$R/pool.env; LOCK=$R/pool-image.lock
-REF=/home/${RUN_USER}/run/image.ref; REG=http://127.0.0.1:${REGISTRY_PORT}; D1=unix:///home/${RUN_USER}/run/docker.sock; B=$HOME/build
+BUILDS=/home/${RUN_USER}/run/builds; REG=http://127.0.0.1:${REGISTRY_PORT}; D1=unix:///home/${RUN_USER}/run/docker.sock; B=$HOME/build
 S03=$B/setup/03-runscaler.sh
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=c4eabf128d1dd89142fd5eda1ca5708b38d3b0d9f2b7a26814d2a005404bc95e
+PINS="$S03=7f1c92daee470effd7c1fbee24d2bbb1ee7b01aa914d5e9c38c24518a7e998c4
 $B/bin/runner-start=698d52799fc20feff260fcec82d3aa49f66aa535547368b17d27226941306107
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
-$B/config/runscaler.service=b84e46b1b9d4391258a6a6161b55f6c96fe625aec4eec8251c0f8dd562c530be"
+$B/bin/validate-class=b5127e6e18e926976b62b15f0dd0eead26085657c192ad4b111ccc2defaceda2
+$B/config/runscaler.service=1f23a5c0f78c7fa6e7c8ddf0e9092c188666729177dce19ff1a8fe149e498565"
 SETS="${MAIN_SET} ${SMALL_SET}"
-IMGRE='^localhost:'"${REGISTRY_PORT}"'/'"${IMAGE_NAME}"'@sha256:[0-9a-f]{64}$'   # 03's own rule for image.ref
+IMGRE='^localhost:'"${REGISTRY_PORT}"'/'"${IMAGE_NAME}"'@sha256:[0-9a-f]{64}$'   # the image reference a config names
 ok() { echo "OK   $*"; }
 die() { echo "FAIL $*"; exit 1; }
 put() {   # put SRC DEST: copy, 0600, in one rename — with a FRESH mtime: the restart rule below reads config.toml's
@@ -79,6 +87,43 @@ pulls() {   # pulls IMAGE: 0 = the local registry serves this digest; 1 = it ans
   curl -fs -m 5 -o /dev/null -I -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
     "$REG/v2/${IMAGE_NAME}/manifests/${1#*@}"
   case $? in 0) return 0 ;; 22) return 1 ;; *) return 2 ;; esac
+}
+recipe_of() {   # recipe_of DIR: 02-d1.sh's RECIPE of DIR (image/): the sha256 of its plain files' `<sha256>  <name>`
+  # lines, names in byte order (02-d1.sh hashes its copies of the same files); rc 1 when DIR holds anything else
+  local names n h lines=
+  { names=$(LC_ALL=C ls -A "$1") && [ -n "$names" ]; } || return 1
+  while IFS= read -r n; do
+    { [ -f "$1/$n" ] && [ ! -L "$1/$n" ]; } || return 1
+    h=$(sha256sum < "$1/$n") || return 1
+    lines+="${h%% *}  $n"$'\n'
+  done <<< "$names"
+  h=$(printf '%s' "$lines" | sha256sum) || return 1
+  [[ ${h%% *} =~ ^[0-9a-f]{64}$ ]] && echo "${h%% *}"
+}
+record_digest() {   # record_digest VERSION RECIPE: digest = the one RUN_USER's build record of VERSION and RECIPE
+  # names. The record is read ONCE (a private copy, then only the copy) and must be exactly 02-d1.sh's four lines; else
+  # rc 1 and why = what is wrong (both are set here, not printed: a $(…) would lose why)
+  local f=$BUILDS/$1-$2 t size nonul text
+  digest=
+  local re=$'^format 1\nversion ([0-9]+\\.[0-9]+\\.[0-9]+)\ndigest (sha256:[0-9a-f]{64})\nrecipe ([0-9a-f]{64})\n$'
+  why="there is none"
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  why="it is not a plain file"
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || return 1
+  why="it cannot be read"
+  t=$(mktemp "$R/.record.XXXXXX") || return 1
+  if head -c 1025 -- "$f" > "$t" < /dev/null; then
+    size=$(wc -c < "$t"); nonul=$(tr -d '\000' < "$t" | wc -c); text=$(cat -- "$t"; echo .); text=${text%.}
+  fi
+  rm -f -- "$t"
+  [ -n "${size-}" ] || return 1
+  why="it is not 02-d1.sh's four lines (format 1, version, digest, recipe)"
+  { [ "$size" -le 1024 ] && [ "$size" = "$nonul" ] && [[ $text =~ $re ]]; } || return 1
+  why="it names version ${BASH_REMATCH[1]}"
+  [ "${BASH_REMATCH[1]}" = "$1" ] || return 1
+  why="it names another recipe"
+  [ "${BASH_REMATCH[3]}" = "$2" ] || return 1
+  digest=${BASH_REMATCH[2]}
 }
 same_but_image() {   # same_but_image A B: the two configs differ in their runner-image lines alone
   cmp -s <(grep -v '^runner-image = ' "$1") <(grep -v '^runner-image = ' "$2")
@@ -157,13 +202,16 @@ if [ "$MODE" = accept ]; then
 fi
 
 if [ "$MODE" = up ]; then
-  # Only `up` reads image.ref: `back` and `accept` work from what runs and what was kept.
-  new=$(cat "$REF" 2> /dev/null) || die "no $REF: run 02-d1.sh as ${RUN_USER} first; nothing changed"
-  [[ $new =~ $IMGRE ]] || die "$REF is not one strict digest reference: [$new]; nothing changed"
+  # Only `up` reads a build record: `back` and `accept` work from what runs and what was kept.
   while IFS= read -r p; do
     [ "$(sha256sum "${p%=*}" 2> /dev/null | cut -d' ' -f1)" = "${p##*=}" ] || die "${p%=*} is not the reviewed copy (sha256): nothing changed"
   done <<< "$PINS"
-  pulls "$new"; case $? in 0) ;; 1) die "the registry does not hold $new (the image runscaler would pull): nothing changed" ;; *) die "the registry ($REG) does not answer: nothing changed" ;; esac
+  fix="build it as ${RUN_USER}, with this release's linux-docker/ as its ~/build: ssh ${RUN_USER}@<host> 'bash ~/build/setup/02-d1.sh build $VERSION'"
+  recipe=$(recipe_of "$B/image") || die "$B/image is not this release's plain image/ files, so its recipe cannot be read: nothing changed"
+  record_digest "$VERSION" "$recipe" || die "no usable build record of runner $VERSION for this release's image (recipe ${recipe:0:12}…, $BUILDS/$VERSION-$recipe): $why. To make it, $fix; nothing changed"
+  new=localhost:${REGISTRY_PORT}/${IMAGE_NAME}@$digest
+  [[ $new =~ $IMGRE ]] || die "the build record's image [$new] is not one strict digest reference: nothing changed"
+  pulls "$new"; case $? in 0) ;; 1) die "the registry does not serve $new, the image of the build record of runner $VERSION (removed since, or not this registry's): $fix; nothing changed" ;; *) die "the registry ($REG) does not answer: nothing changed" ;; esac
   # The runner's version, from the image itself: its labels do not carry it (measured). No network, bounded. Every
   # child here reads /dev/null: the script itself arrives on stdin (`bash -s`), and a child that reads it eats the rest.
   # The image sets ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1, so the runner's log comes too: the version is the one line
@@ -171,8 +219,8 @@ if [ "$MODE" = up ]; then
   out=$(DOCKER_HOST=$D1 docker run --rm --network none --memory 512m --cpus 1 "$new" ./config.sh --version < /dev/null) \
     || die "could not run $new to read its runner version (its error is above): nothing changed"
   v=$(grep -xE '[0-9]+\.[0-9]+\.[0-9]+' <<< "$out")
-  [ "$v" = "$VERSION" ] || die "the runner in $new is [$v], not $VERSION: 02-d1.sh built from another Dockerfile? nothing changed"
-  ok "image.ref: $new (the registry serves it; runner $v)"
+  [ "$v" = "$VERSION" ] || die "the runner in $new is [$v], not $VERSION, though its build record names $VERSION: $fix; nothing changed"
+  ok "build record of runner $VERSION: $new (the registry serves it; runner $v)"
   if [ "$cur" != "$new" ]; then
     if [ -e "$KEEPC" ]; then
       kept=$(image_of "$KEEPC") || die "$KEEPC does not name ONE runner image for both sets: read it; nothing changed"
@@ -186,8 +234,8 @@ if [ "$MODE" = up ]; then
     pulls "$cur" || echo "WARN the registry does not serve the image the pool runs now ($cur): its rollback could not start a runner"
     put "$CFG" "$KEEPC"; ok "kept $KEEPC (the rollback: $cur)"
     m0=$(stat -c %Y "$CFG")
-    echo; echo "== 03-runscaler.sh real (the same sets and numbers, the new image: it installs with the pool running, and restarts nothing)"
-    bash "$S03" real < /dev/null || die "03 real failed: config.toml was not changed, so the pool keeps $cur. Read 03's FAIL line above"
+    echo; echo "== 03-runscaler.sh real $digest (the same sets and numbers, the record's image: it installs with the pool running, and restarts nothing)"
+    bash "$S03" real "$digest" < /dev/null || die "03 real failed: config.toml was not changed, so the pool keeps $cur. Read 03's FAIL line above"
     [ "$(image_of "$CFG")" = "$new" ] || die "03 said DONE but config.toml does not run $new: read it; to go back run pool-image.sh back"
     if ! same_but_image "$KEEPC" "$CFG"; then
       put "$KEEPC" "$R/config.real.toml"; put "$KEEPC" "$CFG"
@@ -195,9 +243,9 @@ if [ "$MODE" = up ]; then
       die "03's config differed from the rollback in more than the image (did pool.env change during the run?): config.toml is back as it was, mtime too, and nothing restarted"
     fi
   else
-    ok "config.toml already runs image.ref: 03 is not run again"
+    ok "config.toml already runs the build record's image: 03 is not run again"
     if ! started_after; then   # a restart is pending: allowed only into a config this script installed
-      [ -e "$KEEPC" ] || die "config.toml names image.ref, but no rollback was kept for the config runscaler runs (03 ran outside pool-image.sh?): nothing restarted"
+      [ -e "$KEEPC" ] || die "config.toml names the build record's image, but no rollback was kept for the config runscaler runs (03 ran outside pool-image.sh?): nothing restarted"
       if [ "$(systemctl --user is-active runscaler 2> /dev/null)" = active ]; then
         a=$(start_of) || die "cannot read runscaler's start time: nothing restarted"
         [ "$(stat -c %Y "$KEEPC")" -ge "$a" ] || die "the rollback $KEEPC is older than the running process, so it is not the config that process runs (03 ran outside pool-image.sh?): nothing restarted"
@@ -218,7 +266,7 @@ else
       *) die "the registry ($REG) does not answer, so no runner of either image can start: bring D1's registry back first (02-d1.sh as ${RUN_USER}); nothing changed" ;;
     esac
     put "$KEEPC" "$R/config.real.toml"; put "$KEEPC" "$CFG"; ok "config.toml and config.real.toml: back to $old"
-    echo "NOTE image.ref still names $(cat "$REF" 2> /dev/null): a later 03 real renders that image again"
+    echo "NOTE a later 03 real with no digest renders $old, the image config.toml runs now: the new image comes back only with an up"
   fi
 fi
 ok "config.toml runs $(image_of "$CFG") (sha256 $(sha256sum "$CFG" | cut -c1-12))"
