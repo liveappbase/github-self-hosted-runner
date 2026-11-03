@@ -1,9 +1,9 @@
 """The CI legs of core/TESTED_JQ: .github/workflows/release-check.yml's jq-linux matrix is exactly TESTED_JQ's ci rows
 (version, image, areas), its job name is the one tools/release-check reads on a tag ("jq VERSION (IMAGE)"), each leg
 checks that the image's jq prints the row's version, and the hosted macOS job runs the tests with /usr/bin/jq (the
-local row). The ubuntu rows, and only they, also run tests/hetzner (linux-docker/'s scripts: no jq, so not a TESTED_JQ
-area), and the setup step installs what those cells need. Read as text: the stdlib has no YAML parser, so the rows keep
-one fixed shape."""
+local row), all of tests/ through tools/run-tests. The ubuntu rows, and only they, also run tests/hetzner
+(linux-docker/'s scripts: no jq, so not a TESTED_JQ area), and the setup step installs what those cells need. Read as
+text: the stdlib has no YAML parser, so the rows keep one fixed shape."""
 import os
 import re
 import unittest
@@ -52,9 +52,12 @@ class Workflow(unittest.TestCase):
     def test_the_hosted_mac_runs_the_tests_with_the_local_row(self):
         local = [w[len('local:'):] for v, a, w in tested_rows() if w.startswith('local:')]
         self.assertEqual(local, ['/usr/bin/jq'])
-        m = re.search(r'- name: tests\n\s+working-directory: src\n\s+env:\n\s+JQ: (\S+)\n', workflow())
+        m = re.search(r'- name: tests\n\s+working-directory: src\n\s+env:\n\s+JQ: (\S+)\n\s+run: (.*)\n', workflow())
         self.assertTrue(m, 'the tests step of the macOS job names JQ')
         self.assertEqual(m.group(1), '/usr/bin/jq')
+        # every area of tests/, through the parallel runner (the same tests as the plain discover line), at its default
+        # -j: the Mac's CPU count
+        self.assertEqual(m.group(2), 'python3 -I tools/run-tests -v')
 
 
 if __name__ == '__main__':
