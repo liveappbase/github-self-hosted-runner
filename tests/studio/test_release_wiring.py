@@ -1,6 +1,7 @@
 """The release's wiring for golden-gate: install links it (TOOLS); release-check holds the constants that two scripts set
-to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-gate) and STATEDIR (golden-build,
-golden-prune). release-check runs on a temporary git repository with only the files the constants rule reads; it
+to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-gate), STATEDIR (golden-build,
+golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune) and DD (runner-updater,
+runner-journal). release-check runs on a temporary git repository with only the files the constants rule reads; it
 downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
@@ -30,7 +31,10 @@ class InstallTools(unittest.TestCase):
 class ReleaseCheckConstants(unittest.TestCase):
     # NAME: (its line in each script, the script whose value the test changes, the other script that sets it)
     WIRING = {'REALRUN': ('/Users/ci/bin/real-run', 'golden-gate', 'golden-build'),
-              'STATEDIR': ('/Users/ci/.local/state/runner-updater', 'golden-prune', 'golden-build')}
+              'STATEDIR': ('/Users/ci/.local/state/runner-updater', 'golden-prune', 'golden-build'),
+              'PINDIR': ('$STATEDIR/pin', 'runner-updater', 'golden-build'),
+              'PROTECTED': ('$STATEDIR/protected', 'runner-updater', 'golden-prune'),
+              'DD': ('/bin/dd', 'runner-updater', 'runner-journal')}
 
     def check(self, name, value):
         line, changed, other = self.WIRING[name]
@@ -43,8 +47,10 @@ class ReleaseCheckConstants(unittest.TestCase):
         write(os.path.join(d, 'tools', 'release-check'), rc_text, 0o755)
         for f in (changed, other):   # data for release-check: read, never run
             text = read(os.path.join(REPO, 'bin', f))
-            self.assertEqual(text.count('\n%s=%s\n' % (name, line)), 1, f)
+            # the line NAME=VALUE, alone or before a comment
+            self.assertEqual(len(re.findall(r'^%s=%s(?=[ \n])' % (re.escape(name), re.escape(line)), text, re.M)), 1, f)
             if f == changed:
+                self.assertEqual(text.count('\n%s=%s\n' % (name, line)), 1, f)
                 text = text.replace('\n%s=%s\n' % (name, line), '\n%s=%s\n' % (name, value))
             write(os.path.join(d, 'bin', f), text, 0o755)
         for argv in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'wiring test']):
@@ -66,6 +72,15 @@ class ReleaseCheckConstants(unittest.TestCase):
 
     def test_two_values_of_statedir_are_red(self):
         self.two_values_are_red('STATEDIR')
+
+    def test_two_values_of_pindir_are_red(self):
+        self.two_values_are_red('PINDIR')
+
+    def test_two_values_of_protected_are_red(self):
+        self.two_values_are_red('PROTECTED')
+
+    def test_two_values_of_dd_are_red(self):
+        self.two_values_are_red('DD')
 
 
 class LockHolderMessages(unittest.TestCase):

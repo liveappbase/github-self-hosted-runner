@@ -101,8 +101,8 @@
 #   PATH         its own, set at the top (the system folders): it never depends on the caller's PATH, so the weekly
 #                watchdog's `runner-updater status` over a non-interactive ssh runs it as the timer does
 #   JQ PS CURL DD the tools it runs (each by its absolute path; DD syncs a file to disk before its rename); CORE, the
-#                release's core/ beside this file's bin/; BIN, this file's bin/ (runner-updater-lib and runner-journal,
-#                of the same release); SELF, this file as it was run (the refusal texts name it)
+#                release's core/ beside this file's bin/; RELBIN, this file's bin/ (runner-updater-lib and runner-journal,
+#                of the same release); INVOKED, this file as it was run (the refusal texts name it)
 #   HEALTHZ_GAP  seconds between the two /healthz reads
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin   # its own, never the caller's (the watchdog runs status over ssh)
@@ -128,8 +128,8 @@ PINDIR=$STATEDIR/pin
 WINDOW=$STATEDIR/window
 ACTIONS=$STATEDIR/actions
 DD=/bin/dd
-BIN=${0:A:h}
-SELF=${0:a}
+RELBIN=${0:A:h}
+INVOKED=${0:a}
 
 say() { print -r -- "runner-updater: $*" }
 refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
@@ -148,7 +148,7 @@ case $cmd in
   (report) ;;
   (*) usage "unknown command '$cmd'" ;;
 esac
-source $BIN/runner-updater-lib || refuse "cannot load $BIN/runner-updater-lib"
+source $RELBIN/runner-updater-lib || refuse "cannot load $RELBIN/runner-updater-lib"
 
 # the state, under the lock (status: with no lock, ONE read) -> ru_state; WAIT (exit 4) on a state of another format,
 # REFUSE on one this release does not read: either way the file stays as it is
@@ -287,7 +287,7 @@ do_off() {
     if [[ -f $p && ! -L $p && -r $p ]]; then c=$(/bin/cat -- $p 2>/dev/null && print -rn -- .); c=${${c%.}%$'\n'}; fi
     if [[ $c =~ '^[0-9]+\.[0-9]+\.[0-9]+ [0-9a-f]{64}$' && $c == "$MATCH" ]]; then v="${p:t} $c"
     else v="${p:t} (not one line VERSION SHA256)"; fi
-    /bin/zsh -f $BIN/runner-journal $ACTIONS pin-remove $v \
+    /bin/zsh -f $RELBIN/runner-journal $ACTIONS pin-remove $v \
       || stop "the action journal could not record the removal of $p (above): the pin stays. The updater is OFF; run off again when the journal can be written"
     /bin/rm -f -- $p || stop "cannot remove the pin $p (its removal is journaled in $ACTIONS)"
     say "off: removed the pin $p (journaled first in $ACTIONS)"
@@ -386,7 +386,7 @@ fi
 # the list: protect writes it from the state, so it alone goes on without one (the text says how to get it back
 # without emptying it: an empty list in place of a lost one would let golden-prune print an image the updater keeps)
 if [[ $cmd != (protect|pass) ]]; then
-  back="\`$SELF protect\` writes it from the updater's state (a pass does too, while the updater is ON); then run $cmd again"
+  back="\`$INVOKED protect\` writes it from the updater's state (a pass does too, while the updater is ON); then run $cmd again"
   if [[ ! -e $PROTECTED && ! -L $PROTECTED ]]; then
     refuse "$STATEDIR has no protected list $PROTECTED, and golden-prune refuses until it has one. Do not create it empty: it lists the images the updater keeps. $back"
   fi
