@@ -1,0 +1,282 @@
+# run-tests: the unit tests in parallel, one unittest process per test module. Python 3 stdlib only.
+#
+#   python3 -I tools/run-tests [-j N] [-v] [AREA ...]
+#
+# Why it exists: the plain line runs every test in ONE process, one after the other, and the macOS job of
+# .github/workflows/release-check.yml has a 30-minute limit. The tests are independent (each makes its own temporary
+# folder), so this tool runs the same tests N modules at a time.
+#
+# The plain line stays the reference: `JQ=/usr/bin/jq python3 -I -m unittest discover -s tests -t .`. Both must agree
+# on the test count. Run this tool where you run that line: in the repository root.
+#
+# What it does:
+# - Discovery is unittest's own: one process runs `unittest discover` (start folder tests, or tests/AREA for each
+#   AREA, top folder .) and writes each module it loaded with its number of tests. An AREA is a folder under tests.
+# - Then one process per module with at least one test, N at a time (default: the number of CPUs), longest list of
+#   tests first. Each is `python3 -I` with the caller's env (JQ included), in this folder. It loads its module as
+#   discovery does, runs it with unittest's text runner (-v: one line per test), and writes a report: the tests it
+#   loaded, ran, failed, errored and skipped.
+# - The output: a line when each module starts; when it ends, its result line and its own output (its result block);
+#   then one summary: tests run, failures, errors, skipped, and the slowest modules; then `run-tests: OK` or
+#   `run-tests: FAILED: ...` naming each failed module and why.
+#
+# A module passes only when its process exits 0, it wrote its report, the report is a pass, and it loaded as many
+# tests as discovery found for it. So a module that crashes, is killed (SIGKILL included), or does not report counts
+# as failed. A discovery that exits non-zero, writes no report, or finds no test is a failure too.
+#
+# Exit: 0 only when every module passed; 1 otherwise (also on SIGINT or SIGTERM: it ends the module processes it
+# started, prints what they wrote so far, and names them); 2 on a usage error.
+import argparse
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+PATTERN = 'test*.py'     # unittest discover's default, as the plain line uses it
+
+# One process runs discovery and writes each module it loaded with its number of tests. A test that discovery made
+# without loading a module (a module that could not be imported or was skipped) counts for the module it names.
+LIST = r'''
+import json, sys, unittest
+top, report, starts = sys.argv[1], sys.argv[2], sys.argv[3:]
+mods, seen = {}, set()
+
+def flat(s):
+    if isinstance(s, unittest.TestSuite):
+        for t in s:
+            yield from flat(t)
+    else:
+        yield s
+
+class Loader(unittest.TestLoader):
+    def loadTestsFromModule(self, module, *args, **kws):
+        suite = super().loadTestsFromModule(module, *args, **kws)
+        seen.update(id(t) for t in flat(suite))
+        mods[module.__name__] = mods.get(module.__name__, 0) + suite.countTestCases()
+        return suite
+
+total = 0
+for start in starts:
+    suite = Loader().discover(start, pattern=%r, top_level_dir=top)
+    total += suite.countTestCases()
+    for t in flat(suite):
+        if id(t) not in seen:
+            name = t._testMethodName if type(t).__module__ == 'unittest.loader' else type(t).__module__
+            mods[name] = mods.get(name, 0) + 1
+with open(report, 'w') as f:
+    json.dump({'total': total, 'modules': list(mods.items())}, f)
+''' % PATTERN
+
+# One process per module: it loads the module as discovery does (with the same pattern), runs it with unittest's text
+# runner (warnings shown as `python3 -m unittest` shows them), and writes its report.
+MODULE = r'''
+import json, sys, unittest
+top, report, verbosity, name = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+if top not in sys.path:
+    sys.path.insert(0, top)
+__import__(name)
+suite = unittest.TestLoader().loadTestsFromModule(sys.modules[name], pattern=%r)
+loaded = suite.countTestCases()
+result = unittest.TextTestRunner(verbosity=verbosity, warnings=None if sys.warnoptions else 'default').run(suite)
+with open(report, 'w') as f:
+    json.dump({'loaded': loaded, 'run': result.testsRun, 'failures': len(result.failures),
+               'errors': len(result.errors), 'skipped': len(result.skipped),
+               'expected_failures': len(result.expectedFailures),
+               'unexpected_successes': len(result.unexpectedSuccesses), 'ok': result.wasSuccessful()}, f)
+sys.exit(0 if result.wasSuccessful() else 1)
+''' % PATTERN
+
+COUNTS = ('failures', 'errors', 'skipped')
+RULE = '=' * 70
+THIN = '-' * 70
+
+stop = []    # the signal that ends the run, once one came
+
+
+def on_signal(signum, frame):
+    stop.append(signum)
+
+
+def out(text=''):
+    sys.stdout.write(text + '\n')
+    sys.stdout.flush()
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def args_of(argv):
+    p = argparse.ArgumentParser(prog='run-tests', description='The unit tests in parallel, one unittest process per '
+                                'test module (see the header of tools/run-tests).')
+    p.add_argument('-j', type=int, default=os.cpu_count() or 1, metavar='N',
+                   help='modules at a time (default: the number of CPUs, here %(default)s)')
+    p.add_argument('-v', action='store_true', help='one line per test, as unittest -v')
+    p.add_argument('areas', nargs='*', metavar='AREA', help='a folder under tests (default: all of tests)')
+    a = p.parse_args(argv)
+    if a.j < 1:
+        p.error('-j must be 1 or more')
+    if not os.path.isdir('tests'):
+        p.error('no tests/ folder here: run it in the repository root, where the plain line runs')
+    for area in a.areas:
+        if not re.match(r'^[A-Za-z0-9_][A-Za-z0-9_.-]*$', area) or not os.path.isdir(os.path.join('tests', area)):
+            p.error("AREA %r is not a folder under tests" % area)
+    if len(set(a.areas)) != len(a.areas):
+        p.error('an AREA is named twice')
+    return a
+
+
+class Module:
+    def __init__(self, n, name, count, work):
+        self.name, self.count = name, count
+        self.log = os.path.join(work, '%d.out' % n)
+        self.report = os.path.join(work, '%d.json' % n)
+        self.proc = None
+        self.start = self.secs = 0.0
+
+    def run(self, top, verbosity):
+        out('run-tests: start %s' % self.name)
+        with open(self.log, 'wb') as f:
+            self.start = time.monotonic()
+            self.proc = subprocess.Popen([sys.executable, '-I', '-c', MODULE, top, self.report, str(verbosity),
+                                          self.name], cwd=top, stdin=subprocess.DEVNULL, stdout=f,
+                                         stderr=subprocess.STDOUT)
+
+    def done(self):
+        rc = self.proc.poll()
+        if rc is None:
+            return False
+        self.secs = time.monotonic() - self.start
+        return True
+
+    def verdict(self):
+        """-> (report or None, [why it failed]); no why: it passed"""
+        rc, rep, why = self.proc.returncode, read_json(self.report), []
+        if rep is None:
+            why.append('no report')
+        else:
+            if not rep['ok']:
+                why.append('tests failed')
+            if rep['loaded'] != self.count:
+                why.append('loaded %d tests, discovery found %d' % (rep['loaded'], self.count))
+        if rc != 0:
+            why.append('killed by signal %d' % -rc if rc < 0 else 'rc %d' % rc)
+        return rep, why
+
+    def block(self, rep, why):
+        line = 'run-tests: %s: %s' % (self.name, 'FAILED (%s)' % ', '.join(why) if why else 'OK')
+        if rep is not None:
+            line += ': ran %d, %s' % (rep['run'], ', '.join('%s %d' % (k, rep[k]) for k in COUNTS))
+        out(RULE)
+        out('%s in %.1f s' % (line, self.secs))
+        out(THIN)
+        try:
+            with open(self.log, 'rb') as f:
+                text = f.read()
+        except OSError:
+            text = b''
+        sys.stdout.buffer.write(text if not text or text.endswith(b'\n') else text + b'\n')
+        sys.stdout.flush()
+
+
+def end(running):
+    """SIGINT or SIGTERM: end each module process this run started (SIGKILL: on SIGTERM a unittest process runs no
+    cleanup either), and print what each wrote so far"""
+    for m in running:
+        m.proc.kill()
+    for m in running:
+        m.proc.wait()
+        m.secs = time.monotonic() - m.start
+        m.block(None, ['interrupted'])
+
+
+def main(argv):
+    a = args_of(argv)
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+    top = os.getcwd()
+    starts = [os.path.join('tests', x) for x in a.areas] or ['tests']
+    work = tempfile.mkdtemp(prefix='run-tests-')
+    running = []
+    try:
+        t0 = time.monotonic()
+        listed, log = os.path.join(work, 'list.json'), os.path.join(work, 'list.out')
+        with open(log, 'wb') as f:
+            rc = subprocess.call([sys.executable, '-I', '-c', LIST, top, listed] + starts, cwd=top,
+                                 stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
+        with open(log, 'rb') as f:
+            text = f.read()
+        if text:
+            out('run-tests: discovery wrote:')
+            sys.stdout.buffer.write(text if text.endswith(b'\n') else text + b'\n')
+            sys.stdout.flush()
+        found = read_json(listed)
+        why = (['no report'] if found is None else []) + (['rc %d' % rc] if rc != 0 else [])
+        if why:
+            out('run-tests: FAILED: discovery (%s)' % ', '.join(why))
+            return 1
+        mods = [Module(n, name, count, work) for n, (name, count) in enumerate(found['modules']) if count > 0]
+        if not mods:
+            out('run-tests: FAILED: discovery found no test')
+            return 1
+        out('run-tests: %s: %d tests in %d modules, %d at a time' % (' '.join(starts), found['total'], len(mods), a.j))
+        pending = sorted(mods, key=lambda m: -m.count)       # the longest list of tests first; a stable sort
+        failed, reports = [], []
+        while (pending or running) and not stop:
+            while pending and len(running) < a.j and not stop:
+                m = pending.pop(0)
+                m.run(top, 2 if a.v else 1)
+                running.append(m)
+            ended = [m for m in running if m.done()]
+            for m in ended:
+                running.remove(m)
+                rep, why = m.verdict()
+                m.block(rep, why)
+                if rep is not None:
+                    reports.append(rep)
+                if why:
+                    failed.append('%s (%s)' % (m.name, ', '.join(why)))
+            if not ended:
+                time.sleep(0.05)
+        if stop:
+            names = [m.name for m in running + pending]
+            end(running)
+            running = []
+            out('run-tests: FAILED: interrupted by signal %d, %d of %d modules not done: %s'
+                % (stop[0], len(names), len(mods), ', '.join(names)))
+            return 1
+        out(RULE)
+        out('run-tests: the slowest modules:')
+        for m in sorted(mods, key=lambda m: -m.secs)[:10]:
+            out('run-tests: %8.1f s  %s' % (m.secs, m.name))
+        total = dict((k, sum(r[k] for r in reports)) for k in ('run', 'expected_failures', 'unexpected_successes')
+                     + COUNTS)
+        line = 'run-tests: ran %d tests in %d modules, %d at a time, in %.1f s: %s' % (
+            total['run'], len(mods), a.j, time.monotonic() - t0, ', '.join('%s %d' % (k, total[k]) for k in COUNTS))
+        for k in ('expected_failures', 'unexpected_successes'):
+            if total[k]:
+                line += ', %s %d' % (k.replace('_', ' '), total[k])
+        out(line)
+        if failed:
+            out('run-tests: FAILED: %d of %d modules: %s' % (len(failed), len(mods), ', '.join(failed)))
+            return 1
+        out('run-tests: OK')
+        return 0
+    finally:
+        for m in running:            # an error of this tool: end what it started
+            m.proc.kill()
+            m.proc.wait()
+        shutil.rmtree(work, True)
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
