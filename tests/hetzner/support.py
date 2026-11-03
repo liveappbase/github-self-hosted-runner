@@ -40,7 +40,7 @@ import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUN_LINE = ('docker run --rm --network none -v "$PWD":/w:ro -w /w IMAGE python3 -I -B -m unittest discover -s '
-            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl and ca-certificates; '
+            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl, jq and ca-certificates; '
             'the ubuntu rows of .github/workflows/release-check.yml run them so too)')
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 SYSTEM_BUNDLE = '/etc/ssl/certs/ca-certificates.crt'
@@ -87,7 +87,7 @@ needs_container = contained(verdict())
 
 
 def require_tools(test):
-    for p in (OPENSSL, REAL_CURL, SYSTEM_BUNDLE, '/usr/bin/sha256sum', '/usr/bin/python3'):
+    for p in (OPENSSL, REAL_CURL, SYSTEM_BUNDLE, '/usr/bin/sha256sum', '/usr/bin/python3', '/usr/bin/jq'):
         if not os.path.exists(p):
             test.fail('this container lacks %s, which these cells need (%s)' % (p, RUN_LINE))
 
@@ -684,9 +684,9 @@ say('runner stub: no answer for: %s\n' % ' '.join(a), 99)
 
 HZLIB = r'''# hzlib: shared by the pool cells' substitutes (tests/hetzner/support.py, Pool): the clock, runscaler's process
 # (systemd.json, and the lines it writes to runscaler's log), and the cell's hooks (hooks.json)
-import fcntl, json, os, signal, time
+import fcntl, json, os, re, signal, time
 SB = @SB@
-LOG = os.path.join(os.environ.get('HOME', '/nonexistent'), '.config', 'runner', 'runner.log')
+LOG =os.path.join(os.environ.get('HOME', '/nonexistent'), '.config', 'runner', 'runner.log')
 
 
 def load(name, default=None):
@@ -797,9 +797,24 @@ def act(a):
     elif a == 'edit-config':               # a person edits config.toml
         with open(os.path.join(os.path.dirname(LOG), 'config.toml'), 'a') as f:
             f.write('# a hand change\n')
-    elif a == 'edit-staged':               # the staged file changes after 03 validated it
-        with open(os.path.join(os.path.dirname(LOG), 'config.staged.toml'), 'a') as f:
+    elif a in ('edit-staged', 'edit-rollback'):   # the staged file (up's, back's) changes after it was validated
+        name = 'config.staged.toml' if a == 'edit-staged' else 'config.rollback.toml'
+        with open(os.path.join(os.path.dirname(LOG), name), 'a') as f:
             f.write('# changed after the validate\n')
+    elif a == 'edit-prev':                 # a person edits config.toml.prev, the rollback
+        with open(os.path.join(os.path.dirname(LOG), 'config.toml.prev'), 'a') as f:
+            f.write('# a hand change of the rollback\n')
+    elif a == 'edit-prev-image':           # ... or puts another image into both its runner-image lines
+        p = os.path.join(os.path.dirname(LOG), 'config.toml.prev')
+        with open(p) as f:
+            text = f.read()
+        with open(p, 'w') as f:
+            f.write(re.sub(r'(?m)^(runner-image = ".*@sha256:)[0-9a-f]{64}"$', r'\g<1>' + '37' * 32 + '"', text))
+    elif a == 'tick':                      # wait for the next whole second of the REAL clock (a state, not a time)
+        t = int(time.time())
+        while int(time.time()) <= t:
+            time.sleep(0.02)
+        event('tick %d' % int(time.time()))
     elif a == 'kill':                      # SIGKILL pool-image.sh's own process group, and nothing else
         g = os.getpgid(0)
         with open('/proc/%d/cmdline' % g, 'rb') as f:
@@ -942,6 +957,23 @@ if r.returncode == 0:
 sys.exit(r.returncode)
 '''
 
+TOUCH_STUB = r'''#!/usr/bin/python3 -I
+# touch, for the pool cells with hooks: the hooks of "touch:NAME" (NAME: the last argument's base name), the real touch,
+# then the hooks of "touch-done:NAME" (logged as the event "touch NAME")
+import os, subprocess, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+name = os.path.basename(a[-1]) if a else ''
+hzlib.event('touch ' + name)
+hzlib.fire('touch:' + name)
+r = subprocess.run(['/usr/bin/touch'] + a)
+if r.returncode == 0:
+    hzlib.fire('touch-done:' + name)
+sys.exit(r.returncode)
+'''
+
 DF_STUB = r'''#!/usr/bin/python3 -I
 # df, for the pool cells: `df -Pk PATH` answers df.json's {size_k, avail_k} in df's POSIX form (logged)
 import json, sys
@@ -956,11 +988,16 @@ print('/dev/sda1      %d %d %d %d%% /' % (d['size_k'], used, d['avail_k'], (100 
 '''
 
 JQ_STUB = r'''#!/usr/bin/python3 -I
-# jq, for the pool cells: `jq --version` prints jq.json's version; every other call is the real jq
+# jq, for the pool cells: `jq --version` prints jq.json's version (null: it prints nothing and fails, as a shell that
+# finds no jq does); every other call is the real jq
 import json, os, sys
 SB = @SB@
 if sys.argv[1:] == ['--version']:
-    print(json.load(open(SB + '/jq.json'))['version'])
+    v = json.load(open(SB + '/jq.json'))['version']
+    if v is None:
+        sys.stderr.write('jq: command not found\n')
+        sys.exit(127)
+    print(v)
     sys.exit(0)
 os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
 '''
@@ -1163,15 +1200,18 @@ class Pool(Sandbox):
 
     def hooks(self, *hooks):
         """The cell's hooks, each (AT, ACTION, ...): AT `journal:KEY` (after that journal line is synced), `mv:NAME`
-        or `mv-done:NAME` (around a rename onto NAME), `systemctl:stop-done` / `:start-done`; ACTION restart (an
-        independent restart), start, revive (the stopped process runs again), busy (/healthz turns busy), edit-config
-        (a hand edit), edit-staged, probe-lock (is the updater lock held?), kill (SIGKILL of pool-image.sh's process
-        group: only an unattended() run is one). An injection, AT with no ACTION: `ddfail:KEY` (the sync of that
-        journal line fails)."""
+        or `mv-done:NAME` (around a rename onto NAME), `touch:NAME` or `touch-done:NAME` (around a touch of NAME),
+        `systemctl:stop-done` / `:start-done`; ACTION restart (an independent restart), start, revive (the stopped
+        process runs again), busy (/healthz turns busy), edit-config (a hand edit), edit-staged, edit-rollback (back's
+        STAGED), edit-prev (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for
+        the next second of the REAL clock), probe-lock (is the updater lock held?), kill (SIGKILL of pool-image.sh's
+        process group: only an unattended() run is one). An injection, AT with no ACTION: `ddfail:KEY` (the sync of
+        that journal line fails)."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
         sb = repr(self.root)
         self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)
         self.write(self.path('stubs', 'mv'), MV_STUB.replace('@SB@', sb), 0o755)
+        self.write(self.path('stubs', 'touch'), TOUCH_STUB.replace('@SB@', sb), 0o755)
 
     def disk(self, size_k, avail_k):
         """`df -Pk` answers this size and free space (KiB)."""
@@ -1179,7 +1219,8 @@ class Pool(Sandbox):
         self.write(self.path('stubs', 'df'), DF_STUB.replace('@SB@', repr(self.root)), 0o755)
 
     def jq_version(self, version):
-        """`jq --version` prints VERSION; every other jq call is the image's jq."""
+        """`jq --version` prints VERSION (None: it prints nothing and fails, as when no jq is there); every other jq
+        call is the image's jq."""
         self.write(self.path('jq.json'), json.dumps({'version': version}))
         self.write(self.path('stubs', 'jq'), JQ_STUB.replace('@SB@', repr(self.root)), 0o755)
 

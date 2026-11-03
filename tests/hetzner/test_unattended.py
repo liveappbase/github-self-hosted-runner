@@ -4,21 +4,28 @@ D6; the changed-lines list, items 21, 24, 26 and "For S2b-2b"):
 - `up --unattended VERSION DIGEST`: under the updater lock, it journals runscaler's process (step 1), then the checks
   (FAMILY LINES from the live config, START STATE, DISK, the tested jq), `03-runscaler.sh render DIGEST STAGED` with
   PRE-VALIDATE's tries (API-ONLY after 3 tries counts as PASS; anything else: STOP before any restart, nothing
-  installed), D3 (STAGED differs from config.toml in the runner-image lines only), the IDLE pair through core/idle.jq;
-  then at once: `rename-start`, the rename of the staged file whose sha256 03 printed, `renamed`, a wait past the
+  installed), D3 (STAGED differs from config.toml in the runner-image lines only), the IDLE pair through core/idle.jq
+  (a core that cannot decide: `end`, no switch); then at once: THE BACKUP (config.toml.prev, a checked copy),
+  `rename-start`, the install time, the rename of the staged file whose sha256 03 printed, `renamed`, a wait past the
   `renamed` second, and the restart, unconditionally. Not idle: nothing staged, config.toml unchanged, exit 3.
+  config.toml already on DIGEST: no switch; done only when a process that started after its install runs it.
 - `back --unattended`: the rollback to config.toml.prev (the switch's journaled backup), PRE-VALIDATEd by the rollback
-  rules (NON-API: STOP ROLLBACK FAILED before any restart; UNKNOWN: no STOP, the caller tries again), no idle wait.
+  rules (NON-API: STOP ROLLBACK FAILED before any restart; UNKNOWN: no STOP, the caller tries again), no idle wait; its
+  own BACKUP (the pre-window config, in the window's folder) before the rename.
 - THE RESTART of both: `from`, `stopping`, the stop, `stopped` (the log position once the old process has exited and
   before the new one starts), `starting`, the start, `running` (the new process, seen started after `renamed`): what
   the updater hands the core as facts.restart {from, to, stopped}.
+- Each check of a file comes after the journal line of the step it guards, right before that step (a hand change
+  injected at each of those lines), and a copy is checked after it is made.
 - Around the rename: an independent restart before `rename-start`, between, with `renamed` missing, after `renamed`, and
   with the run delayed across the rename, each with a busy /healthz: none puts the old file back, and the next call
   finds the journal and the files the updater's next pass reads (that pass's restart is S2b-3's). AFTER THE INSTALL: a
   hand change between the rename and the restart gets no restart (`hand-change`, STOP HAND CHANGE, the journal open).
 
 Every cell runs the real scripts (pin lines rewritten) in a throwaway container (support.Pool), with a fake clock: no
-cell asserts a time it waited, only the order of the journal's lines and the clock reads the substitutes gave.
+cell asserts a time it waited, only the order of the journal's lines and the clock reads the substitutes gave. The
+one exception is InstallTime, on the REAL clock (the fake one starts ahead of every real mtime): it asserts the order
+of whole seconds, never a duration.
 """
 import fcntl
 import hashlib
@@ -41,7 +48,7 @@ SETS = ('linux-ci-main', 'linux-ci-small')
 SWITCH_KEYS = ['window', 'kind', 'version', 'digest', 'process', 'old', 'config-sha', 'staged', 'validate',
                'staged-sha', 'target', 'idle', 'backup', 'rename-start', 'renamed', 'from', 'stopping', 'stopped',
                'starting', 'running', 'closed']
-BACK_KEYS = ['window', 'kind', 'process', 'old', 'config-sha', 'staged', 'validate', 'staged-sha', 'target',
+BACK_KEYS = ['window', 'kind', 'process', 'old', 'config-sha', 'staged', 'validate', 'staged-sha', 'target', 'backup',
              'rename-start', 'renamed', 'from', 'stopping', 'stopped', 'starting', 'running', 'closed']
 
 
@@ -182,6 +189,10 @@ class Switch(unittest.TestCase):
         # then the stop
         ev = g.p.events()
         at = {e: i for i, e in reversed(list(enumerate(ev)))}
+        self.assertLess(at['journal backup'], at['mv config.toml.prev'])
+        self.assertLess(at['mv config.toml.prev'], at['journal rename-start'])
+        self.assertLess(at['journal rename-start'], at['touch config.staged.toml'])
+        self.assertLess(at['touch config.staged.toml'], at['mv config.toml'])
         self.assertLess(at['journal rename-start'], at['mv config.toml'])
         self.assertLess(at['mv config.toml'], at['journal renamed'])
         past = [i for i, e in enumerate(ev) if e.startswith('date ') and int(e.split()[1]) > renamed]
@@ -278,12 +289,24 @@ class Switch(unittest.TestCase):
                 self.assertIn('/home/root', ' '.join(g.p.lines('df')))     # RUN_USER's home: D1 and the registry
 
     def test_an_untested_jq_stops_new_work(self):
-        g = Rig(self)
-        g.p.jq_version('jq-9.9')
-        r = g.up()
-        g.stopped_with(r, 'untested jq', 'jq-9.9')
-        self.assertEqual(g.validates(), [])
-        self.assertEqual(g.healthz_reads(), [])
+        """`jq --version` must be a CORE row of core/TESTED_JQ: a version it does not list, a watchdog-only row (jq-1.6:
+        the core does not run under it), and no jq at all each STOP before the render. The STOP names the jq to test
+        (JQ=<its path>), and with no jq it names none (no empty `JQ=`): it says to install one. The control: the happy
+        path, under the image's jq (a core row)."""
+        for version, says in (('jq-9.9', 'jq-9.9'), ('jq-1.6', 'jq-1.6'), (None, 'TESTED_JQ')):
+            with self.subTest(version=version):
+                g = Rig(self)
+                g.p.jq_version(version)
+                r = g.up()
+                lines = g.stopped_with(r, 'untested jq', says)
+                self.assertEqual(g.validates(), [])
+                self.assertEqual(g.healthz_reads(), [])
+                stop = value(lines, 'stop')
+                if version is None:
+                    self.assertNotIn('JQ=', stop + r.stdout, 'a STOP with no jq names no JQ=')
+                    self.assertIn('install', stop)
+                else:
+                    self.assertRegex(stop, r'\(JQ=/\S+ python3 ', 'the STOP names the jq to test by its path')
 
     def test_a_pinned_file_that_is_not_this_release_s_stops(self):
         """The PINS: what 03 runs and installs, as ~/build holds it. Changed: STOP before 03 runs. The control: the happy
@@ -358,6 +381,48 @@ class Switch(unittest.TestCase):
         self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '), lines)
         self.assertNotIn('rename-start', keys(lines))
 
+    def test_a_hand_change_at_the_backup_line_is_hand_change_and_writes_no_rollback(self):
+        """Opus r1 F3: config.toml changed once `backup` is synced (before the copy): the COPY is checked against
+        `config-sha` after it is made, so the hand change becomes no rollback. A closed STOP HAND CHANGE, no
+        `rename-start`, no restart, config.toml the hand change, and no config.toml.prev (nor its temp copy) is left.
+        The control: the happy path, whose config.toml.prev is the window-start config (sha `config-sha`)."""
+        g = Rig(self)
+        g.p.hooks(('journal:backup', 'edit-config'))
+        r = g.up()
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(g.p.config(), g.old + '# a hand change\n')
+        self.assertFalse(os.path.lexists(g.prev), 'a rollback was written')
+        self.assertFalse(os.path.lexists(g.prev + '.tmp'))
+        self.assertFalse(os.path.lexists(g.staged))
+        self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+        self.assertIsNone(g.p.window())
+        (wid, lines), = g.p.closed()
+        self.assertEqual(keys(lines)[-3:], ['backup', 'stop', 'closed'], lines)
+        self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '), lines)
+        self.assertIn('STOP HAND CHANGE: ', r.stdout)
+
+    def test_a_core_that_cannot_decide_ends_the_window_and_switches_nothing(self):
+        """Opus r1 F2: the core is not pinned, so this branch alone keeps a core that fails, or that answers a verdict
+        other than idle and not-idle, from reading as IDLE: an idle.jq that does not compile, and one that answers
+        `wait`. Each: exit 1, the journal closed with `end the decision core could not decide IDLE: …`, no `idle` and no
+        `rename-start`, no stop or start, config.toml unchanged, STAGED removed. The control: the happy path, where the
+        core says idle and the switch happens."""
+        for why, prog in (('it does not compile', 'this is not jq (\n'),
+                          ('it answers wait', '{"verdict": "wait", "reason": "a test core that waits"}\n')):
+            with self.subTest(why):
+                g = Rig(self)
+                g.p.write(os.path.join(g.p.build, 'core', 'idle.jq'), prog)
+                r = g.up()
+                g.unchanged(r, 1)
+                self.assertIsNone(g.p.window())
+                (wid, lines), = g.p.closed()
+                self.assertEqual(keys(lines)[-2:], ['end', 'closed'], lines)
+                self.assertTrue(value(lines, 'end').startswith('the decision core could not decide IDLE: '), lines)
+                self.assertNotIn('idle', keys(lines))
+                self.assertNotIn('rename-start', keys(lines))
+                self.assertEqual(len(g.healthz_reads()), 2, 'the pair was read, and the core asked')
+                self.assertIn('END the decision core could not decide IDLE: ', r.stdout)
+
     def test_a_journal_line_that_is_not_synced_stops_before_its_step(self):
         """PLAN D1: each line is synced BEFORE its side effect, dd's exit status checked; a failure stops the window
         before that step, the journal open. `rename-start` not synced: no rename. `stopping`: no stop. The control: the
@@ -379,24 +444,48 @@ class Switch(unittest.TestCase):
                     self.assertEqual(g.p.images(), [ref(NEW)] * 2)
                 self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
 
-    def test_a_config_that_already_runs_the_digest_is_no_switch_and_its_rollback_stays(self):
-        """up --unattended of the image config.toml already runs (a second call): nothing to switch, so nothing renamed or
-        restarted, and config.toml.prev, the switch's rollback, is NOT overwritten with the candidate. The control: the
-        first call, which switched."""
-        g = Rig(self)
-        self.assertEqual(g.up().returncode, 0)
-        with open(g.prev) as f:
-            self.assertEqual(f.read(), g.old)
-        cand, unit = g.p.config(), g.p.unit_now()
-        r = g.up()
-        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
-        with open(g.prev) as f:
-            self.assertEqual(f.read(), g.old, 'the rollback was overwritten')
-        self.assertEqual(g.p.config(), cand)
-        self.assertEqual(g.p.unit_now()['pid'], unit['pid'])
-        lines = g.p.closed()[-1][1]
-        self.assertIn('already runs', value(lines, 'end'))
-        self.assertNotIn('rename-start', keys(lines))
+    def test_a_config_that_already_names_the_digest_is_no_switch_and_its_rollback_stays(self):
+        """up --unattended of the image config.toml already names (a second call): nothing to switch, so nothing renamed
+        or restarted, and config.toml.prev, the switch's rollback, is NOT overwritten with the candidate (Opus r1 F4):
+        - a runscaler that started after config.toml's install runs it: done, exit 0, `running` that process, closed;
+        - the unit stopped, or its process started at (or before) the install: not done (exit 1, `end`), and no line
+          says that it runs.
+        The control: the first call, to another digest, which switched."""
+        for why in ('a process started after the install runs it', 'the unit is stopped',
+                    'its process started at the install'):
+            with self.subTest(why):
+                g = Rig(self)
+                self.assertEqual(g.up().returncode, 0)
+                with open(g.prev) as f:
+                    self.assertEqual(f.read(), g.old)
+                prev = os.stat(g.prev).st_mtime_ns
+                if why == 'the unit is stopped':
+                    g.p.set_unit(active=False)
+                elif why == 'its process started at the install':
+                    g.p.set_unit(start=int(os.stat(g.p.rpath('config.toml')).st_mtime))
+                cand, unit = g.p.config(), g.p.unit_now()
+                calls = g.calls('stop') + g.calls('start') + g.calls('restart')
+                r = g.up()
+                with open(g.prev) as f:
+                    self.assertEqual(f.read(), g.old, 'the rollback was overwritten')
+                self.assertEqual(os.stat(g.prev).st_mtime_ns, prev)
+                self.assertEqual(g.p.config(), cand)
+                self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), calls)
+                self.assertIsNone(g.p.window())
+                lines = g.p.closed()[-1][1]
+                self.assertNotIn('rename-start', keys(lines))
+                if why == 'a process started after the install runs it':
+                    self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                    self.assertEqual(keys(lines)[-2:], ['running', 'closed'], lines)
+                    self.assertEqual(value(lines, 'running'), '%d %d' % (unit['pid'], unit['start']))
+                    self.assertIn('POOL IMAGE DONE (up --unattended): %s' % ref(NEW), r.stdout)
+                    continue
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertEqual(keys(lines)[-2:], ['end', 'closed'], lines)
+                self.assertNotIn('running', keys(lines))
+                for text in (r.stdout, '\n'.join(lines)):
+                    self.assertNotIn('already runs', text)
+                    self.assertNotIn('DONE', text)
 
     def test_an_open_window_journal_refuses_and_changes_nothing(self):
         g = Rig(self)
@@ -672,8 +761,8 @@ class AroundTheRename(unittest.TestCase):
 class BackRig(Rig):
     """A Rig after a switch to NEW (config.toml.prev holds the old config), /healthz busy."""
 
-    def __init__(self, test):
-        super().__init__(test)
+    def __init__(self, test, clock=True):
+        super().__init__(test, clock)
         r = self.up()
         test.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.candidate = self.p.config()
@@ -702,11 +791,18 @@ class Back(unittest.TestCase):
         self.assertIn('POOL IMAGE DONE (back --unattended): %s' % ref(OLD), r.stdout)
         self.assertEqual(g.p.config(), g.old)
         self.assertEqual(g.healthz_reads(), [], 'no idle wait')
-        lines = g.p.closed()[-1][1]
+        wid, lines = g.p.closed()[-1]
         self.assertEqual(keys(lines), BACK_KEYS, lines)
         self.assertEqual(value(lines, 'kind'), 'rollback')
-        self.assertEqual(value(lines, 'old'), ref(OLD))
+        self.assertEqual(value(lines, 'old'), ref(NEW), 'old: the image config.toml names at the window start, as in up')
         self.assertEqual(value(lines, 'config-sha'), sha(g.candidate))
+        # the BACKUP (Codex r1 F3): the pre-window config, in the window's folder, 0600, its sha `config-sha`
+        bk = value(lines, 'backup')
+        self.assertEqual(os.path.dirname(bk), os.path.join(g.p.STATE, 'windows', wid + '.d'))
+        with open(bk) as f:
+            self.assertEqual(f.read(), g.candidate)
+        self.assertEqual(sha256_file(bk), value(lines, 'config-sha'))
+        self.assertEqual(os.stat(bk).st_mode & 0o777, 0o600)
         self.assertEqual(value(lines, 'staged-sha'), sha(g.old))
         self.assertEqual(value(lines, 'target'), ' '.join('%s=%s' % (s, ref(OLD)) for s in SETS))
         self.assertEqual(len(g.validates()), 1)
@@ -805,6 +901,263 @@ class Back(unittest.TestCase):
         self.assertEqual(keys(lines)[-2:], ['hand-change', 'stop'])
         self.assertEqual(g.calls('stop') + g.calls('start'), [])
 
+    def test_a_hand_change_during_the_rollback_s_validate_is_hand_change(self):
+        """Opus r1 F5 (its mutant M2): config.toml changed while back validates its copy: the check of the backup's
+        copy, right after `backup` is synced, finds it. A closed STOP HAND CHANGE, no `rename-start`, config.toml the
+        hand change, nothing restarted. The control: the first cell."""
+        g = BackRig(self)
+        g.p.hooks(('journal:validate', 'edit-config'))
+        r = g.back()
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(g.p.config(), g.candidate + '# a hand change\n')
+        self.assertFalse(os.path.lexists(g.p.rpath('config.rollback.toml')))
+        self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+        self.assertIsNone(g.p.window())
+        lines = g.p.closed()[-1][1]
+        self.assertEqual(keys(lines)[-2:], ['stop', 'closed'], lines)
+        self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '), lines)
+        self.assertNotIn('rename-start', keys(lines))
+
+    def test_a_rollback_copy_changed_after_its_validate_is_rollback_failed(self):
+        """Opus r1 F5 (its mutant M3): back's copy (STAGED) changed after its validate: its check right before the
+        rename finds it. A closed STOP ROLLBACK FAILED (config.toml is the window's own pre-window file), nothing
+        renamed or restarted. The control: the first cell."""
+        g = BackRig(self)
+        g.p.hooks(('journal:validate', 'edit-rollback'))
+        r = g.back()
+        lines = g.kept(r)
+        self.assertTrue(value(lines, 'stop').startswith('ROLLBACK FAILED: '), lines)
+        self.assertIn('changed after its validate', value(lines, 'stop'))
+        self.assertNotIn('renamed', keys(lines))
+
+    def test_a_rollback_changed_before_its_copy_is_rollback_failed(self):
+        """A copy is checked after it is made: config.toml.prev changed by hand once `staged` is synced (after back
+        read the rollback's image and asked the registry for it, before it copies the file): the copy, the file back
+        validates and installs, is what is checked (one image, the one asked for; config.toml's other lines). A line
+        that is no image line, and another image in both its image lines: a closed STOP ROLLBACK FAILED, nothing
+        validated or renamed. The control: the first cell."""
+        for why, edit in (('a line that is no image line', 'edit-prev'), ('another image', 'edit-prev-image')):
+            with self.subTest(why):
+                g = BackRig(self)
+                g.p.hooks(('journal:staged', edit))
+                r = g.back()
+                lines = g.kept(r)
+                self.assertTrue(value(lines, 'stop').startswith('ROLLBACK FAILED: '), lines)
+                self.assertNotIn('rename-start', keys(lines))
+                self.assertEqual(g.validates(), [], 'the changed copy was validated')
+
+
+def mode_rig(test, mode, clock=True):
+    """(the rig, its run, STAGED's base name) for MODE: up on a Rig, back on a BackRig."""
+    if mode == 'up':
+        g = Rig(test, clock)
+        return g, g.up, 'config.staged.toml'
+    g = BackRig(test, clock)
+    return g, g.back, 'config.rollback.toml'
+
+
+@needs_container
+class EachCheckRightBeforeItsStep(unittest.TestCase):
+    """Codex r1 F1, Codex r1 F2 and the class: each check of a file comes AFTER the journal line of the step it guards
+    and right before that step, so a hand change injected at that line is seen before the step, in up and in back. What
+    the updater's RECOVER (S2b-3) reads then: a closed journal only where config.toml is provably the window's own
+    pre-window file (checked); else the journal stays OPEN with `hand-change`."""
+
+    def test_a_staged_file_changed_after_rename_start_is_not_renamed(self):
+        """Codex r1 F1: STAGED changed once `rename-start` is synced. Its check right before the rename finds it:
+        nothing renamed, config.toml the pre-window file (checked just before), so the journal is closed with the STOP
+        (up: check failed; back: ROLLBACK FAILED) and no `renamed`; no restart. The control: an unchanged STAGED
+        installs exactly the validated sha (up: the one 03's render printed)."""
+        for mode in ('up', 'back'):
+            for edit in (True, False):
+                with self.subTest(mode, edit=edit):
+                    g, run, staged = mode_rig(self, mode)
+                    pre = g.p.config()
+                    if edit:
+                        g.p.hooks(('journal:rename-start', 'edit-staged' if mode == 'up' else 'edit-rollback'))
+                    r = run()
+                    if not edit:
+                        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                        wid, lines = g.p.closed()[-1]
+                        self.assertEqual(sha256_file(g.p.rpath('config.toml')), value(lines, 'staged-sha'))
+                        if mode == 'up':
+                            out = os.path.join(g.p.STATE, 'windows', wid + '.d', 'validate-pre-1.out')
+                            with open(out) as f:
+                                printed = re.findall(r'^03 STAGED \(render\): .* sha256 ([0-9a-f]{64})\. ', f.read(), re.M)
+                            self.assertEqual(printed, [value(lines, 'staged-sha')])
+                        continue
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    self.assertEqual(g.p.config(), pre, 'the changed STAGED was renamed over config.toml')
+                    self.assertFalse(os.path.lexists(g.p.rpath(staged)))
+                    self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+                    self.assertIsNone(g.p.window())
+                    wid, lines = g.p.closed()[-1]
+                    self.assertEqual(keys(lines)[-2:], ['stop', 'closed'], lines)
+                    self.assertIn('rename-start', keys(lines))
+                    self.assertNotIn('renamed', keys(lines))
+                    self.assertTrue(value(lines, 'stop').startswith(
+                        'check failed: ' if mode == 'up' else 'ROLLBACK FAILED: '), lines)
+
+    def test_a_hand_change_after_rename_start_is_not_renamed_over(self):
+        """config.toml changed once `rename-start` is synced: its check right before the rename finds it, so the rename
+        does not replace the hand change and nothing restarts: `hand-change` (its sha), STOP HAND CHANGE, and the
+        journal stays OPEN (config.toml is no longer the pre-window file: RECOVER reads it, sha neither `config-sha` nor
+        `staged-sha`: leave as found). runscaler runs on as it was. The control: the happy path."""
+        for mode in ('up', 'back'):
+            with self.subTest(mode):
+                g, run, staged = mode_rig(self, mode)
+                pre, unit = g.p.config(), g.p.unit_now()
+                g.p.hooks(('journal:rename-start', 'edit-config'))
+                r = run()
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertEqual(g.p.config(), pre + '# a hand change\n', 'the rename replaced the hand change')
+                self.assertFalse(os.path.lexists(g.p.rpath(staged)))
+                self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+                self.assertEqual(g.p.unit_now()['pid'], unit['pid'])
+                lines = g.p.window()
+                self.assertIsNotNone(lines, 'the journal stays open')
+                self.assertEqual(keys(lines)[-3:], ['rename-start', 'hand-change', 'stop'], lines)
+                self.assertEqual(value(lines, 'hand-change'), sha256_file(g.p.rpath('config.toml')))
+                self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '))
+                self.assertIn('STOP HAND CHANGE: ', r.stdout)
+
+    def test_a_hand_change_at_the_stop_or_the_start_gets_neither(self):
+        """Codex r1 F2 and the stop: config.toml changed once `stopping` is synced: its check right before the stop
+        finds it, so nothing is stopped (the old process runs its own config on); once `starting` is synced: nothing is
+        started (runscaler stays stopped). Each: `hand-change`, STOP HAND CHANGE, the journal OPEN, no `running`. Up
+        and back. The control: the happy path, where the target starts."""
+        for mode in ('up', 'back'):
+            for at, stops in (('journal:stopping', 0), ('journal:starting', 1)):
+                with self.subTest(mode, at=at):
+                    g, run, staged = mode_rig(self, mode)
+                    g.p.hooks((at, 'edit-config'))
+                    r = run()
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    lines = g.p.window()
+                    self.assertIsNotNone(lines, 'the journal stays open')
+                    self.assertEqual(keys(lines)[-3:], [at.split(':')[1], 'hand-change', 'stop'], lines)
+                    self.assertNotIn('running', keys(lines))
+                    self.assertEqual(value(lines, 'hand-change'), sha256_file(g.p.rpath('config.toml')))
+                    self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '))
+                    self.assertTrue(g.p.config().endswith('# a hand change\n'))
+                    self.assertEqual((len(g.calls('stop')), len(g.calls('start')), len(g.calls('restart'))),
+                                     (stops, 0, 0))
+                    self.assertEqual(g.p.unit_now()['active'], stops == 0)
+
+
+@needs_container
+class BackAroundTheRename(unittest.TestCase):
+    """Codex r1 F3, PLAN D1 + RECOVER step 4: a rollback window keeps the config it replaces. A back killed at each
+    point around the rename, and its journal's newest line then cut in half (a power loss): each journal that may have
+    renamed names `backup P`, and P holds the pre-window config's bytes (sha `config-sha`, 0600): what RECOVER puts
+    back when the rollback target fails validate. Killed once `backup` is synced (before the copy): no `rename-start`,
+    and config.toml is the pre-window file itself. The control: Back's first cell (the happy path's backup)."""
+
+    def test_a_back_killed_around_the_rename_leaves_its_backup(self):
+        for at, last_key, renamed in (('journal:rename-start', 'rename-start', False),
+                                      ('mv-done:config.toml', 'rename-start', True), ('journal:renamed', 'renamed', True)):
+            with self.subTest(at):
+                g = BackRig(self)
+                g.p.hooks((at, 'kill'))
+                r = g.back()
+                self.assertEqual(r.returncode, -9, r.stdout[-3000:] + r.stderr)
+                self.assertIn('hook %s: kill' % at, g.p.events())
+                with open(os.path.join(g.p.STATE, 'window')) as f:
+                    text = f.read()
+                self.assertEqual(keys(text.split('\n')[:-1])[-1], last_key)
+                csha = sha256_file(g.p.rpath('config.toml'))
+                for cut in (False, True):
+                    t = text
+                    if cut:                                  # the newest line half written
+                        last = t[:-1].rsplit('\n', 1)[1]
+                        t = t[:len(t) - 1 - len(last) // 2]
+                    lines = t.split('\n')[:-1]               # whole lines only: a reader drops a cut one
+                    with self.subTest(at, cut=cut):
+                        bk = value(lines, 'backup')
+                        self.assertIsNotNone(bk, lines)
+                        with open(bk) as f:
+                            self.assertEqual(f.read(), g.candidate, 'the backup is not the pre-window config')
+                        self.assertEqual(sha256_file(bk), value(lines, 'config-sha'))
+                        self.assertEqual(os.stat(bk).st_mode & 0o777, 0o600)
+                        self.assertEqual(csha, value(lines, 'staged-sha') if renamed else value(lines, 'config-sha'))
+
+    def test_a_back_killed_at_its_backup_line_renamed_nothing(self):
+        g = BackRig(self)
+        g.p.hooks(('journal:backup', 'kill'))
+        r = g.back()
+        self.assertEqual(r.returncode, -9, r.stdout[-3000:] + r.stderr)
+        lines = g.p.window()
+        self.assertEqual(keys(lines)[-1], 'backup', lines)
+        self.assertNotIn('rename-start', keys(lines))
+        self.assertEqual(g.p.config(), g.candidate)
+        self.assertEqual(sha256_file(g.p.rpath('config.toml')), value(lines, 'config-sha'))
+
+
+@needs_container
+class InstallTime(unittest.TestCase):
+    """Opus r1 F1, PLAN D1: the Hetzner install time is the journaled `renamed` epoch, never the staged file's render or
+    copy time. config.toml's mtime (what started_after reads) is set by the clock once `rename-start` is synced and
+    before the rename: rename-start's second <= its second <= renamed's. These cells run on the REAL clock (the fake
+    one starts ahead of every real mtime, so it cannot place a start between a file's mtime and its rename); they
+    assert the order of whole seconds, never a duration."""
+
+    def test_the_install_time_is_between_rename_start_and_renamed(self):
+        """up and back, each with a whole second between the render or copy and `rename-start` (tick), and another
+        after the time is set: config.toml's mtime second is rename-start's or later and renamed's or earlier, and
+        the time is set after `rename-start` and before the rename."""
+        for mode in ('up', 'back'):
+            with self.subTest(mode):
+                g, run, staged = mode_rig(self, mode, clock=False)
+                g.p.hooks(('journal:idle' if mode == 'up' else 'journal:validate', 'tick'),
+                          ('touch-done:' + staged, 'tick'))
+                r = run()
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                lines = g.p.closed()[-1][1]
+                rs, rn = int(value(lines, 'rename-start')), int(value(lines, 'renamed'))
+                m = int(os.stat(g.p.rpath('config.toml')).st_mtime)
+                self.assertLessEqual(rs, m, 'the install time is before rename-start: the render or copy time?')
+                self.assertLessEqual(m, rn)
+                ev = g.p.events()
+                self.assertLess(ev.index('journal rename-start'), ev.index('touch ' + staged))
+                self.assertLess(ev.index('touch ' + staged), ev.index('mv config.toml'))
+
+    def cut_back(self, *hooks):
+        """A switch, then a back cut right after `renamed` (SIGKILL: no restart of its own), its journal then closed as
+        a RECOVER that restarts nothing would close it, and back again: (the rig, the unit after the cut, the cut
+        window's lines, the second back's result and journal)."""
+        g = BackRig(self, clock=False)
+        g.p.hooks(*hooks)
+        r = g.back()
+        self.assertEqual(r.returncode, -9, r.stdout[-3000:] + r.stderr)
+        lines = g.p.window()
+        self.assertEqual(keys(lines)[-1], 'renamed', lines)
+        self.assertEqual(g.p.config(), g.old, 'config.toml is the rollback target')
+        unit = g.p.unit_now()
+        self.assertEqual(unit['independent'], 1)
+        os.rename(os.path.join(g.p.STATE, 'window'), os.path.join(g.p.STATE, 'windows', value(lines, 'window')))
+        calls = g.calls('stop') + g.calls('start') + g.calls('restart')
+        r = g.back()
+        self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), calls, 'the second back restarted')
+        return g, unit, lines, r, g.p.closed()[-1][1]
+
+    def test_a_runscaler_start_before_the_rename_is_not_the_rollback_s(self):
+        """Opus r1 F1 (p1x): an independent restart in a whole second after back's copy and at or before `rename-start`:
+        that process read the candidate, so the next back must not report it as running the rollback: no `running`
+        of it, exit != 0."""
+        g, unit, lines, r, last = self.cut_back(('journal:validate', 'tick', 'restart'), ('journal:renamed', 'kill'))
+        self.assertLessEqual(unit['start'], int(value(lines, 'rename-start')))
+        self.assertNotEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertNotIn('running', keys(last), last)
+        self.assertNotIn('DONE', r.stdout)
+
+    def test_a_runscaler_start_after_renamed_is_the_rollback_s(self):
+        """The control (p1c): the restart in a whole second after `renamed`: that process read the rollback, so the next
+        back is done with no restart: exit 0, `running` that process."""
+        g, unit, lines, r, last = self.cut_back(('journal:renamed', 'tick', 'restart', 'kill'))
+        self.assertGreater(unit['start'], int(value(lines, 'renamed')))
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(value(last, 'running'), '%d %d' % (unit['pid'], unit['start']))
+
 
 class Text(unittest.TestCase):
     def header(self):
@@ -826,8 +1179,18 @@ class Text(unittest.TestCase):
         sec = text.split('\n## The updater\'s switch and rollback\n', 1)[1].split('\n## ', 1)[0]
         self.assertIn('~/.local/state/runner-updater/window', sec)
         self.assertIn("ssh <RS_USER>@<host> 'bash ~/build/setup/pool-image.sh back --unattended'", sec)
-        for k in ('rename-start', 'renamed', 'stopped', 'running', 'hand-change'):
+        for k in ('rename-start', 'renamed', 'stopped', 'running', 'hand-change', 'backup'):
             self.assertIn('`%s' % k, sec)
+        self.assertIn('config.toml.backup', sec, "back's backup of the config it replaces")
+
+    def test_the_readme_s_prerequisites_name_a_tested_jq(self):
+        """Codex r1 F4: the unattended switch STOPs under a jq that core/TESTED_JQ does not list for the core, so
+        Install's prerequisites name jq and that list."""
+        with open(README) as f:
+            need = [l for l in f.read().splitlines() if l.startswith('You need: ')]
+        self.assertEqual(len(need), 1)
+        self.assertIn('`jq`', need[0])
+        self.assertIn('core/TESTED_JQ', need[0])
 
     def test_the_install_line_ships_the_core(self):
         with open(README) as f:
