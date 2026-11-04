@@ -56,13 +56,17 @@
 #            facts, log, healthz, --arg now). The state they read is PASSDIR/state.json, a copy of the state's `core`,
 #            written back by rename after idle and after r1, so a later program reads it; only when all four decided
 #            does it go into STATE (`core`, with the `restart` member removed in the same write: it is handed over
-#            once). A program that exits non-zero, or prints no JSON object with a verdict and lines: "runner-updater:
-#            core could not decide (PROGRAM)", exit 1, and STATE is as it was. Then what it WOULD do: "would roll back
-#            hz-docker" (r1's rollback), "would accept hz-docker" (keep's accept), "would hold hz-docker: STOP JOBS FAIL
-#            ON THE NEW IMAGE" or "... STOP NO EVIDENCE" (keep), and ONE switch line: "would switch hz-docker" when it
-#            has no open candidate, no STOP of the state holds it and idle.jq said idle, else "would not switch" and
-#            the first of those that holds. No runner release is read here (the build pass is S2b-3b's), so the switch
-#            line says only that the pool could take one now. Each program's output stays in PASSDIR/PROGRAM.json.
+#            once). A program that exits non-zero, or prints no JSON object with lines and a verdict core/README.md
+#            names for it (idle: idle or not-idle; r1, keep, status: ok; or wait): "runner-updater: core could not
+#            decide (PROGRAM)", exit 1, and STATE is as it was. A program that answers `wait` (the core's own state is
+#            of a format it does not read: core/README.md) decided nothing: "runner-updater: WAIT the decision core
+#            waits ...", exit 4, and STATE is as it was (its `restart` member too). Then what it WOULD do: "would
+#            roll back hz-docker" (r1's rollback), "would accept hz-docker" (keep's accept), "would hold hz-docker:
+#            STOP JOBS FAIL ON THE NEW IMAGE" or "... STOP NO EVIDENCE" (keep), and ONE switch line: "would switch
+#            hz-docker" when it has no open candidate, no STOP of the state holds it and idle.jq said idle, else
+#            "would not switch" and the first of those that holds. No runner release is read here (the build pass is
+#            S2b-3b's), so the switch line says only that the pool could take one now. Each program's output stays in
+#            PASSDIR/PROGRAM.json.
 # THE JQ CHECK: `jq --version` must be a row of core/TESTED_JQ for the area core (runner-facts.sh's tested_jq), else
 #   "STOP untested jq" and exit 3: no core program runs (status, and a pass that is ON; an OFF pass ends before it).
 #
@@ -78,10 +82,12 @@
 #   3. proc after: as 1, after the capture (core/README.md, "Ownership by position").
 #   4. config: config.toml through ONE open (runner-facts.sh's config_read): `sets` (every [[scaleset]] block's name)
 #      and lines {SET: IMAGE}; a config whose lines the core would read wrongly is no facts. installed = the `renamed`
-#      epoch of the newest closed window journal (WINDOWS) that renamed a file of config.toml's sha into place
-#      (runner-facts.sh's install_time; PLAN D1, the Hetzner install time), else config.toml's mtime (a hand install:
-#      pool-image.sh's hand path restarts only after that second). It is read after the process: a config installed
-#      after the process started has a later time then, which proves nothing (the safe direction).
+#      epoch of the newest closed window journal (WINDOWS) that renamed a file of config.toml's sha into place, unless
+#      config.toml's mtime is later (the same bytes written again after that window: `03-runscaler.sh real DIGEST`
+#      restarts nothing), else config.toml's mtime (a hand install: pool-image.sh's hand path restarts only after that
+#      second) (runner-facts.sh's install_time; PLAN D1, the Hetzner install time). It is never earlier than the file's
+#      own mtime, and it is read after the process: a config installed after the process started has a later time
+#      then, which proves nothing (the safe direction).
 #   5. families: {"hz-docker": {provider: "docker", sets: [MAIN_SET, SMALL_SET], candidate, back_until}}, the last two
 #      the state's; stops: the state's STOPs of hz-docker; restart: the state's `restart` member, or null.
 #   6. healthz: runscaler's /healthz read twice, 3 s apart (runner-facts.sh's healthz_pair), one JSON line each.
@@ -89,9 +95,10 @@
 # DIFFERS from the Studio's pass: no protected list to rewrite, no report command and no observe file, no release
 #   check; the process is systemd's MainPID and ActiveEnterTimestamp (one read), not ps; /healthz is the host
 #   config's port on 127.0.0.1, as pool-image.sh reads it, not the config's health keys; no pool-size rule (a Tart
-#   rule); the install time is a window's journaled `renamed` epoch when a window installed config.toml; no rule for a
-#   folder it cannot search (the Studio's guards the protected list and the pins, which this host has none of: here
-#   a state behind such a folder reads as fresh, OFF, and nothing acts while OFF); the lock is flock(1) on fd 9.
+#   rule); the install time is a window's journaled `renamed` epoch when a window installed config.toml (and nothing
+#   wrote it later); a log-level other than info or debug is no facts (runscaler then logs no finished job); no rule
+#   for a folder it cannot search (the Studio's guards the protected list and the pins, which this host has none of:
+#   here a state behind such a folder reads as fresh, OFF, and nothing acts while OFF); the lock is flock(1) on fd 9.
 #
 # Exit codes:
 #   0  done; also a pass that finds the lock held or the updater OFF
@@ -99,11 +106,12 @@
 #      state it cannot write, the core could not decide, RECOVER needed)
 #   2  usage
 #   3  STOP untested jq
-#   4  WAIT: a state of another format, or with a member this release does not read
+#   4  WAIT: a state of another format, or with a member this release does not read; a pass whose decision core waits
 # Constants:
 #   PATH        its own, the system folders, set first: a caller's PATH (the watchdog's `ssh RS_USER@HOST PATH=...
 #               runner-updater status`, a timer, a terminal) changes nothing, and its #! line names /bin/bash, so no
-#               PATH is read even to find bash
+#               PATH is read even to find bash. To FIND it by its bare name, a caller's PATH names ~/bin (the
+#               watchdog's --hz line: linux-docker/README.md)
 #   B           this release's linux-docker/, ~/build (pool-image.sh's): CORE = B/core, and the sourced
 #               B/setup/runner-release.sh (RR_LOCK, rr_lock) and B/setup/runner-facts.sh (the measuring helpers)
 #   R CFG       runscaler's folder, ~/.config/runner (runner.log, runner.log.1), and its config.toml
@@ -348,8 +356,10 @@ collect() {
   head=${cr%%$'\n'*} js=${cr#*$'\n'}
   [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { REPLY="cannot read $CFG"; return 1; }
   mtime=${BASH_REMATCH[1]} sha=${BASH_REMATCH[2]}
-  if inst=$(install_time "$sha" "$WINDOWS"); then say "config: installed at $inst (the window journal that renamed it into place)"
-  else inst=$mtime; say "config: installed at $inst (its mtime: no window journal renamed it into place)"; fi
+  inst=$(install_time "$sha" "$mtime" "$WINDOWS")
+  [[ $inst =~ ^([0-9]+)\ (.+)$ ]] || { REPLY="cannot read the install time of $CFG"; return 1; }
+  inst=${BASH_REMATCH[1]}
+  say "config: installed at $inst (${BASH_REMATCH[2]})"
   # 6: the /healthz pair
   : > "$d/healthz.json" || { REPLY="cannot write $d/healthz.json"; return 1; }
   healthz_pair "$d/healthz.json"
@@ -366,16 +376,20 @@ collect() {
          stops: ($h.stops // [])}' > "$d/facts.json" 2> /dev/null || { REPLY="jq could not write $d/facts.json"; return 1; }
 }
 
-# PROGRAM's output in PASSDIR is one decision: one JSON object with a verdict and lines
+# PROGRAM's output in PASSDIR is one answer: one JSON object with lines and a verdict core/README.md names for that
+# program ("The programs' outputs"): its decisions, or `wait` (which is none: the caller WAITs)
 decided() {
-  jq -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].verdict | type) == "string"
-            and (.[0].lines | type) == "array"' "$PASSDIR/$1.json" > /dev/null 2>&1
+  local v="ok wait"
+  [ "$1" != idle ] || v="idle not-idle wait"
+  jq -e -s --arg v "$v" 'length == 1 and (.[0] | type) == "object" and (.[0].lines | type) == "array"
+            and (.[0].verdict as $x | ($x | type) == "string" and any($v | split(" ")[]; . == $x))' \
+    "$PASSDIR/$1.json" > /dev/null 2>&1
 }
 
 # NOW: idle, r1, keep and status on PASSDIR's five inputs (the header: pass); each one's verdict and reason printed (r1
 # and keep: each family's too), then status.jq's lines
 run_core() {
-  local d=$PASSDIR prog rc
+  local d=$PASSDIR prog rc why
   for prog in idle r1 keep status; do
     jq -n -L "$CORE/lib" -f "$CORE/$prog.jq" --slurpfile state "$d/state.json" --slurpfile facts "$d/facts.json" \
       --rawfile log "$d/log.txt" --slurpfile healthz "$d/healthz.json" --arg now "$1" > "$d/$prog.json" 2> "$d/$prog.err" < /dev/null
@@ -384,6 +398,10 @@ run_core() {
       say "core could not decide ($prog): exit $rc$(head -n 1 "$d/$prog.err" 2> /dev/null | sed 's/^/: /')"
       say "the pass did nothing: $STATE is as it was"
       exit 1
+    fi
+    if [ "$(jq -r '.verdict' "$d/$prog.json")" = wait ]; then   # its own state is of another format: no decision
+      why=$(jq -r --arg p "$prog" '.lines[0] // "\($p): \(.reason)" | tostring' "$d/$prog.json" 2> /dev/null | head -n 1)
+      wait4 "the decision core waits ($why): this pass decides nothing, and $STATE is as it was"
     fi
     if [ "$prog" = idle ] || [ "$prog" = r1 ]; then   # the new core state, for the next program of this pass: by rename
       jq -e '.state | if type == "object" then . else error("no state") end' "$d/$prog.json" > "$d/state.json.new" 2> /dev/null \

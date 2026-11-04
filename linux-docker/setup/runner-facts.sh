@@ -40,11 +40,18 @@
 #                        line outside a [[scaleset]] block (a table after it, [scaleset.docker], ends the block); a
 #                        name or runner-image line that is not a plain "..." string; a top-level log-file key, or a
 #                        log-format other than "text" (runscaler would then write no runner.log the core reads, and a
-#                        quiet log would look like a healthy one). It reads no pool-size (a Tart rule).
-#   install_time SHA DIR the INSTALL TIME of a config whose sha256 is SHA (PLAN D1, clocks): the `renamed` epoch of the
-#                        newest closed window journal in DIR (a file named YYYYmmddHHMMSS-PID) whose last `staged-sha`
-#                        is SHA and that has a `renamed` line (its last): that window renamed this file into place. No
-#                        such journal: rc 1 (the caller takes config.toml's mtime: a hand install)
+#                        quiet log would look like a healthy one); a top-level log-level other than "info" (what 03
+#                        renders) or "debug": runscaler accepts debug, info, warn and error, and at warn or error it
+#                        writes no INFO record, so no job-completed (the proof of life R1 and KEEP read). It reads no
+#                        pool-size (a Tart rule).
+#   install_time SHA MTIME DIR
+#                        the INSTALL TIME of a config whose sha256 is SHA and whose mtime (whole seconds) is MTIME (PLAN
+#                        D1, clocks), then the why: "EPOCH WHY". R = the `renamed` epoch of the newest closed window
+#                        journal in DIR (a file named YYYYmmddHHMMSS-PID) whose last `staged-sha` is SHA and that has a
+#                        `renamed` line (its last). A window's own install leaves the file's mtime at or before R (its
+#                        touch comes after `rename-start`, its `renamed` after the rename): then R. An mtime AFTER R is
+#                        a later write of the same bytes (`03-runscaler.sh real DIGEST`, which restarts nothing): then
+#                        MTIME, never a time earlier than the file itself. No such journal: MTIME (a hand install)
 
 proc_now() {
   local o k v s= p= a=
@@ -223,6 +230,10 @@ for n, l in enumerate(text.split("\n"), 1):
     elif top and key("log-format").match(l) and not re.fullmatch(WS + "log-format" + WS + "=" + WS + "\"text\"" + TAIL, l):
         no("%s line %d: log-format is not \"text\": runscaler then writes records the core does not read, so R1 would "
            "be blind while the facts look normal; set log-format = \"text\" or remove the line" % (p, n))
+    elif top and key("log-level").match(l) and not re.fullmatch(WS + "log-level" + WS + "=" + WS + "\"(info|debug)\"" + TAIL, l):
+        no("%s line %d: log-level is not \"info\" or \"debug\": runscaler then writes no INFO record (no job-completed "
+           "record, the proof of life R1 and KEEP read), so a quiet log would look like a healthy one; set log-level "
+           "= \"info\" (what 03-runscaler.sh renders) or remove the line" % (p, n))
 end()
 print(int(st.st_mtime), hashlib.sha256(data).hexdigest())
 print(json.dumps({"sets": sets, "lines": lines}, separators=(",", ":")))
@@ -231,12 +242,15 @@ print(json.dumps({"sets": sets, "lines": lines}, separators=(",", ":")))
 
 install_time() {
   local f s r best=
-  for f in "$2"/*; do
+  for f in "$3"/*; do
     [[ ${f##*/} =~ ^[0-9]{14}-[0-9]+$ ]] && [ -f "$f" ] && [ ! -L "$f" ] || continue
     s=$(sed -n 's/^staged-sha \([0-9a-f]\{64\}\)$/\1/p' "$f" 2> /dev/null | tail -n 1)
     r=$(sed -n 's/^renamed \([0-9]\{1,12\}\)$/\1/p' "$f" 2> /dev/null | tail -n 1)
     [ "$s" = "$1" ] && [ -n "$r" ] || continue
     { [ -z "$best" ] || [ "$r" -gt "$best" ]; } && best=$r
   done
-  [ -n "$best" ] && echo "$best"
+  if [ -z "$best" ]; then echo "$2 its mtime: no window journal renamed it into place"
+  elif [ "$2" -gt "$best" ]; then
+    echo "$2 its mtime: it was written again after the window journal that renamed these bytes into place at $best"
+  else echo "$best the window journal that renamed it into place"; fi
 }

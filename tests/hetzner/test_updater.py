@@ -102,6 +102,12 @@ def stop(name, version=None, **detail):
     return {'family': FAM, 'stop': name, 'version': version, 'user': None, 'detail': detail}
 
 
+def wait_past(t):
+    """Until the REAL clock's second is past t: a state of the clock, never a set time."""
+    while int(time.time()) <= t:
+        time.sleep(0.05)
+
+
 class Rig:
     """A Pool whose production runs OLD (the registry serves OLD and NEW), with the fake clock; the updater's state ON
     (on=True), OFF (on=False) or none at all (on=None). production=False: no runscaler and no config at all (a cell
@@ -527,6 +533,62 @@ class Pass(unittest.TestCase):
         self.assertEqual(g.run('pass').returncode, 1)
         self.assertEqual(g.state()['restart'], rs)
 
+    def with_core(self, core):
+        """ON, the decision core's own state CORE, and a restart member to hand over."""
+        rs = {'from': {'pid': 100, 'start': 1761955200}, 'to': {'pid': 101, 'start': 1761955300},
+              'stopped': {'inode': '42', 'offset': 0, 'sha': H}}
+        g = Rig(self, on=True)
+        st = g.state()
+        st.update(core=core, restart=rs)
+        g.put(st)
+        return g, rs
+
+    def test_a_core_that_waits_decides_nothing_and_the_state_stays_byte_for_byte(self):
+        """Codex r1 F2: the core answers `wait` (its own state is of another format: core/README.md); that is no
+        decision, so the pass WAITs and the restart member is not handed over."""
+        g, rs = self.with_core({'format': 2})
+        before = g.raw()
+        r = g.run('pass')
+        self.assertEqual(r.returncode, 4, r.stdout[-3000:] + r.stderr)
+        self.assertIn('runner-updater: WAIT the decision core waits (idle: the state has format 2; this core reads '
+                      'format 1: waiting): this pass decides nothing, and %s is as it was' % STATE, r.stdout)
+        self.assertEqual(g.raw(), before)
+        self.assertEqual(g.state()['restart'], rs)
+        self.assertNotIn('would', r.stdout)
+
+    def test_control_a_core_of_format_1_decides_and_hands_the_restart_over_once(self):
+        g, rs = self.with_core({'format': 1})
+        r = g.ok('pass')
+        self.assertNotIn('WAIT', r.stdout)
+        self.assertEqual(g.facts()['restart'], rs)
+        self.assertNotIn('restart', g.state())
+        self.assertEqual(g.state()['core'], g.out('state'))
+        self.assertIn('runner-updater: pass: would', r.stdout)
+        g.ok('pass')
+        self.assertIsNone(g.facts()['restart'])
+
+    def test_a_verdict_the_program_does_not_name_is_no_decision(self):
+        """The class of Codex r1 F2: a decision is one of the verdicts core/README.md names for that program (idle:
+        idle or not-idle; r1, keep and status: ok); anything else is "could not decide"."""
+        for prog in ('idle', 'r1', 'keep', 'status'):
+            with self.subTest(prog):
+                g = Rig(self, on=True)
+                before = g.raw()
+                g.plant('core/%s.jq' % prog, '{verdict: "maybe", reason: "planted", lines: [], families: {}, '
+                                             'state: {format: 1}}\n')
+                r = g.run('pass')
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertIn('runner-updater: core could not decide (%s)' % prog, r.stdout)
+                self.assertEqual(g.raw(), before)
+                self.assertNotIn('would', r.stdout)
+
+    def test_control_a_planted_program_that_answers_a_verdict_it_names_decides(self):
+        g = Rig(self, on=True)
+        g.plant('core/idle.jq', '{verdict: "not-idle", reason: "planted", lines: [], state: {format: 1}}\n')
+        r = g.ok('pass')
+        self.assertIn('idle: not-idle (planted)', r.stdout)
+        self.assertIn('runner-updater: pass: would not switch hz-docker now: not idle (planted)', r.stdout)
+
     def test_the_boundary_is_carried_to_the_next_pass(self):
         g = Rig(self, on=True)
         g.ok('pass')
@@ -754,12 +816,17 @@ class Continuity(unittest.TestCase):
 @needs_container
 class InstallTime(unittest.TestCase):
     def journal(self, g, wid, staged, renamed):
-        """A closed window journal windows/WID of pool-image.sh's form: its TARGET sha, and `renamed` unless None."""
+        """A closed window journal windows/WID of pool-image.sh's form: its TARGET sha, and `rename-start` one second
+        before `renamed` unless renamed is None."""
         lines = ['window ' + wid, 'kind switch', 'staged-sha ' + staged]
         if renamed is not None:
-            lines += ['rename-start %d' % renamed, 'renamed %d' % renamed]
+            lines += ['rename-start %d' % (renamed - 1), 'renamed %d' % renamed]
         os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
         g.p.write(os.path.join(WINDOWS, wid), '\n'.join(lines + ['closed %d' % ((renamed or 0) + 9)]) + '\n', 0o600)
+
+    def touched(self, g, t):
+        """config.toml's mtime set to t (the second a window's touch, or a later write, leaves it at)."""
+        os.utime(g.p.rpath('config.toml'), (t, t))
 
     def test_installed_is_the_renamed_epoch_of_the_window_that_installed_config_toml(self):
         g = Rig(self, on=True)
@@ -778,17 +845,103 @@ class InstallTime(unittest.TestCase):
         self.assertEqual(g.facts()['config']['installed'], int(os.stat(g.p.rpath('config.toml')).st_mtime))
 
     def test_the_newest_journal_that_renamed_config_toml_s_sha_wins(self):
+        """config.toml's mtime is the newest window's touch (its `rename-start` second, a second before `renamed`), as
+        that window's own install leaves it."""
         g = Rig(self, on=True)
         s = sha256_file(g.p.rpath('config.toml'))
-        mtime = int(os.stat(g.p.rpath('config.toml')).st_mtime)
-        self.journal(g, '20261101000000-7', s, mtime - 90)          # an older install of the same file
-        self.journal(g, '20261101000001-8', s, mtime - 50)          # the newest (its name sorts neither first nor last)
-        self.journal(g, '20261101000002-9', s, mtime - 70)          # another older one
-        self.journal(g, '20261101000003-5', 'cd' * 32, mtime - 10)  # another file's, newer still
+        t = int(os.stat(g.p.rpath('config.toml')).st_mtime)
+        self.journal(g, '20261101000000-7', s, t - 90)              # an older install of the same file
+        self.journal(g, '20261101000001-8', s, t - 50)              # the newest (its name sorts neither first nor last)
+        self.journal(g, '20261101000002-9', s, t - 70)              # another older one
+        self.journal(g, '20261101000003-5', 'cd' * 32, t - 10)      # another file's, newer still
         self.journal(g, '20261101000004-6', s, None)                # a window that stopped before its rename
         os.makedirs(os.path.join(WINDOWS, '20261101000005-4.d'))
+        self.touched(g, t - 51)
         g.ok('pass')
-        self.assertEqual(g.facts()['config']['installed'], mtime - 50)
+        self.assertEqual(g.facts()['config']['installed'], t - 50)
+
+    def test_a_later_install_of_the_same_bytes_is_its_mtime(self):
+        """Opus r1 F1 / Codex r1 F1, planted: a window renamed these bytes into place 100 s before runscaler started,
+        and config.toml's own mtime is 100 s after it (the same bytes written again: `03-runscaler.sh real DIGEST`
+        restarts nothing). The install time is that mtime, never earlier than the file itself."""
+        g = Rig(self, on=True)
+        start = g.p.unit_now()['start']
+        self.journal(g, '20261101000000-7', sha256_file(g.p.rpath('config.toml')), start - 100)
+        self.touched(g, start + 100)
+        g.p.clock(now=start + 200)
+        r = g.ok('pass')
+        self.assertEqual(g.facts()['config']['installed'], start + 100)
+        self.assertIn('runner-updater: config: installed at %d (its mtime: it was written again after the window '
+                      'journal that renamed these bytes into place at %d)' % (start + 100, start - 100), r.stdout)
+
+    def test_control_the_window_s_own_touch_keeps_its_renamed(self):
+        """The same journal, config.toml's mtime the window's `rename-start` second (its touch): the install time is
+        `renamed`, not that earlier mtime."""
+        g = Rig(self, on=True)
+        start = g.p.unit_now()['start']
+        self.journal(g, '20261101000000-7', sha256_file(g.p.rpath('config.toml')), start - 100)
+        self.touched(g, start - 101)
+        g.p.clock(now=start + 200)
+        r = g.ok('pass')
+        self.assertEqual(g.facts()['config']['installed'], start - 100)
+        self.assertIn('runner-updater: config: installed at %d (the window journal that renamed it into place)'
+                      % (start - 100), r.stdout)
+
+    def documented(self, restart):
+        """Opus r1 F1 / Codex r1 F1 on the documented path, with the real scripts and the REAL clock: the updater's
+        switch to NEW (W1, `up --unattended`); a person's `back --unattended` (W2: config.toml back on OLD, process P);
+        in a later second a person's `03-runscaler.sh real NEW`, which writes W1's TARGET bytes again and restarts
+        nothing, so P still runs OLD; restart=True: then, in a later second, a person's restart (process Q runs NEW).
+        Then a pass whose state holds NEW as hz-docker's candidate, three start failures, and the next pass. Returns
+        the rig, whether r1's evidence window was open after the first pass, and the second pass."""
+        new = {MAIN: ref(NEW), SMALL: ref(NEW)}
+        g = Rig(self, on=True, clock=False)
+        up = g.p.unattended('up', '--unattended', V, NEW)
+        self.assertEqual(up.returncode, 0, up.stdout[-3000:] + up.stderr)
+        (w1, l1), = g.p.closed()
+        target = [l.split()[1] for l in l1 if l.startswith('staged-sha ')][-1]
+        renamed1 = int([l.split()[1] for l in l1 if l.startswith('renamed ')][-1])
+        back = g.p.unattended('back', '--unattended')
+        self.assertEqual(back.returncode, 0, back.stdout[-3000:] + back.stderr)
+        self.assertEqual(g.p.images(), [ref(OLD)] * 2)
+        p = g.p.unit_now()
+        wait_past(p['start'])
+        r = g.p.s03('real', NEW)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        cfg = g.p.rpath('config.toml')
+        self.assertEqual(sha256_file(cfg), target, "03 wrote W1's TARGET bytes again (the shape is reached)")
+        mtime = int(os.stat(cfg).st_mtime)
+        self.assertGreater(mtime, p['start'])
+        self.assertEqual(g.p.unit_now()['start'], p['start'], '03 restarted nothing: P still runs OLD')
+        if restart:
+            wait_past(mtime)
+            r = g.p.run(['systemctl', '--user', 'restart', 'runscaler'])
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            p = g.p.unit_now()
+            self.assertGreater(p['start'], mtime)
+        st = g.state()
+        st['families'] = {FAM: {'candidate': candidate(renamed1 + 30, lines=new)}}
+        g.put(st)
+        g.ok('pass')
+        f = g.facts()
+        self.assertEqual(f['config']['lines'], new)
+        self.assertEqual(f['proc']['before'], {'pid': p['pid'], 'start': p['start']})
+        self.assertEqual(f['config']['installed'], mtime, "the install time is 03's write, not W1's rename")
+        opened = g.out('r1')['families'][FAM]['open']
+        t = int(time.time()) + 100
+        g.append(failed(t) + failed(t + 10) + failed(t + 20) + scaling(t + 160) + scaling(t + 161))
+        return g, opened, g.ok('pass')
+
+    def test_a_reinstall_of_the_candidate_s_bytes_opens_no_window_on_the_process_that_runs_the_old_image(self):
+        g, opened, r = self.documented(restart=False)
+        self.assertFalse(opened, 'the evidence window of candidate NEW opened on a process that runs OLD')
+        self.assertNotEqual(g.out('r1')['families'][FAM]['verdict'], 'rollback')
+        self.assertNotIn('would roll back', r.stdout)
+
+    def test_control_a_restart_after_that_reinstall_runs_the_candidate_and_its_failures_count(self):
+        g, opened, r = self.documented(restart=True)
+        self.assertTrue(opened, g.out('r1'))
+        self.assertIn('runner-updater: pass: would roll back hz-docker (this release takes no action)', r.stdout)
 
     def test_control_a_journal_with_no_renamed_line_is_no_install(self):
         g = Rig(self, on=True)
@@ -812,6 +965,10 @@ class ConfigRead(unittest.TestCase):
         real = g.p.config()
         main, rest = real.split('\n[[scaleset]]\n', 2)[1:]
         self.assertIn('[scaleset.docker]', rest)
+        self.assertEqual(real.count('\nlog-level = "info"\n'), 1)
+
+        def level(v):
+            return real.replace('\nlog-level = "info"\n', '\nlog-level = "%s"\n' % v)
         cases = (
             ('two names in a block', real.replace('name = "linux-ci-main"\n', 'name = "linux-ci-main"\nname = "x"\n'),
              'line [0-9]+: a \\[\\[scaleset\\]\\] block has two names'),
@@ -832,6 +989,9 @@ class ConfigRead(unittest.TestCase):
              'a scale set name this does not read'),
             ('a top-level log-file', 'log-file = "/tmp/x.log"\n' + real, 'a top-level log-file key'),
             ('a log-format other than text', 'log-format = "json"\n' + real, 'log-format is not "text"'),
+            # Opus r1 F2: runscaler then writes no INFO record (no job-completed: the proof of life R1 and KEEP read)
+            ('log-level warn', level('warn'), 'line [0-9]+: log-level is not "info" or "debug"'),
+            ('log-level error', level('error'), 'line [0-9]+: log-level is not "info" or "debug"'),
         )
         for why, text, says in cases:
             with self.subTest(why):
@@ -844,7 +1004,11 @@ class ConfigRead(unittest.TestCase):
                 ('log-format "text" and a log-file in a table', 'log-format = "text"\n' + real.replace(
                     '[docker]\n', '[docker]\nlog-file = "x"\n'), [MAIN, SMALL], LINES),
                 ('a comment that names an image', real.replace('runner-image = "%s"\n' % ref(OLD), '# runner-image = '
-                                                               '"%s"\n' % ref(NEW), 1), [MAIN, SMALL], {SMALL: ref(OLD)})):
+                                                               '"%s"\n' % ref(NEW), 1), [MAIN, SMALL], {SMALL: ref(OLD)}),
+                ('log-level debug', level('debug'), [MAIN, SMALL], LINES),
+                ('no log-level line', real.replace('\nlog-level = "info"\n', '\n'), [MAIN, SMALL], LINES),
+                ('a log-level line in a table', real.replace('[docker]\n', '[docker]\nlog-level = "error"\n'),
+                 [MAIN, SMALL], LINES)):
             with self.subTest(why):
                 r = self.read(g, text)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -860,6 +1024,22 @@ class ConfigRead(unittest.TestCase):
         r = g.run('pass')
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn('runner-updater: REFUSE no facts: %s line 1: log-format is not "text"' % g.p.rpath('config.toml'),
+                      r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(PASS, 'idle.json')))
+        self.assertEqual(g.raw(), before)
+
+    def test_a_log_level_that_drops_info_records_is_no_facts_in_a_pass(self):
+        """Opus r1 F2: runner-start runs runscaler with log-level "warn" (03 renders "info"), and then runner.log has
+        no `Runner removed reason=job-completed`: R1 and KEEP would read a quiet log as a normal one."""
+        g = Rig(self, on=True)
+        cfg = g.p.rpath('config.toml')
+        text = g.p.config()
+        n = text.split('\n').index('log-level = "info"') + 1
+        g.p.write(cfg, text.replace('\nlog-level = "info"\n', '\nlog-level = "warn"\n'), 0o600)
+        before = g.raw()
+        r = g.run('pass')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('runner-updater: REFUSE no facts: %s line %d: log-level is not "info" or "debug"' % (cfg, n),
                       r.stdout)
         self.assertFalse(os.path.exists(os.path.join(PASS, 'idle.json')))
         self.assertEqual(g.raw(), before)
@@ -1049,6 +1229,33 @@ class Install(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn('the updater is OFF', r.stdout)
 
+    def test_the_watchdog_s_ask_finds_runner_updater_by_its_bare_name(self):
+        """Codex r1 F3: the watchdog's asks say `LINE runner-updater status` (watchdog/run, --hz), the bare name, run
+        by RS_USER's shell over ssh with a PATH of the system folders. The README's --hz line puts ~/bin first; the
+        cell runs what it sends after step 10's link (`ssh <RS_USER>@<host>` is the shell's own `bash -c`). Control:
+        the same PATH without ~/bin finds no runner-updater (127)."""
+        g = Rig(self, on=None, clock=False, production=False)
+        with open(README) as f:
+            text = f.read()
+        link = [l.strip() for l in text.splitlines() if 'runner-updater ~/bin/runner-updater' in l][0]
+        r = subprocess.run(['bash', '-c', re.sub(r"^ssh <RS_USER>@<host> '", "bash -c '", link)], env=g.p.env(),
+                           cwd=Pool.HOME, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        hz = re.findall(r"^\s*--hz 'ssh <RS_USER>@<host> (PATH=\S+)'$", text, re.M)
+        self.assertEqual(len(hz), 1, 'the README names one --hz line of that shape')
+        path = hz[0].replace('<RS_USER>', 'root')                     # Pool's RS_USER: its home is /home/root
+        bare = 'PATH=' + ':'.join(d for d in path[len('PATH='):].split(':') if d != Pool.HOME + '/bin')
+        system = dict(g.p.env(), PATH='/usr/bin:/bin:/usr/sbin:/sbin')
+        for why, line, rc in (("the README's --hz line", path, 0), ('the same without ~/bin', bare, 127)):
+            with self.subTest(why):
+                r = subprocess.run(['bash', '-c', line + ' runner-updater status'], env=system, cwd=Pool.HOME,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+                self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+                if rc == 0:
+                    self.assertIn('runner-updater: status: the updater is OFF', r.stdout)
+                else:
+                    self.assertIn('runner-updater: command not found', r.stderr)
+
 
 @needs_container
 class Usage(unittest.TestCase):
@@ -1111,6 +1318,25 @@ class Text(unittest.TestCase):
         for s in ('runner-updater status', 'runner-updater on', 'runner-updater off', 'runner-updater pass',
                   'STOP RECOVER needed', '~/.local/state/runner-updater/state.json'):
             self.assertIn(s, sec)
+
+    def test_every_path_to_this_release_sends_a_host_to_install_step_10(self):
+        """Opus r1 F3: a host that gets this release by the upgrade notes, or moves from a hand copy, gets the updater's
+        link too (Install step 10), so `runner-updater status` exists there. Control: step 10 is the Install
+        section's, and the README holds its link line once (Install runs that line)."""
+        with open(README) as f:
+            text = f.read()
+
+        def section(title):
+            return text.split('\n## %s\n' % title, 1)[1].split('\n## ', 1)[0]
+        release = section('A new runner release')
+        for why, part in (('A new runner release, its first paragraph', release.strip().split('\n\n', 1)[0]),
+                          ('the upgrade notes', section('Upgrading from a release before this one')),
+                          ('a hand copy', section('A host that already runs these scripts from a hand copy'))):
+            with self.subTest(why):
+                self.assertIn('Install step 10', part)
+        links = [l for l in text.splitlines() if 'runner-updater ~/bin/runner-updater' in l]
+        self.assertEqual(len(links), 1, links)
+        self.assertIn(links[0], section('Install').split('\n10. **The updater (RS_USER).**', 1)[1])
 
 
 if __name__ == '__main__':

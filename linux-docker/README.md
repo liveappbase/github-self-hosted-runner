@@ -91,7 +91,7 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-githu
 
 ## A new runner release
 
-A new release of GitHub's runner ([actions/runner](https://github.com/actions/runner/releases)) needs no release of this repository: the image is built for the runner version you name. A release of this repository that changes `image/` or the base image is put in place the same way, after Install step 3 for both users and Install step 4 (pool-image.sh refuses a `~/build` whose pinned files are not its own release's; step 3 moves the old `~/build` aside with runscaler's download in it, and 03 checks that download first).
+A new release of GitHub's runner ([actions/runner](https://github.com/actions/runner/releases)) needs no release of this repository: the image is built for the runner version you name. A release of this repository that changes `image/` or the base image is put in place the same way, after Install step 3 for both users and Install step 4 (pool-image.sh refuses a `~/build` whose pinned files are not its own release's; step 3 moves the old `~/build` aside with runscaler's download in it, and 03 checks that download first). A host that has no `~/bin/runner-updater` yet (installed before the updater came) also needs Install step 10, once: its link then follows each later release's `~/build`.
 
 1. **Build the image (RUN_USER).** It reads the release from GitHub, checks the runner tarball against the release's own sha256 digest, builds the image on the pinned base, runs the image checks of Install step 5 on it, and writes its build record. It must end with `BUILD DONE (D1)`. A line that starts with `WAIT` says what it waits for: GitHub's rate limit ends the run (run it again later); the updater lock, held by another build or by the updater, holds it until that run ends, and then it goes on. It does not look at the updater's on/off setting, so it works with the updater off:
    ```
@@ -138,7 +138,12 @@ The runner-image updater runs as RS_USER: `~/bin/runner-updater` (Install step 1
   ssh <RS_USER>@<host> '~/bin/runner-updater on'
   ```
 - `runner-updater pass` is what the timer will run. When another run holds the updater lock, or the updater is OFF, it ends at once. When a window journal is open, it prints `STOP RECOVER needed (S2b-3c)` and does nothing more: a later release's RECOVER ends that window, so do not delete the journal. When ON, it reads runscaler's process (from systemd), where runscaler's log ends and what it wrote since the last pass, the config runscaler runs and when it was installed, and two `/healthz` reads; it asks the core (idle, R1, KEEP, the STOP lines), keeps the core's state, and prints what it would do: `would roll back hz-docker`, `would accept hz-docker`, `would hold hz-docker: STOP …`, and whether it would switch now. Each pass's files are in `~/.local/state/runner-updater/pass/`.
-- Under a jq that `core/TESTED_JQ` does not list for `core`, `status` and a pass that is ON print `STOP untested jq` (exit 3) and the line that runs the core's tests with it. A state file of another format, or with an entry this release does not read (a newer release wrote it), makes every command print `WAIT` (exit 4) and change nothing; one it cannot read is `REFUSE` (exit 1), and it is left as it is.
+- Under a jq that `core/TESTED_JQ` does not list for `core`, `status` and a pass that is ON print `STOP untested jq` (exit 3) and the line that runs the core's tests with it. A state file of another format, or with an entry this release does not read (a newer release wrote it), makes every command print `WAIT` (exit 4) and change nothing; one it cannot read is `REFUSE` (exit 1), and it is left as it is. A pass whose decision core waits (the core's own state, kept in the state file, is of a format it does not read) prints `WAIT` (exit 4) too, and changes nothing.
+- A pass has no facts (`REFUSE no facts`, exit 1) when config.toml's lines would mislead the core, among them a top-level `log-level` other than `"info"` (what 03-runscaler.sh renders) or `"debug"`: at `warn` or `error` runscaler logs no finished job, so a quiet log would look like a healthy one.
+- The weekly runner watchdog (`watchdog/run`) asks the owner to run `<its --hz line> runner-updater status`, by the bare name. An ssh command has no `~/bin` on its PATH, so the `--hz` line must put RS_USER's `~/bin` on it, in this shape:
+  ```
+  --hz 'ssh <RS_USER>@<host> PATH=/home/<RS_USER>/bin:/usr/local/bin:/usr/bin:/bin'
+  ```
 
 ## Upgrading from a release before this one
 
@@ -160,14 +165,14 @@ This release adds the host-config key `RUNNER_VERSION`: the runner version a ful
    - `WANT one KEY line in …, found 2` (or more): every script refuses a host config that names a key twice. As root, keep the one line with your host's value, remove the others, then run this check again.
    - `WANT RUNNER_VERSION=N.N.N in …, found […]`: run step 2 again with the version step 1 printed, then this check.
 
-Then install this release's files as for every release ("A new runner release", its first paragraph).
+Then install this release's files as for every release ("A new runner release", its first paragraph), and do Install step 10 once: this release adds the updater, `~/bin/runner-updater`.
 
 ## A host that already runs these scripts from a hand copy
 
 Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, checks that the pool runs the config and image its records name, and does nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
 
 1. Install step 1 (the host config, with the values the host uses today). Its `RUNNER_VERSION` is the runner version the pool runs now: "Upgrading from a release before this one", step 1, reads it.
-2. Install step 3 for both users, then Install step 4.
+2. Install step 3 for both users, then Install step 4, then Install step 10 (the updater's link: a fresh updater is OFF and starts nothing).
 3. Check that runscaler runs the installed config.toml, read only. It prints the image config.toml names for both sets and the record that names it too (`image.ref`, or after a `back` the kept config, `config.toml.pre-image`), and checks that runscaler started after config.toml was installed (pool-image.sh's own rule, in whole seconds). It must end with `OK   runscaler started`. A line that starts with `STOP` says what to do: the move stops there; do it, then run this check again:
    ```
    ssh <RS_USER>@<host> 'bash -s' <<'EOF'
