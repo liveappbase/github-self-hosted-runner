@@ -13,10 +13,14 @@
 # Each jq-linux job waits for them and fails unless every hetzner job passed (needs.hetzner.result: the CI's own view).
 # A tag does not rest on that roll-up of a matrix, which GitHub does not document: tools/release-check --build needs
 # EVERY check run of the tagged commit `completed success` (each hetzner job by its own, every job of this file, any
-# later job), the newest run of each name deciding. The jobs hetzner and jq-linux keep a closed shape
-# (tests/core/test_workflow.py): no continue-on-error, no step-level if, a hetzner matrix of image and part only.
-# No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
-# home-data rules read every reachable commit). Never pull_request_target; the token can only read.
+# later job), the newest run of each name deciding. GitHub reports a pull_request run's check runs on the PR HEAD,
+# under the same names as the push run's, but its GITHUB_SHA is the MERGE commit of the PR: so every job fetches
+# "$SHA", which its fetch step's env sets to the PR head, else github.sha (never the expression inside run:). Each
+# check run on a commit then tested that commit's tree; the PR's merge result is tested by the push run on main after
+# the merge. The jobs hetzner and jq-linux keep a closed shape (tests/core/test_workflow.py): no continue-on-error, no
+# step-level if, a hetzner matrix of image and part only; every job fetches "$SHA". No action is used, so there is no
+# action to pin: the commit is fetched with plain git, with its full history (the home-data rules read every reachable
+# commit). Never pull_request_target; the token can only read.
 name: release-check
 on:
   pull_request:
@@ -33,10 +37,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Fetch the commit and its history
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git init -q src
           git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
-          git -C src fetch -q --no-tags origin "$GITHUB_SHA"
+          git -C src fetch -q --no-tags origin "$SHA"
           git -C src checkout -q --detach FETCH_HEAD
       - name: A bash 5.2 or newer on PATH (release-check parses linux-docker/'s scripts with it; Homebrew's, if the image has none)
         run: |
@@ -72,10 +78,12 @@ jobs:
           apt-get update -q
           DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl git jq openssl python3
       - name: Fetch the commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git init -q src
           git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
-          git -C src fetch -q --no-tags --depth 1 origin "$GITHUB_SHA"
+          git -C src fetch -q --no-tags --depth 1 origin "$SHA"
           git -C src checkout -q --detach FETCH_HEAD
       - name: the cells of tests/hetzner in this part
         working-directory: src
@@ -103,10 +111,12 @@ jobs:
           apt-get update -q
           DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates git jq python3
       - name: Fetch the commit
+        env:
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git init -q src
           git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
-          git -C src fetch -q --no-tags --depth 1 origin "$GITHUB_SHA"
+          git -C src fetch -q --no-tags --depth 1 origin "$SHA"
           git -C src checkout -q --detach FETCH_HEAD
       - name: the image's jq is the row's
         run: test "$(/usr/bin/jq --version)" = "${{ matrix.jq }}"
@@ -115,5 +125,5 @@ jobs:
         env:
           JQ: /usr/bin/jq
         run: for a in ${{ matrix.areas }}; do python3 -I -m unittest discover -s tests/$a -t . -v || exit 1; done
-      - name: every hetzner job of this commit passed (a tag's release-check reads this job's result, not theirs)
+      - name: every hetzner job of this commit passed
         run: test "${{ needs.hetzner.result }}" = success

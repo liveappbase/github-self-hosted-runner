@@ -136,30 +136,42 @@ class Groups(unittest.TestCase):
         daemon's docker group or sudo, is a FAIL, and so is RUN_USER in one, whichever name sorts first. The first run
         is the control (the exact pair: both group lines OK); then the container's own usermod puts one user in one
         more group, and the second run (R1 finishes the users it made) has that user's FAIL line naming the group, the
-        other user's OK line, and exit 1."""
+        other user's OK line, and exit 1. The extra group sorts FIRST (before both names and docker, as the root
+        daemon's docker group does before scaler-<t> and docker-<t>) and LAST: a check that lets the wanted names end
+        the sorted list, or begin it, is a FAIL in one of the two."""
         for who in ('RS_USER', 'RUN_USER'):
             for rs_name, run_name in (('scaler-%s', 'docker-%s'), ('hz%s-rs', 'hz%s-run')):
-                with self.subTest(who=who, order='RS_USER first' if rs_name.startswith('hz') else 'RS_USER after'):
-                    t = secrets.token_hex(3)
-                    rs, run, extra = rs_name % t, run_name % t, 'xg%s' % t
-                    u, _ = self.check(rs, run)
-                    if who == 'RS_USER':
-                        user, want, other_ok = rs, {rs, run, extra}, 'OK   %s groups = %s' % (run, run)
-                    else:
-                        user, want, other_ok = run, {run, extra}, 'OK   %s groups = %s %s' % (rs, rs, run)
-                    self.addCleanup(subprocess.run, ['groupdel', extra], capture_output=True, stdin=subprocess.DEVNULL)
-                    for argv in (['groupadd', extra], ['usermod', '-aG', extra, user]):
-                        p = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-                        self.assertEqual(p.returncode, 0, p.stderr)
-                    self.assertEqual(u.groups(user), want, 'the host is not wrong')    # what the check checks
-                    r = u.r1()
-                    out = r.stdout.splitlines()
-                    head = 'FAIL %s groups = [' % user
-                    bad = [l for l in out if l.startswith(head)]
-                    self.assertEqual(len(bad), 1, r.stdout)
-                    self.assertEqual(set(bad[0][len(head):].rstrip(']').split()), want, bad[0])
-                    self.assertIn(other_ok, out, r.stdout)
-                    self.assertEqual(r.returncode, 1, r.stdout)
+                for where, extra_name in (('sorts first', 'aa%s'), ('sorts last', 'xg%s')):
+                    with self.subTest(who=who, order='RS_USER first' if rs_name.startswith('hz') else 'RS_USER after',
+                                      extra=where):
+                        t = secrets.token_hex(3)
+                        self.one_more_group(who, rs_name % t, run_name % t, extra_name % t, where)
+
+    def one_more_group(self, who, rs, run, extra, where):
+        """One case of the cell above: WHO (RS_USER or RUN_USER) of the pair rs, run in the group extra, which sorts
+        where it says."""
+        if where == 'sorts first':
+            self.assertLess(extra, min(rs, run, 'docker'))
+        else:
+            self.assertGreater(extra, max(rs, run, 'docker'))
+        u, _ = self.check(rs, run)
+        if who == 'RS_USER':
+            user, want, other_ok = rs, {rs, run, extra}, 'OK   %s groups = %s' % (run, run)
+        else:
+            user, want, other_ok = run, {run, extra}, 'OK   %s groups = %s %s' % (rs, rs, run)
+        self.addCleanup(subprocess.run, ['groupdel', extra], capture_output=True, stdin=subprocess.DEVNULL)
+        for argv in (['groupadd', extra], ['usermod', '-aG', extra, user]):
+            p = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(u.groups(user), want, 'the host is not wrong')    # what the check checks
+        r = u.r1()
+        out = r.stdout.splitlines()
+        head = 'FAIL %s groups = [' % user
+        bad = [l for l in out if l.startswith(head)]
+        self.assertEqual(len(bad), 1, r.stdout)
+        self.assertEqual(set(bad[0][len(head):].rstrip(']').split()), want, bad[0])
+        self.assertIn(other_ok, out, r.stdout)
+        self.assertEqual(r.returncode, 1, r.stdout)
 
 
 if __name__ == '__main__':

@@ -8,8 +8,10 @@ and its setup step installs what those cells need. Every jq-linux leg waits for 
 passed (the CI's own view; a tag's tools/release-check --build reads every check run of the commit). The jobs hetzner
 and jq-linux keep a CLOSED shape (shape()): no continue-on-error, no step `if`, closed key sets, a hetzner matrix of
 image and part only, jq-linux's `if` exactly `${{ !cancelled() }}`: an edit that could let a leg or a row pass while
-cells failed or never ran is a test edit too. The stdlib has no YAML parser: the rows are read as text, and shape()
-reads the workflow with read(), a reader of the block YAML it is written in that refuses any other spelling."""
+cells failed or never ran is a test edit too. Every job fetches "$SHA", the commit GitHub reports its check runs on (a
+pull_request run's PR head, not the merge commit its GITHUB_SHA names): a check run on a commit tested that commit
+(fetched()). The stdlib has no YAML parser: the rows are read as text, and shape() reads the workflow with read(), a
+reader of the block YAML it is written in that refuses any other spelling."""
 import os
 import re
 import unittest
@@ -178,16 +180,56 @@ def anywhere(node):
         yield node
 
 
+SHA = '${{ github.event.pull_request.head.sha || github.sha }}'    # the commit GitHub reports a run's check runs on
+GETS = re.compile(r'\bgit\b.*\b(fetch|clone|pull)\b')              # a line that gets a tree with git
+BY_SHA = re.compile(r'\bgit\b.*\bfetch\b.* origin "\$SHA"$')       # ... the one way: fetch "$SHA"
+
+
+def fetched(w):
+    """The fetch rules, over EVERY job of the read workflow w: (the jobs that get a tree with git, what is wrong). A
+    pull_request run's GITHUB_SHA is the MERGE commit of the PR, but GitHub reports that run's check runs on the PR
+    head, under the push run's names. So a step that gets a tree fetches "$SHA" with exactly the env {SHA: SHA} (the PR
+    head, else github.sha; never the expression inside run:), nothing else names GITHUB_SHA or github.sha, no step uses
+    an action (actions/checkout fetches github.sha), and every job and step is a block mapping these rules can read."""
+    got, why = set(), []
+    jobs = w.get('jobs') if isinstance(w, dict) else None
+    for name, j in sorted(jobs.items()) if isinstance(jobs, dict) else []:
+        if not isinstance(j, dict) or 'uses' in j:
+            why.append('job %s: a reusable workflow, or a job in flow form: what it fetches is unreadable' % name)
+            continue
+        for x in anywhere(j):
+            if ('GITHUB_SHA' in x or 'github.sha' in x) and x != SHA:
+                why.append("job %s: %r names GITHUB_SHA or github.sha (a pull_request run's merge commit)" % (name, x))
+        steps = j.get('steps')
+        for i, st in enumerate(steps if isinstance(steps, list) else [steps], 1):
+            if not isinstance(st, dict):
+                why.append('job %s step %d: a step whose fetch is unreadable: %r' % (name, i, st))
+                continue
+            if 'uses' in st:
+                why.append('job %s step %d: an action (%s): a job fetches its commit with git, by "$SHA"'
+                           % (name, i, st['uses']))
+            gets = [l.strip() for l in (st.get('run') if isinstance(st.get('run'), str) else '').split('\n')
+                    if GETS.search(l)]
+            if gets:
+                got.add(name)
+                why += ['job %s step %d: a fetch not of "$SHA": %s' % (name, i, l) for l in gets if not BY_SHA.search(l)]
+                if st.get('env') != {'SHA': SHA}:
+                    why.append("job %s step %d: a fetch step's env is %r, want exactly {'SHA': %r}"
+                               % (name, i, st.get('env'), SHA))
+    return sorted(got), why
+
+
 def shape(text):
     """[] when the jobs hetzner and jq-linux keep their closed shape, else what is wrong: no continue-on-error
     anywhere in either; no step with an `if`; each key set closed (the workflow's, each job's, each step's); the
     hetzner matrix exactly image and part, jq-linux's exactly include; jq-linux's job `if` exactly
-    `${{ !cancelled() }}` (it runs after a failed hetzner job, and then fails on its last step)."""
+    `${{ !cancelled() }}` (it runs after a failed hetzner job, and then fails on its last step). And over every job,
+    fetched()'s rules: a check run on a commit tested that commit."""
     try:
         w = read(text)
     except Unreadable as e:
         return ['the workflow is not in the block shape these cells read, so they cannot read it: %s' % e]
-    why = []
+    why = fetched(w)[1]
     if not isinstance(w, dict) or set(w) != TOP:
         why.append('the workflow keys %s, want exactly %s' % (sorted(w) if isinstance(w, dict) else w, sorted(TOP)))
     jobs = w.get('jobs') if isinstance(w, dict) else None
@@ -221,12 +263,46 @@ def shape(text):
 
 
 LAST = '        run: test "${{ needs.hetzner.result }}" = success\n'    # the jq rows' last step
-GATE = ("      - name: every hetzner job of this commit passed (a tag's release-check reads this job's result, "
-        "not theirs)\n" + LAST)
+GATE = '      - name: every hetzner job of this commit passed\n' + LAST
 CELLS = "        run: python3 -I -m unittest discover -s tests/hetzner -t . -p '${{ matrix.part }}' -v\n"
 HNAME = '    name: hetzner ${{ matrix.part }} (${{ matrix.image }})\n'
 HMATRIX = '      matrix:\n        image: ['
+GET = ('        env:\n          SHA: %s\n        run: |\n          git init -q src\n'
+       '          git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"\n' % SHA)
+CHECKOUT = '          git -C src checkout -q --detach FETCH_HEAD\n'
+FETCH = {   # each job's whole fetch step, as it is written (the step before it keeps the two shallow ones apart)
+    'release-check': '      - name: Fetch the commit and its history\n' + GET
+                     + '          git -C src fetch -q --no-tags origin "$SHA"\n' + CHECKOUT,
+    'hetzner': 'curl git jq openssl python3\n      - name: Fetch the commit\n' + GET
+               + '          git -C src fetch -q --no-tags --depth 1 origin "$SHA"\n' + CHECKOUT,
+    'jq-linux': 'ca-certificates git jq python3\n      - name: Fetch the commit\n' + GET
+                + '          git -C src fetch -q --no-tags --depth 1 origin "$SHA"\n' + CHECKOUT,
+}
 EDITS = [   # (what, the text, its replacement, the rule that refuses it)
+    ('the release-check job fetches $GITHUB_SHA: a pull_request run would test the merge commit',
+     FETCH['release-check'], FETCH['release-check'].replace(' origin "$SHA"', ' origin "$GITHUB_SHA"'),
+     'a fetch not of'),
+    ('the hetzner job fetches $GITHUB_SHA', FETCH['hetzner'],
+     FETCH['hetzner'].replace(' origin "$SHA"', ' origin "$GITHUB_SHA"'), 'a fetch not of'),
+    ('the jq-linux job fetches $GITHUB_SHA', FETCH['jq-linux'],
+     FETCH['jq-linux'].replace(' origin "$SHA"', ' origin "$GITHUB_SHA"'), 'a fetch not of'),
+    ('the env without head.sha', FETCH['hetzner'], FETCH['hetzner'].replace(SHA, '${{ github.sha }}'),
+     "a fetch step's env"),
+    ('one more key in a fetch step\'s env (it is exactly SHA)', FETCH['jq-linux'],
+     FETCH['jq-linux'].replace('        run: |\n', '          GIT_TRACE: "1"\n        run: |\n'), "a fetch step's env"),
+    ('the expression inside run:, no env', FETCH['jq-linux'],
+     FETCH['jq-linux'].replace('        env:\n          SHA: %s\n' % SHA, '').replace('"$SHA"', '"%s"' % SHA),
+     'a fetch not of'),
+    ('actions/checkout in place of the fetch', FETCH['release-check'],
+     '      - uses: actions/checkout@v4\n        with:\n          path: src\n          fetch-depth: 0\n', 'an action'),
+    ('actions/checkout in flow form', FETCH['release-check'],
+     '      - {uses: actions/checkout@v4, with: {path: src, fetch-depth: 0}}\n', 'a step whose fetch is unreadable'),
+    ('the merge commit without git', FETCH['release-check'],
+     '      - name: Fetch the commit and its history\n        run: mkdir src && curl -fsSL '
+     '"https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz" | tar -xz -C src --strip-components 1\n',
+     'names GITHUB_SHA'),
+    ('a job that calls a reusable workflow (its checkout fetches github.sha)', LAST,
+     LAST + '  other:\n    uses: octo-org/ci/.github/workflows/test.yml@v1\n', 'a reusable workflow'),
     ('continue-on-error on the jq rows\' last step', LAST, '        continue-on-error: true\n' + LAST,
      'a continue-on-error'),
     ('an if on that step: skipped when hetzner failed', LAST,
@@ -292,14 +368,27 @@ class Workflow(unittest.TestCase):
         self.assertIn('    needs: hetzner\n', j)
         self.assertIn('    if: ${{ !cancelled() }}\n', j)
         steps = j.split('\n    steps:\n', 1)[1]
-        self.assertTrue(steps.rstrip('\n').endswith('\n        run: test "${{ needs.hetzner.result }}" = success'),
-                        'the last step of each jq row is the hetzner check')
+        # the last step of each jq row is the hetzner check; its name claims nothing about what a tag reads
+        self.assertTrue((steps.rstrip('\n') + '\n').endswith('\n' + GATE), 'the last step of each jq row is not GATE')
         self.assertNotIn('hetzner', ' '.join(a for _, _, a in matrix()), 'a jq row runs tests/hetzner itself')
+
+    def test_every_job_fetches_the_commit_its_check_runs_are_reported_on(self):
+        """A pull_request run's GITHUB_SHA is the MERGE commit of the PR, but GitHub reports the run's check runs on
+        the PR head, under the same names as the push run's: a newer pass there could stand for a failure of the head's
+        own tree. So every job fetches "$SHA", which its fetch step's env sets to the PR head, else github.sha: each
+        check run on a commit tested that commit. (The PR's merge result is tested by the push run on main after the merge.) The
+        refusals are in EDITS: a job back on $GITHUB_SHA, the env without head.sha or with one more key, the expression
+        inside run:, an action (in either form), the merge commit without git, a reusable workflow."""
+        w = workflow()
+        for name, text in FETCH.items():
+            with self.subTest(name):
+                self.assertIn(text, job(name))
+        self.assertEqual(fetched(read(w)), (['hetzner', 'jq-linux', 'release-check'], []))
 
     def test_the_hetzner_and_jq_linux_jobs_keep_a_closed_shape(self):
         """Each edit in EDITS is valid (actionlint passes it) and is refused, by the rule it breaks; all but the
-        include let a jq row or a hetzner leg pass while hetzner cells failed or never ran. The workflow as it is
-        passes."""
+        include and the env key let a jq row or a hetzner leg pass while hetzner cells failed, never ran, or ran on
+        another tree than the commit's (the merge commit of a pull_request run). The workflow as it is passes."""
         w = workflow()
         self.assertEqual(shape(w), [])
         for label, old, new, rule in EDITS:

@@ -58,10 +58,15 @@
 #                  success`, the newest run of each name deciding (by id: a re-run's newer success replaces an older
 #                  failure, and a newer failure an older success). Each one that is not is RED, named with its status
 #                  and conclusion; no check run at all is RED; check runs that cannot be read are RED. It reads them
-#                  with the jq-matrix rule's one `gh api` call and names no job, so a new job or a new hetzner part is
-#                  covered without an edit. Why: a jq row passes only when needs.hetzner.result is success, but GitHub
-#                  does not document how a matrix rolls up into it, and a matrix whose leg was cancelled before it
-#                  started has been reported rolled up as a success.
+#                  with the jq-matrix rule's one `gh api` call, filter=all (GitHub's default, latest, selects by
+#                  completed_at, not by id), and names no job, so a new job or a new hetzner part is covered without an
+#                  edit. Each check run on the commit tested that commit: in a pull_request run every job of the
+#                  workflow fetches the PR head, not the merge commit (.github/workflows/release-check.yml). Why: a jq
+#                  row passes only when needs.hetzner.result is success, but GitHub does not document how a matrix
+#                  rolls up into it, and a matrix whose leg was cancelled before it started has been reported rolled
+#                  up as a success. A RESIDUAL, named: the rule cannot tell a push run's check run from a pull_request
+#                  run's (one name, one commit), so a newer pass of a run that tested ANOTHER tree would hide an older
+#                  failure. The workflow makes that not arise (each of its runs tests the commit), not this rule.
 #   home-generic   an RFC 1918 address, a MAC address, a GitHub token, a /Users/<name> path — in any file version or
 #                  commit message reachable from REV, and (--build) in the tag object: its tagger line and message.
 #                  Exempt from THESE rules only: /Users/ci and /Users/admin (the guest's user), a line that holds the
@@ -458,7 +463,7 @@ fi
 # ID STATUS CONCLUSION NAME (tab-separated); UNREADABLE when gh fails, NONE when there is no check run
 jruns=
 if [[ -n $tag ]]; then
-  jruns=$(gh api --paginate "repos/$REPO_SLUG/commits/$commit/check-runs?per_page=100" \
+  jruns=$(gh api --paginate "repos/$REPO_SLUG/commits/$commit/check-runs?per_page=100&filter=all" \
             --jq '.check_runs[] | "\(.id)\t\(.status)\t\(.conclusion // "")\t\(.name)"' 2>/dev/null) || jruns=UNREADABLE
   [[ -n $jruns ]] || jruns=NONE
 fi

@@ -7,7 +7,7 @@ run or be read is RED; without --build it is named "absent: not tested here".
 
 check-runs: with --build, EVERY check run on the tagged commit must be `completed success`, the newest run of each
 name deciding; it names no job. A jq row's own success does not prove that every hetzner leg passed: GitHub's roll-up
-of a matrix into needs.hetzner.result is not documented. One gh call serves both rules.
+of a matrix into needs.hetzner.result is not documented. One gh call serves both rules: every page, filter=all.
 
 release-check runs on a temporary repository holding only what the rules read, a planted test that passes or fails, a
 stub `jq` (a version, nothing else) and a stub `gh` (it answers the check runs a cell plants, and logs each call); it
@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ZSH = '/bin/zsh'
@@ -240,6 +241,18 @@ class EveryCheckRun(Release):
         out = self.build(self.GREEN)
         self.assertEqual(self.red(out), [], out)
         self.assertTrue([l for l in out if l.startswith('release-check: check-runs: ') and l.endswith(' passed')], out)
+
+    def test_the_one_gh_call_asks_for_every_check_run_on_every_page(self):
+        """filter=all: GitHub's default, filter=latest, selects by completed_at, while these rules decide by the newest
+        id, so an older run that completed later could stand for a newer one. --paginate: every page."""
+        self.build(self.GREEN)
+        (call,) = self.gh_calls()
+        urls = [a for a in call if a.startswith('repos/')]
+        self.assertEqual(len(urls), 1, call)
+        path, _, query = urls[0].partition('?')
+        self.assertTrue(path.endswith('/check-runs'), call)
+        self.assertEqual(urllib.parse.parse_qs(query, strict_parsing=True).get('filter'), ['all'], call)
+        self.assertIn('--paginate', call)
 
     def test_after_a_re_run_the_newest_run_of_each_name_decides(self):
         """The newest by id, not by the order gh lists them in: an older failure that a re-run replaced passes; an
