@@ -1,15 +1,16 @@
 """linux-docker/setup/01-users.sh, the root step that makes the host's two users: its CHECK of RS_USER's groups passes
 when RS_USER is in group RUN_USER, whichever of the two names sorts first. (Until S2b-3b it compared the SORTED list
 of RS_USER's groups with "RS_USER RUN_USER" as written, so a host whose RS_USER sorts after RUN_USER failed the check
-although it was right; host.conf.example's names sort the other way, so they passed.)
+although it was right; host.conf.example's names sort the other way, so they passed.) Each user's group list must be
+exact: a group too few, or one too many (RS_USER, which holds the token, in the docker group or sudo), is a FAIL.
 
 The cells run a copy of the REAL script (only its HOST_CONF pin line rewritten: support.Sandbox) as root in the
 throwaway container, the fresh host it expects: it makes the two users with the container's own useradd and usermod,
 and the check reads the container's own `id`. A container has no systemd, so systemctl, systemd-tmpfiles and
 loginctl are substitutes, and so is sudo (no cell runs a real sudo): each logs its calls and changes nothing. Other
-CHECK lines fail there (no ssh key to copy, no linger, no lock file): the cells read only the group lines. Each cell's
-users have names of their own; its cleanup removes them, their homes, their markers, and the lock rule and marker
-folder when the run made them.
+CHECK lines fail there (no ssh key to copy, no linger, no lock file): the cells read only the group lines, and the
+script's exit code is 1 in every cell. Each cell's users (and extra group) have names of their own; its cleanup
+removes them, their homes, their markers, and the lock rule and marker folder when the run made them.
 """
 import os
 import secrets
@@ -101,7 +102,7 @@ class Groups(unittest.TestCase):
         self.assertIn('OK   group %s members = %s (D1 socket\'s access list)' % (run, rs), out, r.stdout)
         self.assertEqual([l for l in out if ' groups = ' in l and l.startswith('FAIL')], [], r.stdout)
         self.assertIn('is-active', ' '.join(u.sb.lines('systemctl')), 'the substitute answered, no systemd')
-        return out
+        return u, out
 
     def test_an_rs_user_that_sorts_after_run_user_passes(self):
         """S2b-3a's review: RS_USER sorts after RUN_USER ('scaler-' after 'docker-'), and RS_USER is in group
@@ -129,6 +130,36 @@ class Groups(unittest.TestCase):
                 r = u.r1()
                 self.assertEqual(u.groups(rs % t), {rs % t})
                 self.assertIn('FAIL %s groups = [%s]' % (rs % t, rs % t), r.stdout.splitlines(), r.stdout)
+
+    def test_a_user_in_one_more_group_fails_the_check_in_either_order(self):
+        """The check is an exact list, not "contains": RS_USER (it holds the token) in one more group, such as the root
+        daemon's docker group or sudo, is a FAIL, and so is RUN_USER in one, whichever name sorts first. The first run
+        is the control (the exact pair: both group lines OK); then the container's own usermod puts one user in one
+        more group, and the second run (R1 finishes the users it made) has that user's FAIL line naming the group, the
+        other user's OK line, and exit 1."""
+        for who in ('RS_USER', 'RUN_USER'):
+            for rs_name, run_name in (('scaler-%s', 'docker-%s'), ('hz%s-rs', 'hz%s-run')):
+                with self.subTest(who=who, order='RS_USER first' if rs_name.startswith('hz') else 'RS_USER after'):
+                    t = secrets.token_hex(3)
+                    rs, run, extra = rs_name % t, run_name % t, 'xg%s' % t
+                    u, _ = self.check(rs, run)
+                    if who == 'RS_USER':
+                        user, want, other_ok = rs, {rs, run, extra}, 'OK   %s groups = %s' % (run, run)
+                    else:
+                        user, want, other_ok = run, {run, extra}, 'OK   %s groups = %s %s' % (rs, rs, run)
+                    self.addCleanup(subprocess.run, ['groupdel', extra], capture_output=True, stdin=subprocess.DEVNULL)
+                    for argv in (['groupadd', extra], ['usermod', '-aG', extra, user]):
+                        p = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                        self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertEqual(u.groups(user), want, 'the host is not wrong')    # what the check checks
+                    r = u.r1()
+                    out = r.stdout.splitlines()
+                    head = 'FAIL %s groups = [' % user
+                    bad = [l for l in out if l.startswith(head)]
+                    self.assertEqual(len(bad), 1, r.stdout)
+                    self.assertEqual(set(bad[0][len(head):].rstrip(']').split()), want, bad[0])
+                    self.assertIn(other_ok, out, r.stdout)
+                    self.assertEqual(r.returncode, 1, r.stdout)
 
 
 if __name__ == '__main__':

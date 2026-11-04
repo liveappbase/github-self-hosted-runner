@@ -10,8 +10,11 @@
 # hetzner jobs run tests/hetzner (linux-docker/'s scripts; pool-image.sh's unattended switch asks core/idle.jq, under
 # the image's jq) in the images of the ubuntu rows, in parts by module name: those cells run as root in the job's
 # container, and fail rather than skip on a Linux root without a container's /.dockerenv (tests/hetzner/support.py).
-# Each jq-linux job waits for them and fails unless every hetzner job passed, so the job a tag's release-check reads
-# passes only when the hetzner cells did.
+# Each jq-linux job waits for them and fails unless every hetzner job passed (needs.hetzner.result: the CI's own view).
+# A tag does not rest on that roll-up of a matrix, which GitHub does not document: tools/release-check --build needs
+# EVERY check run of the tagged commit `completed success` (each hetzner job by its own, every job of this file, any
+# later job), the newest run of each name deciding. The jobs hetzner and jq-linux keep a closed shape
+# (tests/core/test_workflow.py): no continue-on-error, no step-level if, a hetzner matrix of image and part only.
 # No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
 # home-data rules read every reachable commit). Never pull_request_target; the token can only read.
 name: release-check

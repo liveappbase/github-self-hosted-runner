@@ -53,6 +53,15 @@
 #                  row that cannot run or be read: RED with --build; without --build it prints "jq VERSION (WHERE)
 #                  absent: not tested here". A tree with core/ and no core/TESTED_JQ, an empty list, or a row of
 #                  another shape: RED.
+#   check-runs     (--build) the tag needs the WHOLE CI of its commit green, not only the jq rows: EVERY check run on
+#                  the commit (each hetzner leg by its own, the release-check job, any later job) must be `completed
+#                  success`, the newest run of each name deciding (by id: a re-run's newer success replaces an older
+#                  failure, and a newer failure an older success). Each one that is not is RED, named with its status
+#                  and conclusion; no check run at all is RED; check runs that cannot be read are RED. It reads them
+#                  with the jq-matrix rule's one `gh api` call and names no job, so a new job or a new hetzner part is
+#                  covered without an edit. Why: a jq row passes only when needs.hetzner.result is success, but GitHub
+#                  does not document how a matrix rolls up into it, and a matrix whose leg was cancelled before it
+#                  started has been reported rolled up as a success.
 #   home-generic   an RFC 1918 address, a MAC address, a GitHub token, a /Users/<name> path — in any file version or
 #                  commit message reachable from REV, and (--build) in the tag object: its tagger line and message.
 #                  Exempt from THESE rules only: /Users/ci and /Users/admin (the guest's user), a line that holds the
@@ -445,13 +454,22 @@ if [[ -f $man ]]; then
   done
 fi
 
+# ---- (--build) the check runs of the commit, read ONCE: the jq-matrix rule and the check-runs rule read them. Each line
+# ID STATUS CONCLUSION NAME (tab-separated); UNREADABLE when gh fails, NONE when there is no check run
+jruns=
+if [[ -n $tag ]]; then
+  jruns=$(gh api --paginate "repos/$REPO_SLUG/commits/$commit/check-runs?per_page=100" \
+            --jq '.check_runs[] | "\(.id)\t\(.status)\t\(.conclusion // "")\t\(.name)"' 2>/dev/null) || jruns=UNREADABLE
+  [[ -n $jruns ]] || jruns=NONE
+fi
+
 # ---- jq-matrix: core/TESTED_JQ's rows (the header says what each kind needs)
 tj=$T/core/TESTED_JQ
 if [[ -d $T/core || -e $tj ]]; then
   if [[ ! -f $tj || -L $tj ]]; then
     RED jq-matrix "core/TESTED_JQ is absent or not a regular file: the core's jq builds were not checked"
   else
-    jrows=0 jruns=
+    jrows=0
     for l in "${(@f)$(<$tj)}"; do
       l=${l%%#*}
       jw=(${=l})
@@ -484,11 +502,6 @@ if [[ -d $T/core || -e $tj ]]; then
         if [[ -z $tag ]]; then
           print -r -- "release-check: jq $jv ($jwhere) absent: not tested here (--build reads its CI job \"$jjob\")"
         else
-          if [[ -z $jruns ]]; then
-            jruns=$(gh api --paginate "repos/$REPO_SLUG/commits/$commit/check-runs?per_page=100" \
-                      --jq '.check_runs[] | "\(.id)\t\(.status)\t\(.conclusion // "")\t\(.name)"' 2>/dev/null) || jruns=UNREADABLE
-            [[ -n $jruns ]] || jruns=NONE
-          fi
           if [[ $jruns == UNREADABLE ]]; then
             RED jq-matrix "$jjob: the check runs of ${commit[1,12]} cannot be read with gh: not tested"
           else
@@ -509,6 +522,35 @@ if [[ -d $T/core || -e $tj ]]; then
       fi
     done
     (( jrows )) || RED jq-matrix "core/TESTED_JQ has no row"
+  fi
+fi
+
+# ---- check-runs (--build): every check run on the commit passed, the newest of each name deciding (the header says
+# why); no list of job names
+if [[ -n $tag ]]; then
+  if [[ $jruns == UNREADABLE ]]; then
+    RED check-runs "the check runs of ${commit[1,12]} cannot be read with gh: its CI was not checked"
+  elif [[ $jruns == NONE ]]; then
+    RED check-runs "no check run on ${commit[1,12]}: its CI did not run there, or has not reported yet"
+  else
+    crn=() crid=() crst=() crbad=0 crred=0
+    for jr in ${(f)jruns}; do
+      jf=("${(@ps:\t:)jr}")
+      if (( ${#jf} != 4 )) || [[ $jf[1] != <-> || -z $jf[4] ]]; then crbad=$(( crbad + 1 )); continue; fi
+      nm=$jf[4]
+      k=${crn[(ie)$nm]}
+      if (( k > ${#crn} )); then crn+=("$nm") crid+=($jf[1]) crst+=("$jf[2] $jf[3]")
+      elif (( jf[1] > crid[k] )); then crid[k]=$jf[1] crst[k]="$jf[2] $jf[3]"; fi
+    done
+    (( crbad )) && RED check-runs "$crbad line(s) of the check runs of ${commit[1,12]} cannot be read: its CI was not checked whole"
+    k=0
+    while (( ++k <= ${#crn} )); do
+      [[ $crst[k] == 'completed success' ]] && continue
+      crred=$(( crred + 1 ))
+      RED check-runs "\"$crn[k]\": its newest check run on ${commit[1,12]} is ${crst[k]% }, not a success"
+    done
+    (( crbad || crred )) \
+      || print -r -- "release-check: check-runs: the newest check run of each of the ${#crn} name(s) on ${commit[1,12]} passed"
   fi
 fi
 
