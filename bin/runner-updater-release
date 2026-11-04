@@ -324,7 +324,8 @@ rl_stop() {
     def shown: if type == "string" and test("^[A-Za-z0-9][A-Za-z0-9 ._-]{0,79}$") then . else tojson end;
     def noversion: (.version | type) != "string" or .version == "";
     [.families[] | (.stops // [])[] | . + {proceeds: S::newer_proceeds(.stop), known: (S::props(.stop) != null)}]
-    | [.[] | select(.family == $f or (.family | type) != "string" or .family == "")
+    | [.[] | select((.family == $f and (.stop == "NO BASELINE" or .stop == "recipe changed")) | not)
+           | select(.family == $f or (.family | type) != "string" or .family == "")
            | select(noversion or ($v != "" and .version == $v) or (.proceeds | not))]
     | first // empty
     | "STOP \(.stop | shown) (\(if noversion then "no runner version" else "runner \(.version | shown)" end)): "
@@ -349,24 +350,37 @@ rl_newer() {
 }
 
 rl_pass() {
-  local now=$1 f s v rec base cur erc= ewhy= trc= twhy=
+  local now=$1 f s v rec base cur until erc= ewhy= trc= twhy=
   local -a imgs
+  typeset -ga rl_due
+  typeset -gA rl_rstop rl_rtext
+  rl_due=() rl_rstop=() rl_rtext=()
   rl_not() { ru_say "pass: $1 is not due: $2" }
   for f in $ru_fam_order; do
     v=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].candidate.version // empty')
     [[ -z $v ]] || { rl_not $f "an open candidate (runner $v): one open release per family"; continue }
+    until=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].back_until // empty')
+    if [[ $until =~ '^[0-9]+$' ]] && (( now < until )); then
+      rl_not $f "its previous image is kept for \`back\` until $(strftime '%Y-%m-%d %H:%M UTC' $until): one open release per family"
+      continue
+    fi
     rl_stop $f; (( $? == 1 )) || { rl_not $f "$REPLY"; continue }   # a STOP that holds whatever the release is
-    rl_recipe $f ${RELBIN:h} || { rl_not $f "$REPLY"; continue }
+    # the recipe: it decides the family's NO BASELINE and recipe changed, which the caller holds as STOPs (rl_rstop,
+    # rl_rtext); rl_stop leaves those two to it
+    rl_recipe $f ${RELBIN:h} || { rl_rstop[$f]= rl_rtext[$f]=; rl_not $f "$REPLY"; continue }
     rec=$REPLY
     base=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].recipe // empty')
     if [[ -z $base ]]; then
-      rl_not $f "STOP NO BASELINE: the family has no recipe baseline (its recipe now: $rec); \`runner-updater rebuild $f\` sets it (a later release)"
+      rl_rstop[$f]="NO BASELINE" rl_rtext[$f]="the family has no recipe baseline (its recipe now: $rec): the accept of a rebuild's image writes it"
+      rl_not $f "STOP NO BASELINE: $rl_rtext[$f]; \`runner-updater rebuild $f\`"
       continue
     fi
     if [[ $base != "$rec" ]]; then
-      rl_not $f "STOP recipe changed: its recipe is $rec, its baseline $base (a builder file, the node-diff file or the base pin changed); \`runner-updater rebuild $f\`"
+      rl_rstop[$f]="recipe changed" rl_rtext[$f]="its recipe is $rec, its baseline $base (a builder file, the node-diff file or the base pin changed): the accept of a rebuild's image writes the new one"
+      rl_not $f "STOP recipe changed: $rl_rtext[$f]; \`runner-updater rebuild $f\`"
       continue
     fi
+    rl_rstop[$f]= rl_rtext[$f]=
     imgs=()
     for s in ${(s: :)ru_fam[$f]}; do
       (( ${+ru_lines[$s]} )) || { rl_not $f "its set $s has no runner-image line in $CONFIG"; continue 2 }
@@ -392,7 +406,8 @@ rl_pass() {
     if [[ -z $trc ]]; then rl_tarball; trc=$? twhy=$REPLY; fi
     if (( trc == 75 )); then rl_not $f "WAIT $twhy"; continue; fi
     (( trc == 0 )) || { rl_not $f "$twhy"; continue }
-    ru_say "pass: would switch $f to $rl_version (this release takes no action)"
+    rl_due+=("$f $rl_version ${rl_digest#sha256:} $rec")
+    ru_say "pass: $f is due: runner $rl_version"
   done
   return 0
 }

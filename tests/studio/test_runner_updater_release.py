@@ -932,11 +932,13 @@ class PassRig:
     """a Rig whose families file names mac-golden (its set mac-a: IMG), whose release bin/ holds the recipe's files
     (BUILDER), and whose release file answers from the GitHub stub and filters a copy of the system bundle. The state:
     ON, mac-golden with the recipe of those files as its baseline, IMG recorded as runner V0. EXTRA_REWRITES go into the
-    runner-updater copy (after the clock's), RELEASE_REWRITES into the release file's copy."""
+    runner-updater copy (after the clock's), RELEASE_REWRITES into the release file's copy. These cells end at the
+    hook's decision: the pass's switch step (pass_switch, which starts the window of a due family) is cut out of the
+    copy; the switch's own cells are test_runner_updater_pass."""
 
     def __init__(self, test, extra_rewrites=(), release_rewrites=(), **fam_kw):
         self.r = r = Rig(test, jq_wrap=True, families='mac-golden tart mac-a\n', extra_rewrites=[(
-            'now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW')] + list(extra_rewrites))
+            'now=$(/bin/date -u +%s)', 'now=$RU_TEST_NOW'), (NO_SWITCH, ': ' + NO_SWITCH)] + list(extra_rewrites))
         self.u = Paths(r)
         sb = r.sb
         self.gh = sb.mkdir('gh')
@@ -974,14 +976,15 @@ class PassRig:
 
     def pass_(self, s=None, now=NOW):
         self.u.put(s or self.state)
-        return self.r.cmd('pass', env={'RU_TEST_NOW': str(now)})
+        return self.r.cmd('pass', env={'RU_TEST_NOW': str(now)}, ok=False)   # a STOP it holds anew: exit 1
 
     def lines(self, res):
         return [l for l in res.stdout.splitlines() if l.startswith('runner-updater: pass: ') and
                 ('mac-golden' in l or ' fx ' in l)]
 
 
-SWITCH = 'runner-updater: pass: would switch mac-golden to %s (this release takes no action)' % V2
+SWITCH = 'runner-updater: pass: mac-golden is due: runner %s' % V2
+NO_SWITCH = '    pass_switch $now\n'   # the pass's switch step: PassRig's copies cut it out
 NOT = 'runner-updater: pass: mac-golden is not due: '
 
 
@@ -1010,8 +1013,9 @@ class TestPassHook(unittest.TestCase):
         p = PassRig(self, recipe=None)
         p.latest()
         res = p.pass_()
-        self.assertEqual(p.lines(res), [NOT + 'STOP NO BASELINE: the family has no recipe baseline (its recipe now: %s); '
-                                        '`runner-updater rebuild mac-golden` sets it (a later release)' % p.recipe])
+        self.assertEqual(p.lines(res), [NOT + 'STOP NO BASELINE: the family has no recipe baseline (its recipe now: %s): '
+                                        'the accept of a rebuild\'s image writes it; `runner-updater rebuild mac-golden`'
+                                        % p.recipe, 'runner-updater: pass: mac-golden holds STOP NO BASELINE'])
         self.assertEqual(p.urls(), [])
 
     def test_a_changed_recipe_is_a_stop(self):
@@ -1019,8 +1023,9 @@ class TestPassHook(unittest.TestCase):
         p.latest()
         res = p.pass_()
         self.assertEqual(p.lines(res), [NOT + 'STOP recipe changed: its recipe is %s, its baseline %s (a builder file, '
-                                        'the node-diff file or the base pin changed); `runner-updater rebuild '
-                                        'mac-golden`' % (p.recipe, 'a' * 64)])
+                                        'the node-diff file or the base pin changed): the accept of a rebuild\'s image '
+                                        'writes the new one; `runner-updater rebuild mac-golden`' % (p.recipe, 'a' * 64),
+                                        'runner-updater: pass: mac-golden holds STOP recipe changed'])
         self.assertEqual(p.urls(), [])
 
     def test_a_builder_change_after_the_baseline_is_a_stop(self):
@@ -1167,7 +1172,9 @@ class TestPassHookStops(unittest.TestCase):
                          sorted([(n, False) for n in NO_ROWS] + [(n, True) for n in YES_ROWS]))
 
     def test_a_stop_no_newer_release_proceeds_past_holds_and_asks_github_nothing(self):
-        for name in NO_ROWS:
+        # NO BASELINE and recipe changed are the hook's own: it decides them from the recipe on each pass (a held one
+        # whose recipe is the baseline again goes: test_runner_updater_pass, TestRecipeStops)
+        for name in (n for n in NO_ROWS if n not in ('NO BASELINE', 'recipe changed')):
             with self.subTest(stop=name):
                 p, lines = self.stopped(name, V1)   # an OLDER version: only its row holds it
                 self.assertEqual(lines, [held(name, V1, NO_PROCEED)])
@@ -1260,16 +1267,17 @@ class TestStopsOnAStateByHand(unittest.TestCase):
 # lets start what a pass may start (PASS_RUNS) and exactly what the hook adds: the filter's openssl, mktemp, and the
 # GitHub stub (PassRig's curl).
 HOOK_RUNS = PASS_RUNS + ('/usr/bin/openssl', '/usr/bin/mktemp')
-WOULD_SWITCH_AT = '    ru_say "pass: would switch $f to $rl_version (this release takes no action)"\n'
+WOULD_SWITCH_AT = '    ru_say "pass: $f is due: runner $rl_version"\n'
 ABSOLUTE = '/bin/launchctl list > /dev/null'
 
 
 class TestNoActionDuePass(unittest.TestCase):
-    """A DUE pass, under macOS's sandbox (test_runner_updater_state, only_these_start): it prints "would switch"
+    """The hook of a DUE pass, under macOS's sandbox (test_runner_updater_state, only_these_start), with the pass's
+    switch step cut out (PassRig: a due family's window is its own cells', test_runner_updater_pass): it prints "is due"
     (positive evidence that the hook ran to its end), its stderr is empty (no start was denied), and no action stub ran.
-    The controls, under the same profile: an action by its absolute path planted at the would-switch line is denied and
-    the cell sees the denial; without openssl in the allowlist the hook never reaches "would switch" (the profile binds
-    the hook)."""
+    The controls, under the same profile: an action by its absolute path planted at the is-due line is denied and the
+    cell sees the denial; without openssl in the allowlist the hook never reaches "is due" (the profile binds the
+    hook)."""
 
     def due_pass(self, runs, plant=None):
         p = PassRig(self, extra_rewrites=[KILL],

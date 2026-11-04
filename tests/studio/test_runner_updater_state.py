@@ -107,11 +107,11 @@ class Paths:
 
 def pair(r, name, lib_rewrites=(), script_rewrites=(), journal_body=None):
     """a release bin/ of its own, sandbox/NAME/: runner-updater (the rig's rewrites), runner-updater-lib (with
-    LIB_REWRITES), the rig's runner-updater-release and tls-excluded-lib, and runner-journal (the real one, or a stub
-    with JOURNAL_BODY); -> the script's path"""
+    LIB_REWRITES), the rig's runner-updater-window, runner-updater-release and tls-excluded-lib, and runner-journal
+    (the real one, or a stub with JOURNAL_BODY); -> the script's path"""
     d = r.sb.mkdir(name)
     r.sb.copy_script('bin/runner-updater-lib', list(lib_rewrites), dest=os.path.join(d, 'runner-updater-lib'))
-    for f in ('tls-excluded-lib', 'runner-updater-release'):   # the pass hook's files, as the rig has them
+    for f in ('tls-excluded-lib', 'runner-updater-release', 'runner-updater-window'):   # the pass's files, as the rig has them
         r.sb.write(os.path.join(d, f), read_text(r.sb.path('tools', f)))
     if journal_body is None:
         r.sb.copy_script('bin/runner-journal', [], dest=os.path.join(d, 'runner-journal'))
@@ -1096,7 +1096,7 @@ SUCCESS = ('2026-11-01 09:30:00 INFO mac-a: Runner removed name=runner-0000aa03 
            'workflowRunId=39746588065 job="build (fef3)" result=succeeded\n'
            '2026-11-01 09:31:00 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1\n')
 KILL = ('umask 077\n', 'umask 077\nkill() { print -r -- "kill $*" >> $ACTIONS_LOG }\n')   # kill is a builtin
-WOULD = '  pass_would   # what this pass would do'
+WOULD = '  pass_act $now   # the pass acts on its verdicts'
 ACTION_CALLS = 'runner-disable; runner-enable; golden-build; golden-gate x; tart list; launchctl list; kill -0 $$; '
 
 
@@ -1148,7 +1148,7 @@ def actions_seen(r):
 
 
 class TestNoActionAnyPath(unittest.TestCase):
-    """pass, report and status take no action, whatever path an action tool is called by. Each runs under a profile
+    """A pass with no work, report and status take no action, whatever path an action tool is called by. Each runs under a profile
     that lets start only what it is meant to start (above): an action tool called by its ABSOLUTE path (the repo's
     style) is denied, and zsh prints the denial. The action stubs, found through PATH, stay the second witness, and
     `kill` (a builtin) is a logging function. The controls, under the same profile: `/bin/launchctl list` by its
@@ -1169,18 +1169,19 @@ class TestNoActionAnyPath(unittest.TestCase):
         return [KILL, (at, '  ' + calls + '\n' + at)]
 
     def a_pass(self, calls=None):
-        """two passes, under the profile: the window opens, then three counted failures (R1: rollback)"""
+        """two passes with no work, under the profile: the window opens, then the log gains jobs and no failure (KEEP
+        observes; no verdict, no release: a pass acts on a verdict only, test_runner_updater_pass)"""
         r = Rig(self, jq_wrap=True, extra_rewrites=self.plant(self.PASS_AT, calls) if calls else [KILL])
         Paths(r).put(on_state())
         profile = only_these_start(r, PASS_RUNS, writes=True)
         env = {'ACTIONS_LOG': r.sb.path('logs', 'actions.log')}
         r.write_log('')
         first = sandboxed(self, r, profile, 'pass', env=env)
-        r.append_log(fixture('studio-cut.log') + fixture('three-failures.log'))
+        r.append_log(fixture('studio-cut.log'))
         res = sandboxed(self, r, profile, 'pass', env=env)
-        self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
-                      '(connect-class only))\n', res.stdout)
-        self.assertIn('runner-updater: pass: would roll back fx (this release takes no action)\n', res.stdout)
+        self.assertIn('\nr1 fx: none (', res.stdout)
+        self.assertIn('\nkeep fx: observe (runner %s: observing since ' % V2, res.stdout)
+        self.assertNotIn('rollback', res.stdout)
         return r, first.stderr + res.stderr
 
     def a_report(self, calls=None):

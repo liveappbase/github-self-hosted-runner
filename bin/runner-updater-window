@@ -1663,8 +1663,9 @@ ru_rb_newer() {
 
 # the family's state for a rollback: FAMILY -> ru_rb_cand (the candidate's version, "" none), ru_rb_clines (its lines
 # "S=I ...", "" none), ru_rb_prev (the one image `previous` names, "" none; 1 + REPLY when it names more than one),
-# ru_rb_until (back_until, "" none), ru_rb_rf (1 when a ROLLBACK FAILED is held), ru_rb_cofirst (1 when a ROLLED BACK
-# of the candidate's version, connect-class only, is held: the second rollback rejects it)
+# ru_rb_until (back_until, "" none), ru_rb_rf (1 when a ROLLBACK FAILED is held), ru_rb_cofirst (1 when the state
+# counts a connect-only rollback of the candidate's version already, its `connect_only` member, never a STOP: this one
+# is the second, and it rejects; S3b-4a r1 P3-5)
 ru_rb_state() {
   local o
   o=$(print -r -- $ru_state | $JQ -r --arg f $1 '(.families[$f] // {}) as $x
@@ -1672,8 +1673,7 @@ ru_rb_state() {
           (($x.previous // {}) | [.[]] | unique | if length == 0 then "" elif length == 1 then .[0] else "?" end),
           ($x.back_until // "" | tostring),
           (if any(($x.stops // [])[]; .stop == "ROLLBACK FAILED") then 1 else 0 end),
-          (if any(($x.stops // [])[]; .stop == "ROLLED BACK" and .version == ($x.candidate.version // null)
-                  and (.detail.connect_only // false) == true) then 1 else 0 end)' 2>/dev/null) \
+          (if (($x.connect_only // {})[$x.candidate.version // ""].n // 0) >= 1 then 1 else 0 end)' 2>/dev/null) \
     || { REPLY="jq could not read the family $1 of the state"; return 1 }
   local -a l=("${(@f)o}")
   (( ${#l} == 6 )) || { REPLY="jq could not read the family $1 of the state"; return 1 }
@@ -1765,7 +1765,7 @@ ru_rb_decided() {
 # condition), journaled first in ACTIONS. Held: only the STOPs (THE STOP RULE), R1 stays armed. The pin by D2's ONE
 # RULE, the `restart` member as a switch's. RECOVER's ROLLED BACK keeps R1's verdict (ru_rb_verdict, P3-2)
 ru_rb_close() {
-  local rolled=$1 rs running=false tv= detail co=false own=0
+  local rolled=$1 rs running=false tv= detail co=false cnt=false own=0
   local -a seen
   ru_w_stops=(${ru_w_stops:#*\"stop\":\"ROLLED BACK\"*})   # one ROLLED BACK, with R1's detail
   # read before this close writes the state (it clears the candidate): the image it leaves is the family's
@@ -1774,6 +1774,9 @@ ru_rb_close() {
     [[ -n $ru_w_reason || -z ${ru_w_vsha-} ]] || ru_rb_verdict
     [[ -z $ru_w_reject ]] && co=true   # an automatic rollback that rejects nothing was a first connect-class one
     detail=${ru_w_reason:-$($JQ -n -c --arg t "${ru_w_reason_text-}" --argjson co $co '{text: $t, connect_only: $co}' 2>/dev/null)}
+    # the state counts each connect-only rollback of the version (CONNECT-ONLY: the first rejects nothing, a second
+    # rejects; S3b-4a r1 P3-5): the first, and a second that R1's verdict says was connect-class only too
+    [[ $co == true || $(print -r -- $detail | $JQ -r '.connect_only' 2>/dev/null) == true ]] && cnt=true
     ru_w_stopjson "ROLLED BACK" "${ru_w_reason_text-}"
     REPLY=$(print -r -- $REPLY | $JQ -c --argjson d "${detail:-{\}}" '.detail = ((.detail // {}) + $d)' 2>/dev/null) || REPLY=
     [[ -n $REPLY ]] || ru_w_stopjson "ROLLED BACK" "${ru_w_reason_text-}"
@@ -1791,12 +1794,15 @@ ru_rb_close() {
   ru_w_state "$ru_w_kept .families[\$f] = ((.families[\$f] // $ru_w_family_new)
         | if \$rb then .candidate = null | .previous = null | .back_until = null
             | .rejected = (((.rejected // []) + (if \$rej != \"\" then [\$rej] else [] end)) | unique)
+            | if \$cnt and \$v != \"\" then .connect_only[\$v] = {n: ((.connect_only[\$v].n // 0) + 1), at: \$now}
+              else . end
             | .stops = [(.stops // [])[] | select(.stop != \"JOBS FAIL ON THE NEW IMAGE\" and .stop != \"NO EVIDENCE\")]
           else . end
         | .stops = kept(\$W; \$new; true; \$running))
       | if \$tv != \"\" then .images[\$tgt] = \$tv else . end
       | if \$rs == null then del(.restart) else .restart = \$rs end" \
       --arg f $ru_w_fam --arg rej "$ru_w_reject" --arg tv "$tv" --arg tgt $ru_w_rbt --argjson W $ru_W --argjson rs $rs \
+      --argjson cnt $cnt --arg v "$ru_w_ver" --argjson now $EPOCHSECONDS \
       --argjson rb ${${rolled:#0}:+true}${${rolled:#1}:+false} --argjson running $running \
       --argjson new "[${(j:,:)ru_w_stops}]" \
     || { print -r -- "runner-updater: STOP the state cannot be written ($REPLY): the window journal stays open"; return 3 }

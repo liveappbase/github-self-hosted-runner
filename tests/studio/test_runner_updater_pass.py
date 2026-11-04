@@ -1,0 +1,469 @@
+"""bin/runner-updater's timer `pass` ACTS on its verdicts (S3b-4b): R1's `rollback` starts the rollback window
+(ru_rollback, with SINCE kept in the state: the 2-h bound), a connect-only rollback allows one retry after 1 h and the
+second rejects (the count in the state), a DUE release starts the switch window (ru_window, one family per pass), a
+due family that waits 3 days at START STATE or IDLE holds NO IDLE, KEEP's ACCEPT, JOBS FAIL and NO EVIDENCE, and the
+7-day deletion of the previous image.
+
+The rig is test_runner_updater_window's (Win: a fake host, the release's bin/ beside the updater, the real core), with
+the pass's clock from the test (RU_TEST_NOW; the windows keep the real clock: the pass hands them how long a verdict or
+a release has waited, never a date of its own clock), and, for the cells that switch, test_runner_updater_release's
+GitHub stub and the mac-golden recipe files under the release folder. Multi-pass scenarios move the pass's clock, never
+sleep.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import time
+import unittest
+
+from tests.studio.test_runner_updater import INSTALLED, config, fixture, read_text
+from tests.studio.test_runner_updater_recover import assert_closed, assert_runs, n_disable, stops
+from tests.studio.test_runner_updater_rollback import CONNECT, NEW, V2, rb_win, rollback, switched
+from tests.studio.test_runner_updater_state import cand, fam, lines_of, state, stop
+from tests.studio.test_runner_updater_window import FAM, OLD, V0, Win, healthz, switched_config, today
+from tests.studio import test_runner_updater_release as rel
+
+# the pass's clock, from the test when it sets RU_TEST_NOW (every other command keeps the real clock)
+CLOCK = ('now=$(/bin/date -u +%s)', 'now=${RU_TEST_NOW:-$(/bin/date -u +%s)}')
+MIN, HOUR, DAY = 60, 3600, 86400
+# mac-golden's recipe files (bin/runner-updater-release, RL_RECIPE)
+RL_FILES = ('bin/golden-build bin/golden-emudhra bin/node-diff-compare bin/real-run bin/tls-excluded-lib '
+            'setup/emudhra.node-diff setup/tls-excluded-spki')
+
+
+def failures(hour=5, connect=False):
+    """three counted failures on mac-a at HOUR:00 of 2026-11-01 (log time), settled by a record 2 min later. CONNECT:
+    every one connect-class (runscaler's text), else none (another `Failed to start runner` error)"""
+    text = fixture('three-failures.log').replace('2026-11-01 05:', '2026-11-01 %02d:' % hour)
+    if not connect:
+        for i in (1, 2, 3):
+            text = text.replace('runner process exited on runner-0000000%d before connecting to GitHub' % i,
+                                'tart clone failed for runner-0000000%d' % i)
+    return text
+
+
+def pass_(w, at=None, env=None):
+    e = {'RU_TEST_NOW': str(at if at is not None else int(time.time()))}
+    e.update(env or {})
+    return w.r.cmd('pass', ok=False, env=e)
+
+
+def family(w):
+    return w.u.get()['families'].get(FAM)
+
+
+class LockHeld:
+    """the updater lock held by this test (a POSIX record lock, as zsh's zsystem flock takes it)"""
+
+    def __init__(self, w):
+        self.path = os.path.join(w.r.statedir, 'lock')
+
+    def __enter__(self):
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.lockf(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return self
+
+    def __exit__(self, *a):
+        fcntl.lockf(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+def gh_rig(w):
+    """W's release file answers from test_runner_updater_release's GitHub stub (W.gh) and filters a copy of the system
+    bundle; the mac-golden recipe files are under the release folder (RELBIN/..). -> their recipe"""
+    sb = w.sb
+    w.gh = sb.mkdir('gh')
+    curl = sb.write(sb.path('tools-gh2', 'curl'), '#!/bin/zsh -f\n' + rel.GH_STUB.replace('@D@', w.gh), 0o755)
+    source = sb.write(sb.path('ca', 'cert.pem'), read_text(rel.SYSTEM_BUNDLE))
+    sb.copy_script('bin/runner-updater-release', [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + curl),
+                                                  ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + source)])
+    files = dict(rel.BUILDER)
+    files['setup/tls-excluded-spki'] = read_text(rel.DATA)
+    for path, text in files.items():
+        sb.write(sb.path(path), text)
+    return rel.recipe_of(files)
+
+
+def latest(w, v=V2, published=None):
+    """GitHub's latest release is runner V (published 3 days ago by the real clock), with its tarball"""
+    def route(url, body):
+        k = os.path.join(w.gh, rel.key(url))
+        w.sb.write(k + '.code', '200\n')
+        with open(k + '.body', 'wb') as f:
+            f.write(body if isinstance(body, bytes) else body.encode())
+    route(rel.API + '/releases/latest', rel.release(v, published=published or int(time.time()) - 3 * DAY))
+    route('%s/v%s/actions-runner-osx-arm64-%s.tar.gz' % (rel.DL, v, v), rel.tarball_bytes(v))
+    return hashlib.sha256(rel.tarball_bytes(v)).hexdigest()
+
+
+def journals(w):
+    """every window journal, closed (oldest first) and then the open one: a list of lines each"""
+    d = os.path.join(w.r.statedir, 'windows')
+    out = [lines_of(os.path.join(d, n)) for n in sorted(os.listdir(d)) if not n.endswith('.d')] if os.path.isdir(d) else []
+    return out + ([lines_of(w.u.window)] if os.path.exists(w.u.window) else [])
+
+
+def jvalue(lines, key):
+    vals = [l.split(' ', 1)[1] if ' ' in l else '' for l in lines if l.split(' ', 1)[0] == key]
+    assert len(vals) == 1, (key, lines)
+    return vals[0]
+
+
+def armed(test, log=None, gh=False, **kw):
+    """a Win whose family mac-golden switched to NEW (runner V2; previous OLD); one pass opened its evidence window,
+    and the log then gained LOG (default: three counted failures, none connect-class): the next pass's R1 says
+    rollback. GH: the GitHub stub and the recipe files (the family's baseline: their recipe; the latest release V2)"""
+    f = kw.pop('fam', None) or switched()
+    w = Win(test, cfg=config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+            s=state(on=True, families={FAM: f}, images={OLD: V0, NEW: V2}), **kw)
+    w.sb.write(os.path.join(w.vms, NEW), '')
+    if gh:
+        s = w.u.get()
+        s['families'][FAM]['recipe'] = w.recipe = gh_rig(w)
+        w.u.put(s)
+        w.tsha = latest(w)
+    w.r.write_log('')
+    res = pass_(w)
+    test.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+    w.r.append_log(fixture('studio-cut.log') + (log if log is not None else failures()))
+    return w
+
+
+class TestR1RollsBack(unittest.TestCase):
+    """An R1 `rollback` verdict: the pass calls ru_rollback FAMILY "<r1's verdict>" SINCE. SINCE is the first pass that
+    saw the verdict, kept in the state (`r1_since`); the window gets how long it has held."""
+
+    def test_an_r1_verdict_rolls_the_family_back(self):
+        w = armed(self)
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('\nr1 %s: rollback (R1 on set mac-a: 3 counted failures' % FAM, res.stdout)
+        self.assertIn('runner-updater: pass: rolled back %s: it runs %s again\n' % (FAM, OLD), res.stdout)
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+        assert_closed(self, w)
+        self.assertEqual((w.value('kind'), w.value('command'), w.value('reject')), ('rollback', 'pass', V2))
+        f = family(w)
+        self.assertEqual((f['candidate'], f['previous'], f['rejected']), (None, None, [V2]))
+        (s,) = f['stops']
+        self.assertEqual((s['stop'], s['version'], len(s['detail']['failures']), s['detail']['connect_only']),
+                         ('ROLLED BACK', V2, 3, False))
+        self.assertFalse(os.path.exists(os.path.join(w.vms, NEW)))   # the image it left, deleted by its name
+        # the next pass: the verdict is gone with the candidate, and so is its SINCE; no second rollback
+        res = pass_(w)
+        self.assertEqual((res.returncode, n_disable(w)), (0, 1), res.stdout)
+        self.assertNotIn('r1_since', family(w))
+
+    def test_control_no_verdict_no_rollback(self):
+        w = armed(self, log='')
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertNotIn('rollback', res.stdout.replace('rollback pending', ''))
+        self.assertEqual((n_disable(w), family(w)['candidate']['version']), (0, V2))
+        self.assertNotIn('r1_since', family(w))
+
+    def test_since_is_the_first_pass_that_saw_the_verdict(self):
+        w = armed(self)
+        w.validate('unknown')                 # every validate UNKNOWN: the rollback cannot start, it is pending
+        t = int(time.time())
+        res = pass_(w, t)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn('runner-updater: rollback pending: pre-window validate (pre) is UNKNOWN', res.stdout)
+        self.assertEqual((family(w)['r1_since'], n_disable(w)), (t, 0))
+        pass_(w, t + 30 * MIN)
+        self.assertEqual(family(w)['r1_since'], t)   # kept, never moved
+
+    def test_the_2_h_bound_runs_from_since_also_across_passes_that_found_the_lock_held(self):
+        w = armed(self)
+        w.validate('unknown')
+        t = int(time.time())
+        pass_(w, t)
+        with LockHeld(w):                     # a timer pass that finds the lock held ends at once
+            res = pass_(w, t + HOUR)
+        self.assertEqual((res.returncode, res.stdout),
+                         (0, 'runner-updater: pass: another run holds the updater lock; this pass ends\n'))
+        res = pass_(w, t + 2 * HOUR - MIN)    # the control: within the bound, still pending
+        self.assertIn('runner-updater: rollback pending: ', res.stdout)
+        self.assertEqual(stops(w), [])
+        res = pass_(w, t + 2 * HOUR)          # from SINCE, not from the pass after the lock
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP ROLLBACK FAILED: ', res.stdout)
+        self.assertEqual((stops(w), n_disable(w)), (['ROLLBACK FAILED'], 0))
+
+    def test_a_held_rollback_failed_starts_no_rollback_and_retry_restarts_since(self):
+        # P3-a: `retry` clears a ROLLBACK FAILED raised by the 2-h bound and SINCE restarts, else the next call would
+        # fail again at once
+        w = armed(self)
+        w.validate('unknown')
+        t = int(time.time())
+        pass_(w, t)
+        pass_(w, t + 2 * HOUR)
+        self.assertEqual(stops(w), ['ROLLBACK FAILED'])
+        res = pass_(w, t + 2 * HOUR + 10 * MIN)
+        self.assertIn('runner-updater: pass: %s: R1\'s rollback is due, but ROLLBACK FAILED holds it: '
+                      '`runner-updater retry %s`' % (FAM, FAM), res.stdout)
+        self.assertNotIn('runner-updater: STOP', res.stdout)
+        self.assertEqual(w.r.cmd('retry', FAM).returncode, 0)
+        self.assertNotIn('r1_since', family(w))
+        res = pass_(w, t + 3 * HOUR)
+        self.assertIn('runner-updater: rollback pending: ', res.stdout)
+        self.assertEqual((stops(w), family(w)['r1_since']), ([], t + 3 * HOUR))
+
+    def test_a_rollback_whose_journal_stays_open_is_ended_by_the_next_pass(self):
+        w = armed(self)
+        w.put('disable-fail')                 # runner-disable times out: the rollback could not start
+        res = pass_(w)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertTrue(os.path.exists(w.u.window))
+        os.remove(os.path.join(w.scn, 'disable-fail'))
+        res = pass_(w)                        # RECOVER brings CI back, then R1 (still armed) rolls back
+        self.assertIn('runner-updater: recover: ', res.stdout)
+        self.assertIn('runner-updater: pass: rolled back %s' % FAM, res.stdout)
+        assert_closed(self, w)
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+        self.assertIsNone(family(w)['candidate'])
+
+
+class TestConnectOnlyCount(unittest.TestCase):
+    """CONNECT-ONLY (PLAN D6 :320; S3b-4a r1 P3-5): the count of a version's connect-only rollbacks lives IN THE STATE
+    (the family's `connect_only`: {VERSION: {n, at}}), never in a STOP: the first rejects nothing and is counted; one
+    with the count already there is the second and rejects, whatever STOP is held; `retry` never resets it."""
+
+    def test_the_first_connect_only_rollback_is_counted_and_rejects_nothing(self):
+        w = rb_win(self)
+        t = int(time.time())
+        self.assertEqual(rollback(w, reason=CONNECT).returncode, 0)
+        f = family(w)
+        self.assertEqual((f['rejected'], jvalue(journals(w)[-1], 'reject')), ([], 'none'))
+        c = f['connect_only'][V2]
+        self.assertEqual(c['n'], 1)
+        self.assertLessEqual(abs(c['at'] - t), 5)
+
+    def test_with_the_count_and_no_stop_the_second_rejects(self):
+        # the STOP is gone (`retry`, or the pass's 1-h retry cleared it): the count alone makes it the second
+        w = rb_win(self, families={FAM: switched(connect_only={V2: {'n': 1, 'at': int(time.time()) - 2 * HOUR}})})
+        self.assertEqual(rollback(w, reason=CONNECT).returncode, 0)
+        self.assertEqual((family(w)['rejected'], jvalue(journals(w)[-1], 'reject')), ([V2], V2))
+
+    def test_control_the_count_of_another_version_does_not(self):
+        w = rb_win(self, families={FAM: switched(connect_only={'2.338.9': {'n': 1, 'at': int(time.time())}})})
+        self.assertEqual(rollback(w, reason=CONNECT).returncode, 0)
+        self.assertEqual(family(w)['rejected'], [])
+
+    def test_retry_never_resets_the_count(self):
+        held = [stop(FAM, 'ROLLED BACK', version=V2, detail={'connect_only': True, 'failures': []})]
+        count = {V2: {'n': 1, 'at': int(time.time())}}
+        w = rb_win(self, families={FAM: fam(previous={'mac-a': OLD}, rejected=[V2], stops=held, connect_only=count)})
+        self.assertEqual(w.r.cmd('retry', FAM).returncode, 0)
+        f = family(w)
+        self.assertEqual((f['stops'], f['rejected'], f['connect_only']), ([], [], count))
+
+
+class TestConnectOnlyRetryAfter1h(unittest.TestCase):
+    """The pass: a connect-only ROLLED BACK of V holds V (it is of the eligible release) until 1 h after that rollback;
+    then the pass clears it and V is due again: ONE retry (a switch window); R1 again rolls it back, and that second
+    rollback rejects V."""
+
+    def test_one_retry_after_1_h_and_the_second_rollback_rejects(self):
+        w = armed(self, log=failures(connect=True), gh=True)
+        res = pass_(w)                                     # the first connect-only rollback
+        self.assertIn('runner-updater: pass: rolled back %s' % FAM, res.stdout)
+        self.assertEqual((family(w)['rejected'], stops(w)), ([], ['ROLLED BACK']))
+        t1, n = int(time.time()), n_disable(w)
+        res = pass_(w, t1 + HOUR - MIN)                    # the control: before 1 h, V2 is held
+        self.assertIn('runner-updater: pass: %s is not due: STOP ROLLED BACK (runner %s): it is of the eligible '
+                      'release' % (FAM, V2), res.stdout)
+        self.assertNotIn('the one retry', res.stdout)
+        self.assertEqual((n_disable(w), stops(w)), (n, ['ROLLED BACK']))
+        res = pass_(w, t1 + HOUR)                          # 1 h on: its one retry
+        self.assertIn('runner-updater: pass: %s: its connect-only rollback of runner %s was 1 h ago or more: the one '
+                      'retry of %s may start (a second rollback rejects it)' % (FAM, V2, V2), res.stdout)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['stops'], n_disable(w)), (V2, [], n + 1))
+        self.assertEqual(jvalue(journals(w)[-1], 'command'), 'pass')
+        # R1 again: the second rollback rejects it
+        pass_(w)
+        w.r.append_log(failures(hour=6, connect=True))
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: rolled back %s' % FAM, res.stdout)
+        self.assertEqual((family(w)['rejected'], jvalue(journals(w)[-1], 'reject')), ([V2], V2))
+        # it is counted too, so its ROLLED BACK stays past 1 h (status keeps naming `retry`)
+        t2 = int(time.time())
+        res = pass_(w, t2 + 2 * HOUR)
+        self.assertNotIn('the one retry', res.stdout)
+        self.assertEqual((stops(w), family(w)['connect_only'][V2]['n']), (['ROLLED BACK'], 2))
+
+
+def due_win(test, families='mac-golden tart mac-a\n', images=None, **famkw):
+    """a Win whose family mac-golden runs OLD (runner V0) with the recipe of its files as its baseline (unless FAMKW
+    says otherwise); GitHub's latest release V2 is 3 days old: a pass finds the family DUE"""
+    w = Win(test, families=families, extra_rewrites=[CLOCK])
+    w.recipe = gh_rig(w)
+    f = dict(recipe=w.recipe)
+    f.update(famkw)
+    w.u.put(state(on=True, families={FAM: fam(**f)}, images=images or {OLD: V0}))
+    w.tsha = latest(w)
+    return w
+
+
+def busy(w):
+    """every /healthz read: mac-a ready and busy (START STATE passes, the idle pair says not idle)"""
+    h = healthz('mac-a')
+    h['scale_sets'][0]['busy'] = 1
+    w.r.set_curl(json.dumps(h))
+
+
+class TestDueSwitches(unittest.TestCase):
+    """A DUE release (bin/runner-updater-release, rl_pass) starts the switch window (ru_window FAMILY V SHA idle SINCE
+    pass): one window per pass, only when no journal is open. ONE OPEN RELEASE PER FAMILY: an open candidate, or a
+    previous image kept for `back`, holds it."""
+
+    def test_a_due_release_switches_the_family(self):
+        w = due_win(self)
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        out = 'liveapp-mac-golden-' + today()
+        self.assertIn('runner-updater: pass: %s is due: runner %s\n' % (FAM, V2), res.stdout)
+        self.assertIn('runner-updater: pass: switched %s to %s (runner %s)\n' % (FAM, out, V2), res.stdout)
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['candidate']['lines'], f['previous']),
+                         (V2, {'mac-a': out}, {'mac-a': OLD}))
+        j = journals(w)[-1]
+        self.assertEqual([jvalue(j, k) for k in ('kind', 'command', 'version', 'runner-sha', 'idle')],
+                         ['switch', 'pass', V2, w.tsha, 'idle'])
+        assert_runs(self, w, switched_config(w.pre, out))
+        self.assertEqual(read_text(w.pin), '%s %s\n' % (V2, w.tsha))
+        res = pass_(w)                                       # one open release per family
+        self.assertIn('runner-updater: pass: %s is not due: an open candidate (runner %s)' % (FAM, V2), res.stdout)
+        self.assertEqual(n_disable(w), 1)
+
+    def test_control_a_rejected_release_starts_no_window(self):
+        w = due_win(self, rejected=[V2])
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn('runner-updater: pass: %s is not due: release v%s is rejected for %s' % (FAM, V2, FAM), res.stdout)
+        self.assertEqual((n_disable(w), journals(w), family(w)['candidate']), (0, [], None))
+
+    def test_a_previous_image_kept_for_back_holds_the_family(self):
+        until = int(time.time()) + DAY
+        w = due_win(self, previous={'mac-a': 'liveapp-mac-golden-20260901'}, back_until=until)
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: %s is not due: its previous image is kept for `back` until %s: one open '
+                      'release per family' % (FAM, time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(until))), res.stdout)
+        self.assertEqual(n_disable(w), 0)
+
+    def test_control_after_back_until_the_family_is_due(self):
+        w = due_win(self, previous={'mac-a': 'liveapp-mac-golden-20260901'}, back_until=int(time.time()) - MIN)
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: switched %s to ' % FAM, res.stdout)
+
+    def test_one_window_per_pass(self):
+        # a second family with a builder (both wired here by the test; this release wires mac-golden alone) that is
+        # due too waits for the next pass
+        w = due_win(self, families='mac-golden tart mac-a\nfx tart mac-b\n',
+                    images={OLD: V0, 'liveapp-mac-golden-20260902': V0})
+        w.sb.copy_script('bin/runner-updater-release', [
+            ('RL_CURL=/usr/bin/curl', 'RL_CURL=' + w.sb.path('tools-gh2', 'curl')),
+            ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + w.sb.path('ca', 'cert.pem')),
+            ("RL_RECIPE=(mac-golden '", "RL_RECIPE=(fx '%s' mac-golden '" % RL_FILES)])
+        w.sb.write(w.r.config, config((('mac-a', OLD), ('mac-b', 'liveapp-mac-golden-20260902'))))
+        os.utime(w.r.config, (INSTALLED, INSTALLED))
+        w.r.set_curl(json.dumps(healthz('mac-a', 'mac-b')))   # the idle pair reads every set of the config
+        s = w.u.get()
+        s['families']['fx'] = fam(recipe=w.recipe)
+        w.u.put(s)
+        w.sb.write(os.path.join(w.vms, 'liveapp-mac-golden-20260902'), '')
+        w.r.script = w.r.copy('runner-updater', [CLOCK, ('BUILDERS=(mac-golden)', 'BUILDERS=(mac-golden fx)')])
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: switched %s to ' % FAM, res.stdout)
+        self.assertIn('runner-updater: pass: fx: one window per pass: the next pass switches it to %s\n' % V2, res.stdout)
+        self.assertEqual((n_disable(w), len(journals(w))), (1, 1))
+        self.assertEqual(w.u.get()['families']['fx']['stops'], [])
+
+
+class TestDueSince(unittest.TestCase):
+    """The pass keeps when the family became due for a release (`due`: {version, since}), the first pass that found it
+    due, and gives the window how long it has waited: NO IDLE (PLAN D5 :285) after 3 days at START STATE or IDLE."""
+
+    def test_since_is_kept_across_passes_that_were_not_now(self):
+        w = due_win(self)
+        busy(w)
+        t = int(time.time())
+        res = pass_(w, t)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertIn('runner-updater: pass %s: not now: IDLE: ' % FAM, res.stdout)
+        self.assertEqual(family(w)['due'], {'version': V2, 'since': t})
+        pass_(w, t + HOUR)
+        self.assertEqual((family(w)['due'], n_disable(w)), ({'version': V2, 'since': t}, 0))
+
+    def test_no_idle_3_days_after_the_family_became_due(self):
+        w = due_win(self)
+        busy(w)
+        t = int(time.time())
+        pass_(w, t)
+        res = pass_(w, t + 3 * DAY - MIN)                  # the control: a minute short of 3 days
+        self.assertIn('runner-updater: pass %s: not now: IDLE: ' % FAM, res.stdout)
+        self.assertEqual(stops(w), [])
+        res = pass_(w, t + 3 * DAY)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP NO IDLE: IDLE: ', res.stdout)
+        (s,) = family(w)['stops']
+        self.assertEqual((s['stop'], s['version'], s['detail']['sha']), ('NO IDLE', V2, w.tsha))
+        self.assertIn('Next: `runner-updater switch-now %s`' % FAM, w.status())
+        self.assertEqual(n_disable(w), 0)
+        res = pass_(w, t + 3 * DAY + HOUR)                 # NO IDLE holds the family: no window
+        self.assertIn('runner-updater: pass: %s is not due: STOP NO IDLE (runner %s)' % (FAM, V2), res.stdout)
+        # switch-now takes its release; the next pass finds the candidate, and `due` is gone
+        res = w.run('switch-now')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        pass_(w, t + 3 * DAY + 2 * HOUR)
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['stops'], 'due' in f), (V2, [], False))
+
+
+class TestRecipeStops(unittest.TestCase):
+    """NO BASELINE and recipe changed (PLAN D2 :143) are STOPs the pass HOLDS for a family with no candidate, so status
+    shows them with `rebuild FAMILY`; it drops them when the recipe is the baseline again, and for a family with a
+    candidate (a rebuild's: its ACCEPT writes the baseline), before the core reads the STOPs."""
+
+    def test_no_baseline_is_held(self):
+        w = due_win(self, recipe=None)
+        res = pass_(w)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: pass: %s is not due: STOP NO BASELINE: the family has no recipe baseline (its '
+                      'recipe now: %s)' % (FAM, w.recipe), res.stdout)
+        (s,) = family(w)['stops']
+        self.assertEqual((s['family'], s['stop'], s['version']), (FAM, 'NO BASELINE', None))
+        self.assertIn('\n%s: STOP NO BASELINE: the family has no recipe baseline (its recipe now: %s)' % (FAM, w.recipe),
+                      w.status())
+        self.assertIn('Next: `runner-updater rebuild %s`' % FAM, w.status())
+        res = pass_(w)                                      # held once; the next pass changes nothing
+        self.assertEqual((res.returncode, stops(w)), (0, ['NO BASELINE']))
+
+    def test_recipe_changed_is_held(self):
+        w = due_win(self, recipe='a' * 64)
+        pass_(w)
+        (s,) = family(w)['stops']
+        self.assertEqual(s['stop'], 'recipe changed')
+        self.assertIn('its recipe is %s, its baseline %s' % (w.recipe, 'a' * 64), s['detail']['text'])
+        self.assertEqual(n_disable(w), 0)
+
+    def test_a_recipe_stop_goes_when_the_recipe_is_the_baseline(self):
+        held = [stop(FAM, 'NO BASELINE', version=None, detail={'text': 'x'})]
+        w = due_win(self, rejected=[V2], stops=held)
+        res = pass_(w)
+        self.assertIn('is not due: release v%s is rejected' % V2, res.stdout)
+        self.assertEqual(stops(w), [])
+
+    def test_a_recipe_stop_goes_for_a_family_with_a_candidate_before_keep_reads_it(self):
+        held = [stop(FAM, 'NO BASELINE', version=None, detail={'text': 'x'})]
+        w = due_win(self, recipe=None, stops=held, candidate=cand(V0, {'mac-a': OLD}, int(time.time()) - HOUR),
+                    previous={'mac-a': 'liveapp-mac-golden-20260901'})
+        res = pass_(w)
+        self.assertIn('\nkeep %s: observe (' % FAM, res.stdout)
+        self.assertEqual(stops(w), [])
+
+
+if __name__ == '__main__':
+    unittest.main()

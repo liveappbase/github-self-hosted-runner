@@ -478,8 +478,11 @@ do_retry() {
     && idx=$(print -r -- $out | $JQ -c --arg f $family --argjson n $n \
                '[.stops[:$n] | to_entries[] | select(.value.line | contains("runner-updater retry \($f)`")) | .key]') \
     || stop "core could not decide (status): ${out%%$'\n'*}: nothing was cleared"
+  # a ROLLBACK FAILED it clears restarts R1's SINCE (S3b-4a r2 P3-a): the 2-h bound is measured anew from the next
+  # pass that sees the verdict, else the next try would fail again at once
   change_state '.families[$f] |= (((.stops // []) | to_entries | map(select(.key as $k | $i | index($k) | not))
         | map(.value)) as $left
+      | (if any((.stops // [])[$i[]]; .stop == "ROLLBACK FAILED") then del(.r1_since) else . end)
       | .stops = $left
       | .rejected = [(.rejected // [])[] | select(. as $v | any($left[]; .stop == "PINNED RUNNER RETIRED" and .version == $v))])' \
       --arg f $family --argjson i $idx
@@ -559,23 +562,152 @@ do_pass() {
   [[ -d $PASSDIR ]] || /bin/mkdir -m 700 $PASSDIR || refuse "cannot create $PASSDIR"
   print -r -- $ru_state | $JQ -c '.core // empty' > $PASSDIR/state.json || refuse "cannot copy the core's state into $PASSDIR"
   /bin/rm -f -- $PASSDIR/{idle,r1,keep,status}.json
+  # the STOPs the core reads: a family with a candidate holds no NO BASELINE or recipe changed (a rebuild's candidate:
+  # its ACCEPT writes the baseline; pass_recipe drops them from the state)
   held=$(print -r -- $ru_state | $JQ -c '{families: (.families | map_values({candidate: (.candidate // null),
-           back_until: (.back_until // null)})), stops: [.families[] | (.stops // [])[]], restart: (.restart // null)}') \
+           back_until: (.back_until // null)})),
+           stops: [.families[] | . as $x | (.stops // [])[] | select(($x.candidate != null
+                     and (.stop == "NO BASELINE" or .stop == "recipe changed")) | not)],
+           restart: (.restart // null)}') \
     || refuse "jq could not read the families of the state"
-  say "pass: one pass at $(strftime '%Y-%m-%d %H:%M:%S UTC' $now) ($now); it takes no action"
+  say "pass: one pass at $(strftime '%Y-%m-%d %H:%M:%S UTC' $now) ($now)"
   ru_collect $PASSDIR $PASSDIR/state.json '' $now $held || refuse "no facts: $REPLY"
   run_core $PASSDIR $STATE $now
-  change_state '.core = $c[0] | del(.restart)' --slurpfile c $PASSDIR/state.json   # the restart: passed once
+  # the core's state back; the restart passed once (removed); each family's R1 SINCE (r1_since): the first pass whose
+  # R1 said rollback keeps its clock, and a family whose R1 says anything else has none
+  change_state '.core = $c[0] | del(.restart)
+      | .families |= with_entries(.key as $f
+          | if (($r1[0].families // {})[$f].verdict // "") == "rollback" then .value.r1_since //= $now
+            else .value |= del(.r1_since) end)' \
+    --slurpfile c $PASSDIR/state.json --slurpfile r1 $PASSDIR/r1.json --argjson now $now
   write_protected $now
-  pass_would   # what this pass would do: no action in this release
-  # which release each family may switch to, or why not: bin/runner-updater-release (its header: THE PASS HOOK)
+  pass_act $now   # the pass acts on its verdicts
+  exit $(( recovered || pass_rc ))
+}
+# what the pass does on its verdicts, in order
+pass_act() {
+  local now=$1
+  pass_would   # KEEP's verdicts: what this pass would do
+  source $RELBIN/runner-updater-window || refuse "cannot load $RELBIN/runner-updater-window"
+  pass_r1 $now
+  pass_connect_retry $now
+  # which release each family may switch to, or why not: bin/runner-updater-release (its header: THE PASS HOOK). A
+  # window of this pass read another config (its backup): the config and the families are read again first
   source $RELBIN/runner-updater-release || refuse "cannot load $RELBIN/runner-updater-release"
-  rl_pass $now
-  exit $recovered
+  if ru_config && ru_families; then
+    rl_pass $now
+    pass_recipe
+    pass_switch $now
+  else
+    say "pass: no family is checked for a release: $REPLY"; pass_rc=1
+  fi
+}
+# THE RECIPE STOPs (PLAN D2 :143): NO BASELINE and recipe changed, as rl_pass decided them for a family with no
+# candidate (rl_rstop: the STOP, or "" none; rl_rtext: its text), are HELD, so status shows them with `rebuild FAMILY`;
+# each replaces the family's other one. A family with a candidate holds neither (a rebuild's candidate: its ACCEPT
+# writes the baseline). A STOP it holds anew: the pass exits 1
+pass_recipe() {
+  local f j="{}" new
+  for f in ${(k)rl_rstop}; do
+    j=$(print -r -- $j | $JQ -c --arg f $f --arg s "$rl_rstop[$f]" --arg t "$rl_rtext[$f]" '.[$f] = {s: $s, t: $t}') \
+      || { say "pass: jq could not read the recipe STOPs"; pass_rc=1; return }
+  done
+  new=$(print -r -- $ru_state | $JQ -r --argjson d $j '[.families | to_entries[] | .key as $f | select(($d[$f].s // "") != "")
+          | select(any((.value.stops // [])[]; .stop == $d[$f].s) | not) | "pass: \($f) holds STOP \($d[$f].s)"] | .[]') \
+    || { say "pass: jq could not read the recipe STOPs"; pass_rc=1; return }
+  change_state '.families |= with_entries(.key as $f | .value |= (
+      def recipe: .stop == "NO BASELINE" or .stop == "recipe changed";
+      if .candidate != null then .stops = [(.stops // [])[] | select(recipe | not)]
+      elif $d | has($f) then
+        ([(.stops // [])[] | select(recipe and .stop == $d[$f].s and .detail.text == $d[$f].t)] | first) as $same
+        | .stops = [(.stops // [])[] | select(recipe | not)]
+          + (if $d[$f].s == "" then [] elif $same != null then [$same]
+             else [{family: $f, stop: $d[$f].s, version: null, user: null, detail: {text: $d[$f].t}}] end)
+      else . end))' --argjson d $j
+  [[ -z $new ]] || { print -r -- ${(F)${(f)new}/#/runner-updater: }; pass_rc=1 }
+}
+# DUE -> THE SWITCH WINDOW (bin/runner-updater-window, ru_window FAMILY V SHA idle SINCE pass): rl_pass's due families
+# (rl_due: "FAMILY V SHA RECIPE", families-file order). ONE window per pass (pass_windowed: an R1 rollback ran, or the
+# first due family's), and only when no window journal is open. SINCE (D5 NO IDLE, 3 days from eligibility): the
+# first pass that found the family due for that version, kept in the state (`due`: {version, since}); the window gets
+# EPOCHSECONDS less how long that is by the pass's clock. A family with a candidate has no `due`
+pass_switch() {
+  local now=$1 d f v s since j="{}"
+  local -a w
+  for d in $rl_due; do
+    w=(${=d})
+    j=$(print -r -- $j | $JQ -c --arg f $w[1] --arg v $w[2] '.[$f] = $v') || { say "pass: jq could not record the due families"; pass_rc=1; return }
+  done
+  change_state '.families |= with_entries(.key as $f | .value |= (
+      if .candidate != null then del(.due)
+      elif $d | has($f) then (if .due.version == $d[$f] then . else .due = {version: $d[$f], since: $now} end)
+      else . end))' --argjson d $j --argjson now $now
+  for d in $rl_due; do
+    w=(${=d}) f=$w[1] v=$w[2] s=$w[3]
+    if (( pass_windowed )); then say "pass: $f: one window per pass: the next pass switches it to $v"; continue; fi
+    [[ ! -e $WINDOW && ! -L $WINDOW ]] || { say "pass: $f: a window journal is open ($WINDOW): no switch; the next pass's RECOVER ends it"; continue }
+    (( ${BUILDERS[(Ie)$f]} )) || { say "pass: $f: no builder wired for it: no switch"; continue }
+    since=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].due.since // empty')
+    [[ $since =~ '^[0-9]+$' ]] && (( since <= now )) || since=$now
+    pass_windowed=1
+    ru_window $f $v $s idle $(( EPOCHSECONDS - (now - since) )) pass
+    case $? in
+      (0) say "pass: switched $f to $ru_w_out (runner $v)" ;;
+      (2) ;;   # not now: the window said why; nothing changed
+      (*) pass_rc=1 ;;
+    esac
+  done
+}
+# R1 -> THE ROLLBACK WINDOW (bin/runner-updater-window, ru_rollback FAMILY REASON SINCE): the first family whose R1 says
+# rollback, in r1's order; ONE window per pass (pass_windowed). REASON: r1's verdict of the family {set, failures,
+# connect_only, reason}. SINCE (the 2-h bound): the window measures it with its own clock, so it gets EPOCHSECONDS less
+# how long the verdict has held by the pass's clock (now - r1_since). A family that holds ROLLBACK FAILED starts none
+# (`retry FAMILY` clears it). Returns: 0 rolled back; 1 a STOP or a REFUSE; 2 pending (R1 stays armed: the next pass
+# calls again); 3 the journal stays open (the next pass's RECOVER ends it)
+pass_windowed=0 pass_rc=0
+pass_r1() {
+  local now=$1 f since verdict
+  for f in ${(f)"$($JQ -r '(.families // {}) | to_entries[] | select(.value.verdict == "rollback") | .key' \
+                   $PASSDIR/r1.json)"}; do
+    if (( pass_windowed )); then say "pass: $f: R1's rollback is due; one window per pass: the next pass starts it"; continue; fi
+    ru_rb_state $f || { say "pass: $f: R1's rollback is due, but $REPLY"; pass_rc=1; continue }
+    if (( ru_rb_rf )); then
+      say "pass: $f: R1's rollback is due, but ROLLBACK FAILED holds it: \`runner-updater retry $f\`"
+      continue
+    fi
+    since=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].r1_since // empty')
+    [[ $since =~ '^[0-9]+$' ]] && (( since <= now )) || since=$now
+    verdict=$($JQ -c --arg f $f '.families[$f] | {set, failures, connect_only, reason}' $PASSDIR/r1.json) \
+      || { say "pass: $f: jq could not read R1's verdict: no rollback"; pass_rc=1; continue }
+    pass_windowed=1
+    ru_rollback $f "$verdict" $(( EPOCHSECONDS - (now - since) ))
+    case $? in
+      (0) say "pass: rolled back $f: it runs $ru_w_rbt again" ;;
+      (2) ;;   # pending: ru_rb_window said why; the next pass calls again while R1's verdict holds
+      (*) pass_rc=1 ;;
+    esac
+  done
+}
+# CONNECT-ONLY's ONE RETRY (PLAN D6 :320): a ROLLED BACK of version V whose failures were all connect-class rejected
+# nothing, and it holds V (rl_stop: it is of the eligible release). When the state counts exactly one connect-only
+# rollback of V (the family's `connect_only`: {V: {n, at}}) and it is 1 h old or more by the pass's clock, the pass
+# removes that STOP: V may be due again, once. The count stays (`retry` never resets it), so the next connect-only
+# rollback of V is the second: it rejects V (ru_rb_state), counts 2, and its ROLLED BACK stays
+typeset -g pass_co_retry='def co_retry($c; $now): .stop == "ROLLED BACK" and .detail.connect_only == true
+  and (.version | type) == "string" and ($c[.version].n // 0) == 1 and $now - $c[.version].at >= 3600;'
+pass_connect_retry() {
+  local now=$1 out l
+  out=$(print -r -- $ru_state | $JQ -r --argjson now $now "$pass_co_retry"' .families | to_entries[] | .key as $f
+          | .value | (.connect_only // {}) as $c | (.stops // [])[] | select(co_retry($c; $now)) | "\($f) \(.version)"') \
+    || { say "pass: jq could not read the connect-only rollbacks"; pass_rc=1; return }
+  [[ -n $out ]] || return 0
+  change_state "$pass_co_retry"' .families |= map_values((.connect_only // {}) as $c
+      | .stops = [(.stops // [])[] | select(co_retry($c; $now) | not)])' --argjson now $now
+  for l in ${(f)out}; do
+    say "pass: ${l%% *}: its connect-only rollback of runner ${l#* } was 1 h ago or more: the one retry of ${l#* } may start (a second rollback rejects it)"
+  done
 }
 pass_would() {
-  $JQ -r '(.families // {}) | to_entries[] | select(.value.verdict == "rollback")
-          | "runner-updater: pass: would roll back \(.key) (this release takes no action)"' $PASSDIR/r1.json
   $JQ -r '(.families // {}) | to_entries[] | .key as $f | .value.verdict
           | if . == "accept" then "runner-updater: pass: would accept \($f) (this release takes no action)"
             elif . == "jobs-fail" then "runner-updater: pass: would hold \($f): STOP JOBS FAIL ON THE NEW IMAGE (this release takes no action)"

@@ -470,7 +470,12 @@ def family_ok($f): type == "object"
   and (.back_until == null or (.back_until | epoch_ok))
   and (.rejected == null or (.rejected | type == "array" and all(.[]; version_ok)))
   and (.recipe == null or (.recipe | type == "string" and test("^[0-9a-f]{64}$")))
-  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok($f))));
+  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok($f))))
+  and (.r1_since == null or (.r1_since | epoch_ok))
+  and (.due == null or (.due | type == "object" and (.version | version_ok) and (.since | epoch_ok)))
+  and (.connect_only == null or (.connect_only | type == "object"
+                                 and all(to_entries[]; (.key | version_ok) and (.value | type) == "object"
+                                                       and (.value.n | epoch_ok) and (.value.at | epoch_ok))));
 if type == "object" and .format == 1 and (.on | type) == "boolean"
    and (.families | type) == "object" and all(.families | to_entries[]; .key as $f | ($f | fam_ok) and (.value | family_ok($f)))
    and (.images | type) == "object" and all(.images | to_entries[]; (.key | image_ok) and (.value | version_ok))
@@ -485,7 +490,12 @@ ru_state_members='
 def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
 [(keys - ["format", "on", "families", "images", "core", "restart"])[] | shown]
 + [.families | to_entries[] | .key as $f | .value
-   | ((keys - ["candidate", "previous", "back_until", "rejected", "recipe", "stops"])[] | "families.\($f).\(shown)"),
+   | ((keys - ["candidate", "previous", "back_until", "rejected", "recipe", "stops", "r1_since", "connect_only",
+                "due"])[] | "families.\($f).\(shown)"),
+     (if (.due | type) == "object" then (.due | keys - ["version", "since"])[] | "families.\($f).due.\(shown)"
+      else empty end),
+     ((.connect_only // {}) | to_entries[] | .key as $v | .value | (keys - ["n", "at"])[]
+        | "families.\($f).connect_only.\($v | shown).\(shown)"),
      (if (.candidate | type) == "object" then (.candidate | keys - ["version", "lines", "closed_at"])[]
         | "families.\($f).candidate.\(shown)" else empty end),
      ((.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
