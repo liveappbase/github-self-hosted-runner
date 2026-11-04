@@ -230,6 +230,138 @@ class TestR1RollsBack(unittest.TestCase):
         self.assertIsNone(family(w)['candidate'])
 
 
+class TestTheBoundCountsOnlyTimeATryCouldStart(unittest.TestCase):
+    """S3b-4b r1 P1-1: the 2-h bound counts only time in which a rollback COULD start. A pass that finds CI disabled by
+    a person (FLAG absent), or a pending hand edit (HAND CHANGE before runner-disable), restarts SINCE (r1_since goes:
+    the next pass that sees the verdict sets it anew); `off` removes it (time while OFF never counts); a pass that finds
+    the updater lock held does not (that time counts: TestR1RollsBack). So the first pass that can try, tries."""
+
+    def rolls_back(self, w, res):
+        """RES, the first pass that can try: it runs runner-disable ONCE, the family runs its previous image, and it
+        holds ROLLED BACK and no ROLLBACK FAILED"""
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('runner-updater: pass: rolled back %s: it runs %s again\n' % (FAM, OLD), res.stdout)
+        self.assertNotIn('ROLLBACK FAILED', res.stdout)
+        self.assertEqual((n_disable(w), stops(w)), (1, ['ROLLED BACK']))
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+
+    def test_ci_disabled_by_a_person_for_3_h_then_enabled_rolls_back(self):
+        w = armed(self)
+        os.remove(w.r.flag)                   # a person ran runner-disable
+        t = int(time.time())
+        res = pass_(w, t)
+        self.assertIn('runner-updater: rollback pending: CI disabled by a person', res.stdout)
+        since = family(w).get('r1_since')
+        pass_(w, t + HOUR)
+        w.sb.write(w.r.flag, '')               # the person runs runner-enable
+        self.rolls_back(w, pass_(w, t + 3 * HOUR))
+        self.assertIsNone(since)               # no try could start: the bound had not begun
+
+    def test_off_for_3_h_then_on_rolls_back(self):
+        w = armed(self)
+        w.validate('unknown')                 # the first try: pending, SINCE = t
+        t = int(time.time())
+        pass_(w, t)
+        self.assertEqual(family(w)['r1_since'], t)
+        self.assertEqual(w.r.cmd('off').returncode, 0)
+        since = family(w).get('r1_since')
+        pass_(w, t + HOUR)                        # OFF: nothing
+        self.assertEqual(w.r.cmd('on').returncode, 0)
+        w.validate('pass')
+        self.rolls_back(w, pass_(w, t + 3 * HOUR))
+        self.assertIsNone(since)                  # OFF means nothing: its time never counts
+
+    def test_a_pending_hand_edit_fixed_after_3_h_rolls_back(self):
+        w = armed(self)
+        w.validate('unknown')                 # R1's verdict comes; its first try is pending (SINCE = t)
+        t = int(time.time())
+        pass_(w, t)
+        self.assertEqual(family(w)['r1_since'], t)
+        w.validate('pass')
+        cand_cfg = w.config_now()
+        w.sb.write(w.r.config, config((('mac-a', 'liveapp-mac-golden-20261011'),)))   # a hand edit, pending
+        res = pass_(w, t + 10 * MIN)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP HAND CHANGE: a pending hand edit', res.stdout)
+        since = family(w).get('r1_since')
+        pass_(w, t + HOUR)
+        with open(w.r.config, 'wb') as f:      # the person puts the candidate's lines back
+            f.write(cand_cfg)
+        self.rolls_back(w, pass_(w, t + 3 * HOUR))
+        self.assertIsNone(since)               # the pending hand edit restarted the bound
+
+    def test_control_unknown_tries_still_reach_rollback_failed_at_2_h(self):
+        # tries that start and end with no rollback count: the bound is not restarted by them
+        w = armed(self)
+        w.validate('unknown')
+        t = int(time.time())
+        for at in (t, t + HOUR):
+            res = pass_(w, at)
+            self.assertIn('runner-updater: rollback pending: pre-window validate (pre) is UNKNOWN', res.stdout)
+            self.assertEqual(family(w)['r1_since'], t)
+        res = pass_(w, t + 2 * HOUR)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP ROLLBACK FAILED: ', res.stdout)
+        self.assertNotIn('tried again each pass', res.stdout)
+        self.assertEqual((stops(w), n_disable(w)), (['ROLLBACK FAILED'], 0))
+
+
+# the second family of the two-family cells: fx, its set mac-b, its candidate NEW_B (runner V2), its previous OLD_B
+NEW_B, OLD_B = 'liveapp-mac-golden-20261021', 'liveapp-mac-golden-20261002'
+
+
+def armed_two(test):
+    """two families with a candidate each (mac-golden on mac-a: NEW, previous OLD; fx on mac-b: NEW_B, previous OLD_B);
+    one pass opened both evidence windows, and the log then gained three counted failures on each set: the next pass's
+    R1 says rollback for both"""
+    fams = {FAM: switched(), 'fx': fam(candidate=cand(V2, {'mac-b': NEW_B}, int(time.time()) - HOUR),
+                                       previous={'mac-b': OLD_B})}
+    w = Win(test, cfg=config((('mac-a', NEW), ('mac-b', NEW_B))), families='mac-golden tart mac-a\nfx tart mac-b\n',
+            extra_rewrites=[CLOCK], s=state(on=True, families=fams, images={OLD: V0, NEW: V2, OLD_B: V0, NEW_B: V2}))
+    for img in (NEW, NEW_B, OLD_B):
+        w.sb.write(os.path.join(w.vms, img), '')
+    w.r.set_curl(json.dumps(healthz('mac-a', 'mac-b')))
+    w.r.write_log('')
+    res = pass_(w)
+    test.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+    w.r.append_log(fixture('studio-cut.log') + failures() + failures(hour=6).replace('mac-a', 'mac-b'))
+    return w
+
+
+def rolled(w):
+    """the families whose candidate is gone (rolled back), in name order"""
+    return sorted(f for f, x in w.u.get()['families'].items() if x['candidate'] is None)
+
+
+class TestOneRollbackWindowPerPass(unittest.TestCase):
+    """ONE window per pass also for R1's rollbacks (S3b-4b r1 P3-2): two families with rollback verdicts in one pass:
+    one window runs, the other waits one pass. Its wait does not count against its 2-h bound (P1-1: SINCE restarts).
+    A rollback that never opened its window (pending, or a STOP before its journal) does not use up the pass's one
+    window."""
+
+    def test_two_rollback_verdicts_one_window_per_pass(self):
+        w = armed_two(self)
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("R1's rollback is due; one window per pass: the next pass starts it", res.stdout)
+        self.assertEqual((n_disable(w), len(rolled(w))), (1, 1), res.stdout)
+        (waits,) = [f for f in (FAM, 'fx') if f not in rolled(w)]
+        since = w.u.get()['families'][waits].get('r1_since')
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: rolled back %s' % waits, res.stdout)
+        self.assertEqual((n_disable(w), rolled(w)), (2, ['fx', FAM]))
+        self.assertIsNone(since)               # its wait behind the other's window restarted its bound
+
+    def test_a_pending_rollback_does_not_use_up_the_window(self):
+        w = armed_two(self)
+        w.validate('unknown', call=1)          # the first family's pre-window validate: UNKNOWN, pending
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('runner-updater: rollback pending: pre-window validate (pre) is UNKNOWN', res.stdout)
+        self.assertNotIn('one window per pass', res.stdout)
+        self.assertEqual((n_disable(w), len(rolled(w))), (1, 1), res.stdout)
+
+
 class TestConnectOnlyCount(unittest.TestCase):
     """CONNECT-ONLY (PLAN D6 :320; S3b-4a r1 P3-5): the count of a version's connect-only rollbacks lives IN THE STATE
     (the family's `connect_only`: {VERSION: {n, at}}), never in a STOP: the first rejects nothing and is counted; one
@@ -322,8 +454,8 @@ def busy(w):
 
 class TestDueSwitches(unittest.TestCase):
     """A DUE release (bin/runner-updater-release, rl_pass) starts the switch window (ru_window FAMILY V SHA idle SINCE
-    pass): one window per pass, only when no journal is open. ONE OPEN RELEASE PER FAMILY: an open candidate, or a
-    previous image kept for `back`, holds it."""
+    pass): one window per pass, only when no journal is open. ONE OPEN RELEASE PER FAMILY: an open candidate holds it;
+    a previous image kept for `back` after an accept does not (PLAN D6 AFTER ACCEPT, 11-04)."""
 
     def test_a_due_release_switches_the_family(self):
         w = due_win(self)
@@ -351,13 +483,16 @@ class TestDueSwitches(unittest.TestCase):
         self.assertIn('runner-updater: pass: %s is not due: release v%s is rejected for %s' % (FAM, V2, FAM), res.stdout)
         self.assertEqual((n_disable(w), journals(w), family(w)['candidate']), (0, [], None))
 
-    def test_a_previous_image_kept_for_back_holds_the_family(self):
+    def test_a_previous_image_kept_for_back_does_not_hold_the_family(self):
+        # PLAN D6 AFTER ACCEPT (11-04): the 7 days after an accept are no open release; the next switch supersedes the
+        # keep (test_runner_updater_close, TestSupersede, has the whole cell)
         until = int(time.time()) + DAY
         w = due_win(self, previous={'mac-a': 'liveapp-mac-golden-20260901'}, back_until=until)
         res = pass_(w)
-        self.assertIn('runner-updater: pass: %s is not due: its previous image is kept for `back` until %s: one open '
-                      'release per family' % (FAM, time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(until))), res.stdout)
-        self.assertEqual(n_disable(w), 0)
+        self.assertNotIn('kept for `back`', res.stdout)
+        self.assertIn('runner-updater: pass: %s is due: runner %s\n' % (FAM, V2), res.stdout)
+        self.assertIn('runner-updater: pass: switched %s to ' % FAM, res.stdout)
+        self.assertEqual(n_disable(w), 1)
 
     def test_control_after_back_until_the_family_is_due(self):
         w = due_win(self, previous={'mac-a': 'liveapp-mac-golden-20260901'}, back_until=int(time.time()) - MIN)
@@ -587,6 +722,42 @@ class TestCiDisabledCleared(unittest.TestCase):
         w.r.set_ps([])
         pass_(w)
         self.assertEqual(stops(w), ['CI DISABLED'])
+
+
+class TestPoolDownCleared(unittest.TestCase):
+    """S3b-4b r1 P3-3: POOL DOWN (a window's second pre-close failure: CI down on the host; its next step is
+    runner-enable by hand) is cleared as CI DISABLED is: when no window journal is open, CI's flag is present and one
+    runscaler runs, the pass removes it before the core reads the STOPs. The controls: no flag; no runscaler."""
+
+    HELD = [stop(FAM, 'POOL DOWN', version=V2, detail={'text': 'x', 'hand': '/x/runner-enable'})]
+
+    def win(self):
+        w = Win(self, cfg=config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+                s=state(on=True, families={FAM: switched(stops=self.HELD)}, images={OLD: V0, NEW: V2}))
+        w.sb.write(os.path.join(w.vms, NEW), '')
+        return w
+
+    def test_ci_up_again_clears_it(self):
+        w = self.win()
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('runner-updater: pass: CI is enabled and runscaler runs: STOP POOL DOWN of %s is cleared\n' % FAM,
+                      res.stdout)
+        self.assertIn('\nkeep %s: observe (' % FAM, res.stdout)
+        self.assertEqual(stops(w), [])
+
+    def test_control_no_flag_keeps_it(self):
+        w = self.win()
+        os.remove(w.r.flag)
+        res = pass_(w)
+        self.assertIn('\nkeep %s: held (POOL DOWN stands' % FAM, res.stdout)
+        self.assertEqual(stops(w), ['POOL DOWN'])
+
+    def test_control_no_runscaler_keeps_it(self):
+        w = self.win()
+        w.r.set_ps([])
+        pass_(w)
+        self.assertEqual(stops(w), ['POOL DOWN'])
 
 
 def job(result, hour=9):

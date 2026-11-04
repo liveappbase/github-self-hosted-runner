@@ -559,7 +559,8 @@ ru_write() {
 # how many. 1 + REPLY when it cannot (PROTECTED is then as it was). The names:
 #   - each family's candidate lines (a candidate in the state is a checked one);
 #   - each family's `previous` lines (the window's old image) while it has a candidate, and after an ACCEPT while NOW is
-#     before its back_until: until ACCEPT + 7 days;
+#     before its back_until: until ACCEPT + 7 days, or until the family's next switch window has closed, whichever
+#     comes first (that close replaces `previous`: bin/runner-updater-window, ru_w_close, SUPERSEDE);
 #   - an open window's journaled names: each `image NAME` line of WINDOW (the window journals every image name it
 #     makes or needs kept on such a line, BEFORE it makes it). An `image` line whose NAME is not an image name: 1.
 #     A folder on WINDOW's path it cannot search: 1 (ru_reach), never "no window".

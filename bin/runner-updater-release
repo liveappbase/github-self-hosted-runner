@@ -53,8 +53,10 @@
 #                         families and recipe STOPs for the caller (below).
 #
 # THE PASS HOOK (rl_pass). A family is DUE when the eligible release is newer than the family's current version, the
-# family has no open release (one open release per family: no candidate, and no previous image kept for `back`
-# until its back_until) and no STOP holds it. Its current version: the image every
+# family has no open release (one open release per family: no candidate, a release not yet ACCEPTED, rejected or
+# closed by a STOP) and no STOP holds it. The 7 days after an ACCEPT, while `back` restores its previous image, are no
+# open release (PLAN D6 AFTER ACCEPT, 11-04): the next switch window supersedes that keep (bin/runner-updater-window,
+# ru_w_close). Its current version: the image every
 # set of the family names in the config (one image), and the state's record of that image (images). A STOP the state
 # holds (in any family's stops) holds the family when it names the family or names no family, and: it names no
 # version; or a newer release does not proceed alone past it (D7's column, asked of the core's S::newer_proceeds in
@@ -63,7 +65,6 @@
 # for DUE. It prints, per family, the first that holds, in this order (what needs no network first, so a family held
 # for a local reason asks GitHub nothing):
 #   1. an open candidate: "FAMILY is not due: an open candidate (runner V): ...";
-#   1b. a previous image kept for `back` (NOW before the family's back_until): "... until DATE: one open release ...";
 #   2. a STOP that holds whatever the release is (no version, or a newer release does not proceed alone past it), or
 #      STOPs jq cannot read: "STOP NAME (runner V): why; `runner-updater status` names its next step". The family's
 #      own NO BASELINE and recipe changed are not read here: steps 4 and 5 decide them from the recipe now;
@@ -357,7 +358,7 @@ rl_newer() {
 }
 
 rl_pass() {
-  local now=$1 f s v rec base cur until erc= ewhy= trc= twhy=
+  local now=$1 f s v rec base cur erc= ewhy= trc= twhy=
   local -a imgs
   typeset -ga rl_due
   typeset -gA rl_rstop rl_rtext
@@ -366,11 +367,6 @@ rl_pass() {
   for f in $ru_fam_order; do
     v=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].candidate.version // empty')
     [[ -z $v ]] || { rl_not $f "an open candidate (runner $v): one open release per family"; continue }
-    until=$(print -r -- $ru_state | $JQ -r --arg f $f '.families[$f].back_until // empty')
-    if [[ $until =~ '^[0-9]+$' ]] && (( now < until )); then
-      rl_not $f "its previous image is kept for \`back\` until $(strftime '%Y-%m-%d %H:%M UTC' $until): one open release per family"
-      continue
-    fi
     rl_stop $f; (( $? == 1 )) || { rl_not $f "$REPLY"; continue }   # a STOP that holds whatever the release is
     # the recipe: it decides the family's NO BASELINE and recipe changed, which the caller holds as STOPs (rl_rstop,
     # rl_rtext); rl_stop leaves those two to it
