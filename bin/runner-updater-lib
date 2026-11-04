@@ -58,8 +58,10 @@
 #      block's name. No facts on: a block with two names or two images, or with no name; two blocks with one name; a
 #      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read; a top-level
 #      log-file key (runscaler then writes elsewhere, or nowhere, and runner.log reads as a quiet log); a top-level
-#      log-format that is not exactly `log-format = "text"` (the core reads only the text format). Either of the
-#      last two would leave R1 blind while the facts look normal. pool-size: ONE spelling is read, `pool-size = N` in the
+#      log-format that is not exactly `log-format = "text"` (the core reads only the text format); a top-level
+#      log-level that is not exactly `log-level = "info"` or `"debug"` (at warn or error runscaler writes no INFO
+#      record: no job-completed record, the proof of life R1 and KEEP read). Each of the last three would leave R1
+#      blind while the facts look normal. pool-size: ONE spelling is read, `pool-size = N` in the
 #      top-level [tart] table, once (none: runscaler's default, 0); any other line whose KEY names pool-size (a scale
 #      set's tart.pool-size, a [scaleset.tart] table, a dotted or quoted key, a key of an inline table, a value that is
 #      not a number) is one it does not read (ru_pool_key: the text in a string value, such as a URL, or in a comment
@@ -75,8 +77,8 @@
 #      facts.families.F = {provider: "tart", sets, candidate, back_until}, both from step 7.
 #   7. With HELD (a pass: JSON {families: {FAMILY: {candidate, back_until}}, stops: [...], restart}, from the updater's
 #      state): each family's candidate and back_until, the STOPs and the restart (null when absent) are HELD's. A
-#      family that HELD gives a candidate or a back_until and FAMILIES does not name: no facts. OBSERVEFILE is not
-#      read.
+#      family that HELD gives a candidate and FAMILIES does not name: no facts (R1 would be blind). A family that holds
+#      only a back_until is no refusal: the pass deletes its previous image after that date. OBSERVEFILE is not read.
 #      Without HELD (report): back_until null, no STOP, and the candidates are OBSERVEFILE's (JSON {FAMILY: {version:
 #      "observed", lines: {SET: IMAGE}, closed_at: EPOCH}}), or null. In this pass, each
 #      ru_observe_add family is added with its CURRENT config lines and closed_at = NOW (a family already observed
@@ -470,7 +472,8 @@ def stop_ok($f): type == "object" and .family == $f and (.stop | type) == "strin
   and (.detail == null or (.detail | type) == "object");
 def family_ok($f): type == "object"
   and (.candidate == null or (.candidate | type == "object" and (.version | version_ok) and (.lines | lines_ok)
-                              and (.closed_at | epoch_ok)))
+                              and (.closed_at | epoch_ok)
+                              and (.recipe == null or (.recipe | type == "string" and test("^[0-9a-f]{64}$")))))
   and (.previous == null or (.previous | lines_ok))
   and (.back_until == null or (.back_until | epoch_ok))
   and (.rejected == null or (.rejected | type == "array" and all(.[]; version_ok)))
@@ -501,7 +504,7 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
       else empty end),
      ((.connect_only // {}) | to_entries[] | .key as $v | .value | (keys - ["n", "at"])[]
         | "families.\($f).connect_only.\($v | shown).\(shown)"),
-     (if (.candidate | type) == "object" then (.candidate | keys - ["version", "lines", "closed_at"])[]
+     (if (.candidate | type) == "object" then (.candidate | keys - ["version", "lines", "closed_at", "recipe"])[]
         | "families.\($f).candidate.\(shown)" else empty end),
      ((.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
         | "families.\($f).stops[\($i)].\(shown)")]

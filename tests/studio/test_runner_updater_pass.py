@@ -22,8 +22,8 @@ from tests.studio.support import REPO
 from tests.studio.test_runner_updater import INSTALLED, Rig, config, fixture, read_text
 from tests.studio.test_runner_updater_recover import assert_closed, assert_runs, n_disable, stops
 from tests.studio.test_runner_updater_rollback import CONNECT, NEW, V2, rb_win, rollback, switched
-from tests.studio.test_runner_updater_state import Paths, cand, fam, lines_of, on_state, state, stop
-from tests.studio.test_runner_updater_window import FAM, OLD, V0, Win, healthz, switched_config, today
+from tests.studio.test_runner_updater_state import KEEP, SUCCESS, Paths, cand, fam, lines_of, on_state, state, stop
+from tests.studio.test_runner_updater_window import FAM, KILLED, OLD, V0, Win, healthz, switched_config, today
 from tests.studio import test_runner_updater_release as rel
 
 # the pass's clock, from the test when it sets RU_TEST_NOW (every other command keeps the real clock)
@@ -43,6 +43,10 @@ def failures(hour=5, connect=False):
             text = text.replace('runner process exited on runner-0000000%d before connecting to GitHub' % i,
                                 'tart clone failed for runner-0000000%d' % i)
     return text
+
+
+def utc(t):
+    return time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(t))
 
 
 def pass_(w, at=None, env=None):
@@ -583,6 +587,207 @@ class TestCiDisabledCleared(unittest.TestCase):
         w.r.set_ps([])
         pass_(w)
         self.assertEqual(stops(w), ['CI DISABLED'])
+
+
+def job(result, hour=9):
+    """one job of mac-a completed with RESULT at HOUR:30 of 2026-11-01 (log time), and a record a minute later"""
+    return SUCCESS.replace('2026-11-01 09:', '2026-11-01 %02d:' % hour).replace('result=succeeded', 'result=' + result)
+
+
+def switched_and_open(test, **kw):
+    """a due_win whose pass switched mac-golden to V2 (t0), and whose next pass (t1, returned) opened its evidence
+    window through the window's own restart"""
+    w = due_win(test, **kw)
+    res = pass_(w)
+    test.assertIn('runner-updater: pass: switched %s to ' % FAM, res.stdout)
+    t1 = int(time.time())
+    res = pass_(w, t1)
+    test.assertIn('\nkeep %s: observe (runner %s: observing since ' % (FAM, V2), res.stdout)
+    return w, t1
+
+
+class TestAccept(unittest.TestCase):
+    """KEEP's ACCEPT (PLAN D6 :324, :330; D2 :143): 72 h after the evidence window opened, a job succeeded: the pass
+    writes the recipe baseline (the candidate's: the recipe its window built with), sets back_until = now + 7 days,
+    clears the candidate and keeps `previous` until then (the protected list keeps it), and the pin follows D2's ONE
+    RULE. A switch, KEEP over 72 h on the pass's clock, then ACCEPT, and the deletion after 7 days."""
+
+    def test_switch_keep_accept_then_the_deletion_after_7_days(self):
+        w, t1 = switched_and_open(self)
+        out = family(w)['candidate']['lines']['mac-a']
+        self.assertEqual(family(w)['candidate']['recipe'], w.recipe)
+        w.r.append_log(job('succeeded'))
+        res = pass_(w, t1 + KEEP - 1)                    # the control: a second short of 72 h
+        self.assertIn('\nkeep %s: observe (' % FAM, res.stdout)
+        self.assertEqual(family(w)['candidate']['version'], V2)
+        res = pass_(w, t1 + KEEP)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        until = t1 + KEEP + 7 * DAY
+        self.assertIn('runner-updater: pass: accepted %s: runner %s: 1 succeeded of 1 completed in 72 h; `runner-updater '
+                      'back %s` restores %s until %s\n' % (FAM, V2, FAM, OLD, utc(until)), res.stdout)
+        f = family(w)
+        self.assertEqual((f['candidate'], f['previous'], f['back_until'], f['recipe'], f['stops']),
+                         (None, {'mac-a': OLD}, until, w.recipe, []))
+        self.assertEqual(lines_of(w.u.protected), [OLD])  # previous, kept for `back`
+        self.assertIn('%s: `runner-updater back %s` restores the previous image until %s' % (FAM, FAM, utc(until)),
+                      w.status())
+        n = n_disable(w)
+        res = pass_(w, until - 1)                         # the control: a second before back_until
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual(family(w)['previous'], {'mac-a': OLD})
+        res = pass_(w, until)                             # 7 days on: deleted by its recorded name
+        self.assertIn('runner-updater: pass: deleted %s (the previous image of %s, kept for `back` until %s)\n'
+                      % (OLD, FAM, utc(until)), res.stdout)
+        self.assertFalse(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual(lines_of(w.u.actions)[-1], 'delete ' + OLD)
+        f = family(w)
+        self.assertEqual((f['previous'], f['back_until']), (None, None))
+        self.assertEqual(lines_of(w.u.protected), [])
+        self.assertEqual(n_disable(w), n)                 # no window
+        self.assertTrue(os.path.exists(os.path.join(w.vms, out)))
+
+    def test_the_pin_follows_the_one_rule(self):
+        # the pin was removed (off, then on): the accept writes it again, the version the config runs, with the sha
+        # of its family's closed journal; journaled first in ACTIONS
+        w, t1 = switched_and_open(self)
+        os.remove(w.pin)
+        w.r.append_log(job('succeeded'))
+        pass_(w, t1 + KEEP)
+        self.assertEqual(read_text(w.pin), '%s %s\n' % (V2, w.tsha))
+        self.assertEqual(lines_of(w.u.actions), ['pin-write %s %s %s' % (FAM, V2, w.tsha)])
+
+    def test_control_a_pin_that_follows_the_rule_already_is_left(self):
+        w, t1 = switched_and_open(self)
+        w.r.append_log(job('succeeded'))
+        pass_(w, t1 + KEEP)
+        self.assertEqual(read_text(w.pin), '%s %s\n' % (V2, w.tsha))
+        self.assertFalse(os.path.exists(w.u.actions))
+
+
+class TestRebuildBaseline(unittest.TestCase):
+    """D2: NO BASELINE until `rebuild FAMILY`; its ACCEPT writes the recipe (the one its window built with, kept in
+    the candidate)."""
+
+    def test_the_accept_of_a_rebuild_writes_the_baseline(self):
+        w = due_win(self, recipe=None, rejected=[V2])
+        pass_(w)
+        self.assertEqual(stops(w), ['NO BASELINE'])
+        self.assertEqual(w.run('rebuild').returncode, 0)
+        self.assertEqual(family(w)['candidate']['recipe'], w.recipe)
+        t1 = int(time.time())
+        pass_(w, t1)
+        self.assertEqual(stops(w), [])                   # a family with a candidate holds no recipe STOP
+        w.r.append_log(job('succeeded'))
+        pass_(w, t1 + KEEP)
+        self.assertEqual((family(w)['recipe'], family(w)['candidate']), (w.recipe, None))
+
+
+class TestJobsFail(unittest.TestCase):
+    """72 h, completions, none succeeded: STOP JOBS FAIL ON THE NEW IMAGE, held with the job counts; its status line
+    names `back` and `retry`. The candidate stays (R1 stays armed)."""
+
+    def test_jobs_fail(self):
+        w, t1 = switched_and_open(self)
+        w.r.append_log(job('failed'))
+        res = pass_(w, t1 + KEEP)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: pass: %s holds STOP JOBS FAIL ON THE NEW IMAGE: runner %s: 1 jobs completed in '
+                      '72 h, none succeeded' % (FAM, V2), res.stdout)
+        f = family(w)
+        (s,) = f['stops']
+        self.assertEqual((s['stop'], s['version'], s['detail']['counts']),
+                         ('JOBS FAIL ON THE NEW IMAGE', V2, {'completions': 1, 'succeeded': 0, 'failed': 1, 'canceled': 0}))
+        self.assertEqual(f['candidate']['version'], V2)
+        st = w.status()
+        self.assertIn('%s: STOP JOBS FAIL ON THE NEW IMAGE (runner %s): 1 completed, 0 succeeded, 1 failed, 0 canceled. '
+                      'Next: `runner-updater back %s` (until the keep date), or `runner-updater retry %s` to keep it'
+                      % (FAM, V2, FAM, FAM), st)
+        res = pass_(w, t1 + KEEP + HOUR)                  # held once
+        self.assertEqual((res.returncode, stops(w)), (0, ['JOBS FAIL ON THE NEW IMAGE']))
+
+
+class TestNoEvidence(unittest.TestCase):
+    """72 h and no job completed: STOP NO EVIDENCE, held; it heals by itself: a later success accepts and drops it."""
+
+    def test_no_evidence_then_a_success_heals_it(self):
+        w, t1 = switched_and_open(self)
+        res = pass_(w, t1 + KEEP)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: pass: %s holds STOP NO EVIDENCE: runner %s: no job completed in 72 h'
+                      % (FAM, V2), res.stdout)
+        self.assertEqual(stops(w), ['NO EVIDENCE'])
+        self.assertIn('Next: `runner-updater retry %s`' % FAM, w.status())
+        res = pass_(w, t1 + KEEP + HOUR)                  # held once
+        self.assertEqual((res.returncode, stops(w)), (0, ['NO EVIDENCE']))
+        w.r.append_log(job('succeeded'))
+        res = pass_(w, t1 + KEEP + 2 * HOUR)
+        self.assertIn('runner-updater: pass: accepted %s' % FAM, res.stdout)
+        self.assertEqual((stops(w), family(w)['candidate']), ([], None))
+
+
+class TestDeletion(unittest.TestCase):
+    """DELETION (PLAN D6 :332): after back_until, `previous` is deleted by its recorded name, only when no non-comment
+    config line names it (and no window journal is open), journaled first in ACTIONS; the state drops it, and so does
+    the protected list. An image the updater never recorded (a person's) is never deleted."""
+
+    def win(self, cfg=None, images=None, families=None):
+        until = int(time.time()) - MIN
+        w = Win(self, cfg=cfg or config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+                s=state(on=True, families=families or {FAM: fam(previous={'mac-a': OLD}, back_until=until)},
+                        images=images if images is not None else {OLD: V0, NEW: V2}))
+        w.sb.write(os.path.join(w.vms, NEW), '')
+        return w
+
+    def test_a_config_line_that_names_it_keeps_it(self):
+        w = self.win(cfg=config((('mac-a', NEW), ('mac-c', OLD))))
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: %s stays: a line of %s names it' % (OLD, w.r.config), res.stdout)
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertFalse(os.path.exists(w.u.actions))
+        self.assertEqual(family(w)['previous'], None)    # no longer the updater's to keep
+
+    def test_a_persons_image_is_never_deleted(self):
+        w = self.win(images={NEW: V2})
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: %s stays: the updater has no record of it' % OLD, res.stdout)
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+
+    def test_control_a_recorded_image_no_line_names_is_deleted(self):
+        w = self.win()
+        pass_(w)
+        self.assertFalse(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual(lines_of(w.u.actions), ['delete ' + OLD])
+
+    def test_a_delete_that_fails_keeps_previous_for_the_next_pass(self):
+        w = self.win()
+        os.remove(os.path.join(w.vms, OLD))
+        os.mkdir(os.path.join(w.vms, OLD))                # the fake tart cannot delete it (tart delete fails)
+        res = pass_(w)
+        self.assertIn('runner-updater: pass: cannot delete %s (tart delete failed): the next pass tries again' % OLD,
+                      res.stdout)
+        self.assertEqual(family(w)['previous'], {'mac-a': OLD})
+        os.rmdir(os.path.join(w.vms, OLD))
+        w.sb.write(os.path.join(w.vms, OLD), '')
+        pass_(w)                                          # the next pass deletes it
+        self.assertEqual((os.path.exists(os.path.join(w.vms, OLD)), family(w)['previous']), (False, None))
+
+    def test_a_family_dropped_from_the_families_file_is_cleaned_up_too(self):
+        # S3b-2a r1 carry: no 7-day refusal of every pass; its previous image goes after back_until
+        w = self.win(families={'fz': fam(previous={'mac-c': OLD}, back_until=int(time.time()) - MIN)})
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertFalse(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual(w.u.get()['families']['fz']['previous'], None)
+
+    def test_a_kill_after_the_journal_line_leaves_the_image_and_the_next_pass_deletes_it(self):
+        w = self.win()
+        res = pass_(w, env={'RU_KILL_AT': 'delete'})       # runner-journal kills the pass right after its line
+        self.assertEqual(res.returncode, KILLED, res.stdout)
+        self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual(family(w)['previous'], {'mac-a': OLD})
+        pass_(w)
+        self.assertFalse(os.path.exists(os.path.join(w.vms, OLD)))
+        self.assertEqual((lines_of(w.u.actions), family(w)['previous']), (['delete ' + OLD] * 2, None))
 
 
 if __name__ == '__main__':

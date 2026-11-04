@@ -1096,7 +1096,7 @@ SUCCESS = ('2026-11-01 09:30:00 INFO mac-a: Runner removed name=runner-0000aa03 
            'workflowRunId=39746588065 job="build (fef3)" result=succeeded\n'
            '2026-11-01 09:31:00 INFO mac-a: Scaling up runner currentCount=0 desiredCount=1\n')
 KILL = ('umask 077\n', 'umask 077\nkill() { print -r -- "kill $*" >> $ACTIONS_LOG }\n')   # kill is a builtin
-WOULD = '  pass_act $now   # the pass acts on its verdicts'
+WOULD = '  pass_act $now   # the pass acts on its verdicts'   # where a planted call goes: before the pass acts
 ACTION_CALLS = 'runner-disable; runner-enable; golden-build; golden-gate x; tart list; launchctl list; kill -0 $$; '
 
 
@@ -1269,7 +1269,7 @@ class TestStderrKept(unittest.TestCase):
 class TestPass(unittest.TestCase):
     """runner-updater pass, the timer's entry: it TRIES the lock (held: exit 0 at once); OFF: exit 0 at once, no core
     call; ON: the facts from the real state, idle / r1 / keep / status, the core state written back into the state,
-    the protected list rewritten, the verdicts printed, and what it WOULD do. It takes no action."""
+    the protected list rewritten, the verdicts printed. What it then does on them: test_runner_updater_pass."""
 
     def rig(self, s=None, **kw):
         r = Rig(self, jq_wrap=True, **kw)
@@ -1394,15 +1394,17 @@ class TestPass(unittest.TestCase):
         r.append_log(SUCCESS)
         return r.cmd('pass', env={'RU_TEST_NOW': str(t + later)})
 
-    def test_72_h_after_the_window_opened_with_a_success_it_would_accept(self):
+    def test_72_h_after_the_window_opened_with_a_success_it_accepts(self):
+        # the ACCEPT itself: test_runner_updater_pass, TestAccept
         res = self.accept_at(KEEP)
         self.assertIn('\nkeep fx: accept (runner %s: 1 succeeded of 1 completed in 72 h)\n' % V2, res.stdout)
-        self.assertIn('runner-updater: pass: would accept fx (this release takes no action)\n', res.stdout)
+        self.assertIn('runner-updater: pass: accepted fx: runner %s: 1 succeeded of 1 completed in 72 h; '
+                      '`runner-updater back fx` restores %s until ' % (V2, IMG0), res.stdout)
 
     def test_control_a_second_before_72_h_it_observes(self):
         res = self.accept_at(KEEP - 1)
         self.assertIn('\nkeep fx: observe (', res.stdout)
-        self.assertNotIn('would accept', res.stdout)
+        self.assertNotIn('accepted', res.stdout)
 
     def test_a_config_whose_log_the_core_cannot_read_is_no_facts_in_a_pass_too(self):
         for top, why in (('log-format = "json"\n', LOG_FORMAT), ('log-file = "/x.log"\n', LOG_FILE),
@@ -1436,7 +1438,8 @@ class TestPass(unittest.TestCase):
     def test_control_a_held_family_the_families_file_names(self):
         r, u = self.rig(state(on=True, families={'fz': fam(candidate=cand()), 'fw': fam(rejected=[V1])}),
                         families='fx tart mac-a\nfz tart mac-b\n')
-        r.cmd('pass')
+        res = r.cmd('pass', ok=False)                 # its old candidate (T0) holds NO EVIDENCE: exit 1
+        self.assertEqual(core_calls(r), ['idle', 'r1', 'keep', 'status'], res.stdout)
         self.assertEqual(self.facts(u)['families']['fz']['candidate'], cand())
 
     def test_a_state_of_another_format_waits_with_no_core_call(self):

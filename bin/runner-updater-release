@@ -49,10 +49,12 @@
 #                         a later release): 0; 1 + REPLY when it is not rejected for it (nothing to clear).
 #   rl_stop FAMILY [V]    the first STOP the state holds that holds FAMILY's DUE (PLAN D7; below): 0 + REPLY (the
 #                         STOP, its version and why); 1 none; 2 + REPLY when jq cannot read the STOPs (fail closed).
-#   rl_pass NOW           THE PASS HOOK: one line per family of the families file, in its order (below).
+#   rl_pass NOW           THE PASS HOOK: one line per family of the families file, in its order, and the due
+#                         families and recipe STOPs for the caller (below).
 #
 # THE PASS HOOK (rl_pass). A family is DUE when the eligible release is newer than the family's current version, the
-# family has no open candidate (one open release per family) and no STOP holds it. Its current version: the image every
+# family has no open release (one open release per family: no candidate, and no previous image kept for `back`
+# until its back_until) and no STOP holds it. Its current version: the image every
 # set of the family names in the config (one image), and the state's record of that image (images). A STOP the state
 # holds (in any family's stops) holds the family when it names the family or names no family, and: it names no
 # version; or a newer release does not proceed alone past it (D7's column, asked of the core's S::newer_proceeds in
@@ -61,10 +63,13 @@
 # for DUE. It prints, per family, the first that holds, in this order (what needs no network first, so a family held
 # for a local reason asks GitHub nothing):
 #   1. an open candidate: "FAMILY is not due: an open candidate (runner V): ...";
+#   1b. a previous image kept for `back` (NOW before the family's back_until): "... until DATE: one open release ...";
 #   2. a STOP that holds whatever the release is (no version, or a newer release does not proceed alone past it), or
-#      STOPs jq cannot read: "STOP NAME (runner V): why; `runner-updater status` names its next step";
+#      STOPs jq cannot read: "STOP NAME (runner V): why; `runner-updater status` names its next step". The family's
+#      own NO BASELINE and recipe changed are not read here: steps 4 and 5 decide them from the recipe now;
 #   3. no recipe for the family (this release builds no image for it), or one it cannot compute;
-#   4. "STOP NO BASELINE": the state holds no recipe for the family (`rebuild FAMILY`, a later release, sets it);
+#   4. "STOP NO BASELINE": the state holds no recipe for the family (`rebuild FAMILY`: the ACCEPT of the image it
+#      builds writes it);
 #   5. "STOP recipe changed": the recipe is not the state's;
 #   6. its sets do not name one image, or the state has no record of that image's runner version;
 #   7. the latest release (read once per pass): "WAIT ..." (403, 429), or a check it fails (a refusal, under 2 days);
@@ -72,10 +77,12 @@
 #   9. "release vV is rejected for FAMILY";
 #   10. "release vV is not newer than its runner C";
 #   11. the tarball's digest check (once per pass): "WAIT ..." or why it failed;
-#   12. else "would switch FAMILY to V (this release takes no action)".
-# NO BASELINE and recipe changed of steps 4 and 5 are printed, never written into the state (`status` does not show
-# them), and a later pass prints them again while they hold. It never fails the pass: every line is
-# "runner-updater: pass: ...".
+#   12. else DUE: "FAMILY is due: runner V".
+# Its results, for the caller (bin/runner-updater's pass, which acts on them; this file writes no state): rl_due, one
+# "FAMILY V SHA256 RECIPE" per due family in the families file's order (SHA256: the tarball's, from its digest); and,
+# for each family that reached step 3, rl_rstop[FAMILY] = "NO BASELINE" | "recipe changed" | "" (none: steps 3-5 hold
+# no recipe STOP) with its text in rl_rtext[FAMILY]: the caller holds that STOP (or drops the family's recipe STOPs).
+# It never fails the pass: every line is "runner-updater: pass: ...".
 # Constants:
 #   RL_CURL      the downloads' curl (above)
 #   RL_OPENSSL   the filter's openssl (above)

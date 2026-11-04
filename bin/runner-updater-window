@@ -2,8 +2,8 @@
 # runner-updater-window — the switch window of the runner-image updater on the Studio (PLAN D5, "STUDIO WINDOW"): zsh
 # functions that bin/runner-updater sources for `rebuild` and `switch-now` (never run on its own; it reads no argument),
 # and RECOVER (ru_recover), which ends an interrupted window, and THE ROLLBACK WINDOW (ru_rollback, ru_rb_window; `back`).
-# ONE copy. A later release's pass calls ru_recover first, then ru_window with an eligible release's version, or
-# ru_rollback FAMILY REASON SINCE on an R1 verdict.
+# ONE copy. The pass (bin/runner-updater, pass_act) calls ru_recover first, then ru_rollback FAMILY REASON SINCE on an
+# R1 verdict, or ru_window with a due release's version (one window per pass).
 #
 # The caller holds the updater lock for the whole window, has loaded the state (ru_state), sourced
 # bin/runner-updater-lib, exports TZ=UTC and LC_ALL=C, and sets (bin/runner-updater's header has the values): RUNNER
@@ -11,11 +11,13 @@
 # LOGDIR TARTDIR BIN LOCK DF DU FLOOR_GIB VALIDATE_GAP CLOSE_WAIT CLOSE_POLL MTIME_WAIT, for RECOVER RECOVER_WAIT
 # RECOVER_POLL LSOF, and for the rollback window ROLLBACK_BOUND ACTIONS.
 #
-# ru_window FAMILY VERSION SHA256 MODE SINCE COMMAND — ONE switch window: FAMILY's sets go from the image they run (the
-#   old image) to a new image its builder makes with runner VERSION (the tarball's SHA256). MODE: idle (the idle pair
-#   before runner-disable) | now (switch-now: no idle pair, and it says so). SINCE: when the release became due (the
-#   commands: now): a window that waits at START STATE or IDLE 3 days (NO_IDLE_S) from SINCE is STOP NO IDLE. COMMAND
-#   (rebuild | switch-now | pass) is journaled. It prints its steps ("runner-updater: window: ...") and every STOP line.
+# ru_window FAMILY VERSION SHA256 MODE SINCE COMMAND [RECIPE] — ONE switch window: FAMILY's sets go from the image they
+#   run (the old image) to a new image its builder makes with runner VERSION (the tarball's SHA256). MODE: idle (the
+#   idle pair before runner-disable) | now (switch-now: no idle pair, and it says so). SINCE: when the release became
+#   due (the commands: now): a window that waits at START STATE or IDLE 3 days (NO_IDLE_S) from SINCE is STOP NO IDLE.
+#   COMMAND (rebuild | switch-now | pass) is journaled. RECIPE: the family's recipe (bin/runner-updater-release,
+#   rl_recipe) as the window builds with it: a window that switches keeps it in the candidate (`recipe`), which KEEP's
+#   ACCEPT writes as the family's baseline (PLAN D2 :143); none given (or a RECOVER close): none kept. It prints its steps ("runner-updater: window: ...") and every STOP line.
 #   Returns 0: the window closed on the new image (switched). 1: a STOP (held in the state, the window ended) or a
 #   REFUSE (nothing changed, nothing held). 2: not now (START STATE or IDLE; nothing changed, nothing held). 3: the
 #   window journal stays open: a failure the window cannot end itself; RECOVER ends it.
@@ -106,7 +108,7 @@
 #   else the sha the family's pin had for that version in its newest closed journal that names one (a `pin-write`,
 #   `pin-rule` or `pin-before` line: a rollback's restored version; S3b-4a r1 F4); none found: the pin is REMOVED, and
 #   status shows "none"); the state (switched: the family's candidate = {VERSION,
-#   the new lines, closed_at}, previous = the old image's lines, back_until null, images: the output's VERSION and the
+#   the new lines, closed_at[, recipe]}, previous = the old image's lines, back_until null, images: the output's VERSION and the
 #   old image's when known; `restart` (THE OWN RESTART); the STOPs by THE STOP RULE); `closed`; the journal renamed to
 #   WINDOWS/ID; the protected list rewritten.
 #   A held close whose gate did not pass (no `gate green 0` line) first deletes the builder's names (the output, the
@@ -296,8 +298,9 @@
 #   - FAMILY LINES on the backup: one image, the candidate's lines (else a pending hand edit: STOP HAND CHANGE), and not
 #     the target already.
 #   - the rejection, decided here and journaled (`reject`): pass: the version it leaves, except a first rollback whose
-#     counted failures are all connect-class (CONNECT-ONLY: one retry after 1 h; with a ROLLED BACK of that version,
-#     connect-only, held already, this is the second: it rejects). back: only when the version it leaves is newer than
+#     counted failures are all connect-class (CONNECT-ONLY: one retry after 1 h; when the state counts a connect-only
+#     rollback of that version already, the family's `connect_only` member, never a STOP: S3b-4a r1 P3-5, this is the
+#     second: it rejects). back: only when the version it leaves is newer than
 #     the restored image's (both known: the state's image record, else golden-build's log).
 #   - FLAG absent (a person disabled CI): "rollback pending: CI disabled by a person": nothing restarts.
 #   - `runner-enable --check` (else STOP ROLLBACK FAILED); PRE-VALIDATE the TARGET (the backup with the family's lines
@@ -320,7 +323,9 @@
 # validate; a hand change after the install is a switch's. ENABLE as a switch's (ru_w_enable on the target's sha; a
 # pre-close failure puts the backup back: STOP ROLLBACK FAILED). A FUTURE MTIME is ROLLBACK FAILED too.
 # Its CLOSE (ru_rb_close): rolled back = the target ran with no STOP: the candidate, previous and back_until cleared,
-# `reject`'s version added to rejected, STOP ROLLED BACK (an automatic rollback: R1's failures and connect_only), the
+# `reject`'s version added to rejected, an automatic connect-only rollback counted in `connect_only` ({V: {n, at}}:
+# the first, which rejects nothing, and a second whose R1 verdict was connect-only too; the pass's 1-h retry reads
+# it), STOP ROLLED BACK (an automatic rollback: R1's failures and connect_only), the
 # candidate's observation STOPs (JOBS FAIL ON THE NEW IMAGE, NO EVIDENCE) dropped, the target image's version recorded,
 # `restart` as a switch's; after the journal closes, the image it left is deleted by its recorded name when the state
 # recorded it as the family's (its candidate's lines, or the image record: one the updater built or adopted; a
@@ -914,12 +919,13 @@ ru_w_close() {
   (( ru_w_running )) && running=true
   ru_j state-write ${${switched:#0}:+switched}${${switched:#1}:+held} || return 3
   ru_w_state "$ru_w_kept .families[\$f] = ((.families[\$f] // $ru_w_family_new)
-        | if \$sw then .candidate = {version: \$v, lines: (\$sets | split(\" \") | map({(.): \$out}) | add), closed_at: \$now}
+        | if \$sw then .candidate = ({version: \$v, lines: (\$sets | split(\" \") | map({(.): \$out}) | add), closed_at: \$now}
+                               + (if \$rec != \"\" then {recipe: \$rec} else {} end))
             | .previous = (\$sets | split(\" \") | map({(.): \$old}) | add) | .back_until = null else . end
         | .stops = kept(\$W; \$new; true; \$running))
       | if \$sw then .images[\$out] = \$v else . end | if \$oldv != \"\" then .images[\$old] = \$oldv else . end
       | if \$rs == null then del(.restart) else .restart = \$rs end" \
-      --arg f $ru_w_fam --arg v $ru_w_ver --arg out $ru_w_out --arg old $ru_w_old --arg oldv "$oldv" \
+      --arg f $ru_w_fam --arg v $ru_w_ver --arg out $ru_w_out --arg old $ru_w_old --arg oldv "$oldv" --arg rec "${ru_w_recipe-}" \
       --argjson now $EPOCHSECONDS --argjson W $ru_W --arg sets "${(j: :)ru_w_fsets}" --argjson rs $rs \
       --argjson sw ${${switched:#0}:+true}${${switched:#1}:+false} --argjson running $running \
       --argjson new "[${(j:,:)ru_w_stops}]" \
@@ -1037,7 +1043,7 @@ ru_w_back() {
 ru_window() {
   local fam=$1 ver=$2 sha=$3 mode=$4 cmd=$6 t rc have old out date csha idle=idle f
   local -a work
-  ru_w_fam=$fam ru_w_ver=$ver ru_w_sha=$sha ru_w_since=$5 ru_w_cmd=$cmd
+  ru_w_fam=$fam ru_w_ver=$ver ru_w_sha=$sha ru_w_since=$5 ru_w_cmd=$cmd ru_w_recipe=${7-}
   ru_w_stops=() ru_w_vals=() ru_w_open=0 ru_w_tsha= ru_w_last_target= ru_w_out= ru_w_old= ru_w_pinbefore= ru_w_work=
   ru_w_from= ru_w_stopped= ru_w_to= ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0 ru_w_ran= ru_w_chosen=
   ru_w_restored=0 ru_w_kind=switch ru_w_failname="check failed" ru_w_bsha=
@@ -1045,6 +1051,8 @@ ru_window() {
   [[ $ver =~ '^[0-9]+\.[0-9]+\.[0-9]+$' && $sha =~ '^[0-9a-f]{64}$' && $mode == (idle|now) && $5 =~ '^[0-9]+$' ]] \
     || { print -r -- "runner-updater: REFUSE the window's arguments: '$ver' '$sha' '$mode' '$5'"; return 1 }
   [[ $cmd == (rebuild|switch-now|pass) ]] || { print -r -- "runner-updater: REFUSE the window's command: '$cmd'"; return 1 }
+  [[ -z $ru_w_recipe || $ru_w_recipe =~ '^[0-9a-f]{64}$' ]] \
+    || { print -r -- "runner-updater: REFUSE the window's recipe: '$ru_w_recipe'"; return 1 }
   [[ ! -e $WINDOW && ! -L $WINDOW ]] \
     || { print -r -- "runner-updater: STOP RECOVER needed: the window journal $WINDOW is open (ru_recover ends it first)"; return 1 }
   [[ -d $WINDOWS ]] || /bin/mkdir -m 700 -- $WINDOWS || { print -r -- "runner-updater: REFUSE cannot create $WINDOWS"; return 1 }
@@ -1291,7 +1299,7 @@ ru_rc_load() {
   ru_w_id= ru_w_fam= ru_w_kind= ru_w_ver= ru_w_sha= ru_w_old= ru_w_work= ru_w_out= ru_w_rbt= ru_w_pinbefore=
   ru_w_bsha= ru_w_tsha= ru_w_backup= ru_w_from= ru_w_stopped= ru_w_to= ru_w_ran= ru_w_chosen= ru_w_reject=
   ru_w_running=0 ru_w_preclosed=0 ru_w_futured=0 ru_w_restored=0 ru_w_open=1 ru_w_cmd=recover ru_w_jcmd=
-  ru_w_reason= ru_w_reason_text= ru_w_vsha= ru_rc_iepoch= ru_rc_isha= ru_rc_icsha= ru_rc_bad=
+  ru_w_reason= ru_w_reason_text= ru_w_vsha= ru_rc_iepoch= ru_rc_isha= ru_rc_icsha= ru_rc_bad= ru_w_recipe=
   ru_w_stops=() ru_w_vals=() ru_w_fsets=() ru_rc_targets=() ru_rc_ok=() ru_rc_tools=() ru_rc_jstops=()
   ru_rc_first window && ru_w_id=$REPLY
   ru_rc_first family && ru_w_fam=$REPLY
