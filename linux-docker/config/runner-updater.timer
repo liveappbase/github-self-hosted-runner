@@ -1,0 +1,18 @@
+# systemd USER unit of BOTH host users (the same file): setup/04-timer.sh installs it as
+# ~/.config/systemd/user/runner-updater.timer and enables it (linux-docker/README.md, Install step 11). It starts
+# runner-updater.service, one pass of the updater, every 10 minutes (PLAN §4: one timer per host user; a pass with
+# nothing due returns at once, and a pass while the updater is OFF ends at once, exit 0).
+# WHY OnBootSec and OnUnitActiveSec, not OnCalendar: both count on the monotonic clock, so no step of the wall clock
+# (NTP, a hand set) moves or doubles a pass; OnUnitActiveSec counts from the last start of the pass, and the timer
+# starts no second pass while one runs (a build): passes never pile up, and the next one comes within 10 minutes.
+# OnBootSec gives the first pass 10 minutes after a boot (the pool comes up first); when it is already past at `enable
+# --now` (the install), systemd starts that first pass at once. AccuracySec is systemd's default (1 min).
+[Unit]
+Description=runner-updater pass every 10 minutes (linux-docker/README.md, "The updater")
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target

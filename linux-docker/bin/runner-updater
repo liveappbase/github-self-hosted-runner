@@ -5,7 +5,11 @@
 # config that names one user twice runs RS_USER's). The Studio's twin is bin/runner-updater (zsh) with
 # bin/runner-updater-release; what DIFFERS from it is named below. Install: linux-docker/README.md, "The updater:
 # status, on, off, pass, build" (each user's ~/bin/runner-updater, a link to ~/build/bin/runner-updater, so it always
-# runs with this release's ~/build: its setup/runner-facts.sh, setup/runner-release.sh and core/).
+# runs with this release's ~/build: its setup/runner-facts.sh, setup/runner-release.sh and core/). ITS TIMER is this
+# release's: config/runner-updater.timer runs config/runner-updater.service, one `~/bin/runner-updater pass`, every 10
+# minutes as each user (both files' headers say when and why, and the service's TimeoutStartSec bound); Install step
+# 11, setup/04-timer.sh, installs and starts it as each user. A fresh install is OFF (D11): a pass while OFF ends at
+# once.
 #
 # THIS RELEASE SWITCHES NOTHING. RS_USER's pass measures, asks the decision core (core/README.md) and prints what it
 # WOULD do, and which runner release it would switch to (DUE, below): it runs no pool-image.sh and no `systemctl --user
@@ -66,9 +70,19 @@
 #            does not know: never guessed). status.jq's answer is checked as a pass checks it (`decided`): a `wait` is
 #            its lines, then "runner-updater: WAIT the decision core waits ...", exit 4; another answer is
 #            "runner-updater: STOP core could not decide (status)", exit 1.
+#            RS_USER's status then prints RUN_USER's record (PLAN D7: both users' records), after its own lines and
+#            before such a WAIT line (run_record): RUN_USER's STATE (RUN_STATE) read as hostile (PLAN D1: ONE open by
+#            runner-release.sh's rr_read, at most RUN_MAX bytes, never sourced; RUN_USER's own format, shape and member
+#            rules), each line "runner-updater: as RUN_USER: ...": ON or OFF (no file: a fresh install, OFF), then
+#            status.jq's lines of its STOPs, the user each names the host config's RUN_USER (a `check failed` of a
+#            build: `runner-updater build V`, as RUN_USER), each control character "?"; or ONE line that names why
+#            it is not shown (none of it is guessed) and RUN_USER's own `runner-updater status`. Its exit code is
+#            RS_USER's own:
+#            nothing of RUN_USER's record changes it, as no STOP of RS_USER's own does (status reports; the watchdog
+#            reads only the lines). A host config whose RUN_USER is RS_USER has one record: none is printed twice.
 #   on       on = true.
 #   off      refuses while WINDOW is open (off never strands a window: D11), and changes nothing; else on = false.
-#   pass     the timer's entry (the timers are a later release's). The lock held: "another run holds the updater lock",
+#   pass     the timer's entry (config/runner-updater.timer). The lock held: "another run holds the updater lock",
 #            exit 0 at once. OFF: "the updater is OFF", exit 0, no core call and no network. RS_USER's: an open window
 #            journal (WINDOW): "STOP RECOVER needed (S2b-3c)", exit 1, and nothing else (a window holds the lock for its
 #            whole run, so a pass that holds the lock and finds one found an interrupted window). ON: the jq check, now
@@ -128,10 +142,14 @@
 #   shares (rr_lock's rule: 02-d1.sh's own rr_lock takes it there at once; a new open would wait for its own parent).
 #   02-d1.sh's exit 0: "built runner V", exit 0; 75 (GitHub's rate limit): "WAIT ...", exit 0, no STOP; 129, 141 or 143
 #   (SIGHUP, SIGPIPE, SIGTERM: an ssh drop, a reboot, a stop): "CUT ...", exit 0, no STOP, and the next pass builds V
-#   again; any other (137 too, SIGKILL or an OOM kill: a build that fails each time must not loop): STOP `check failed`
-#   of V with THE CAUSE 02-d1.sh printed (the state, by rename), exit 1. THE CAUSE: the REFUSE line right before its
-#   last FAIL line (that FAIL line then says only "the REFUSE line above says why"), else that FAIL line; with no FAIL
-#   line, its last REFUSE line (a host config it refuses); with neither, what it exited with.
+#   again. systemd's stop of the timer's unit (its TimeoutStartSec, a shutdown, `systemctl --user stop`) is SIGTERM to
+#   every process of the unit, this run too: while the build runs, this run has a TERM trap (not an ignore, which the
+#   child would inherit), so it waits for 02-d1.sh's 143 and prints that CUT; anywhere else in a pass a TERM ends it at
+#   once (STATE is written by rename: it is the old state or the new one). Any other (137 too, SIGKILL or an OOM kill:
+#   a build that fails each time must not loop): STOP `check failed` of V with THE CAUSE 02-d1.sh printed (the state,
+#   by rename), exit 1. THE CAUSE: the REFUSE line right before its last FAIL line (that FAIL line then says only "the
+#   REFUSE line above says why"), else that FAIL line; with no FAIL line, its last REFUSE line (a host config it
+#   refuses); with neither, what it exited with.
 # THE FACTS (core/README.md, "facts", host "hz"), RS_USER's pass, in this ORDER (the Studio's, bin/runner-updater-lib's
 # ru_collect):
 #   1. proc before: runscaler as systemd reports it, in ONE `systemctl --user show` read (runner-facts.sh's
@@ -194,6 +212,8 @@
 #               PROGRAM.err, the latest release's release.out and release.err), WINDOW (window: pool-image.sh's open
 #               window journal), WINDOWS (windows/: its closed ones), BUILDOUT (build.out: RUN_USER's last 02-d1.sh
 #               build's output)
+#   RUN_STATE RUN_MAX  RUN_USER's STATE as RS_USER's status reads it: /home/RUN_USER plus this STATE's path in the home;
+#               at most 262144 bytes of it (a larger one is not shown)
 #   BUILDS      RUN_USER's build records (02-d1.sh's ~/run/builds): /home/RUN_USER/run/builds as RS_USER (RS_USER reads
 #               them through RUN_USER's group), ~/run/builds as RUN_USER
 #   FAMILY      hz-docker, the one family of this host
@@ -258,6 +278,7 @@ WINDOW=$STATEDIR/window
 WINDOWS=$STATEDIR/windows
 BUILDOUT=$STATEDIR/build.out
 if [ "$ROLE" = rs ]; then BUILDS=/home/${RUN_USER}/run/builds; else BUILDS=$HOME/run/builds; fi
+RUN_STATE=/home/${RUN_USER}${STATE#"$HOME"}   # RUN_USER's STATE, as RS_USER's status reads it (run_record)
 
 # ---- the state
 FRESH='{"format":1,"on":false,"families":{}}'
@@ -305,40 +326,57 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
        + [($r.stopped | keys - ["inode", "offset", "sha"])[] | "restart.stopped.\(shown)"]
    else [] end)
 | join(", ")'
-# RUN_USER's state (the header): its own FRESH, shape and members
-if [ "$ROLE" = run ]; then
-  FRESH='{"format":1,"on":false,"stops":[]}'
-  CHECK='
+# RUN_USER's state (the header): its own FRESH, shape and members; ONE copy, which RS_USER's status reads RUN_USER's
+# record by too
+RUN_FRESH='{"format":1,"on":false,"stops":[]}'
+RUN_CHECK='
 def stop_ok: type == "object" and (.stop | type) == "string" and (.stop | length) > 0
   and (.version == null or (.version | type) == "string") and (.user == null or (.user | type) == "string")
   and (.detail == null or (.detail | type) == "object");
 if type == "object" and .format == 1 and (.on | type) == "boolean"
    and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok)))
 then . else error("not a state of format 1") end'
-  MEMBERS='
+RUN_MEMBERS='
 def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
 [(keys - ["format", "on", "stops"])[] | shown]
 + [(.stops // []) | to_entries[] | .key as $i | .value | (keys - ["stop", "version", "user", "detail"])[]
      | "stops[\($i)].\(shown)"]
 | join(", ")'
-fi
+[ "$ROLE" != run ] || { FRESH=$RUN_FRESH CHECK=$RUN_CHECK MEMBERS=$RUN_MEMBERS; }
+
+# TEXT CHECK MEMBERS: a state's text read by the rules of one user's state (its format, CHECK's shape, MEMBERS' list
+# of the members this release does not read). 0 + REPLY = the state, compact JSON; 1: not one JSON object (or no jq
+# reads it); 2 + REPLY = its format, another than 1 (JSON: `null` when it names none); 3: not CHECK's shape; 5 +
+# REPLY = the members it does not read; 6: jq could not list them. ONE copy: load_state and RUN_USER's record
+# (status as RS_USER) both read by it
+parse_state() {
+  local fmt s m
+  fmt=$(printf '%s' "$1" | jq -s -r 'if length == 1 and (.[0] | type) == "object" then .[0].format | tojson
+                                      else error("not one object") end' 2> /dev/null) || return 1
+  [ "$fmt" = 1 ] || { REPLY=$fmt; return 2; }
+  s=$(printf '%s' "$1" | jq -c "$2" 2> /dev/null) && [ -n "$s" ] || return 3
+  m=$(printf '%s\n' "$s" | jq -r "$3" 2> /dev/null) || return 6
+  [ -z "$m" ] || { REPLY=$m; return 5; }
+  REPLY=$s
+}
 
 # STATE, read ONCE -> ST (compact JSON); a missing one is FRESH. WAIT (exit 4) on another format or a member this
 # release does not read, REFUSE on one it does not read: in each case nothing is written
 load_state() {
-  local text fmt m
+  local text
   if [ ! -e "$STATE" ] && [ ! -L "$STATE" ]; then ST=$FRESH; return 0; fi
   { [ -f "$STATE" ] && [ ! -L "$STATE" ] && [ -r "$STATE" ]; } || refuse "$STATE is not a readable regular file: it is left as it is"
   text=$(cat -- "$STATE" && echo .) || refuse "$STATE cannot be read: it is left as it is"
   text=${text%.}
-  fmt=$(printf '%s' "$text" | jq -s -r 'if length == 1 and (.[0] | type) == "object" then .[0].format | tojson
-                                         else error("not one object") end' 2> /dev/null) \
-    || refuse "$STATE is not one JSON object (or no jq reads it): it is left as it is"
-  [ "$fmt" = 1 ] || wait4 "the state $STATE has format $fmt; this updater reads format 1: it waits and changes nothing"
-  ST=$(printf '%s' "$text" | jq -c "$CHECK" 2> /dev/null) && [ -n "$ST" ] \
-    || refuse "$STATE is not a state of format 1 this reads: it is left as it is"
-  m=$(printf '%s\n' "$ST" | jq -r "$MEMBERS" 2> /dev/null) || refuse "jq could not list the members of $STATE: it is left as it is"
-  [ -z "$m" ] || wait4 "the state $STATE holds members this release does not read ($m): a later release wrote them, and they may hold a STOP; it waits and changes nothing"
+  parse_state "$text" "$CHECK" "$MEMBERS"
+  case $? in
+    0) ST=$REPLY ;;
+    1) refuse "$STATE is not one JSON object (or no jq reads it): it is left as it is" ;;
+    2) wait4 "the state $STATE has format $REPLY; this updater reads format 1: it waits and changes nothing" ;;
+    3) refuse "$STATE is not a state of format 1 this reads: it is left as it is" ;;
+    5) wait4 "the state $STATE holds members this release does not read ($REPLY): a later release wrote them, and they may hold a STOP; it waits and changes nothing" ;;
+    *) refuse "jq could not list the members of $STATE: it is left as it is" ;;
+  esac
 }
 
 # JSON: the new state into STATE by rename, after a sync to disk; a STOP when it cannot (STATE is then as it was)
@@ -372,22 +410,97 @@ jq_check() {
 window_open() { [ -e "$WINDOW" ] || [ -L "$WINDOW" ]; }
 
 # ---- status: no lock, no write; ONE read of the state, and the facts status.jq needs come from it
+# ROLE [USER] (stdin: a checked state of ROLE's shape) -> the facts status.jq reads. RS_USER's: the family's
+# candidate, back_until and STOPs; RUN_USER's: its STOPs, of hz-docker (no family: it observes none). With USER
+# (RUN_USER's record, as RS_USER reads it): each STOP's user, and its detail's build_user, are USER, so a line names the
+# host config's user, never one the record names (PLAN D1: RUN_USER's files are hostile to RS_USER)
+status_facts() {
+  jq -c --arg role "$1" --arg u "${2-}" --arg f "$FAMILY" --arg m "$MAIN_SET" --arg s "$SMALL_SET" '
+    {format: 1, host: "hz", sets: [], proc: null, position: null, continuous: false, restart: null, config: null}
+    + (if $role == "rs" then (.families[$f] // {}) as $h
+         | {families: {($f): {provider: "docker", sets: [$m, $s], candidate: ($h.candidate // null),
+                              back_until: ($h.back_until // null)}},
+            stops: ($h.stops // [])}
+       else {families: {}, stops: [(.stops // [])[] | {family: $f} + .
+                                   | if $u == "" then .
+                                     else .user = $u
+                                          | if (.detail | type) == "object" then .detail.build_user = $u else . end
+                                     end]} end)'
+}
+# CORE FACTS NOW -> status.jq's answer, its stderr with it (anything but one decision is "could not decide"), and its
+# exit code. The inputs come through process substitutions: pipes, no file
+status_jq() {
+  jq -n -L "$CORE/lib" -f "$CORE/status.jq" --slurpfile state <(printf '%s' "$1") \
+    --slurpfile facts <(printf '%s\n' "$2") --arg now "$3" 2>&1 < /dev/null
+}
+# status.jq's answer (stdin) -> its lines (jq -r --arg pre PREFIX): the verdict, its lines, then each STOP's D7
+# properties. PREFIX "": the user's own status, as it always printed it. Another PREFIX (RUN_USER's record) starts EVERY
+# line, and each control character of a line is "?": a record's text never makes a line of its own
+STATUS_LINES='def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
+  def clean: tostring | explode | map(if . < 32 or (. >= 127 and . < 160) then 63 else . end) | implode;
+  def mine: if $pre == "" then . else $pre + clean end;
+  (("status: \(.verdict) (\(.reason))", .lines[]) | mine),
+  (.stops[]? | "STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)"
+   | if $pre == "" then "runner-updater: " + . else mine end)'
+
+# THE RECORD OF RUN_USER (status as RS_USER, after its own lines; PLAN D7: `status` prints both users' records, each
+# STOP's line with its user). NOW. RUN_USER's state.json is read as HOSTILE (PLAN D1): ONE open, runner-release.sh's
+# rr_read (it never blocks and never follows a symlink; a plain file only), at most RUN_MAX bytes, never sourced; a
+# text with a byte no JSON text holds (a NUL; a control byte but tab, newline and CR) is none; then RUN_USER's own rules
+# (parse_state with RUN_CHECK and RUN_MEMBERS: its format, shape and members); no file is a fresh install, OFF, as
+# RUN_USER reads it. EVERY line starts with "runner-updater: as RUN_USER: ": ON or OFF, then status.jq's lines of its
+# STOPs (status_facts: the user each names is the host config's RUN_USER); or ONE line that names why it is not shown
+# and RUN_USER's own `runner-updater status` as the way to read it. It writes nothing, takes no lock, and changes no
+# exit code. A host config whose RUN_USER is RS_USER: no second record (the one above is that user's)
+RUN_MAX=262144
+run_record() {
+  local pre="runner-updater: as ${RUN_USER}: " raw tail body st= why= fresh= facts out rc
+  [ "${RUN_USER}" != "$ME" ] || return 0
+  raw=$({ rr_read "$RUN_STATE" "$((RUN_MAX + 1))"; printf '\n%s %s' "$?" "$RR_WHY"; } | tr '\000' '\001')
+  tail=${raw##*$'\n'} body=${raw%$'\n'*}
+  if [[ ! $tail =~ ^([0-9]+)\ (.*)$ ]]; then why="it cannot be read"
+  elif [ "${BASH_REMATCH[1]}" != 0 ]; then
+    if [ "${BASH_REMATCH[2]}" = "there is none" ]; then st=$RUN_FRESH fresh=1; else why=${BASH_REMATCH[2]:-it cannot be read}; fi
+  elif [ "${#body}" -gt "$RUN_MAX" ]; then why="it is larger than $RUN_MAX bytes"
+  elif [[ ${body//[$'\t\n\r']/} == *[$'\001'-$'\037']* ]]; then
+    why="it holds a byte no JSON text holds (a NUL or another control byte)"
+  else
+    parse_state "$body" "$RUN_CHECK" "$RUN_MEMBERS"
+    case $? in
+      0) st=$REPLY ;;
+      1) why="it is not one JSON object" ;;
+      2) why="it has format $REPLY; this release reads format 1" ;;
+      3) why="it is not a state of format 1 this release reads" ;;
+      5) why="it holds members this release does not read ($REPLY)" ;;
+      *) why="jq could not list its members" ;;
+    esac
+  fi
+  if [ -z "$why" ]; then
+    facts=$(printf '%s\n' "$st" | status_facts run "${RUN_USER}") || why="jq could not build its facts"
+  fi
+  if [ -z "$why" ]; then
+    out=$(status_jq "" "$facts" "$1")
+    rc=$?
+    { [ "$rc" = 0 ] && printf '%s\n' "$out" | decided status && [ "$(printf '%s\n' "$out" | jq -r '.verdict')" = ok ]; } \
+      || why="the decision core did not render it (status.jq, exit $rc)"
+  fi
+  if [ -n "$why" ]; then
+    why=${why:0:400}
+    echo "${pre}status: its record $RUN_STATE is not shown: ${why//[[:cntrl:]]/?}; as ${RUN_USER}, \`runner-updater status\` reads it"
+    return 0
+  fi
+  if [ -n "$fresh" ]; then echo "${pre}status: the updater is OFF (no record: $RUN_STATE is not there: a fresh install)"
+  else echo "${pre}status: the updater is $(printf '%s\n' "$st" | jq -r 'if .on then "ON" else "OFF" end') (its record: $RUN_STATE)"; fi
+  printf '%s\n' "$out" | jq -r --arg pre "$pre" "$STATUS_LINES"
+}
+
 do_status() {
   local now core facts out rc
   load_state
   jq_check
   now=$(date +%s)
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
-  # RS_USER's facts: the family's candidate, back_until and STOPs; RUN_USER's: its STOPs, of hz-docker (no family:
-  # it observes none)
-  core=$(printf '%s\n' "$ST" | jq -c '.core // empty') \
-    && facts=$(printf '%s\n' "$ST" | jq -c --arg role "$ROLE" --arg f "$FAMILY" --arg m "$MAIN_SET" --arg s "$SMALL_SET" '
-         {format: 1, host: "hz", sets: [], proc: null, position: null, continuous: false, restart: null, config: null}
-         + (if $role == "rs" then (.families[$f] // {}) as $h
-              | {families: {($f): {provider: "docker", sets: [$m, $s], candidate: ($h.candidate // null),
-                                   back_until: ($h.back_until // null)}},
-                 stops: ($h.stops // [])}
-            else {families: {}, stops: [(.stops // [])[] | {family: $f} + .]} end)') \
+  core=$(printf '%s\n' "$ST" | jq -c '.core // empty') && facts=$(printf '%s\n' "$ST" | status_facts "$ROLE") \
     || refuse "jq could not build the facts of the state"
   say "status: the updater is $(printf '%s\n' "$ST" | jq -r 'if .on then "ON" else "OFF" end')"
   [ "$ROLE" != rs ] || printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" 'def utc: strftime("%Y-%m-%d %H:%M UTC");
@@ -400,17 +513,13 @@ do_status() {
        + "; rejected: " + (if ($h.rejected // []) == [] then "none" else ($h.rejected | join(", ")) end))' \
     || refuse "jq could not print the state"
   [ "$ROLE" != rs ] || ! window_open || say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, RECOVER (S2b-3c) ends it)"
-  # the core's inputs come through process substitutions (pipes, no file); its stderr goes with its output: anything
-  # but one decision is "could not decide"
-  out=$(jq -n -L "$CORE/lib" -f "$CORE/status.jq" --slurpfile state <(printf '%s' "$core") \
-          --slurpfile facts <(printf '%s\n' "$facts") --arg now "$now" 2>&1 < /dev/null)
+  out=$(status_jq "$core" "$facts" "$now")
   rc=$?
   if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | decided status; then
     stop "core could not decide (status): exit $rc: ${out%%$'\n'*}"
   fi
-  printf '%s\n' "$out" | jq -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
-    "status: \(.verdict) (\(.reason))", .lines[],
-    (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")'
+  printf '%s\n' "$out" | jq -r --arg pre "" "$STATUS_LINES"
+  [ "$ROLE" != rs ] || run_record "$now"
   [ "$(printf '%s\n' "$out" | jq -r '.verdict')" != wait ] \
     || wait4 "the decision core waits ($(printf '%s\n' "$out" | waits_why status)): status decides nothing, and it writes nothing"
   exit 0
@@ -733,8 +842,13 @@ do_build_pass() {
   fi
   stop_holds "$v"; [ "$?" = 1 ] || { say "pass: no build of runner $v: $REPLY"; exit 0; }
   say "pass: building runner $v for this release's image (recipe $rec): 02-d1.sh build $v, its output also in $BUILDOUT"
+  # systemd's stop of the timer's unit (TimeoutStartSec, a shutdown) is SIGTERM to EVERY process of the unit, this one
+  # too: a trap (not an ignore, which the child would inherit) keeps this run alive until 02-d1.sh, which got it too,
+  # has exited (143), so the CUT below says so. Only while the build runs: elsewhere a TERM ends a pass at once
+  trap : TERM
   build_child "$v"
   rc=$?
+  trap - TERM
   case $rc in
     0) say "pass: built runner $v"; exit 0 ;;
     75) say "pass: WAIT 02-d1.sh build $v waits (exit 75): $REPLY; no STOP: a later pass builds it"; exit 0 ;;

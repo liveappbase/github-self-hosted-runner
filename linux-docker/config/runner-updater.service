@@ -1,0 +1,25 @@
+# systemd USER unit of BOTH host users, RS_USER and RUN_USER (the same file): setup/04-timer.sh installs it as
+# ~/.config/systemd/user/runner-updater.service, and runner-updater.timer starts it every 10 minutes
+# (linux-docker/README.md, Install step 11 and "The updater"). One pass of the runner-image updater. ExecStart is the
+# link Install step 10 makes (%h: the user's home), so each pass runs this release's ~/build. systemd runs it in /,
+# with the user manager's environment and no terminal: the updater sets its own PATH and needs nothing else of them.
+[Unit]
+Description=runner-updater pass: one pass of the runner-image updater (linux-docker/README.md, "The updater")
+
+[Service]
+Type=oneshot
+ExecStart=%h/bin/runner-updater pass
+# THE BOUND. A oneshot has no start timeout unless it names one. RUN_USER's pass builds a release's image (02-d1.sh
+# build V, as its child). 02-d1.sh's own bounded waits: 60 s (GitHub's API), 900 s (the tarball), 30 s (docker) and
+# 20 s (the registry); the build was measured on the host at 7 min 38 s from the start of its step 5 to the image
+# (2026-10-22, with the pull of the base image; 27 s with the base cached), and its checks after the build at 66 s:
+# about 26 min in all. 1 h is above that. At the bound systemd stops the unit: SIGTERM to EVERY process of its cgroup.
+# 02-d1.sh exits 143 (its own trap removes its build context); the updater waits for it (a TERM trap while the build
+# runs), prints its CUT line and exits 0: no STOP, and the next pass builds the release again.
+# THE RESIDUAL: a build that hangs each time is cut each time, an hour each, then built again by the next pass, with no
+# STOP and no end. RUN_USER's journal shows one CUT line per try (journalctl --user -u runner-updater), and its updater
+# lock is held most of the time (a person's `runner-updater build V`, `on` and `off` wait for it). What reaches the
+# owner is the watchdog's STALE ask (PLAN D8: a release out for 7 days that no family runs). RS_USER's pass of this
+# release takes seconds; a later release that switches in a pass (its window waits for runscaler's own stop, up to
+# 4260 s) needs another bound.
+TimeoutStartSec=1h

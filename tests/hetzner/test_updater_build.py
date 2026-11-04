@@ -25,6 +25,7 @@ import json
 import os
 import re
 import select
+import signal
 import time
 import unittest
 
@@ -359,6 +360,52 @@ class BuildPass(unittest.TestCase):
                     self.assertEqual([(s['stop'], s['version']) for s in state(p)['stops']], [('check failed', V)])
                 ok(self, p.updater('pass'))
                 self.assertEqual(len(p.d1_calls()), 2 if cut else 1)
+
+    def test_systemd_s_stop_of_the_unit_during_a_build_is_a_cut(self):
+        """S2b-3b-3: the timer's unit bounds a pass (config/runner-updater.service, TimeoutStartSec), and systemd's stop
+        (that bound, a shutdown, `systemctl --user stop`) is SIGTERM to EVERY process of the unit's cgroup: the
+        updater's own, not only 02-d1.sh's. The pass lives to see 02-d1.sh's 143: its CUT line, exit 0, no STOP, the
+        lock free, and the next pass builds V again. Control: SIGKILL to the same group (systemd's last word, after
+        TimeoutStopSec) leaves no line at all; still no STOP (the updater wrote nothing)."""
+        for sig, cut in ((signal.SIGTERM, True), (signal.SIGKILL, False)):
+            with self.subTest(signal=sig.name):
+                p, _ = run_pool(self, V)
+                p.d1_stub(out='== 5. the runner image of release v%s\n' % V, hang=True)
+                before = p.read(STATE)
+                pr = p.updater_start('pass')                     # a session of its own: its group is the unit's
+                for _ in range(2400):                            # the state "02-d1.sh runs", never a time; a bound
+                    if p.d1_calls():
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(len(p.d1_calls()), 1, 'the build never started')
+                os.killpg(pr.pid, sig)
+                out, _ = pr.communicate(timeout=120)
+                if cut:
+                    self.assertEqual(pr.returncode, 0, out)
+                    self.assertIn('runner-updater: pass: CUT 02-d1.sh build %s ended by SIGTERM (exit 143): no STOP; '
+                                  'the next pass builds it again' % V, out)
+                else:
+                    self.assertEqual(pr.returncode, -signal.SIGKILL, out)
+                    self.assertNotIn('CUT', out)
+                self.assertEqual(p.read(STATE), before)
+                # the lock: free at once after a CUT (the pass waited for 02-d1.sh, which shares it); after the
+                # control's SIGKILL, free once the killed child has exited too (that state is waited for, never a time)
+                fd = os.open(LOCK, os.O_RDONLY)
+                try:
+                    for _ in range(1 if cut else 2400):
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            time.sleep(0.05)
+                    else:
+                        self.fail('the updater lock is still held')
+                finally:
+                    os.close(fd)
+                p.d1_stub(out='BUILD DONE (D1): a substitute\n', digest=digest(39))
+                r = ok(self, p.updater('pass'))
+                self.assertIn('runner-updater: pass: built runner %s' % V, r.stdout)
+                self.assertEqual(len(p.d1_calls()), 2)
 
     def test_a_pass_that_finds_the_record_of_v_clears_its_check_failed_stop(self):
         """Opus r1 F3 (a): a person built V by README "A new runner release" step 1 (02-d1.sh build V), after a pass's

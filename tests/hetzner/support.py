@@ -437,6 +437,7 @@ class Sandbox:
         'setup/01-users.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/02-d1.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/03-runscaler.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
+        'setup/04-timer.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/pool-image.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'bin/runner-start': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'bin/pool-ready': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
@@ -452,6 +453,7 @@ class Sandbox:
     LEFT_OUT = {'setup/01-users.sh': ('/etc/liveapp-ci',),
                 'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
                 'setup/03-runscaler.sh': ('/etc/liveapp-ci',), 'setup/pool-image.sh': ('/etc/liveapp-ci',),
+                'setup/04-timer.sh': ('/etc/liveapp-ci',),
                 'bin/pool-ready': ('/etc/liveapp-ci',), 'bin/runner-updater': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
     # The original lines a copy may differ in (pin_lines_only): the rewrites above, and the pins Pool rewrites
@@ -1058,8 +1060,8 @@ D1_STUB = r'''#!/usr/bin/python3 -I
 # its fd 9 the updater lock (the same file); held: does a NEW open of the lock find it held (by its parent, then);
 # shares: can fd 9 take it at once (the parent's own open file). Then it answers as d1.json says: out on stdout, exit
 # rc; with rc 0 and a "digest", it writes the build record of argv's version for the recipe d1.json names, as 02-d1.sh
-# does. It builds nothing.
-import fcntl, json, os, sys
+# does. With "hang", it then waits (a build that hangs) until a signal ends it, at most 600 s. It builds nothing.
+import fcntl, json, os, sys, time
 SB = @SB@
 a = sys.argv[1:]
 lock = os.path.join(os.environ['HOME'], '.local', 'state', 'runner-updater', 'lock')
@@ -1088,6 +1090,8 @@ with open(SB + '/logs/d1.log', 'a') as f:
 c = json.load(open(SB + '/d1.json'))
 sys.stdout.write(c.get('out', ''))
 sys.stdout.flush()
+if c.get('hang'):
+    time.sleep(600)
 if c.get('rc', 0) == 0 and c.get('digest') and len(a) == 2:
     b = os.path.join(os.environ['HOME'], 'run', 'builds')
     os.makedirs(b, mode=0o750, exist_ok=True)
@@ -1426,14 +1430,15 @@ class Pool(Sandbox):
             raise AssertionError('host.conf: no single RS_USER=root line')
         self.write(p, conf.replace('\nRS_USER=root\n', '\nRS_USER=%s\n' % RS_USER), 0o644)
 
-    def d1_stub(self, rc=0, out='', digest=None, recipe=None):
+    def d1_stub(self, rc=0, out='', digest=None, recipe=None, hang=False):
         """~/build/setup/02-d1.sh of THIS copy replaced by D1_STUB (a bash line that execs it, fd 9 kept): it logs its
         call and answers OUT and RC; with rc 0 and DIGEST it writes the build record of its version for RECIPE (default:
-        this ~/build's recipe). The real 02-d1.sh never runs."""
+        this ~/build's recipe); with HANG it waits after OUT until a signal ends it (a build that hangs). The real
+        02-d1.sh never runs."""
         self.write(self.path('stubs', 'd1stub.py'), D1_STUB.replace('@SB@', repr(self.root)), 0o755)
         self.write(os.path.join(self.build, 'setup', '02-d1.sh'),
                    '#!/bin/bash\nexec /usr/bin/python3 -I %s "$@"\n' % self.path('stubs', 'd1stub.py'), 0o755)
-        self.write(self.path('d1.json'), json.dumps({'rc': rc, 'out': out, 'digest': digest,
+        self.write(self.path('d1.json'), json.dumps({'rc': rc, 'out': out, 'digest': digest, 'hang': hang,
                                                      'recipe': recipe or self.recipe()}))
 
     def d1_calls(self):

@@ -660,7 +660,8 @@ NO_FILE_READ = (('rr_read ', 'the one reader of another user\'s file'),
                 ('docker.sock', 'a socket: a connection to D1 (the design), no file read'),
                 ('df -Pk', 'the free space of its filesystem (statfs), no file read'),
                 ('DISK_WHY=', 'a message'),
-                ('BUILDS=', 'the folder\'s name: rr_record and rr_record_of read its records, through rr_read'))
+                ('BUILDS=', 'the folder\'s name: rr_record and rr_record_of read its records, through rr_read'),
+                ('RUN_STATE=', 'the file\'s name: run_record reads it through rr_read (test_updater.py, Text)'))
 
 
 class OtherUsersFiles(unittest.TestCase):
