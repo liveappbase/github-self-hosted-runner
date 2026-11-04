@@ -120,8 +120,14 @@ class Lines(unittest.TestCase):
         self.assertIn('JQ=/opt/x/jq python3 -I -m unittest discover -s tests/core -t .', l)
         self.assertIn('jq-1.9', l)
 
-    def test_retired_says_a_newer_release_is_needed(self):
-        self.assertIn('a newer runner release', self.line('PINNED RUNNER RETIRED'))
+    def test_retired_has_none_to_run_and_says_when_it_clears(self):
+        # PLAN D7 (11-04): the lines column is "none to run"; it clears itself when a newer version's switch window
+        # closes on the family with the newer image running
+        l = self.line('PINNED RUNNER RETIRED', reason='set mac-a: Runner version v2.339.0 is deprecated')
+        self.assertIn(': GitHub refuses this runner version (set mac-a: Runner version v2.339.0 is deprecated). Next: '
+                      'none to run: it clears itself when a newer runner release\'s switch window closes on fx with the '
+                      'newer image running', l)
+        self.assertNotIn('`', l)                  # no command to run
 
     def test_disk_names_the_numbers_and_what_to_do(self):
         l = self.line('DISK', text='free disk 180 GiB < 250 GiB (the builder\'s floor 200 GiB + the image 50 GiB)')

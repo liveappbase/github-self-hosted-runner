@@ -30,7 +30,7 @@ def render:
            + ". Next: " + as_user($u; "runner-updater retry \($f)")
        elif $n == "PINNED RUNNER RETIRED" then
          ": GitHub refuses this runner version" + (if ($d.reason // "") != "" then " (\($d.reason))" else "" end)
-         + ". Next: a newer runner release; the updater takes it when it is out"
+         + ". Next: none to run: it clears itself when a newer runner release's switch window closes on \($f) with the newer image running"
        elif $n == "JOBS FAIL ON THE NEW IMAGE" then
          ($d.counts // {}) as $c
          | ": \($c.completions // 0) completed, \($c.succeeded // 0) succeeded, \($c.failed // 0) failed, \($c.canceled // 0) canceled. Next: "

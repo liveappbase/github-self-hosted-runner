@@ -89,6 +89,12 @@
 #            (pass_switch: ru_window; NO IDLE after 3 days), and the protected list once more. Each function's comment
 #            has its rule. Exit 0; 1 when RECOVER or a window held a STOP or left its journal open, or the pass held a
 #            STOP anew; 4 WAIT.
+#            RESIDUALS, named (S3b-4b r2): time with no pass at all (the host off or asleep, or no timer, for more than
+#            2 h while a rollback is pending) still counts against the 2-h rollback bound, as a pass that found the
+#            lock held does: the first pass after it holds ROLLBACK FAILED with no try (`retry FAMILY` starts the 2 h
+#            again). After PINNED RUNNER RETIRED the family runs the retired image, so the next release's window
+#            journals it as its old image, and an R1 rollback of that release goes back to it (PLAN D5 FAMILY LINES:
+#            no rule; ROLLED BACK and the watchdog's STALE ask a person).
 #   protect  writes the protected list PROTECTED from the state (bin/runner-updater-lib, ru_protect: each family's
 #            candidate; its `previous` while it has a candidate and until back_until, which is until ACCEPT + 7 days
 #            or until the family's next switch window has closed (that close supersedes it), whichever comes first; an
@@ -116,12 +122,14 @@
 #            ROLLBACK FAILED (its hand line, whatever step raised it; clearing it also removes r1_since, so the 2-h
 #            bound starts again). A JOBS FAIL ON THE NEW IMAGE of the family's candidate that it clears IS the person's
 #            ACCEPT (PLAN D7, 11-04): the same writes as KEEP's ACCEPT (accept_jq) in the same state write, the
-#            protected list, and while ON the pin by D2's ONE RULE (pass_pin); NO EVIDENCE accepts nothing (the
-#            candidate stays under observation). A STOP whose line names another step, and another family's, stay; a
-#            version a PINNED RUNNER RETIRED STOP still holds stays rejected; the connect-only count stays. It starts
-#            nothing, says the
-#            next pass may proceed only when no STOP of the family is left (else it names them), and it runs while the
-#            updater is OFF too.
+#            protected list, and while ON the pin by D2's ONE RULE (pass_pin, which reads the families file: a pin
+#            that follows the rule stays byte-equal). NO EVIDENCE accepts nothing (the candidate stays under
+#            observation), and neither does a JOBS FAIL while R1's rollback verdict stands for the candidate's window
+#            (the core state's verdict, never r1_since; S3b-4b r2 P1-1): it clears the STOPs, says why it accepts
+#            nothing, and the next pass with CI up rolls back. A STOP whose line names another step, and another
+#            family's, stay; a version a PINNED RUNNER RETIRED STOP still holds stays rejected; the connect-only count
+#            stays. It starts nothing, says the next pass may proceed only when no STOP of the family is left (else it
+#            names them), and it runs while the updater is OFF too.
 # RECOVER FIRST: an open window journal (WINDOW) that no run holds (the window holds the updater lock for its whole run,
 # so a run that took the lock and finds one found an interrupted window): pass, rebuild, switch-now, back, retry, on and
 # off end it
@@ -502,7 +510,7 @@ do_back() {
 # FAIL ON THE NEW IMAGE of the candidate it clears is the person's ACCEPT (below). It starts nothing: the next pass may
 # proceed. It needs no window, and runs while the updater is OFF too
 do_retry() {
-  local core facts out n idx acc now on
+  local core facts out n idx acc now on r1v
   load_state
   run_recover
   jq_tested
@@ -526,11 +534,18 @@ do_retry() {
   # a JOBS FAIL ON THE NEW IMAGE of the candidate that it clears IS the person's ACCEPT (PLAN D7, 11-04: failing jobs are
   # a person's call): the same writes as KEEP's ACCEPT (accept_jq), in the same state write, so keep.jq never sees the
   # old counts again. A JOBS FAIL of another version, or another STOP, accepts nothing (NO EVIDENCE: the candidate stays
-  # under observation)
-  acc=$(print -r -- $ru_state | $JQ -r --arg f $family --argjson i $idx '.families[$f] as $x
-          | ($x.candidate.version // null) as $cv
-          | $cv != null and any(($x.stops // [])[$i[]]; .stop == "JOBS FAIL ON THE NEW IMAGE" and .version == $cv)') \
-    && [[ $acc == (true|false) ]] || acc=false
+  # under observation). Nor does it while R1's rollback verdict stands for the candidate's window (acc=r1; S3b-4b r2
+  # P1-1): no STOP disarms R1 while a candidate is live (PLAN D6), and KEEP never accepts then (core/keep.jq). The
+  # verdict is the core state's (`core`: r1.jq's evidence of that window, core/lib/core.jq's same_window), never
+  # r1_since, which a pass removes while no try could start. The STOPs are cleared, the candidate stays, and the next
+  # pass with CI up rolls back. A jq that fails: nothing is accepted
+  acc=$(print -r -- $ru_state | $JQ -r -L $CORE/lib --arg f $family --argjson i $idx 'import "core" as C;
+          .families[$f] as $x | ($x.candidate // null) as $c | (((.core // {}).families // {})[$f] // null) as $e
+          | if $c == null or (any(($x.stops // [])[$i[]]; .stop == "JOBS FAIL ON THE NEW IMAGE" and .version == $c.version)
+                              | not) then "false"
+            elif C::same_window($e; $c) and $e.verdict != null then "r1"
+            else "true" end') \
+    && [[ $acc == (true|false|r1) ]] || acc=false
   # a ROLLBACK FAILED it clears restarts R1's SINCE (S3b-4a r2 P3-a): the 2-h bound is measured anew from the next
   # pass that sees the verdict, else the next try would fail again at once
   change_state "$accept_jq"' .families[$f] |= (((.stops // []) | to_entries | map(select(.key as $k | $i | index($k) | not))
@@ -539,7 +554,13 @@ do_retry() {
       | .stops = $left
       | .rejected = [(.rejected // [])[] | select(. as $v | any($left[]; .stop == "PINNED RUNNER RETIRED" and .version == $v))]
       | if $acc then accept($now) else . end)' \
-      --arg f $family --argjson i $idx --argjson acc $acc --argjson now $now
+      --arg f $family --argjson i $idx --argjson acc $([[ $acc == true ]] && print true || print false) --argjson now $now
+  if [[ $acc == r1 ]]; then
+    r1v=$(print -r -- $ru_state | $JQ -r --arg f $family '.core.families[$f].verdict | (.failures | length) as $n
+            | "set \(.set), \($n) counted failure\(if $n == 1 then "" else "s" end)\(if .connect_only == true then ", connect-class only" else "" end)"') \
+      || r1v="its verdict cannot be read"
+    say "retry $family: runner $(print -r -- $ru_state | $JQ -r --arg f $family '.families[$f].candidate.version') is not accepted: R1's rollback is due for it ($r1v), and no STOP cancels it: the next pass with CI up rolls it back"
+  fi
   if [[ $acc == true ]]; then
     say "retry $family: accepted runner $(print -r -- $out | $JQ -r --argjson i $idx '[.stops[$i[]] | select(.stop == "JOBS FAIL ON THE NEW IMAGE")][0].version'): JOBS FAIL ON THE NEW IMAGE is your call, and retry keeps the image; \`runner-updater back $family\` restores $(print -r -- $ru_state | $JQ -r --arg f $family '[(.families[$f].previous // {})[]] | unique | join(", ")') until $(strftime '%Y-%m-%d %H:%M UTC' $(( now + 604800 )))"
     write_protected $now
@@ -812,8 +833,10 @@ pass_r1() {
 # r1's reason; one of the same version is replaced), closes the candidate (its observation STOPs, JOBS FAIL ON THE NEW
 # IMAGE and NO EVIDENCE, go with it) and adds the version to rejected, so a newer release is due alone. `previous` stays
 # in the state, no longer protected (no candidate and no back_until, so `back` refuses); the family's next switch window
-# supersedes it (bin/runner-updater-window, ru_w_close). Another verdict `stop` (SHIM REFUSED) keeps the candidate (D7:
-# not closed). A STOP it holds anew: the pass exits 1
+# replaces it with its own old image (the retired one: the residual named in the header, PLAN D5 FAMILY LINES) and
+# deletes nothing (it supersedes only a keep: bin/runner-updater-window, ru_w_close). The STOP clears itself when a newer
+# version's switch window closes switched (ru_w_close; PLAN D7, 11-04); a window that goes back to its backup leaves it.
+# Another verdict `stop` (SHIM REFUSED) keeps the candidate (D7: not closed). A STOP it holds anew: the pass exits 1
 pass_retired() {
   local l f v r
   for l in ${(f)"$($JQ -r '(.families // {}) | to_entries[] | select(.value.verdict == "stop")
@@ -894,13 +917,19 @@ pass_keep() {
 # family's lines name in the config (the state's image record, else golden-build's log: ru_w_version), its sha the
 # pin's own for that version, else the release literal's or the family's closed journals' (ru_w_sha_for); none known:
 # the pin is removed. A pin it writes or removes is journaled first in ACTIONS (`pin-write FAMILY V SHA`, `pin-remove
-# FAMILY`); a pin that is that already is left. Only a family with a builder has a pin
+# FAMILY`); a pin that is that already is left. Only a family with a builder has a pin. The family's sets are the
+# families file's (ru_fam): a pass read it with its facts; `retry` did not, so it is read here (S3b-4b r2 P2-1: with no
+# lookup the family named no set, its version read as not known, and a right pin was removed); a file it cannot read:
+# the pin stays. Its lines name the command that runs it ($cmd: pass, retry)
 pass_pin() {
   local f=$1 img= l v= sh= cur
   (( ${BUILDERS[(Ie)$f]} )) || return 0
   ru_w_fam=$f ru_w_out= ru_w_ver= ru_w_sha=
-  ru_w_pin_read $f || { say "pass: $f: $REPLY: the pin stays (golden-build stops on it)"; pass_rc=1; return }
+  ru_w_pin_read $f || { say "$cmd: $f: $REPLY: the pin stays (golden-build stops on it)"; pass_rc=1; return }
   cur=$REPLY ru_w_pinbefore=${REPLY:#none}
+  if [[ ${(t)ru_fam-} != association* ]]; then
+    ru_families || { say "$cmd: $f: $REPLY: the pin stays (its version is not decided)"; pass_rc=1; return }
+  fi
   if ru_config; then
     for l in $ru_sets; do
       (( ${${(s: :)ru_fam[$f]-}[(Ie)$l]} && ${+ru_lines[$l]} )) || continue
@@ -911,15 +940,15 @@ pass_pin() {
   if [[ -n $v && -n $sh ]]; then
     [[ $cur != "$v $sh" ]] || return 0
     /bin/zsh -f $RELBIN/runner-journal $ACTIONS pin-write "$f $v $sh" \
-      || { say "pass: $f: the action journal could not record the pin (above): the pin stays"; pass_rc=1; return }
-    ru_w_pin_write $f "$v $sh" || { say "pass: $f: cannot write the pin $PINDIR/$f: $REPLY"; pass_rc=1; return }
-    say "pass: the pin $PINDIR/$f: $v (the version of $img, which the config runs)"
+      || { say "$cmd: $f: the action journal could not record the pin (above): the pin stays"; pass_rc=1; return }
+    ru_w_pin_write $f "$v $sh" || { say "$cmd: $f: cannot write the pin $PINDIR/$f: $REPLY"; pass_rc=1; return }
+    say "$cmd: the pin $PINDIR/$f: $v (the version of $img, which the config runs)"
   else
     [[ $cur != none ]] || return 0
     /bin/zsh -f $RELBIN/runner-journal $ACTIONS pin-remove $f \
-      || { say "pass: $f: the action journal could not record the pin's removal (above): the pin stays"; pass_rc=1; return }
-    /bin/rm -f -- $PINDIR/$f || { say "pass: $f: cannot remove the pin $PINDIR/$f"; pass_rc=1; return }
-    say "pass: the pin $PINDIR/$f is removed: the version of what the family runs is not known; a hand golden-build uses the release literal"
+      || { say "$cmd: $f: the action journal could not record the pin's removal (above): the pin stays"; pass_rc=1; return }
+    /bin/rm -f -- $PINDIR/$f || { say "$cmd: $f: cannot remove the pin $PINDIR/$f"; pass_rc=1; return }
+    say "$cmd: the pin $PINDIR/$f is removed: the version of what the family runs is not known; a hand golden-build uses the release literal"
   fi
 }
 # DELETION (PLAN D6 :332): after back_until (the pass's clock), a family's `previous` image is deleted by its recorded

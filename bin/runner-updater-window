@@ -108,15 +108,22 @@
 #   else the sha the family's pin had for that version in its newest closed journal that names one (a `pin-write`,
 #   `pin-rule` or `pin-before` line: a rollback's restored version; S3b-4a r1 F4); none found: the pin is REMOVED, and
 #   status shows "none"); the state (switched: the family's candidate = {VERSION,
-#   the new lines, closed_at[, recipe]}, previous = the old image's lines, back_until null, images: the output's VERSION and the
-#   old image's when known; `restart` (THE OWN RESTART); the STOPs by THE STOP RULE); `closed`; the journal renamed to
-#   WINDOWS/ID; the protected list rewritten.
-#   SUPERSEDE (PLAN D6 AFTER ACCEPT, 11-04): a switched close replaces the family's `previous`, so an accepted family's
-#   keep (until ACCEPT + 7 days) ends here: the old image (the accepted one) is the `back` target until the new
-#   candidate's ACCEPT + 7 days, and each image the old `previous` named that is not the old image leaves the protected
-#   list with the rewrite and is deleted by its recorded name after the journal closed (ru_w_delete: in the image
-#   record, no non-comment config line names it, no journal open; `delete NAME` in ACTIONS first). Until the close, the
-#   list keeps it (the state still names it). A held close supersedes nothing.
+#   the new lines, closed_at[, recipe]}, previous = the old image's lines (but an OPEN candidate's `previous` stays,
+#   below), back_until null, images: the output's VERSION and the
+#   old image's when known; `restart` (THE OWN RESTART); the STOPs by THE STOP RULE, and a PINNED RUNNER RETIRED of an
+#   older version cleared (below)); `closed`; the journal renamed to WINDOWS/ID; the protected list rewritten.
+#   SUPERSEDE (PLAN D6 AFTER ACCEPT, 11-04): a switched close of a family that holds a KEEP (no candidate and a
+#   back_until, from before the window) ends that keep: the old image (the accepted one) is the `back` target until
+#   the new candidate's ACCEPT + 7 days, and each image the old `previous` named that is not the old image leaves the
+#   protected list with the rewrite and is deleted by its recorded name after the journal closed (ru_w_delete: in the
+#   image record, no non-comment config line names it, no journal open; `delete NAME` in ACTIONS first). Until the
+#   close, the list keeps it (the state still names it). It supersedes ONLY a keep (S3b-4b r2 P2-2): a switched close
+#   of an OPEN candidate whose lines the family ran at the start (a rebuild or switch-now of the image under
+#   observation) keeps `previous`, the image before the candidate's version (the rollback target and `back`'s), and
+#   deletes nothing; the old candidate's image leaves the protected list (golden-prune may delete it). A held close
+#   supersedes nothing.
+#   PINNED RUNNER RETIRED (PLAN D7, 11-04): a switched close to a version newer than a held RETIRED STOP's clears that
+#   STOP, and says so (the family runs the newer image); a held close (the backup back, or no edit) leaves it.
 #   A held close whose gate did not pass (no `gate green 0` line) first deletes the builder's names (the output, the
 #   work VM) that tart lists, each journaled first (`delete`), and only when no non-comment line of the config names it
 #   (PLAN D5, RECOVER step 3): golden-prune would keep a gate-RED image as the way back. The old image is never one.
@@ -295,7 +302,8 @@
 # an R1 verdict: REASON = r1.jq's verdict of the family, one JSON object {set, failures, connect_only[, reason]} (the
 # ROLLED BACK STOP's detail); SINCE = when that verdict began (the 2-h bound). `back FAMILY` is a person's (COMMAND
 # back; REASON unused). KIND rollback: the family's sets go from the image they run to the state's `previous` image (the
-# switch window's journaled old image): the TARGET. Returns 0 rolled back (the window closed on the target); 1 a STOP
+# switch window's journaled old image; after a rebuild of an open candidate, the image before the candidate's version:
+# CLOSE, SUPERSEDE): the TARGET. Returns 0 rolled back (the window closed on the target); 1 a STOP
 # (held) or a REFUSE; 2 pending ("rollback pending: ...": nothing changed, nothing held); 3 the journal stays open.
 # Before runner-disable (no journal yet; a failure: no runner-disable, NO drain):
 #   - the state: one previous image. pass: a candidate, no ROLLBACK FAILED held (R1 starts no rollback window while it
@@ -920,15 +928,29 @@ ru_w_pin_rule() {
 
 # CLOSE (after runner-disable): SWITCHED (1 = the new image runs) -> 0 switched, 1 a STOP was held, 3 the journal stays
 # open. ONE state write: the family (THE STOP RULE), the image records, the `restart` member (THE OWN RESTART).
-# SUPERSEDE (PLAN D6 AFTER ACCEPT, 11-04): a SWITCHED close makes the window's old image the family's `previous`; each
-# image the family's `previous` named before (an accepted family's keep: until ACCEPT + 7 days) that is not that old
-# image leaves the state, so the protected list written at the close no longer names it, and it is deleted by its
-# recorded name after the journal closed (ru_w_delete: DELETION). A held close supersedes nothing
+# SUPERSEDE (PLAN D6 AFTER ACCEPT, 11-04): a SWITCHED close of a family that holds a KEEP (no candidate, a back_until:
+# both from before this window, which writes neither until here) makes the window's old image (the accepted one) the
+# family's `previous`; each image the old `previous` named that is not that old image leaves the state, so the
+# protected list written at the close no longer names it, and it is deleted by its recorded name after the journal
+# closed (ru_w_delete: DELETION). It supersedes ONLY a keep (S3b-4b r2 P2-2): a switched close of an OPEN candidate
+# (a rebuild, or switch-now, of the image under observation: the window's old image is the candidate's) keeps
+# `previous`, the image before the candidate's version, as the rollback target and `back`'s, and deletes nothing (the
+# old candidate's image is no longer protected; golden-prune may delete it). Any other switched close: `previous` = the
+# window's old image (PLAN D5 FAMILY LINES), and nothing is deleted. A held close supersedes nothing.
+# PINNED RUNNER RETIRED (PLAN D7, 11-04): a SWITCHED close to a version newer than a RETIRED STOP's clears that STOP (the
+# family runs the newer image); a held close leaves it
+typeset -g ru_w_retired_jq='def vnum: try (split(".") | map(tonumber)) catch null;
+  def cleared($v): .stop == "PINNED RUNNER RETIRED" and (.version | type) == "string" and (.version | vnum) != null
+    and ($v | vnum) != null and (.version | vnum) < ($v | vnum);'
 ru_w_close() {
-  local switched=$1 oldv= rs running=false img i
-  local -a sup own
+  local switched=$1 oldv= rs running=false img i keep=false
+  local -a sup own retired
   (( switched )) || ru_w_prune || return 3
   if (( switched )); then
+    keep=$(print -r -- $ru_state | $JQ -r --arg f $ru_w_fam '(.families[$f] // {}) | .candidate == null and .back_until != null') \
+      && [[ $keep == (true|false) ]] || keep=false
+  fi
+  if [[ $keep == true ]]; then
     for img in ${(f)"$(print -r -- $ru_state | $JQ -r --arg f $ru_w_fam --arg old "$ru_w_old" --arg out "$ru_w_out" \
                         '[(.families[$f].previous // {})[]] | unique | .[] | select(. != $old and . != $out)')"}; do
       sup+=($img)
@@ -941,12 +963,22 @@ ru_w_close() {
   ru_w_restart
   rs=$REPLY
   (( ru_w_running )) && running=true
+  # the RETIRED STOPs this close clears (switched: each of a version older than the window's), named after the write
+  retired=()
+  if (( switched )); then
+    retired=(${(f)"$(print -r -- $ru_state | $JQ -r --arg f $ru_w_fam --arg v $ru_w_ver "$ru_w_retired_jq"'
+                       [(.families[$f].stops // [])[] | select(cleared($v)) | .version] | unique | .[]')"})
+  fi
   ru_j state-write ${${switched:#0}:+switched}${${switched:#1}:+held} || return 3
-  ru_w_state "$ru_w_kept .families[\$f] = ((.families[\$f] // $ru_w_family_new)
-        | if \$sw then .candidate = ({version: \$v, lines: (\$sets | split(\" \") | map({(.): \$out}) | add), closed_at: \$now}
-                               + (if \$rec != \"\" then {recipe: \$rec} else {} end))
-            | .previous = (\$sets | split(\" \") | map({(.): \$old}) | add) | .back_until = null else . end
-        | .stops = kept(\$W; \$new; true; \$running))
+  ru_w_state "$ru_w_kept $ru_w_retired_jq .families[\$f] = ((.families[\$f] // $ru_w_family_new)
+        | if \$sw then
+            ((.candidate // null) as \$c | \$c != null and .previous != null and ([\$c.lines[]] | unique) == [\$old]) as \$open
+            | .candidate = ({version: \$v, lines: (\$sets | split(\" \") | map({(.): \$out}) | add), closed_at: \$now}
+                            + (if \$rec != \"\" then {recipe: \$rec} else {} end))
+            | (if \$open then . else .previous = (\$sets | split(\" \") | map({(.): \$old}) | add) end) | .back_until = null
+          else . end
+        | .stops = kept(\$W; \$new; true; \$running)
+        | if \$sw then .stops = [.stops[] | select(cleared(\$v) | not)] else . end)
       | if \$sw then .images[\$out] = \$v else . end | if \$oldv != \"\" then .images[\$old] = \$oldv else . end
       | if \$rs == null then del(.restart) else .restart = \$rs end" \
       --arg f $ru_w_fam --arg v $ru_w_ver --arg out $ru_w_out --arg old $ru_w_old --arg oldv "$oldv" --arg rec "${ru_w_recipe-}" \
@@ -954,6 +986,7 @@ ru_w_close() {
       --argjson sw ${${switched:#0}:+true}${${switched:#1}:+false} --argjson running $running \
       --argjson new "[${(j:,:)ru_w_stops}]" \
     || { print -r -- "runner-updater: STOP the state cannot be written ($REPLY): the window journal stays open: RECOVER ends it"; return 3 }
+  for i in $retired; do ru_wsay "STOP PINNED RUNNER RETIRED (runner $i) is cleared: the family runs runner $ru_w_ver"; done
   ru_w_archive || return 3
   for (( i = 1; i <= ${#sup}; i++ )); do
     ru_w_delete $sup[i] $own[i] "the previous image of $ru_w_fam, which this window superseded"
