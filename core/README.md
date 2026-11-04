@@ -259,8 +259,12 @@ It holds the candidate only when it is of the candidate's `version` (or names no
 not a string), or when its D7 row says a newer
 release does NOT proceed alone (`lib/stops.jq`): check failed, ROLLED BACK and PINNED RUNNER RETIRED of an older version
 closed that version's candidate, and a newer release proceeds alone past them. KEEP never
-accepts while r1's `pending` stands (three counted failures, not all settled, the held record counted as one when it
-may be): `observe` until they settle.
+accepts while r1's `pending` stands in the open window (three counted failures, not all settled, the held record
+counted as one when it may be): `observe` until they settle. What in r1's evidence of the candidate's window bars the
+accept (R1's verdict, r1's own STOP, that `pending`) is ONE predicate, `lib/core.jq`'s `r1_bar`: keep.jq reads it, and
+so does the Studio glue's `retry`, whose accept on JOBS FAIL ON THE NEW IMAGE (a person's call) must hold where KEEP's
+would. A closed window's `pending` bars nothing: a closed window reads no log, and the window that opens again starts
+its sets from zero.
 
 **IDLE.** Over every set in `facts.sets` (required: IDLE is never said of nothing) and every set the reads list: two
 reads; each set present with `metrics` on both (a read that does not list a set of `facts.sets` is not idle:

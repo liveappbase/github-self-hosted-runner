@@ -4,8 +4,10 @@
   writes as KEEP's ACCEPT (the recipe baseline, `previous` kept until now + 7 days, the candidate closed, the pin by D2's
   ONE RULE: a right pin stays byte-equal, a removed one is written, journaled first), so the next pass holds no STOP.
   `retry` on another STOP accepts nothing (NO EVIDENCE: the candidate stays under observation), and neither does it
-  while R1's rollback verdict stands for the candidate's window (the core state's: S3b-4b r2 P1-1): it clears the
-  STOPs it names, says why it accepts nothing, and the next pass with CI up rolls back.
+  where KEEP's own accept would not (core/lib/core.jq's r1_bar on the core state's evidence of the candidate's window,
+  the ONE predicate keep.jq reads too): R1's rollback verdict stands (S3b-4b r2 P1-1), r1's own STOP stands in the
+  window (SHIM REFUSED), or the open window's counted failures are not all settled (`pending`; r3 P2-1). It clears the
+  STOPs it names, says why it accepts nothing, and the pass with CI up that has R1's verdict rolls back.
 - R1's verdict `stop` with PINNED RUNNER RETIRED (PLAN D6, D7): the pass holds the STOP, closes the candidate with no
   restart and rejects the version, so a newer release is due alone. SHIM REFUSED keeps the candidate. The STOP clears
   itself when a newer version's switch window closes on the family with the newer image running (PLAN D7, 11-04); a
@@ -16,6 +18,8 @@
   the actions journal first). A window that does not switch supersedes nothing, and a switched close supersedes ONLY a
   keep (no candidate, a back_until before the window): a rebuild of an open candidate keeps `previous`, the image
   before the candidate's version, and deletes nothing (S3b-4b r2 P2-2).
+- A switched close drops the family's JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE (S3b-4b r3 P3-1): they judged the
+  candidate the window replaced, and KEEP judges the new image. A held close keeps them.
 
 The rigs are test_runner_updater_pass's (the pass's clock from RU_TEST_NOW; every other command keeps the real clock
 unless it reads the same `now` line).
@@ -28,7 +32,7 @@ from tests.studio.test_runner_updater import config
 from tests.studio.test_runner_updater_pass import (CLOCK, DAY, HOUR, MIN, armed, failures, family, gh_rig, job, latest,
                                                    pass_, switched_and_open, utc)
 from tests.studio.test_runner_updater_recover import assert_runs, n_disable, stops
-from tests.studio.test_runner_updater_rollback import NEW, V2, actions, switched
+from tests.studio.test_runner_updater_rollback import NEW, V2, actions, rb_win, switched
 from tests.studio.test_runner_updater_state import KEEP, fam, lines_of, state, stop
 from tests.studio.test_runner_updater_window import FAM, KILLED, OLD, V0, Win, today
 
@@ -174,6 +178,92 @@ class TestRetryWhileR1RollbackIsDue(unittest.TestCase):
                 self.assertEqual('accepted runner %s' % V2 in res.stdout, accepted, res.stdout)
                 self.assertEqual('is not accepted: R1\'s rollback is due' in res.stdout, not accepted, res.stdout)
                 self.assertEqual(family(w)['candidate'] is None, accepted)
+
+
+class TestRetryAcceptsOnlyWhereKeepWould(unittest.TestCase):
+    """S3b-4b r3 P2-1. retry's ACCEPT on JOBS FAIL ON THE NEW IMAGE checks what KEEP's accept checks, apart from that
+    STOP: core/lib/core.jq's r1_bar, the ONE predicate keep.jq reads too, on the core state's evidence of the
+    candidate's window (same_window). No R1 verdict (TestRetryWhileR1RollbackIsDue), no r1 STOP in the window (SHIM
+    REFUSED), and no `pending` run in the open window (counted failures not all settled: R1 may still come). Else it
+    accepts nothing, clears the STOPs it names and says why; the pass that settles the failures rolls back. The
+    control, none of them, accepts: TestRetryOnJobsFailAccepts."""
+
+    def test_pending_then_retry_accepts_nothing_and_the_pass_that_settles_them_rolls_back(self):
+        w, t = jobs_fail(self)
+        text = failures(hour=11)
+        cut = text.index('2026-11-01 11:02:30')       # the record that settles them comes later
+        w.r.append_log(text[:cut])
+        pass_(w, t + 10 * MIN)
+        e = w.u.get()['core']['families'][FAM]
+        self.assertEqual((e['verdict'], e['pending']), (None, {'set': 'mac-a', 'failures': 3, 'settled': 0}))
+        self.assertEqual(stops(w), ['JOBS FAIL ON THE NEW IMAGE'])
+        res = retry(w, t + 12 * MIN)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn('accepted runner', res.stdout)
+        self.assertIn('runner-updater: retry %s: runner %s is not accepted: set mac-a has 3 counted failures with no '
+                      'proof of life between them, 3 not settled yet (R1 may still come): the pass that settles them '
+                      'rolls it back when R1 comes, else KEEP judges it again\n' % (FAM, V2), res.stdout)
+        self.assertIn('runner-updater: retry %s: cleared JOBS FAIL ON THE NEW IMAGE;' % FAM, res.stdout)
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['back_until'], f['stops']), (V2, None, []))
+        n = n_disable(w)
+        w.r.append_log(text[cut:])
+        res = pass_(w, t + 20 * MIN)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('runner-updater: pass: rolled back %s: it runs %s again\n' % (FAM, OLD), res.stdout)
+        self.assertEqual((n_disable(w) - n, stops(w), family(w)['candidate']), (1, ['ROLLED BACK'], None))
+        assert_runs(self, w, config((('mac-a', OLD),)).encode())
+
+    def test_shim_refused_in_the_window_then_retry_accepts_nothing(self):
+        w, t = jobs_fail(self)
+        w.r.append_log(SHIM_LOG.replace('2026-11-01 05:', '2026-11-01 11:'))
+        res = pass_(w, t + 10 * MIN)
+        self.assertIn('\nr1 %s: stop (SHIM REFUSED: ' % FAM, res.stdout)
+        res = retry(w, t + 12 * MIN)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn('accepted runner', res.stdout)
+        self.assertIn('runner-updater: retry %s: runner %s is not accepted: r1\'s STOP stands in its window (SHIM '
+                      'REFUSED: set mac-a: free disk below the floor: 93 GiB < 100 GiB), and KEEP does not accept while '
+                      'it stands: `runner-updater status` names its next step\n' % (FAM, V2), res.stdout)
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['back_until'], f['stops']), (V2, None, []))
+        res = pass_(w, t + HOUR)
+        self.assertIn('\nkeep %s: held (SHIM REFUSED: set mac-a: ' % FAM, res.stdout)
+        self.assertEqual(family(w)['candidate']['version'], V2)
+
+    def test_only_the_candidates_own_window_holds_retry(self):
+        # the core state's evidence, hand-made: of the candidate's window (its switch: closed_at), or of an earlier
+        # switch of the same lines. A `pending` of a closed window holds nothing: a closed window reads no log, and the
+        # window that opens again starts its sets from zero (r1.jq's open_at), so it cannot become a verdict; KEEP does
+        # not read it either. r1's STOP holds KEEP whether the window is open or not, and so it holds retry
+        closed = int(time.time()) - DAY
+        pend = {'set': 'mac-a', 'failures': 3, 'settled': 1}
+        shim = [{'stop': 'SHIM REFUSED', 'reason': 'set mac-a: free disk below the floor: 93 GiB < 100 GiB'}]
+        for what, members, at, accepted in (
+                ('pending, its open window', {'pending': pend}, closed, False),
+                ('pending of an earlier window', {'pending': pend}, closed - HOUR, True),
+                ('pending of its closed window', {'pending': pend, 'open': False}, closed, True),
+                ('SHIM REFUSED, its window', {'stops': shim}, closed, False),
+                ('SHIM REFUSED, its closed window', {'stops': shim, 'open': False}, closed, False),
+                ('SHIM REFUSED of an earlier window', {'stops': shim}, closed - HOUR, True),
+                ('none of them', {}, closed, True)):
+            with self.subTest(what):
+                held = [stop(FAM, 'JOBS FAIL ON THE NEW IMAGE', detail={'text': 'x'})]
+                ev = {'version': V2, 'lines': {'mac-a': NEW}, 'closed_at': at, 'open': True, 'since': closed,
+                      'gaps': 0, 'succeeded': 0, 'failed': 1, 'canceled': 0, 'other': 0, 'sets': {}, 'verdict': None,
+                      'stops': [], 'pending': None}
+                ev.update(members)
+                w = Win(self, cfg=config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+                        s=state(on=False, families={FAM: fam(candidate={'version': V2, 'lines': {'mac-a': NEW},
+                                                                         'closed_at': closed},
+                                                             previous={'mac-a': OLD}, stops=held)},
+                                images={OLD: V0, NEW: V2}, core={'format': 1, 'families': {FAM: ev}}))
+                res = retry(w, int(time.time()))
+                self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+                self.assertEqual('accepted runner %s' % V2 in res.stdout, accepted, res.stdout)
+                self.assertEqual('runner %s is not accepted: ' % V2 in res.stdout, not accepted, res.stdout)
+                self.assertEqual(family(w)['candidate'] is None, accepted)
+                self.assertEqual(family(w)['stops'], [])
 
 
 class TestRetryAcceptKeepsThePinRule(unittest.TestCase):
@@ -419,6 +509,72 @@ class TestSupersede(unittest.TestCase):
                       res.stdout)
         self.assertTrue(os.path.exists(os.path.join(w.vms, OLD)))
         self.assertNotIn(OLD, lines_of(w.u.protected))
+
+
+def observed(test, job_result):
+    """mac-golden switched to NEW (runner V2, previous OLD) by an earlier window (NEW is not today's image, so a rebuild
+    can build today's); the pass at t0 opened its evidence window, the log gained one job of JOB_RESULT (None: no job),
+    and the pass 72 h later held JOBS FAIL ON THE NEW IMAGE (NO EVIDENCE). -> w, t0 + 72 h"""
+    w = Win(test, cfg=config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+            s=state(on=True, families={FAM: switched()}, images={OLD: V0, NEW: V2}))
+    w.sb.write(os.path.join(w.vms, NEW), '')
+    w.sb.write(w.pin, '%s %s\n' % (V2, 'b' * 64))
+    w.r.write_log('')
+    t0 = int(time.time())
+    res = pass_(w, t0)
+    test.assertIn('\nkeep %s: observe (runner %s: observing since ' % (FAM, V2), res.stdout)
+    if job_result:
+        w.r.append_log(job(job_result))
+    pass_(w, t0 + KEEP)
+    test.assertEqual(stops(w), ['JOBS FAIL ON THE NEW IMAGE' if job_result else 'NO EVIDENCE'])
+    return w, t0 + KEEP
+
+
+class TestSwitchedCloseDropsTheObservationStops(unittest.TestCase):
+    """S3b-4b r3 P3-1. A SWITCHED close drops the family's JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE, as a rollback
+    close and PINNED RUNNER RETIRED's close do: they judged the candidate the window replaced, and KEEP judges the new
+    image (HAND CHANGE's line is `rebuild FAMILY`, so a rebuild of an open candidate is a supported path). Controls: a
+    switch window that does not switch keeps them, and so does a rollback window that does not roll back (a rolled
+    back close drops them: test_runner_updater_rollback, test_back_clears_the_candidate_s_observation_stops)."""
+
+    def rebuild_drops(self, job_result, name):
+        w, t = observed(self, job_result)
+        res = w.run('rebuild')
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        out = 'liveapp-mac-golden-' + today()
+        f = family(w)
+        self.assertEqual((f['candidate']['version'], f['candidate']['lines'], f['stops']), (V2, {'mac-a': out}, []))
+        self.assertNotIn(name, w.status())
+        res = pass_(w, t + HOUR)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('\nkeep %s: observe (runner %s: observing since %s, KEEP at %s; 0 succeeded of 0 completed)\n'
+                      % (FAM, V2, utc(t + HOUR), utc(t + HOUR + KEEP)), res.stdout)
+        self.assertEqual(stops(w), [])
+
+    def test_jobs_fail_then_a_rebuild_of_the_candidate_drops_it_and_keep_observes_the_new_image(self):
+        self.rebuild_drops('failed', 'JOBS FAIL ON THE NEW IMAGE')
+
+    def test_no_evidence_then_a_rebuild_of_the_candidate_drops_it_and_keep_observes_the_new_image(self):
+        self.rebuild_drops(None, 'NO EVIDENCE')
+
+    def test_control_a_rebuild_that_does_not_switch_keeps_them(self):
+        w, t = observed(self, 'failed')
+        w.put('build-fail')
+        res = w.run('rebuild')
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn('runner-updater: STOP check failed: build: ', res.stdout)
+        f = family(w)
+        self.assertEqual((f['candidate']['lines'], sorted(stops(w))),
+                         ({'mac-a': NEW}, ['JOBS FAIL ON THE NEW IMAGE', 'check failed']))
+
+    def test_control_a_rollback_close_that_does_not_roll_back_keeps_them(self):
+        held = [stop(FAM, 'JOBS FAIL ON THE NEW IMAGE', version=V2), stop(FAM, 'NO EVIDENCE', version=V2)]
+        w = rb_win(self, families={FAM: switched(stops=held)})
+        w.validate('refuse', call=2)                 # the validate after the edit: the backup goes back
+        res = w.run('back')
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn('runner-updater: STOP ROLLBACK FAILED: after the edit: validate (post) is NON-API', res.stdout)
+        self.assertEqual(sorted(stops(w)), ['JOBS FAIL ON THE NEW IMAGE', 'NO EVIDENCE', 'ROLLBACK FAILED'])
 
 
 if __name__ == '__main__':

@@ -64,6 +64,25 @@ def same_window($e; $cand):
   $e != null and $cand != null and $e.version == $cand.version and $e.lines == $cand.lines
   and $e.closed_at == $cand.closed_at;
 
+# what in r1's evidence $e keeps KEEP from accepting the candidate $cand, apart from a STOP the glue holds and the 72 h:
+# null, or {kind, reason}. Only the evidence of the candidate's own window counts (same_window). ONE copy (S3b-4b r3
+# P2-1): keep.jq reads it, and so does the glue's `retry`, whose ACCEPT on JOBS FAIL ON THE NEW IMAGE (a person's call)
+# holds where KEEP's would, so the two cannot drift. The kinds, first match:
+#   rollback  R1's verdict stands: the rollback is due (no STOP takes it back);
+#   stop      r1's own STOP in the window (SHIM REFUSED);
+#   pending   in the OPEN window, a run that can still reach R1 (r1.jq's pending: three counted failures with no proof
+#             of life between them, not all settled). A closed window reads no log, and the window that opens again
+#             starts its sets from zero (r1.jq's open_at), so its pending never becomes a verdict: it bars nothing.
+# keep.jq: `held` on rollback and stop; on pending, no accept (`observe` until the failures settle)
+def r1_bar($e; $cand):
+  if same_window($e; $cand) | not then null
+  elif $e.verdict != null then {kind: "rollback", reason: "R1 on set \($e.verdict.set): the rollback is due"}
+  elif ($e.stops | length) > 0 then {kind: "stop", reason: "\($e.stops[0].stop): \($e.stops[0].reason)"}
+  elif $e.open and $e.pending != null then
+    {kind: "pending",
+     reason: "set \($e.pending.set) has \($e.pending.failures) counted failures with no proof of life between them, \($e.pending.failures - $e.pending.settled) not settled yet (R1 may still come)"}
+  else null end;
+
 # a process read {pid, start}: the same process when both are there and equal
 def same_proc($a; $b): $a != null and $b != null and $a.pid == $b.pid and $a.start == $b.start;
 

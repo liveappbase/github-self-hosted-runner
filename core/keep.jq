@@ -20,6 +20,9 @@ C::now_in("keep") as $now
       else
         ($state.families[$f] // null) as $e0
         | (if C::same_window($e0; $fam.candidate) then $e0 else null end) as $e
+        # what in r1's evidence bars the ACCEPT (R1's verdict, r1's STOP, a pending run): ONE predicate, which the
+        # glue's `retry` reads too (core/lib/core.jq, r1_bar; S3b-4b r3 P2-1)
+        | C::r1_bar($e0; $fam.candidate) as $bar
         # a STOP the glue holds for the family, other than NO EVIDENCE (which heals itself): a person answers it
         # (JOBS FAIL: `back` or `retry` to keep it), so it is never turned into ACCEPT here. It holds THIS candidate
         # when it is of the candidate's version (or names none), or when its D7 row says a newer release does NOT
@@ -33,10 +36,7 @@ C::now_in("keep") as $now
         | ($e.succeeded // 0) as $ok | ($e.failed // 0) as $bad | ($e.other // 0) as $oth | ($e.canceled // 0) as $can
         | ($ok + $bad + $oth) as $done
         | {since: ($e.since // null), succeeded: $ok, completions: $done, failed: $bad, canceled: $can, other: $oth}
-        + (if $e != null and $e.verdict != null then
-             {verdict: "held", reason: "R1 on set \($e.verdict.set): the rollback is due", keep_at: null}
-           elif $e != null and ($e.stops | length) > 0 then
-             {verdict: "held", reason: "\($e.stops[0].stop): \($e.stops[0].reason)", keep_at: null}
+        + (if $bar != null and $bar.kind != "pending" then {verdict: "held", reason: $bar.reason, keep_at: null}
            elif $hs != null then
              {verdict: "held", reason: "\($hs.stop) stands: a person answers it; KEEP does not accept while it stands",
               keep_at: null}
@@ -45,10 +45,10 @@ C::now_in("keep") as $now
              | if $now < $at then
                  {verdict: "observe", keep_at: $at,
                   reason: "runner \($fam.candidate.version): observing since \($e.since | C::utc), KEEP at \($at | C::utc); \($ok) succeeded of \($done) completed"}
-               # never ACCEPT while a run that can still reach R1 waits for its failures to settle (r1.jq's pending)
-               elif $ok >= 1 and $e.pending != null then
-                 {verdict: "observe", keep_at: $at,
-                  reason: "runner \($fam.candidate.version): KEEP waits: set \($e.pending.set) has \($e.pending.failures) counted failures with no proof of life between them, \($e.pending.failures - $e.pending.settled) not settled yet (R1 may still come)"}
+               # never ACCEPT while a run that can still reach R1 waits for its failures to settle (r1.jq's pending:
+               # the bar's last kind, the only one left here)
+               elif $ok >= 1 and $bar != null then
+                 {verdict: "observe", keep_at: $at, reason: "runner \($fam.candidate.version): KEEP waits: \($bar.reason)"}
                elif $ok >= 1 then
                  {verdict: "accept", keep_at: $at, reason: "runner \($fam.candidate.version): \($ok) succeeded of \($done) completed in 72 h"}
                elif $done >= 1 then

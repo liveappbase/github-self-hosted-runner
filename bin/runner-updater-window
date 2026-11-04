@@ -124,6 +124,10 @@
 #   supersedes nothing.
 #   PINNED RUNNER RETIRED (PLAN D7, 11-04): a switched close to a version newer than a held RETIRED STOP's clears that
 #   STOP, and says so (the family runs the newer image); a held close (the backup back, or no edit) leaves it.
+#   THE OBSERVATION STOPs (S3b-4b r3 P3-1): a switched close drops the family's JOBS FAIL ON THE NEW IMAGE and NO
+#   EVIDENCE, as a rolled-back close and PINNED RUNNER RETIRED's do: they judged the candidate this window replaced,
+#   and KEEP judges the new one (HAND CHANGE's line is `rebuild FAMILY`, so a rebuild of an open candidate is a
+#   supported path). A held close keeps them.
 #   A held close whose gate did not pass (no `gate green 0` line) first deletes the builder's names (the output, the
 #   work VM) that tart lists, each journaled first (`delete`), and only when no non-comment line of the config names it
 #   (PLAN D5, RECOVER step 3): golden-prune would keep a gate-RED image as the way back. The old image is never one.
@@ -131,7 +135,8 @@
 # replaces nothing else: a held POOL DOWN, NO IDLE (its release) or DISK still holds, and it proved nothing about them.
 # A window that ran runner-disable also replaces the family's other window STOPs (check failed, HAND CHANGE, NO IDLE,
 # DISK), and a held POOL DOWN (CI is down on the host) only when it saw its target run (`running`). A STOP that no
-# window raises always stays.
+# window raises stays, except where the CLOSE's own rules drop it (above: PINNED RUNNER RETIRED, THE OBSERVATION
+# STOPs).
 #
 # THE ONE VALIDATE RULE (PLAN D5), ru_w_validate: up to 3 tries VALIDATE_GAP seconds apart, each classified by
 # bin/validate-class: PASS ends it; API-ONLY tries again, and after the third counts as PASS; NON-API or UNKNOWN is a
@@ -938,7 +943,9 @@ ru_w_pin_rule() {
 # old candidate's image is no longer protected; golden-prune may delete it). Any other switched close: `previous` = the
 # window's old image (PLAN D5 FAMILY LINES), and nothing is deleted. A held close supersedes nothing.
 # PINNED RUNNER RETIRED (PLAN D7, 11-04): a SWITCHED close to a version newer than a RETIRED STOP's clears that STOP (the
-# family runs the newer image); a held close leaves it
+# family runs the newer image); a held close leaves it. THE OBSERVATION STOPs (S3b-4b r3 P3-1): a SWITCHED close drops
+# the family's JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE (they judged the candidate it replaced: KEEP judges the new
+# one), as ru_rb_close and the pass's PINNED RUNNER RETIRED do; a held close keeps them
 typeset -g ru_w_retired_jq='def vnum: try (split(".") | map(tonumber)) catch null;
   def cleared($v): .stop == "PINNED RUNNER RETIRED" and (.version | type) == "string" and (.version | vnum) != null
     and ($v | vnum) != null and (.version | vnum) < ($v | vnum);'
@@ -978,7 +985,9 @@ ru_w_close() {
             | (if \$open then . else .previous = (\$sets | split(\" \") | map({(.): \$old}) | add) end) | .back_until = null
           else . end
         | .stops = kept(\$W; \$new; true; \$running)
-        | if \$sw then .stops = [.stops[] | select(cleared(\$v) | not)] else . end)
+        | if \$sw then .stops = [.stops[] | select(cleared(\$v) | not)
+                                 | select(.stop != \"JOBS FAIL ON THE NEW IMAGE\" and .stop != \"NO EVIDENCE\")]
+          else . end)
       | if \$sw then .images[\$out] = \$v else . end | if \$oldv != \"\" then .images[\$old] = \$oldv else . end
       | if \$rs == null then del(.restart) else .restart = \$rs end" \
       --arg f $ru_w_fam --arg v $ru_w_ver --arg out $ru_w_out --arg old $ru_w_old --arg oldv "$oldv" --arg rec "${ru_w_recipe-}" \

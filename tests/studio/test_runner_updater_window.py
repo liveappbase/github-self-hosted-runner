@@ -608,11 +608,14 @@ class TestPreWindowStops(unittest.TestCase):
                          ['validate pre 1 API-ONLY', 'validate pre 2 API-ONLY', 'validate pre 3 API-ONLY'])
 
     def test_a_later_good_window_clears_the_held_window_stops_and_keeps_the_others(self):
+        # the other STOP: a ROLLED BACK of an older version (a newer release proceeds alone past it). Not JOBS FAIL ON
+        # THE NEW IMAGE or NO EVIDENCE: a switched close drops those (S3b-4b r3 P3-1; test_runner_updater_close,
+        # TestSwitchedCloseDropsTheObservationStops)
         held = [stop(FAM, 'DISK', version=V0, detail={'text': 'x'}), stop(FAM, 'HAND CHANGE', version=V0),
-                stop(FAM, 'JOBS FAIL ON THE NEW IMAGE', version=V0)]
+                stop(FAM, 'ROLLED BACK', version='2.0.1')]
         w = Win(self, s=state(on=True, families={FAM: fam(stops=held)}, images={OLD: V0}))
         w.ok()
-        self.assertEqual([s['stop'] for s in w.family()['stops']], ['JOBS FAIL ON THE NEW IMAGE'])
+        self.assertEqual([s['stop'] for s in w.family()['stops']], ['ROLLED BACK'])
 
     def test_a_config_changed_during_the_checks_is_no_window(self):
         w = Win(self)
