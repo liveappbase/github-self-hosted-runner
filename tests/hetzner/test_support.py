@@ -1,15 +1,16 @@
 """Where the cells of tests/hetzner run (support.py's verdict and its class decorator):
-- 'run' as root on Linux in a container (/.dockerenv): the throwaway container of support.RUN_LINE, and the ubuntu
-  rows of .github/workflows/release-check.yml;
+- 'run' as root on Linux in a container (/.dockerenv): the throwaway container of support.RUN_LINE, and the hetzner
+  jobs of .github/workflows/release-check.yml;
 - 'skip' where they cannot run: not Linux, or not root;
 - 'fail' on Linux as root with no /.dockerenv. They could run there, but it may be a real host, so they neither run
   nor pass as skipped: a CI row whose container ever lacked the mark goes red, never green with every cell skipped.
 Pure; runs anywhere. So does Tools: a container that lacks a tool the cells need (jq among them: the unattended switch
-asks core/idle.jq) fails each cell by name. And (Copies, in a container): the copies a cell runs are the real scripts
-with only their pin lines rewritten (HOST_CONF, RR_API/RR_DL/RR_SRC, 03's TGZ_SHA and BIN_SHA, pool-image.sh's PINS,
-runner-updater's PATH):
-Sandbox.pin_lines_only finds any other difference, and a planted one is found.
+asks core/idle.jq) fails each cell by name; and Names: every name the loader collects from tests/hetzner's TestCases
+starts with `test_`, so no helper runs as a cell. And (Copies, in a container): the copies a cell runs are the real
+scripts with only their pin lines rewritten (HOST_CONF, RR_API/RR_DL/RR_SRC, 03's TGZ_SHA and BIN_SHA, pool-image.sh's
+PINS, runner-updater's PATH): Sandbox.pin_lines_only finds any other difference, and a planted one is found.
 """
+import importlib
 import os
 import re
 import time
@@ -60,6 +61,38 @@ class Tools(unittest.TestCase):
                     self.assertEqual(len(fails), 1, fails)
                     self.assertIn('lacks %s' % missing, fails[0])
                     self.assertTrue(re.search(r'\bjq\b', fails[0]), 'the message names the image to use (RUN_LINE)')
+
+
+def odd_names(classes):
+    """['Class.name'] of each name unittest's loader collects from these TestCase classes that is not test_...: a
+    helper named test... is collected and run as a cell of its own."""
+    loader = unittest.TestLoader()
+    return sorted('%s.%s' % (c.__name__, n) for c in classes for n in loader.getTestCaseNames(c)
+                  if not n.startswith('test_'))
+
+
+class Names(unittest.TestCase):
+    def test_the_loader_collects_only_test_names_here(self):
+        """Codex r2 F1, Opus r2 F2 (S2b-3a): Status.tested, a helper, was collected and run as a test that cannot
+        fail. Every name the loader collects from a TestCase of tests/hetzner starts with `test_`. Control: a planted
+        helper named `tested` is found, and its class's cell is not. Pure; runs anywhere."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        classes = []
+        for n in sorted(os.listdir(here)):
+            if re.fullmatch(r'test.*\.py', n):
+                m = importlib.import_module('tests.hetzner.' + n[:-3])
+                classes += [c for c in vars(m).values() if isinstance(c, type) and issubclass(c, unittest.TestCase)
+                            and c.__module__ == m.__name__]
+        self.assertGreater(len(classes), 10)
+        self.assertEqual(odd_names(classes), [])
+
+        class Planted(unittest.TestCase):
+            def test_x(self):
+                pass
+
+            def tested(self):
+                return []
+        self.assertEqual(odd_names([Planted]), ['Planted.tested'])
 
 
 @needs_container

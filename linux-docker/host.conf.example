@@ -10,8 +10,7 @@ HOST_IP=203.0.113.10
 SSH_PORT=22
 
 # The two users 01-users.sh creates (their homes are /home/<name>). RUN_USER runs the rootless Docker daemon and the
-# local registry and holds no secret; RS_USER runs only runscaler and holds the token. RS_USER must sort before
-# RUN_USER (01-users.sh's group check compares a sorted list; see its header).
+# local registry and holds no secret; RS_USER runs only runscaler and holds the token.
 RUN_USER=ci-run
 RS_USER=ci-rs
 

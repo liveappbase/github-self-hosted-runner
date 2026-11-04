@@ -14,8 +14,6 @@
 # ORDER: users, group, keys, lock rule, linger LAST (a user manager keeps the groups it started with), and RS_USER gets
 # linger only once it has group RUN_USER.
 # Ends with CHECK lines; exit 1 when any check fails. Touches no unmarked user, no service, sshd or Docker setting.
-# KNOWN LIMIT (kept as it runs on the first host): the group check compares the SORTED group list of RS_USER with
-# "RS_USER RUN_USER", so it passes only when RS_USER sorts before RUN_USER (host.conf.example's names do).
 set -uo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
@@ -88,7 +86,8 @@ for u in $marked; do
 done
 
 # CHECKS
-want_groups() { [ "$(id -nG "$1" 2>/dev/null | tr ' ' '\n' | sort | paste -sd' ' -)" = "$2" ]; }
+# USER "NAME...": USER's groups are exactly those NAMEs, in any order (both lists sorted before they are compared)
+want_groups() { [ "$(id -nG "$1" 2>/dev/null | tr ' ' '\n' | sort | paste -sd' ' -)" = "$(printf '%s\n' $2 | sort | paste -sd' ' -)" ]; }
 want_groups ${RS_USER} "${RS_USER} ${RUN_USER}" && ok "${RS_USER} groups = ${RS_USER} ${RUN_USER}" || bad "${RS_USER} groups = [$(id -nG ${RS_USER} 2>&1)]"
 want_groups ${RUN_USER} "${RUN_USER}" && ok "${RUN_USER} groups = ${RUN_USER}" || bad "${RUN_USER} groups = [$(id -nG ${RUN_USER} 2>&1)]"
 m=$(getent group ${RUN_USER} | cut -d: -f4); [ "$m" = ${RS_USER} ] && ok "group ${RUN_USER} members = ${RS_USER} (D1 socket's access list)" || bad "group ${RUN_USER} members = [$m]"

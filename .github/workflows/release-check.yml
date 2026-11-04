@@ -6,10 +6,12 @@
 # at a time as the Mac has CPUs (3 on macos-latest); a module that fails, crashes or does not report fails the step,
 # and its block names it. The jq-linux jobs run
 # the core's and the watchdog's tests once per ci row of core/TESTED_JQ, in that image with its own jq package;
-# tools/release-check --build reads their results on the tagged commit by their names, "jq VERSION (IMAGE)". The ubuntu
-# rows also run tests/hetzner (linux-docker/'s scripts; pool-image.sh's unattended switch asks core/idle.jq, under the
-# image's jq): those cells run as root in the job's container, and fail rather than skip on a Linux root without a
-# container's /.dockerenv (tests/hetzner/support.py).
+# tools/release-check --build reads their results on the tagged commit by their names, "jq VERSION (IMAGE)". The
+# hetzner jobs run tests/hetzner (linux-docker/'s scripts; pool-image.sh's unattended switch asks core/idle.jq, under
+# the image's jq) in the images of the ubuntu rows, in parts by module name: those cells run as root in the job's
+# container, and fail rather than skip on a Linux root without a container's /.dockerenv (tests/hetzner/support.py).
+# Each jq-linux job waits for them and fails unless every hetzner job passed, so the job a tag's release-check reads
+# passes only when the hetzner cells did.
 # No action is used, so there is no action to pin: the commit is fetched with plain git, with its full history (the
 # home-data rules read every reachable commit). Never pull_request_target; the token can only read.
 name: release-check
@@ -45,25 +47,58 @@ jobs:
         env:
           JQ: /usr/bin/jq
         run: python3 -I tools/run-tests -v
+  hetzner:
+    name: hetzner ${{ matrix.part }} (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    # In parts, each a -p pattern of unittest discover (tests/core/test_workflow.py: together they run every module of
+    # tests/hetzner exactly once). In one job per image, tests/hetzner took 1028 and 1105 s in CI at 243 cells (run
+    # 41815113783), its rows 20 and 21 min of 30. Each part is a job of its own: its cells share nothing with another
+    # part's (a Pool cell needs /home/root to itself, so two modules in one container cannot run at once). At 251 cells
+    # the parts took 201-223, 173-194, 222-236 and 167-169 s in local containers of both images (S2b-3b-1), and CI
+    # took about 1.35 times a local run: the slowest part is about 6 min. A part that nears 15 min gets a pattern more.
+    timeout-minutes: 30
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:26.04", "ubuntu:24.04"]
+        part: ["test_[a-q]*.py", "test_[!a-qu]*.py", "test_un*.py", "test_u[!n]*.py"]
+    steps:
+      - name: git, python3, the image's own jq package, and curl and openssl (tests/hetzner)
+        run: |
+          apt-get update -q
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl git jq openssl python3
+      - name: Fetch the commit
+        run: |
+          git init -q src
+          git -C src remote add origin "https://github.com/$GITHUB_REPOSITORY"
+          git -C src fetch -q --no-tags --depth 1 origin "$GITHUB_SHA"
+          git -C src checkout -q --detach FETCH_HEAD
+      - name: the cells of tests/hetzner in this part
+        working-directory: src
+        env:
+          JQ: /usr/bin/jq
+        run: python3 -I -m unittest discover -s tests/hetzner -t . -p '${{ matrix.part }}' -v
   jq-linux:
     name: jq ${{ matrix.jq }} (${{ matrix.image }})
     runs-on: ubuntu-latest
-    # 30, not 15: the ubuntu rows run tests/hetzner after core and watchdog; at 60 hetzner cells a row took 8 min in CI
-    # (run 41599539837), and S2b-2a takes them to 101 (6-9 min alone in a local container). A hang still ends here.
+    # after the hetzner jobs (it reports them: see the last step), and also when one of them failed
+    needs: hetzner
+    if: ${{ !cancelled() }}
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {jq: jq-1.8.1, image: "ubuntu:26.04", areas: "core watchdog hetzner"}
-          - {jq: jq-1.7, image: "ubuntu:24.04", areas: "core watchdog hetzner"}
+          - {jq: jq-1.8.1, image: "ubuntu:26.04", areas: "core watchdog"}
+          - {jq: jq-1.7, image: "ubuntu:24.04", areas: "core watchdog"}
           - {jq: jq-1.6, image: "debian:bookworm-slim", areas: "watchdog"}
     steps:
-      - name: git, python3, the image's own jq package, and curl and openssl (tests/hetzner)
+      - name: git, python3 and the image's own jq package
         run: |
           apt-get update -q
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl git jq openssl python3
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates git jq python3
       - name: Fetch the commit
         run: |
           git init -q src
@@ -77,3 +112,5 @@ jobs:
         env:
           JQ: /usr/bin/jq
         run: for a in ${{ matrix.areas }}; do python3 -I -m unittest discover -s tests/$a -t . -v || exit 1; done
+      - name: every hetzner job of this commit passed (a tag's release-check reads this job's result, not theirs)
+        run: test "${{ needs.hetzner.result }}" = success

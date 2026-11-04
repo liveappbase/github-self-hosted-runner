@@ -1,7 +1,7 @@
 """Helpers for the tests of linux-docker/ (the Linux host's scripts), stdlib only.
 
 Those scripts run on a Linux host (bash 5, GNU coreutils, OpenSSL, curl), so these cells run IN A THROWAWAY LINUX
-CONTAINER as root (RUN_LINE by hand; the ubuntu rows of .github/workflows/release-check.yml in CI). Where they cannot
+CONTAINER as root (RUN_LINE by hand; the hetzner jobs of .github/workflows/release-check.yml in CI). Where they cannot
 run (not Linux, or not root) each cell SKIPS. On Linux as root with no container's /.dockerenv each cell FAILS before
 it runs: a copy that ran as root on a real host could still reach that host's programs, and a skip there would let a
 CI row pass with no cell run (verdict, test_support.py). In a container that lacks a tool the cells need, they FAIL.
@@ -42,7 +42,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUN_LINE = ('docker run --rm --network none -v "$PWD":/w:ro -w /w IMAGE python3 -I -B -m unittest discover -s '
             'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl, jq and ca-certificates; '
-            'the ubuntu rows of .github/workflows/release-check.yml run them so too)')
+            'the hetzner jobs of .github/workflows/release-check.yml run them so too, in parts)')
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 SYSTEM_BUNDLE = '/etc/ssl/certs/ca-certificates.crt'
 OPENSSL = '/usr/bin/openssl'
@@ -434,6 +434,7 @@ GOOD_MAIN = ('Seccomp: 2\nNoNewPrivs: 1\npid1=docker-init umask=0022\nkeyctl EPE
 
 class Sandbox:
     PIN_REWRITES = {
+        'setup/01-users.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/02-d1.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/03-runscaler.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
         'setup/pool-image.sh': [('HOST_CONF=/etc/liveapp-ci/host.conf\n', 'HOST_CONF=@ROOT@/host.conf\n')],
@@ -448,7 +449,8 @@ class Sandbox:
              'RR_DL=@GH@/actions/runner/releases/download\n'),
             ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n')],
     }
-    LEFT_OUT = {'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
+    LEFT_OUT = {'setup/01-users.sh': ('/etc/liveapp-ci',),
+                'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
                 'setup/03-runscaler.sh': ('/etc/liveapp-ci',), 'setup/pool-image.sh': ('/etc/liveapp-ci',),
                 'bin/pool-ready': ('/etc/liveapp-ci',), 'bin/runner-updater': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
@@ -1043,7 +1045,8 @@ class Pool(Sandbox):
     """A Sandbox for the pool side, run as RS_USER: 03-runscaler.sh, pool-image.sh and the files 03 installs
     (runner-start, pool-ready, validate-class, the unit). RS_USER = RUN_USER = root: pool-image.sh runs only as RS_USER,
     and runner-start reads /home/RS_USER/…, so the scripts' HOME is /home/root, a symlink to this sandbox's home that only
-    a container has (the cell's cleanup removes it; a /home/root that is already there fails the cell). The pin lines
+    a container has (the cell's cleanup removes it; a /home/root that is already there fails the cell: so two Pool
+    cells, of two modules run at once in one container, cannot both run). The pin lines
     rewritten on top of HOST_CONF: 03's TGZ_SHA and BIN_SHA (the download ~/build/dl/runner-linux-amd64.tar.gz holds the
     runscaler substitute POOL_RUNNER) and pool-image.sh's PINS (each the sha256 of the copy it pins). Substitutes: the
     docker and curl of Sandbox (D1, the registry, which serves the digests in curl['served'], and /healthz,

@@ -44,8 +44,9 @@
 #            check (below); status.jq with facts from the state (the family's candidate and back_until, the STOPs it
 #            holds) and its `core`. It prints ON or OFF; the family's candidate (or "no candidate"), back_until and
 #            rejected versions; an open window journal; status.jq's verdict and lines; per STOP its D7 properties
-#            (`known false` and "unknown" for a STOP this core does not know: never guessed). A status.jq that does
-#            not decide: a STOP.
+#            (`known false` and "unknown" for a STOP this core does not know: never guessed). status.jq's answer is
+#            checked as a pass checks it (`decided`): a `wait` is its lines, then "runner-updater: WAIT the decision
+#            core waits ...", exit 4; another answer is "runner-updater: STOP core could not decide (status)", exit 1.
 #   on       on = true.
 #   off      refuses while WINDOW is open (off never strands a window: D11), and changes nothing; else on = false.
 #   pass     the timer's entry (the timer is a later release's). The lock held: "another run holds the updater lock",
@@ -98,7 +99,10 @@
 #   rule); the install time is a window's journaled `renamed` epoch when a window installed config.toml (and nothing
 #   wrote it later); a log-level other than info or debug is no facts (runscaler then logs no finished job); no rule
 #   for a folder it cannot search (the Studio's guards the protected list and the pins, which this host has none of:
-#   here a state behind such a folder reads as fresh, OFF, and nothing acts while OFF); the lock is flock(1) on fd 9.
+#   here a state behind such a folder reads as fresh, OFF, and nothing acts while OFF); the lock is flock(1) on fd 9;
+#   a decision core that answers `wait` is a WAIT (exit 4), in a pass and in status, and this updater takes only the
+#   verdicts core/README.md names for each program (idle: idle or not-idle; r1, keep and status: ok; or wait), where
+#   the Studio's takes any string as a decision.
 #
 # Exit codes:
 #   0  done; also a pass that finds the lock held or the updater OFF
@@ -106,7 +110,8 @@
 #      state it cannot write, the core could not decide, RECOVER needed)
 #   2  usage
 #   3  STOP untested jq
-#   4  WAIT: a state of another format, or with a member this release does not read; a pass whose decision core waits
+#   4  WAIT: a state of another format, or with a member this release does not read; a pass, or status, whose decision
+#      core waits
 # Constants:
 #   PATH        its own, the system folders, set first: a caller's PATH (the watchdog's `ssh RS_USER@HOST PATH=...
 #               runner-updater status`, a timer, a terminal) changes nothing, and its #! line names /bin/bash, so no
@@ -298,13 +303,14 @@ do_status() {
   out=$(jq -n -L "$CORE/lib" -f "$CORE/status.jq" --slurpfile state <(printf '%s' "$core") \
           --slurpfile facts <(printf '%s\n' "$facts") --arg now "$now" 2>&1 < /dev/null)
   rc=$?
-  if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | jq -e -s 'length == 1 and (.[0] | type) == "object"
-       and (.[0].verdict | type) == "string" and (.[0].lines | type) == "array"' > /dev/null 2>&1; then
+  if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | decided status; then
     stop "core could not decide (status): exit $rc: ${out%%$'\n'*}"
   fi
   printf '%s\n' "$out" | jq -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
     "status: \(.verdict) (\(.reason))", .lines[],
     (.stops[]? | "runner-updater: STOP \(.family) \(.stop): known \(.known); candidate closed: \(.closes_candidate | yn); version rejected: \(.rejects | yn); a newer release proceeds alone: \(.newer_proceeds | yn)")'
+  [ "$(printf '%s\n' "$out" | jq -r '.verdict')" != wait ] \
+    || wait4 "the decision core waits ($(printf '%s\n' "$out" | waits_why status)): status decides nothing, and it writes nothing"
   exit 0
 }
 
@@ -376,15 +382,17 @@ collect() {
          stops: ($h.stops // [])}' > "$d/facts.json" 2> /dev/null || { REPLY="jq could not write $d/facts.json"; return 1; }
 }
 
-# PROGRAM's output in PASSDIR is one answer: one JSON object with lines and a verdict core/README.md names for that
-# program ("The programs' outputs"): its decisions, or `wait` (which is none: the caller WAITs)
+# PROGRAM's answer (stdin) is one answer: one JSON object with lines and a verdict core/README.md names for that
+# program ("The programs' outputs"): its decisions, or `wait` (which is none: the caller WAITs). ONE copy of these
+# sets: a pass and status both check by it
 decided() {
   local v="ok wait"
   [ "$1" != idle ] || v="idle not-idle wait"
   jq -e -s --arg v "$v" 'length == 1 and (.[0] | type) == "object" and (.[0].lines | type) == "array"
-            and (.[0].verdict as $x | ($x | type) == "string" and any($v | split(" ")[]; . == $x))' \
-    "$PASSDIR/$1.json" > /dev/null 2>&1
+            and (.[0].verdict as $x | ($x | type) == "string" and any($v | split(" ")[]; . == $x))' > /dev/null 2>&1
 }
+# PROGRAM's answer (stdin), a `wait`: why, for the WAIT line (its first line, else "PROGRAM: its reason")
+waits_why() { jq -r --arg p "$1" '.lines[0] // "\($p): \(.reason)" | tostring' 2> /dev/null | head -n 1; }
 
 # NOW: idle, r1, keep and status on PASSDIR's five inputs (the header: pass); each one's verdict and reason printed (r1
 # and keep: each family's too), then status.jq's lines
@@ -394,13 +402,13 @@ run_core() {
     jq -n -L "$CORE/lib" -f "$CORE/$prog.jq" --slurpfile state "$d/state.json" --slurpfile facts "$d/facts.json" \
       --rawfile log "$d/log.txt" --slurpfile healthz "$d/healthz.json" --arg now "$1" > "$d/$prog.json" 2> "$d/$prog.err" < /dev/null
     rc=$?
-    if [ "$rc" != 0 ] || ! decided "$prog"; then
+    if [ "$rc" != 0 ] || ! decided "$prog" < "$d/$prog.json"; then
       say "core could not decide ($prog): exit $rc$(head -n 1 "$d/$prog.err" 2> /dev/null | sed 's/^/: /')"
       say "the pass did nothing: $STATE is as it was"
       exit 1
     fi
     if [ "$(jq -r '.verdict' "$d/$prog.json")" = wait ]; then   # its own state is of another format: no decision
-      why=$(jq -r --arg p "$prog" '.lines[0] // "\($p): \(.reason)" | tostring' "$d/$prog.json" 2> /dev/null | head -n 1)
+      why=$(waits_why "$prog" < "$d/$prog.json")
       wait4 "the decision core waits ($why): this pass decides nothing, and $STATE is as it was"
     fi
     if [ "$prog" = idle ] || [ "$prog" = r1 ]; then   # the new core state, for the next program of this pass: by rename

@@ -5,7 +5,8 @@ the measuring helpers it shares with pool-image.sh (PLAN D1, D6, D7, D11; core/R
 - THE STATE (STATEDIR/state.json, format 1): fresh = OFF; another format WAITs (exit 4) with every command; a format 1
   state of another shape is REFUSED (exit 1); a member this release does not read WAITs; every write is a rename after
   a sync, and a sync that fails is a STOP with the state as it was.
-- status: no lock, no write anywhere, ONE read; on and off wait for the updater lock; off refuses while a window
+- status: no lock, no write anywhere, ONE read; status.jq's answer checked as a pass checks it: a `wait` is its lines,
+  then WAIT (exit 4), another answer is a STOP; on and off wait for the updater lock; off refuses while a window
   journal is open.
 - pass: it only TRIES the lock; OFF ends it at once; an open window journal is "STOP RECOVER needed (S2b-3c)"; an
   untested jq is exit 3; the facts (host "hz"), in the Studio's order: proc before, the log position (one open of
@@ -383,10 +384,11 @@ class Status(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn('runner-updater: STOP untested jq: jq here prints [jq-9.9]', r.stdout)
         self.assertNotIn('status: ok', r.stdout)
-        g.p.jq_version('jq-1.7.1' if 'jq-1.7.1' in self.tested() else self.tested()[0])   # the control
+        g.p.jq_version('jq-1.7.1' if 'jq-1.7.1' in self.jq_rows() else self.jq_rows()[0])   # the control
         self.assertIn('status: ok', g.ok('status').stdout)
 
-    def tested(self):
+    def jq_rows(self):
+        """core/TESTED_JQ's versions for the area core (a helper: its name is no test_ name)"""
         with open(os.path.join(REPO, 'core', 'TESTED_JQ')) as f:
             return [l.split()[0] for l in f if l.strip() and not l.startswith('#') and ',core' in ',' + l.split()[1]]
 
@@ -396,6 +398,46 @@ class Status(unittest.TestCase):
         r = g.run('status')
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn('runner-updater: STOP core could not decide (status)', r.stdout)
+
+    def test_a_core_that_waits_prints_its_lines_then_waits_and_writes_nothing(self):
+        """Opus r2 F1 (S2b-3a): status.jq answers `wait` when the core's own state is of a format it does not read: it
+        decided nothing, so status prints its lines, then WAIT, exit 4, as a pass does, and writes nothing. Control:
+        the core's own format, 1: exit 0, `ok`, no WAIT."""
+        g = Rig(self, on=True, production=False)
+        g.put({'format': 1, 'on': True, 'families': {}, 'core': {'format': 2}})
+        before = tree(g.p.root)
+        r = g.run('status')
+        self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+        out = r.stdout.splitlines()
+        for l in ('runner-updater: status: the updater is ON', 'runner-updater: family hz-docker: no candidate; back: '
+                  'none; rejected: none', 'status: wait (unknown state format)',
+                  'status: the state has format 2; this core reads format 1: waiting'):
+            self.assertIn(l, out[:-1])
+        self.assertEqual(out[-1], 'runner-updater: WAIT the decision core waits (status: the state has format 2; this '
+                                  'core reads format 1: waiting): status decides nothing, and it writes nothing')
+        self.assertEqual(sorted(k for k, v in tree(g.p.root).items() if before.get(k) != v), [], 'status wrote')
+        g.put({'format': 1, 'on': True, 'families': {}, 'core': {'format': 1}})      # the control
+        r = g.ok('status')
+        self.assertIn('status: ok (0 STOPs)', r.stdout.splitlines())
+        self.assertNotIn('WAIT', r.stdout)
+
+    def test_a_verdict_core_readme_does_not_name_for_status_jq_is_a_stop(self):
+        """Opus r2 F1 (S2b-3a): status takes the verdicts core/README.md names for status.jq (ok, or wait), the
+        pass's own set for it (ONE copy: decided); any other, also another program's (`not-idle`), is "core could not
+        decide", exit 1. Control: a planted `ok` is printed, exit 0."""
+        for verdict, rc in (('maybe', 1), ('not-idle', 1), ('ok', 0)):
+            with self.subTest(verdict):
+                g = Rig(self, on=True, production=False)
+                g.plant('core/status.jq', '{verdict: %s, reason: "planted", lines: ["a planted line"]}\n'
+                        % json.dumps(verdict))
+                r = g.run('status')
+                self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+                if rc:
+                    self.assertIn('runner-updater: STOP core could not decide (status)', r.stdout)
+                    self.assertNotIn('a planted line', r.stdout)
+                else:
+                    self.assertIn('status: ok (planted)', r.stdout.splitlines())
+                    self.assertIn('a planted line', r.stdout.splitlines())
 
 
 # ---- on, off
@@ -1308,6 +1350,49 @@ class Text(unittest.TestCase):
             self.assertIn(s, h)
         for code in ('0', '1', '2', '3', '4'):
             self.assertRegex(h, r'#\s+%s\s' % code, 'the header names no exit code %s' % code)
+
+    def test_the_differs_list_names_the_core_wait_and_the_verdicts_it_takes(self):
+        """Opus r2 F3 (S2b-3a): the header's "DIFFERS from the Studio's pass" (complete, as the header's first lines
+        promise) names that a core `wait` is a WAIT here, in a pass and in status, and that only the verdicts
+        core/README.md names for each program are taken (the Studio's takes any). Control: the paragraph is found,
+        and it still names what it named."""
+        with open(UPD) as f:
+            h = f.read().split('\nset -uo pipefail\n', 1)[0]
+        d = ' '.join(l.lstrip('#').strip() for l in h.split("# DIFFERS from the Studio's pass", 1)[1]
+                     .split('\n# Exit codes:', 1)[0].splitlines())
+        self.assertIn('no protected list to rewrite', d)
+        self.assertIn('a decision core that answers `wait` is a WAIT (exit 4), in a pass and in status', d)
+        self.assertIn('takes only the verdicts core/README.md names for each program (idle: idle or not-idle; r1, '
+                      'keep and status: ok; or wait)', d)
+
+    def test_the_header_and_the_readme_say_status_waits_when_the_core_waits(self):
+        """Opus r2 F1 (S2b-3a): the header's `status` and the README's updater section say that status WAITs (exit 4)
+        after its lines when the decision core waits, and STOPs on an answer the core does not give. Control: they
+        still say it for a pass."""
+        with open(UPD) as f:
+            h = ' '.join(l.lstrip('#').strip() for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines())
+        st = h.split('status   no lock,', 1)[1].split(' on       on = true.', 1)[0]
+        self.assertIn('status.jq\'s answer is checked as a pass checks it (`decided`): a `wait` is its lines, then '
+                      '"runner-updater: WAIT the decision core waits ...", exit 4; another answer is "runner-updater: '
+                      'STOP core could not decide (status)", exit 1', st)
+        self.assertIn('a pass, or status, whose decision core waits', h.split('Exit codes:', 1)[1])
+        with open(README) as f:
+            sec = f.read().split('\n## The updater: status, on, off, pass\n', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('A pass or `status` whose decision core waits (the core\'s own state, kept in the state file, is '
+                      'of a format it does not read) prints `WAIT` (exit 4) too, `status` after its lines, and changes '
+                      'nothing. An answer of the core that is not one of its own is `STOP core could not decide` (exit '
+                      '1).', sec)
+
+    def test_one_copy_of_the_verdicts_the_updater_takes(self):
+        """Opus r2 F1 (S2b-3a): a pass and status take ONE set of verdicts per program, decided()'s."""
+        with open(UPD) as f:
+            text = f.read()
+        self.assertEqual(defs(UPD, 'decided'), 1)
+        self.assertEqual(len(re.findall(r'"idle not-idle wait"', text)), 1)
+        self.assertEqual(len(re.findall(r'"ok wait"', text)), 1)
+        status = text.split('\ndo_status() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('decided status', status)
+        self.assertNotIn('.verdict | type', status, 'status has a verdict check of its own')
 
     def test_the_readme_names_the_files_the_install_line_and_the_commands(self):
         with open(README) as f:
