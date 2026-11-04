@@ -1023,6 +1023,52 @@ if sys.argv[1:] == ['--version']:
 os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
 '''
 
+D1_STUB = r'''#!/usr/bin/python3 -I
+# 02-d1.sh, for the build pass cells (support.Pool.d1_stub): logs its call to logs/d1.log, one JSON line: argv; fd9: is
+# its fd 9 the updater lock (the same file); held: does a NEW open of the lock find it held (by its parent, then);
+# shares: can fd 9 take it at once (the parent's own open file). Then it answers as d1.json says: out on stdout, exit
+# rc; with rc 0 and a "digest", it writes the build record of argv's version for the recipe d1.json names, as 02-d1.sh
+# does. It builds nothing.
+import fcntl, json, os, sys
+SB = @SB@
+a = sys.argv[1:]
+lock = os.path.join(os.environ['HOME'], '.local', 'state', 'runner-updater', 'lock')
+try:
+    fd9 = os.path.samestat(os.fstat(9), os.stat(lock))
+except OSError:
+    fd9 = False
+try:
+    fd = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held = False
+    except BlockingIOError:
+        held = True
+    finally:
+        os.close(fd)
+except OSError:
+    held = None
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    shares = True
+except OSError:
+    shares = False
+with open(SB + '/logs/d1.log', 'a') as f:
+    f.write(json.dumps({'argv': a, 'fd9': fd9, 'held': held, 'shares': shares}) + '\n')
+c = json.load(open(SB + '/d1.json'))
+sys.stdout.write(c.get('out', ''))
+sys.stdout.flush()
+if c.get('rc', 0) == 0 and c.get('digest') and len(a) == 2:
+    b = os.path.join(os.environ['HOME'], 'run', 'builds')
+    os.makedirs(b, mode=0o750, exist_ok=True)
+    p = os.path.join(b, '%s-%s' % (a[1], c['recipe']))
+    with open(p + '.new', 'w') as f:
+        f.write('format 1\nversion %s\ndigest %s\nrecipe %s\n' % (a[1], c['digest'], c['recipe']))
+    os.chmod(p + '.new', 0o640)
+    os.replace(p + '.new', p)
+sys.exit(c.get('rc', 0))
+'''
+
 PASS_OUT = ('  ✓ scaleset[0] "linux-ci-main" — provider=docker url=https://github.com/your-org max=3 min=0\n'
             '  ✓ scaleset[1] "linux-ci-small" — provider=docker url=https://github.com/your-org max=1 min=0\n'
             '  ✓ Docker connectivity\n\nAll checks passed.\n')
@@ -1338,3 +1384,53 @@ class Pool(Sandbox):
         b = os.path.join(self.HOME, 'run', 'builds')
         os.makedirs(b, mode=0o750, exist_ok=True)
         return self.write(os.path.join(b, name or '%s-%s' % (version, recipe)), text, 0o640)
+
+    # ---- the updater as RUN_USER (its build pass)
+
+    def run_user(self):
+        """From now on root is RUN_USER alone: host.conf's RS_USER goes back to host.conf.example's, so the updater
+        runs in RUN_USER's role (its build pass). pool-image.sh, RS_USER's only, then refuses to run."""
+        p = self.path('host.conf')
+        conf = self.read(p)
+        if conf.count('\nRS_USER=root\n') != 1:
+            raise AssertionError('host.conf: no single RS_USER=root line')
+        self.write(p, conf.replace('\nRS_USER=root\n', '\nRS_USER=%s\n' % RS_USER), 0o644)
+
+    def d1_stub(self, rc=0, out='', digest=None, recipe=None):
+        """~/build/setup/02-d1.sh of THIS copy replaced by D1_STUB (a bash line that execs it, fd 9 kept): it logs its
+        call and answers OUT and RC; with rc 0 and DIGEST it writes the build record of its version for RECIPE (default:
+        this ~/build's recipe). The real 02-d1.sh never runs."""
+        self.write(self.path('stubs', 'd1stub.py'), D1_STUB.replace('@SB@', repr(self.root)), 0o755)
+        self.write(os.path.join(self.build, 'setup', '02-d1.sh'),
+                   '#!/bin/bash\nexec /usr/bin/python3 -I %s "$@"\n' % self.path('stubs', 'd1stub.py'), 0o755)
+        self.write(self.path('d1.json'), json.dumps({'rc': rc, 'out': out, 'digest': digest,
+                                                     'recipe': recipe or self.recipe()}))
+
+    def d1_calls(self):
+        """The calls of the 02-d1.sh substitute: [{argv, fd9, held, shares}]."""
+        return self.calls('d1')
+
+
+def iso(t):
+    """Epoch seconds as GitHub's published_at (UTC, whole seconds)."""
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t))
+
+
+def run_pool(test, version, age=3 * 86400, on=True, stops=(), status=200, rc=0, out='BUILD DONE (D1): a substitute\n',
+             digest=None):
+    """A Pool in RUN_USER's role, for the updater's build pass: root is RUN_USER alone (Pool.run_user), the fake clock,
+    02-d1.sh replaced by its substitute (Pool.d1_stub: RC, OUT, DIGEST), and GitHub's latest release VERSION published
+    AGE seconds before the fake clock's now (STATUS: the API's answer). The updater's state ON (on=True), OFF (False) or
+    none (None), holding STOPS. Returns (pool, now)."""
+    p = Pool(test)
+    p.run_user()
+    p.fake_clock()
+    now = p.clock()
+    p.gh.release(version, tarball(version), latest=True, published=iso(now - age), status=status)
+    p.d1_stub(rc=rc, out=out, digest=digest)
+    p.files()
+    if on is not None:
+        os.makedirs(Pool.STATE, mode=0o700, exist_ok=True)
+        p.write(os.path.join(Pool.STATE, 'state.json'),
+                json.dumps({'format': 1, 'on': on, 'stops': list(stops)}) + '\n', 0o600)
+    return p, now

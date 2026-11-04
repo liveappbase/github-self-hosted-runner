@@ -1,21 +1,44 @@
 #!/usr/bin/env bash
 # runner-release.sh — SOURCED, never run: ONE copy of how the Linux host reads an actions/runner release, and of the
-# trust every such download uses. 02-d1.sh sources it (`02-d1.sh build VERSION` and its full run); the updater's
-# latest-release check sources it too, so a person's build and the updater read a release the same way. It reads no
-# host config. Needs bash 5, GNU coreutils, curl, python3 and RR_OPENSSL.
+# trust every such download uses; and ONE copy of a release's image RECIPE and of its BUILD RECORD reader. 02-d1.sh
+# sources it (`02-d1.sh build VERSION` and its full run), and so do pool-image.sh (its `up` and its unattended modes)
+# and bin/runner-updater (both users: RS_USER's DUE, RUN_USER's build pass), so a person's build and the updater read a
+# release, a recipe and a record the same way. It reads no host config. Needs bash 5, GNU coreutils, curl, python3 and
+# RR_OPENSSL.
 #
 #   rr_excluded FILE        the keys the data file excludes, one per line on stdout (or REFUSE)
 #   rr_bundle               the filtered CA bundle is current, or is rebuilt: sets RR_BUNDLE and RR_CAPATH
 #   rr_curl ARG...          ONE download: rr_bundle first (its lines on stderr), then curl with the trust below
 #   rr_release tag VERSION  release v<VERSION>; rr_release latest: the newest release. GitHub's API answer, checked:
 #                           sets RR_VERSION, RR_PUBLISHED (epoch seconds), RR_DIGEST (sha256:<64 hex>), RR_URL
+#   rr_eligible NOW         rr_release latest, published at least RR_AGE (2 days) before NOW (whole epoch seconds: the
+#                           caller's UTC clock): 0, with the RR_ facts above set; younger: 1 and a REFUSE line that
+#                           names when it becomes eligible (PLAN D2: "at least 2 days old (latest only)")
 #   rr_tarball FILE         downloads RR_URL into FILE, then its sha256 must be RR_DIGEST
 #   rr_lock                 THE UPDATER LOCK (below), held on fd 9 until this process and its children end;
 #                           rr_lock -n (a timer pass of the updater) only tries it: 75 when another run holds it
-# Each returns 0, or 1 with a REFUSE line on stderr; rr_release returns 75 with a WAIT line on stderr when GitHub
-# answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its rr_bundle
-# refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own commands' exit
-# codes, so a bare call under `set -e` would exit at the first such test.
+# Each returns 0, or 1 with a REFUSE line on stderr; rr_release and rr_eligible return 75 with a WAIT line on stderr
+# when GitHub answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its
+# rr_bundle refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own
+# commands' exit codes, so a bare call under `set -e` would exit at the first such test.
+# THE RECIPE AND THE BUILD RECORD (02-d1.sh's header gives their form; PLAN D2 HETZNER: ONE recipe function and ONE
+# build-record reader). These three print nothing: 0, or 1 and RR_WHY, for the caller's own line. Call them in the
+# caller's shell (a condition, never $(…)), so that what they set stays set:
+#   rr_recipe DIR [CTX]     RR_RECIPE = the RECIPE of DIR, an image/ folder: the sha256 of one `<sha256>  <name>` line
+#                           per entry, names in byte order; RR_NAMES = the names, one per line. Every entry must be a
+#                           plain file (no folder, no symlink), and none may be named runner.tar.gz (the checked
+#                           tarball's name in a build context). With CTX (02-d1.sh's build context), each file is copied
+#                           into CTX first and the COPY is hashed: what the build reads is what the recipe names
+#   rr_record DIR VERSION RECIPE
+#                           THE BUILD RECORD of (VERSION, RECIPE): DIR/<VERSION>-<RECIPE>, read ONCE (a private copy in
+#                           RR_DIR, then only the copy), exactly 02-d1.sh's four lines, at most 1024 bytes, no NUL byte,
+#                           never sourced; its version and recipe must be its name's. Sets RR_RECORD (its path),
+#                           RR_REC_VERSION, RR_REC_DIGEST and RR_REC_RECIPE. RR_WHY: there is none; it is not a plain
+#                           file; it cannot be read; it is not the four lines; it names another version, or recipe
+#   rr_record_of DIR DIGEST the ONE build record in DIR whose digest is DIGEST (the image a config runs: the updater's
+#                           BASELINE, PLAN D2 HETZNER). A record is a plain file of DIR named <VERSION>-<RECIPE> that
+#                           rr_record reads as that version and recipe; any other file of DIR is none. The same
+#                           variables; RR_COUNT = how many records name DIGEST: none, or more than one, is rc 1
 #
 # TRUST (plan D2): every download is rr_curl, curl with ~/.curlrc ignored (-q first), https only (redirects too), TLS
 # 1.2 or newer, OPENSSL_X509_TEA_DISABLE=1, --cacert RR_BUNDLE and --capath RR_CAPATH, an EMPTY folder. That folder
@@ -50,11 +73,13 @@ RR_DL=https://github.com/actions/runner/releases/download
 RR_SRC=/etc/ssl/certs/ca-certificates.crt
 RR_OPENSSL=/usr/bin/openssl
 RR_FLOOR=100
+RR_AGE=172800   # the seconds a latest release must be old before an updater takes it (2 days: PLAN D2)
 RR_DIR=$HOME/.cache/liveapp-ci
 RR_LOCK=$HOME/.local/state/runner-updater/lock
 case ${BASH_SOURCE[0]} in */*) RR_EXCLUDED=${BASH_SOURCE[0]%/*}/tls-excluded-spki ;; *) RR_EXCLUDED=./tls-excluded-spki ;; esac
 case $(uname -m) in x86_64) RR_ARCH=x64 ;; aarch64) RR_ARCH=arm64 ;; *) RR_ARCH= ;; esac
 RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
+RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY=
 
 rr_no() { echo "runner-release: REFUSE $*" >&2; }
 rr_sha() {   # rr_sha FILE: its sha256, 64 hex, or rc 1
@@ -218,6 +243,16 @@ PY
   echo "OK   release v$RR_VERSION ($RR_ARCH): $RR_DIGEST"
 }
 
+rr_eligible() {   # rr_eligible NOW: the latest release, at least RR_AGE old at NOW (the header)
+  local now=${1-} rc
+  [[ $now =~ ^(0|[1-9][0-9]*)$ ]] || { rr_no "rr_eligible: NOW is not whole epoch seconds: [$now]"; return 1; }
+  rr_release latest; rc=$?
+  [ "$rc" = 0 ] || return "$rc"
+  [ $((now - RR_PUBLISHED)) -ge "$RR_AGE" ] && return 0
+  rr_no "release v$RR_VERSION is younger than 2 days: published $(date -u -d "@$RR_PUBLISHED" '+%Y-%m-%d %H:%M:%S UTC'), eligible from $(date -u -d "@$((RR_PUBLISHED + RR_AGE))" '+%Y-%m-%d %H:%M:%S UTC')"
+  return 1
+}
+
 rr_tarball() {   # rr_tarball FILE: after rr_release; a FILE that fails the digest check is removed
   local f=${1-} s rc
   { [ -n "$f" ] && [ -n "$RR_URL" ] && [[ $RR_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; } \
@@ -227,6 +262,76 @@ rr_tarball() {   # rr_tarball FILE: after rr_release; a FILE that fails the dige
   s=$(rr_sha "$f") || { rm -f -- "$f"; rr_no "cannot hash $f"; return 1; }
   [ "sha256:$s" = "$RR_DIGEST" ] || { rm -f -- "$f"; rr_no "$RR_URL: its sha256 is $s, not the release asset's digest $RR_DIGEST"; return 1; }
   echo "OK   $RR_URL: its sha256 is the release asset's digest"
+}
+
+rr_recipe() {   # rr_recipe DIR [CTX]: RR_RECIPE and RR_NAMES of an image/ folder (the header); 1 + RR_WHY
+  local d=${1-} c=${2-} names n f h lines=
+  RR_RECIPE= RR_NAMES= RR_WHY=
+  { names=$(LC_ALL=C ls -A -- "$d" 2> /dev/null) && [ -n "$names" ]; } \
+    || { RR_WHY="cannot list image/ ($d), or it is empty"; return 1; }
+  while IFS= read -r n; do
+    { [ -f "$d/$n" ] && [ ! -L "$d/$n" ]; } || { RR_WHY="image/$n is not a plain file: the recipe is image/'s plain files only"; return 1; }
+    [ "$n" != runner.tar.gz ] || { RR_WHY="image/$n: that name is the checked tarball's in the build context"; return 1; }
+    f=$d/$n
+    if [ -n "$c" ]; then
+      cp -- "$d/$n" "$c/$n" || { RR_WHY="cannot copy image/$n into the build context"; return 1; }
+      f=$c/$n
+    fi
+    h=$(sha256sum < "$f") || { RR_WHY="cannot hash image/$n"; return 1; }
+    lines+="${h%% *}  $n"$'\n'
+  done <<< "$names"
+  h=$(printf '%s' "$lines" | sha256sum) && h=${h%% *} && [[ $h =~ ^[0-9a-f]{64}$ ]] || { RR_WHY="cannot hash the recipe"; return 1; }
+  RR_RECIPE=$h RR_NAMES=$names
+}
+
+rr_record_read() {   # rr_record_read FILE: one build record, read ONCE into a private copy, then only the copy (the
+  # header: rr_record): RR_REC_VERSION, RR_REC_DIGEST, RR_REC_RECIPE; 1 + RR_WHY
+  local f=${1-} t size= nonul text
+  local re=$'^format 1\nversion ([0-9]+\\.[0-9]+\\.[0-9]+)\ndigest (sha256:[0-9a-f]{64})\nrecipe ([0-9a-f]{64})\n$'
+  RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE=
+  RR_WHY="there is none"
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  RR_WHY="it is not a plain file"
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || return 1
+  RR_WHY="it cannot be read"
+  { install -d -m 700 "$RR_DIR" && t=$(mktemp "$RR_DIR/record.XXXXXX"); } 2> /dev/null || return 1
+  if head -c 1025 -- "$f" > "$t" < /dev/null; then
+    size=$(wc -c < "$t"); nonul=$(tr -d '\000' < "$t" | wc -c); text=$(cat -- "$t"; echo .); text=${text%.}
+  fi
+  rm -f -- "$t"
+  [ -n "$size" ] || return 1
+  RR_WHY="it is not 02-d1.sh's four lines (format 1, version, digest, recipe)"
+  { [ "$size" -le 1024 ] && [ "$size" = "$nonul" ] && [[ $text =~ $re ]]; } || return 1
+  RR_REC_VERSION=${BASH_REMATCH[1]} RR_REC_DIGEST=${BASH_REMATCH[2]} RR_REC_RECIPE=${BASH_REMATCH[3]}
+}
+
+rr_record() {   # rr_record DIR VERSION RECIPE: the build record of (VERSION, RECIPE) (the header); 1 + RR_WHY
+  RR_RECORD=${1-}/${2-}-${3-}
+  rr_record_read "$RR_RECORD" || return 1
+  RR_WHY="it names version $RR_REC_VERSION"
+  [ "$RR_REC_VERSION" = "${2-}" ] || return 1
+  RR_WHY="it names another recipe"
+  [ "$RR_REC_RECIPE" = "${3-}" ] || return 1
+}
+
+rr_record_of() {   # rr_record_of DIR DIGEST: the ONE build record whose digest is DIGEST (the header); 1 + RR_WHY
+  local d=${1-} want=${2-} f n v= rc= rec= names=
+  RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT=0
+  [[ $want =~ ^sha256:[0-9a-f]{64}$ ]] || { RR_WHY="[$want] is no sha256 digest"; return 1; }
+  for f in "$d"/*; do
+    n=${f##*/}
+    [[ $n =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9a-f]{64}$ ]] || continue
+    rr_record_read "$f" || continue
+    [ "$n" = "$RR_REC_VERSION-$RR_REC_RECIPE" ] && [ "$RR_REC_DIGEST" = "$want" ] || continue
+    RR_COUNT=$((RR_COUNT + 1)) rec=$f v=$RR_REC_VERSION rc=$RR_REC_RECIPE
+    names+="${names:+, }$n"
+  done
+  RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE=
+  case $RR_COUNT in
+    0) RR_WHY="no build record in $d names $want"; return 1 ;;
+    1) RR_RECORD=$rec RR_REC_VERSION=$v RR_REC_DIGEST=$want RR_REC_RECIPE=$rc RR_WHY= ;;
+    *) RR_WHY="$RR_COUNT build records in $d name $want ($names)"; return 1 ;;
+  esac
 }
 
 rr_lock() {   # rr_lock: THE UPDATER LOCK (the header), for a command: it waits, and says so first. rr_lock -n, for

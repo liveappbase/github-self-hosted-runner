@@ -25,8 +25,8 @@ import re
 import time
 import unittest
 
-from tests.hetzner.support import (REPO, Sandbox, needs_container, pki, sha256_file, tarball, ARCH, IMAGE_NAME,
-                                   REGISTRY_PORT)
+from tests.hetzner.support import (REPO, Pool, Sandbox, digest, needs_container, pki, run_pool, sha256_file, tarball,
+                                   ARCH, IMAGE_NAME, REGISTRY_PORT)
 
 VERSION = '2.339.0'
 OLD = '2.338.2'           # host.conf.example's RUNNER_VERSION
@@ -542,6 +542,206 @@ class Release(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, why)
                 self.assertIn('REFUSE', r.stderr, why)
                 self.assertEqual(r.stdout.count(VERSION), 0, why)
+
+
+@needs_container
+class Eligible(unittest.TestCase):
+    """rr_eligible NOW (plan D2, the release's trust: "at least 2 days old (latest only)"; the ONE copy both users'
+    updaters call): rr_release latest, then published at least RR_AGE = 172800 s (2 days) before NOW: 0, with the release's
+    facts set; younger: 1 and a REFUSE line that names when it becomes eligible; GitHub's 403 or 429: 75 (WAIT); an
+    answer it cannot read: 1. NOW is an input: every cell passes it, relative to the stub's published_at, and none reads
+    a clock."""
+    PUBLISHED = '2026-10-20T12:00:00Z'
+    P = calendar.timegm((2026, 10, 20, 12, 0, 0))
+    RUN = 'rr_eligible "$1"; rc=$?; printf "rc=%s %s\\n" "$rc" "$RR_VERSION"'
+
+    def eligible(self, now, **release):
+        sb = Sandbox(self)
+        sb.gh.release(VERSION, tarball(VERSION), latest=True, published=self.PUBLISHED, **release)
+        r = sb.lib(self.RUN, str(now))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.splitlines()[-1], r.stderr, sb
+
+    def test_two_days_old_or_more_is_eligible(self):
+        for why, now in (('2 days + 1 s', P2 + 1), ('exactly 2 days', P2)):
+            with self.subTest(why):
+                last, err, sb = self.eligible(now)
+                self.assertEqual(last, 'rc=0 %s' % VERSION, err)
+                self.assertNotIn('REFUSE', err)
+                self.assertEqual(sb.gh.seen, ['/repos/actions/runner/releases/latest'])
+
+    def test_younger_than_two_days_is_not_eligible_and_says_from_when(self):
+        last, err, _ = self.eligible(P2 - 1)
+        self.assertEqual(last.split(' ')[0], 'rc=1', err)
+        self.assertIn('runner-release: REFUSE release v%s is younger than 2 days: published 2026-10-20 12:00:00 UTC, '
+                      'eligible from 2026-10-22 12:00:00 UTC' % VERSION, err)
+
+    def test_a_rate_limit_waits(self):
+        for status in (429, 403):
+            with self.subTest(status=status):
+                last, err, _ = self.eligible(P2 + 1, status=status)
+                self.assertEqual(last.split(' ')[0], 'rc=75', err)
+                self.assertIn('runner-release: WAIT GitHub answered %d' % status, err)
+
+    def test_an_answer_it_cannot_read_is_not_eligible(self):
+        for why, body in (('not JSON', b'{"tag_name": '), ('no published time', None)):
+            with self.subTest(why):
+                sb = Sandbox(self)
+                if body is None:
+                    sb.gh.release(VERSION, tarball(VERSION), latest=True, published='yesterday')
+                else:
+                    sb.gh.routes['/repos/actions/runner/releases/latest'] = (200, {}, body)
+                r = sb.lib(self.RUN, str(P2 + 1))
+                self.assertEqual(r.stdout.splitlines()[-1].split(' ')[0], 'rc=1', r.stderr)
+                self.assertIn('runner-release: REFUSE', r.stderr)
+
+    def test_now_is_whole_epoch_seconds(self):
+        for now in ('', 'soon', '-1', '1.5'):
+            with self.subTest(now=now):
+                sb = Sandbox(self)
+                sb.gh.release(VERSION, tarball(VERSION), latest=True, published=self.PUBLISHED)
+                r = sb.lib(self.RUN, now)
+                self.assertEqual(r.stdout.splitlines()[-1].split(' ')[0], 'rc=1', r.stderr)
+                self.assertIn('runner-release: REFUSE', r.stderr)
+                self.assertEqual(sb.gh.seen, [], 'it asked GitHub with no NOW to compare')
+
+
+P2 = Eligible.P + 172800
+
+RR = os.path.join(REPO, 'linux-docker', 'setup', 'runner-release.sh')
+D1 = os.path.join(REPO, 'linux-docker', 'setup', '02-d1.sh')
+PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
+UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
+
+
+def defs(path, name):
+    with open(path) as f:
+        return len(re.findall(r'^%s\(\) \{' % re.escape(name), f.read(), re.M))
+
+
+class OneCopy(unittest.TestCase):
+    """ONE copy (S2b-3b-2, the class): the RECIPE of an image/ folder and the BUILD RECORD reader are runner-release.sh's
+    rr_recipe, rr_record (by version and recipe) and rr_record_of (by digest), which 02-d1.sh, pool-image.sh and
+    bin/runner-updater source. No caller keeps a listing of image/ or a pattern of the record's lines of its own (the
+    two copies before: 02-d1.sh's loop and pool-image.sh's recipe_of; pool-image.sh's record_digest). Text: runs
+    anywhere."""
+
+    def test_one_recipe_function_and_one_build_record_reader(self):
+        for name in ('rr_recipe', 'rr_record', 'rr_record_of'):
+            with self.subTest(name):
+                self.assertEqual([defs(p, name) for p in (RR, D1, PIMG, UPD)], [1, 0, 0, 0])
+        for name in ('recipe_of', 'record_digest'):
+            with self.subTest(name):
+                self.assertEqual([defs(p, name) for p in (RR, D1, PIMG, UPD)], [0, 0, 0, 0])
+        text = {}
+        for p in (D1, PIMG, UPD):
+            with open(p) as f:
+                text[p] = f.read()
+        for p, calls in ((D1, ('rr_recipe ',)), (PIMG, ('rr_recipe ', 'rr_record ')),
+                         (UPD, ('rr_recipe ', 'rr_record ', 'rr_record_of '))):
+            for c in calls:
+                with self.subTest(file=os.path.basename(p), call=c):
+                    self.assertIn(c, text[p])
+        for p in (D1, PIMG, UPD):
+            with self.subTest(file=os.path.basename(p)):
+                self.assertNotIn('ls -A', text[p], 'a listing of image/ of its own')
+                self.assertNotIn('recipe ([0-9a-f]{64})', text[p], "a pattern of the record's lines of its own")
+        with open(RR) as f:
+            rr = f.read()
+        self.assertEqual(rr.count('recipe ([0-9a-f]{64})'), 1)
+
+
+def plant(build, kind, name):
+    """In BUILD's image/: NAME as a plain FILE, a DIR or a LINK (to Dockerfile)."""
+    p = os.path.join(build, 'image', name)
+    if kind == 'file':
+        with open(p, 'w') as f:
+            f.write('planted\n')
+    elif kind == 'dir':
+        os.mkdir(p)
+    else:
+        os.symlink('Dockerfile', p)
+
+
+@needs_container
+class Recipe(unittest.TestCase):
+    """The three callers of rr_recipe agree (S2b-3b-2 item 1): for one image/ folder, 02-d1.sh build (the record's name),
+    pool-image.sh up (the record it looks for) and the updater's build pass as RUN_USER (the build it starts) use ONE
+    recipe, the one support.Pool.recipe computes; and each refuses a folder whose entries are not all plain files, or
+    that holds runner.tar.gz (the checked tarball's name in a build context), at the recipe, before anything else."""
+
+    def recipes(self, kind=None, name=None):
+        """{caller: the recipe it used} for the shipped image/ (+ NAME planted as KIND)."""
+        out = {}
+        b = Sandbox(self)                                      # 02-d1.sh build, the real script (stubs: support)
+        if kind:
+            plant(b.build, kind, name)
+        b.gh.release(VERSION, tarball(VERSION))
+        b.docker['config_version'] = VERSION + '\n'
+        r = b.d1('build', VERSION)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr)
+        (rec,) = os.listdir(os.path.join(b.home, 'run', 'builds'))
+        out['02-d1.sh'] = rec.split('-', 1)[1]
+        p = Pool(self)                                         # pool-image.sh up, no record: it names the one it reads
+        if kind:
+            plant(p.build, kind, name)
+        p.curl['served'] = [digest(38)]
+        p.production(digest(38))
+        out['python'] = p.recipe()
+        r = p.pool('up', VERSION)
+        self.assertEqual(r.returncode, 1, r.stdout[-2000:] + r.stderr)
+        m = re.search(r'/home/root/run/builds/%s-([0-9a-f]{64})\)' % re.escape(VERSION), r.stdout)
+        self.assertTrue(m, r.stdout[-2000:])
+        out['pool-image.sh'] = m.group(1)
+        q, _ = run_pool(self, VERSION)                         # the build pass: the build it starts
+        if kind:
+            plant(q.build, kind, name)
+        r = q.updater('pass')
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr)
+        m = re.search(r"^runner-updater: pass: building runner %s for this release's image \(recipe ([0-9a-f]{64})\)"
+                      % re.escape(VERSION), r.stdout, re.M)
+        self.assertTrue(m, r.stdout[-2000:])
+        out['runner-updater'] = m.group(1)
+        return out
+
+    def test_the_three_callers_give_one_recipe_for_one_folder(self):
+        shipped = None
+        for why, kind, name in (('the shipped image/', None, None), ('an extra plain file', 'file', 'notes.txt')):
+            with self.subTest(why):
+                got = self.recipes(kind, name)
+                self.assertEqual(len(set(got.values())), 1, got)
+                if shipped is None:
+                    shipped = got['python']
+                else:
+                    self.assertNotEqual(got['python'], shipped, 'the extra file is no part of the recipe')
+
+    def test_a_folder_that_is_not_plain_files_is_refused_by_all_three(self):
+        for why, kind, name in (('a symbolic link', 'link', 'link'), ('a folder', 'dir', 'sub'),
+                                ('a file named runner.tar.gz', 'file', 'runner.tar.gz')):
+            with self.subTest(why):
+                b = Sandbox(self)
+                plant(b.build, kind, name)
+                b.gh.release(VERSION, tarball(VERSION))
+                b.docker['config_version'] = VERSION + '\n'
+                r = b.d1('build', VERSION)
+                self.assertNotEqual(r.returncode, 0, '02-d1.sh: ' + r.stdout[-2000:])
+                self.assertRegex(r.stdout, r'(?m)^FAIL .*image/%s' % re.escape(name))
+                self.assertEqual([a for a in b.calls('docker') if a[:1] == ['build']], [])
+                p = Pool(self)
+                plant(p.build, kind, name)
+                p.curl['served'] = [digest(38)]
+                p.production(digest(38))
+                r = p.pool('up', VERSION)
+                self.assertEqual(r.returncode, 1, 'pool-image.sh: ' + r.stdout[-2000:] + r.stderr)
+                self.assertRegex(r.stdout, r'(?m)^FAIL .*image/%s' % re.escape(name))
+                self.assertNotIn('no usable build record', r.stdout, 'pool-image.sh refused later than the recipe')
+                self.assertNotIn('== 03-runscaler.sh real', r.stdout)
+                q, _ = run_pool(self, VERSION)
+                plant(q.build, kind, name)
+                r = q.updater('pass')
+                self.assertEqual(r.returncode, 1, 'runner-updater: ' + r.stdout[-2000:] + r.stderr)
+                self.assertRegex(r.stdout, r'(?m)^runner-updater: REFUSE .*image/%s' % re.escape(name))
+                self.assertEqual(q.d1_calls(), [])
 
 
 @needs_container

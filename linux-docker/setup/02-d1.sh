@@ -6,7 +6,9 @@
 #   ssh RUN_USER@<host> 'bash ~/build/setup/02-d1.sh build RUNNER_VERSION'     BUILD: a runner release's image
 # ONE RUN AT A TIME: both modes hold this user's ONE updater lock (runner-release.sh's RR_LOCK, the updater's too) for
 # the whole run; a second run (a build, or a pass of the updater) waits for it, with a WAIT line that names it, and
-# then goes on (that WAIT is no exit).
+# then goes on (that WAIT is no exit). RUN_USER's updater (`runner-updater pass`, its build pass, and `runner-updater
+# build VERSION`) runs `02-d1.sh build VERSION` as its CHILD on the lock it holds (fd 9): this run then takes it there
+# at once.
 # THE IMAGE (step 5, both modes): release v<VERSION> of actions/runner, read with setup/runner-release.sh (GitHub's API;
 # the tarball's sha256 must be the release asset's digest; every download with the filtered CA bundle and no CA
 # folder), built with --no-cache on the base image/Dockerfile pins, from a fresh 0700 context outside ~/build that holds
@@ -23,12 +25,15 @@
 #   VERSION` (never 03-runscaler.sh alone: up reads this build record, checks the image's runner version, keeps the
 #   rollback and restarts only with no runner), and after the first job on the new image passes, `pool-image.sh
 #   accept` (or `back`).
-# THE BUILD RECORD: ~/run/builds/<VERSION>-<RECIPE>, RECIPE = the sha256 of image/'s `sha256sum` lines (`<hash>  <name>`,
-#   names in byte order). ONE per (version, recipe): a rebuild replaces it. 0640 in a 0750 folder, so RS_USER (in
-#   RUN_USER's group) can read it. Exactly four `key value` lines, in this order: `format 1`, `version N.N.N`, `digest
-#   sha256:<64 hex>` (the image's digest in the local registry), `recipe <64 hex>`. Written whole under a temporary name
-#   (.new.*), fsynced, then renamed: a reader takes only names of the record's form, and reads each line by its pattern,
-#   as hostile (never sourced). A failed check, a version mismatch or a digest mismatch writes no record.
+# THE BUILD RECORD: ~/run/builds/<VERSION>-<RECIPE>, RECIPE = the sha256 of image/'s `sha256sum` lines
+#   (`<hash>  <name>`, names in byte order; every entry a plain file, none named runner.tar.gz). ONE per (version,
+#   recipe): a rebuild replaces it. 0640 in a 0750 folder, so RS_USER (in RUN_USER's group) can read it. Exactly four
+#   `key value` lines, in this order: `format 1`, `version N.N.N`, `digest sha256:<64 hex>` (the image's digest in the
+#   local registry), `recipe <64 hex>`. Written whole under a temporary name (.new.*), fsynced, then renamed: a reader
+#   takes only names of the record's form, and reads each line by its pattern, as hostile (never sourced). A failed
+#   check, a version mismatch or a digest mismatch writes no record. The recipe and the reader are ONE copy each,
+#   runner-release.sh's rr_recipe, rr_record and rr_record_of: this script, pool-image.sh's `up` and both users'
+#   updaters (RS_USER's DUE finds the record of the image config.toml runs by its digest: its baseline) use them.
 # Exit: 0 done; 1 FAIL or REFUSE (the line says why; nothing a pool runs changed); 2 usage; 75 WAIT (GitHub answered
 # 403 or 429, a rate limit: run it again later). No secret here.
 set -euo pipefail
@@ -136,19 +141,11 @@ CTX=$(mktemp -d "$RR_DIR/ctx.XXXXXX") || die "cannot make a build context in $RR
 trap 'rm -rf -- "${CTX:?}"' EXIT
 # Runs go by DIGEST; the tag only names this build, and is its own: the second and the context's unique name
 TAG=localhost:$RPORT/${IMAGE_NAME}:b$(date -u +%Y%m%dT%H%M%SZ)-${CTX##*.}
-# The RECIPE: image/'s files, each a plain file, copied into the context; the hash is of these copies (the header).
-names=$(LC_ALL=C ls -A "$B/image") && [ -n "$names" ] || die "cannot list $B/image"
-lines=
-while IFS= read -r n; do
-  [ -f "$B/image/$n" ] && [ ! -L "$B/image/$n" ] || die "image/$n is not a plain file: the recipe is image/'s plain files only"
-  [ "$n" != runner.tar.gz ] || die "image/$n: that name is the checked tarball's in the build context"
-  cp "$B/image/$n" "$CTX/$n" || die "cannot copy image/$n into the build context"
-  h=$(sha256sum < "$CTX/$n") || die "cannot hash image/$n"
-  lines+="${h%% *}  $n"$'\n'
-done <<< "$names"
-RECIPE=$(printf '%s' "$lines" | sha256sum | cut -d' ' -f1)
-[[ $RECIPE =~ ^[0-9a-f]{64}$ ]] || die "cannot hash the recipe"
-ok "the recipe: image/ ($(paste -sd' ' - <<< "$names")): sha256 $RECIPE"
+# The RECIPE: image/'s files, each a plain file, copied into the context; the hash is of these copies (the header:
+# runner-release.sh's rr_recipe, the ONE copy pool-image.sh and the updater use too).
+rr_recipe "$B/image" "$CTX" || die "the recipe of $B/image: $RR_WHY (nothing was built)"
+RECIPE=$RR_RECIPE
+ok "the recipe: image/ ($(paste -sd' ' - <<< "$RR_NAMES")): sha256 $RECIPE"
 rr_release tag "$VERSION" || { [ $? != 75 ] || wait_ "GitHub's rate limit: nothing was built; run it again later"; die "release v$VERSION: nothing was built (the REFUSE line above says why)"; }
 rr_tarball "$CTX/runner.tar.gz" || die "release v$VERSION: nothing was built (the REFUSE line above says why)"
 iid=$(docker build -q --no-cache -t "$TAG" "$CTX") || die "docker build failed: no record, image.ref NOT changed"

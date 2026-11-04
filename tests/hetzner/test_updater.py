@@ -13,7 +13,8 @@ the measuring helpers it shares with pool-image.sh (PLAN D1, D6, D7, D11; core/R
   runner.log, and the text since the core state's boundary through it), proc after, the config (installed: the
   `renamed` epoch of the newest closed window journal that installed config.toml's sha, else its mtime), the family
   hz-docker of the host config's sets, the state's candidate, back_until, STOPs and restart, the /healthz pair; idle,
-  r1, keep, status; the core state written back only when all four decided; then what it WOULD do.
+  r1, keep, status; the core state written back only when all four decided; then what it WOULD do, and DUE's one line
+  for hz-docker (S2b-3b-2: its steps are test_release_due.py's; RUN_USER's role is test_updater_build.py's).
 - It acts on nothing: no systemctl start, stop or restart, no pool-image.sh or 02-d1.sh, no change to config.toml or
   to pool-image.sh's files.
 
@@ -49,6 +50,7 @@ LOCK = os.path.join(STATEDIR, 'lock')
 WINDOW = os.path.join(STATEDIR, 'window')
 WINDOWS = os.path.join(STATEDIR, 'windows')
 H = 'ab' * 32
+DUE = r'(?m)^runner-updater: pass: (hz-docker is not due: |would switch hz-docker to )'   # DUE's one line
 # runscaler's own records (the real log's text format; the set names are host.conf.example's)
 REAL = ('2026-10-25 20:04:01 INFO linux-ci-main: Scaling up runner currentCount=0 desiredCount=1\n'
         '2026-10-25 20:04:01 INFO linux-ci-main: refreshing token githubConfigUrl=https://github.com/example-org\n'
@@ -605,7 +607,7 @@ class Pass(unittest.TestCase):
         self.assertEqual(g.facts()['restart'], rs)
         self.assertNotIn('restart', g.state())
         self.assertEqual(g.state()['core'], g.out('state'))
-        self.assertIn('runner-updater: pass: would', r.stdout)
+        self.assertRegex(r.stdout, DUE)
         g.ok('pass')
         self.assertIsNone(g.facts()['restart'])
 
@@ -629,7 +631,7 @@ class Pass(unittest.TestCase):
         g.plant('core/idle.jq', '{verdict: "not-idle", reason: "planted", lines: [], state: {format: 1}}\n')
         r = g.ok('pass')
         self.assertIn('idle: not-idle (planted)', r.stdout)
-        self.assertIn('runner-updater: pass: would not switch hz-docker now: not idle (planted)', r.stdout)
+        self.assertRegex(r.stdout, DUE)
 
     def test_the_boundary_is_carried_to_the_next_pass(self):
         g = Rig(self, on=True)
@@ -1143,28 +1145,22 @@ class Would(unittest.TestCase):
         self.assertIn('runner-updater: pass: would hold hz-docker: STOP NO EVIDENCE (this release takes no action)',
                       r.stdout)
 
-    def test_the_switch_line(self):
-        cases = (
-            ('idle, no candidate, no STOP', {}, None,
-             'runner-updater: pass: would switch hz-docker: the pool is idle, it has no open candidate and no STOP '
-             'holds it (this release takes no action, and reads no runner release: S2b-3b)'),
-            ('a busy set', {}, healthz(**{MAIN: {'busy': 1}}),
-             'runner-updater: pass: would not switch hz-docker now: not idle (%s: busy 1)' % MAIN),
-            ('an open candidate', {'candidate': candidate(1762156800)}, None,
-             'runner-updater: pass: would not switch hz-docker: it has an open candidate (runner 2.339.0): one open '
-             'release per family'),
-            ('a STOP it holds', {'stops': [stop('DISK', text='free disk')]}, None,
-             'runner-updater: pass: would not switch hz-docker: STOP DISK holds it (`runner-updater status` names its '
-             'next step)'),
-        )
-        for why, fam, hz, line in cases:
+    def test_the_switch_line_is_due_s_one_line(self):
+        """S2b-3b-2: S2b-3a's switch line ("would switch hz-docker: the pool is idle ...", which read no release) is
+        gone; DUE prints ONE line for hz-docker (test_release_due.py: its 12 steps; an open candidate is step 1, a
+        STOP that holds it step 2, and the idle pair is the switch window's own: pool-image.sh up --unattended).
+        Control: a busy pool changes the idle line, not DUE's."""
+        for why, hz in (('idle', None), ('a busy set', healthz(**{MAIN: {'busy': 1}}))):
             with self.subTest(why):
-                g = Rig(self, on=True, families={FAM: fam} if fam else None)
+                g = Rig(self, on=True)
                 if hz is not None:
                     g.p.curl['healthz'] = hz
                 r = g.ok('pass')
-                self.assertIn(line, r.stdout)
-                self.assertEqual(len([l for l in r.stdout.splitlines() if ': pass: would' in l and 'switch' in l]), 1)
+                switch = [l for l in r.stdout.splitlines() if l.startswith('runner-updater: pass: ')
+                          and ('switch' in l or ' is not due: ' in l)]
+                self.assertEqual(len(switch), 1, r.stdout[-3000:])
+                self.assertRegex(switch[0], DUE)
+                self.assertIn('idle: %s (' % ('idle' if hz is None else 'not-idle'), r.stdout)
 
 
 # ---- it acts on nothing
@@ -1206,7 +1202,7 @@ class NoAction(unittest.TestCase):
     def test_a_pass_that_would_roll_back_acts_on_nothing(self):
         g = self.rig()
         m = self.mark(g)
-        self.assertIn('would not switch hz-docker', g.ok('pass').stdout)
+        self.assertIn('runner-updater: pass: hz-docker is not due: an open candidate', g.ok('pass').stdout)
         self.acted_on_nothing(g, m)
         t = int(time.time()) + 100
         g.append(failed(t) + failed(t + 10) + failed(t + 20) + scaling(t + 160) + scaling(t + 161))
@@ -1301,14 +1297,17 @@ class Install(unittest.TestCase):
 
 @needs_container
 class Usage(unittest.TestCase):
-    def test_another_user_than_rs_user_is_refused(self):
+    def test_another_user_than_rs_user_or_run_user_is_refused(self):
+        """The user decides the role (S2b-3b-2): RS_USER's or RUN_USER's (test_updater_build.py, Role); any other user
+        is refused, and nothing is written."""
         g = Rig(self, on=None, clock=False, production=False)
         conf = g.p.read(g.p.path('host.conf'))
-        g.p.write(g.p.path('host.conf'), conf.replace('\nRS_USER=root\n', '\nRS_USER=ci-rs\n'), 0o644)
+        g.p.write(g.p.path('host.conf'), conf.replace('\nRS_USER=root\n', '\nRS_USER=ci-rs\n')
+                  .replace('\nRUN_USER=root\n', '\nRUN_USER=ci-run\n'), 0o644)
         for cmd in ('status', 'on', 'pass'):
             r = g.run(cmd)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-            self.assertIn('runner-updater: REFUSE run me as ci-rs', r.stdout)
+            self.assertIn('runner-updater: REFUSE run me as ci-rs or ci-run', r.stdout)
         self.assertFalse(os.path.lexists(STATEDIR))
 
     def test_usage(self):
@@ -1317,7 +1316,7 @@ class Usage(unittest.TestCase):
             with self.subTest(args):
                 r = g.run(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('usage: runner-updater status | on | off | pass', r.stderr)
+                self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
 
 
 # ---- the text (runs anywhere)
@@ -1377,7 +1376,7 @@ class Text(unittest.TestCase):
                       'STOP core could not decide (status)", exit 1', st)
         self.assertIn('a pass, or status, whose decision core waits', h.split('Exit codes:', 1)[1])
         with open(README) as f:
-            sec = f.read().split('\n## The updater: status, on, off, pass\n', 1)[1].split('\n## ', 1)[0]
+            sec = f.read().split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         self.assertIn('A pass or `status` whose decision core waits (the core\'s own state, kept in the state file, is '
                       'of a format it does not read) prints `WAIT` (exit 4) too, `status` after its lines, and changes '
                       'nothing. An answer of the core that is not one of its own is `STOP core could not decide` (exit '
@@ -1397,9 +1396,9 @@ class Text(unittest.TestCase):
     def test_the_readme_names_the_files_the_install_line_and_the_commands(self):
         with open(README) as f:
             text = f.read()
-        for row in ('| `bin/runner-updater` | RS_USER |', '| `setup/runner-facts.sh` | RS_USER |'):
+        for row in ('| `bin/runner-updater` | RS_USER, RUN_USER |', '| `setup/runner-facts.sh` | RS_USER |'):
             self.assertIn(row, text)
-        sec = text.split('\n## The updater: status, on, off, pass\n', 1)[1].split('\n## ', 1)[0]
+        sec = text.split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         for s in ('runner-updater status', 'runner-updater on', 'runner-updater off', 'runner-updater pass',
                   'STOP RECOVER needed', '~/.local/state/runner-updater/state.json'):
             self.assertIn(s, sec)
@@ -1421,7 +1420,7 @@ class Text(unittest.TestCase):
                 self.assertIn('Install step 10', part)
         links = [l for l in text.splitlines() if 'runner-updater ~/bin/runner-updater' in l]
         self.assertEqual(len(links), 1, links)
-        self.assertIn(links[0], section('Install').split('\n10. **The updater (RS_USER).**', 1)[1])
+        self.assertIn(links[0], section('Install').split('\n10. **The updater (RS_USER and RUN_USER).**', 1)[1])
 
 
 if __name__ == '__main__':

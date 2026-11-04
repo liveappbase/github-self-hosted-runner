@@ -8,8 +8,10 @@
 #           closes the release whose image config.toml RUNS, whatever build records there are by then.
 # THE BUILD RECORD (02-d1.sh's header gives its form): `up VERSION` reads RUN_USER's ~/run/builds/<VERSION>-<RECIPE>,
 # RECIPE being 02-d1.sh's recipe of this release's image/ (this ~/build/image/: the same release's files as RUN_USER's
-# ~/build), ONCE: a private copy, parsed by one exact pattern of 02-d1.sh's four lines, never sourced. A record that is
-# missing, not a plain file, of another form, version or recipe, or whose digest the local registry does not serve:
+# ~/build), ONCE: a private copy, parsed by one exact pattern of 02-d1.sh's four lines, never sourced. The recipe and
+# the reader are runner-release.sh's rr_recipe and rr_record (ONE copy each: 02-d1.sh and the updater use them too); an
+# image/ entry that is no plain file, or one named runner.tar.gz, is no recipe: REFUSED, nothing changed. A record that
+# is missing, not a plain file, of another form, version or recipe, or whose digest the local registry does not serve:
 # REFUSED, nothing changed, and the line names the fix (`02-d1.sh build VERSION` as RUN_USER). Its digest is the image
 # up puts into the pool (`03-runscaler.sh real DIGEST`).
 # THE ROLLBACK FILE (config.toml.pre-image) belongs to ONE release: `up` writes it only when it is absent or names the
@@ -194,43 +196,6 @@ pulls() {   # pulls IMAGE: 0 = the local registry serves this digest; 1 = it ans
   curl -fs -m 5 -o /dev/null -I -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
     "$REG/v2/${IMAGE_NAME}/manifests/${1#*@}"
   case $? in 0) return 0 ;; 22) return 1 ;; *) return 2 ;; esac
-}
-recipe_of() {   # recipe_of DIR: 02-d1.sh's RECIPE of DIR (image/): the sha256 of its plain files' `<sha256>  <name>`
-  # lines, names in byte order (02-d1.sh hashes its copies of the same files); rc 1 when DIR holds anything else
-  local names n h lines=
-  { names=$(LC_ALL=C ls -A "$1") && [ -n "$names" ]; } || return 1
-  while IFS= read -r n; do
-    { [ -f "$1/$n" ] && [ ! -L "$1/$n" ]; } || return 1
-    h=$(sha256sum < "$1/$n") || return 1
-    lines+="${h%% *}  $n"$'\n'
-  done <<< "$names"
-  h=$(printf '%s' "$lines" | sha256sum) || return 1
-  [[ ${h%% *} =~ ^[0-9a-f]{64}$ ]] && echo "${h%% *}"
-}
-record_digest() {   # record_digest VERSION RECIPE: digest = the one RUN_USER's build record of VERSION and RECIPE
-  # names. The record is read ONCE (a private copy, then only the copy) and must be exactly 02-d1.sh's four lines; else
-  # rc 1 and why = what is wrong (both are set here, not printed: a $(…) would lose why)
-  local f=$BUILDS/$1-$2 t size nonul text
-  digest=
-  local re=$'^format 1\nversion ([0-9]+\\.[0-9]+\\.[0-9]+)\ndigest (sha256:[0-9a-f]{64})\nrecipe ([0-9a-f]{64})\n$'
-  why="there is none"
-  [ -e "$f" ] || [ -L "$f" ] || return 1
-  why="it is not a plain file"
-  { [ -f "$f" ] && [ ! -L "$f" ]; } || return 1
-  why="it cannot be read"
-  t=$(mktemp "$R/.record.XXXXXX") || return 1
-  if head -c 1025 -- "$f" > "$t" < /dev/null; then
-    size=$(wc -c < "$t"); nonul=$(tr -d '\000' < "$t" | wc -c); text=$(cat -- "$t"; echo .); text=${text%.}
-  fi
-  rm -f -- "$t"
-  [ -n "${size-}" ] || return 1
-  why="it is not 02-d1.sh's four lines (format 1, version, digest, recipe)"
-  { [ "$size" -le 1024 ] && [ "$size" = "$nonul" ] && [[ $text =~ $re ]]; } || return 1
-  why="it names version ${BASH_REMATCH[1]}"
-  [ "${BASH_REMATCH[1]}" = "$1" ] || return 1
-  why="it names another recipe"
-  [ "${BASH_REMATCH[3]}" = "$2" ] || return 1
-  digest=${BASH_REMATCH[2]}
 }
 same_but_image() {   # same_but_image A B: the two configs differ in their runner-image lines alone
   cmp -s <(grep -v '^runner-image = ' "$1") <(grep -v '^runner-image = ' "$2")
@@ -569,8 +534,14 @@ if [ "$MODE" = up ]; then
   # Only `up` reads a build record: `back` and `accept` work from what runs and what was kept.
   p=$(pins_bad) && die "$p is not the reviewed copy (sha256): nothing changed"
   fix="build it as ${RUN_USER}, with this release's linux-docker/ as its ~/build: ssh ${RUN_USER}@<host> 'bash ~/build/setup/02-d1.sh build $VERSION'"
-  recipe=$(recipe_of "$B/image") || die "$B/image is not this release's plain image/ files, so its recipe cannot be read: nothing changed"
-  record_digest "$VERSION" "$recipe" || die "no usable build record of runner $VERSION for this release's image (recipe ${recipe:0:12}…, $BUILDS/$VERSION-$recipe): $why. To make it, $fix; nothing changed"
+  # the recipe and the build record: runner-release.sh's rr_recipe and rr_record, the ONE copy 02-d1.sh and the
+  # updater use too (the header)
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (is this release's linux-docker/ ~/build?): nothing changed"
+  rr_recipe "$B/image" || die "the recipe of $B/image cannot be computed: $RR_WHY: nothing changed"
+  recipe=$RR_RECIPE
+  rr_record "$BUILDS" "$VERSION" "$recipe" || die "no usable build record of runner $VERSION for this release's image (recipe ${recipe:0:12}…, $BUILDS/$VERSION-$recipe): $RR_WHY. To make it, $fix; nothing changed"
+  digest=$RR_REC_DIGEST
   new=localhost:${REGISTRY_PORT}/${IMAGE_NAME}@$digest
   [[ $new =~ $IMGRE ]] || die "the build record's image [$new] is not one strict digest reference: nothing changed"
   pulls "$new"; case $? in 0) ;; 1) die "the registry does not serve $new, the image of the build record of runner $VERSION (removed since, or not this registry's): $fix; nothing changed" ;; *) die "the registry ($REG) does not answer: nothing changed" ;; esac
