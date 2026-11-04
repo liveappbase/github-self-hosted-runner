@@ -14,13 +14,15 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import time
 import unittest
 
-from tests.studio.test_runner_updater import INSTALLED, config, fixture, read_text
+from tests.studio.support import REPO
+from tests.studio.test_runner_updater import INSTALLED, Rig, config, fixture, read_text
 from tests.studio.test_runner_updater_recover import assert_closed, assert_runs, n_disable, stops
 from tests.studio.test_runner_updater_rollback import CONNECT, NEW, V2, rb_win, rollback, switched
-from tests.studio.test_runner_updater_state import cand, fam, lines_of, state, stop
+from tests.studio.test_runner_updater_state import Paths, cand, fam, lines_of, on_state, state, stop
 from tests.studio.test_runner_updater_window import FAM, OLD, V0, Win, healthz, switched_config, today
 from tests.studio import test_runner_updater_release as rel
 
@@ -463,6 +465,124 @@ class TestRecipeStops(unittest.TestCase):
         res = pass_(w)
         self.assertIn('\nkeep %s: observe (' % FAM, res.stdout)
         self.assertEqual(stops(w), [])
+
+
+def core_copy(r, prog, verdict):
+    """a copy of core/ in R's sandbox whose PROG prints VERDICT (one exact edit at its end); -> its path"""
+    d = r.sb.path('core-copy')
+    shutil.copytree(os.path.join(REPO, 'core'), d)
+    p = os.path.join(d, prog + '.jq')
+    text = read_text(p).rstrip('\n')
+    r.sb.write(p, text + '\n| .verdict = %s\n' % json.dumps(verdict))
+    return d
+
+
+class TestDecided(unittest.TestCase):
+    """decided() accepts only the verdicts core/README.md gives each program (idle: idle, not-idle, wait; r1, keep and
+    status: ok, wait). Another verdict is "core could not decide" (exit 1, the state as it was); `wait` is a WAIT: exit
+    4 and the state byte-equal (a pass's STATE; a report's REPORT/state.json)."""
+
+    def run_with(self, cmd, prog, verdict):
+        r = Rig(self)
+        u = Paths(r)
+        u.put(on_state())
+        if cmd == 'report':
+            r.report()
+        else:
+            r.cmd('pass')
+        core = core_copy(r, prog, verdict)
+        script = r.copy('runner-updater', [('CORE=' + os.path.join(REPO, 'core'), 'CORE=' + core)])
+        before = (u.raw(), r.state_bytes())
+        res = r.cmd(cmd, script=script, ok=False)
+        return res, before, (u.raw(), r.state_bytes())
+
+    def test_a_verdict_the_program_does_not_give_is_could_not_decide(self):
+        for cmd in ('pass', 'report'):
+            for prog, verdict in (('idle', 'ok'), ('r1', 'idle'), ('keep', 'accept'), ('status', 'maybe'),
+                                  ('r1', None)):
+                with self.subTest(cmd=cmd, prog=prog, verdict=verdict):
+                    res, before, after = self.run_with(cmd, prog, verdict)
+                    self.assertEqual(res.returncode, 1, res.stdout)
+                    self.assertIn('runner-updater: core could not decide (%s)' % prog, res.stdout)
+                    self.assertEqual(after, before)
+
+    def test_control_each_programs_own_verdicts_decide(self):
+        for cmd in ('pass', 'report'):
+            for prog, verdict in (('idle', 'not-idle'), ('r1', 'ok'), ('keep', 'ok'), ('status', 'ok')):
+                with self.subTest(cmd=cmd, prog=prog, verdict=verdict):
+                    res, before, after = self.run_with(cmd, prog, verdict)
+                    self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_wait_is_exit_4_with_the_state_byte_equal(self):
+        for cmd in ('pass', 'report'):
+            for prog in ('idle', 'r1', 'keep', 'status'):
+                with self.subTest(cmd=cmd, prog=prog):
+                    res, before, after = self.run_with(cmd, prog, 'wait')
+                    self.assertEqual(res.returncode, 4, res.stdout)
+                    self.assertIn('runner-updater: WAIT the core waits (%s): ' % prog, res.stdout)
+                    self.assertEqual(after, before)
+
+    def test_status_takes_only_its_own_verdicts_too(self):
+        for verdict, rc in (('maybe', 1), ('accept', 1), ('ok', 0), ('wait', 0)):
+            with self.subTest(verdict=verdict):
+                r = Rig(self)
+                Paths(r).put(on_state())
+                script = r.copy('runner-updater', [('CORE=' + os.path.join(REPO, 'core'),
+                                                    'CORE=' + core_copy(r, 'status', verdict))])
+                res = r.cmd('status', script=script, ok=False)
+                self.assertEqual(res.returncode, rc, res.stdout)
+                if rc:
+                    self.assertIn('runner-updater: STOP core could not decide (status)', res.stdout)
+
+    def test_a_core_state_of_another_format_waits(self):
+        # the real core: a state whose `core` member has another format makes idle.jq (the first) say wait
+        r = Rig(self)
+        u = Paths(r)
+        s = on_state()
+        s['core'] = {'format': 2}
+        raw = u.put(s)
+        res = r.cmd('pass', ok=False)
+        self.assertEqual(res.returncode, 4, res.stdout)
+        self.assertIn('runner-updater: WAIT the core waits (idle): unknown state format: idle: the state has format 2; '
+                      'this core reads format 1: waiting\n', res.stdout)
+        self.assertEqual(u.raw(), raw)
+
+
+class TestCiDisabledCleared(unittest.TestCase):
+    """S3b-4a r3 P3-b: RECOVER's no-action STOP CI DISABLED (CI down, and a journal that shows no runner-disable of
+    its own) holds the family until a window disables CI again; when no window journal is open, CI's flag is present
+    and one runscaler runs (a person ran runner-enable), the pass clears it, before the core reads the STOPs. The
+    controls: no flag; no runscaler."""
+
+    HELD = [stop(FAM, 'CI DISABLED', version=None, detail={'text': 'x', 'hand': '/x/runner-enable'})]
+
+    def win(self):
+        w = Win(self, cfg=config((('mac-a', NEW),)), extra_rewrites=[CLOCK],
+                s=state(on=True, families={FAM: switched(stops=self.HELD)}, images={OLD: V0, NEW: V2}))
+        w.sb.write(os.path.join(w.vms, NEW), '')
+        return w
+
+    def test_ci_up_again_clears_it_before_the_core_reads_it(self):
+        w = self.win()
+        res = pass_(w)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn('runner-updater: pass: CI is enabled and runscaler runs: STOP CI DISABLED of %s is cleared\n' % FAM,
+                      res.stdout)
+        self.assertIn('\nkeep %s: observe (' % FAM, res.stdout)
+        self.assertEqual(stops(w), [])
+
+    def test_control_no_flag_keeps_it(self):
+        w = self.win()
+        os.remove(w.r.flag)
+        res = pass_(w)
+        self.assertIn('\nkeep %s: held (CI DISABLED stands' % FAM, res.stdout)
+        self.assertEqual(stops(w), ['CI DISABLED'])
+
+    def test_control_no_runscaler_keeps_it(self):
+        w = self.win()
+        w.r.set_ps([])
+        pass_(w)
+        self.assertEqual(stops(w), ['CI DISABLED'])
 
 
 if __name__ == '__main__':

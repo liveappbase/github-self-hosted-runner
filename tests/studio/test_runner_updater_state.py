@@ -1405,7 +1405,8 @@ class TestPass(unittest.TestCase):
         self.assertNotIn('would accept', res.stdout)
 
     def test_a_config_whose_log_the_core_cannot_read_is_no_facts_in_a_pass_too(self):
-        for top, why in (('log-format = "json"\n', LOG_FORMAT), ('log-file = "/x.log"\n', LOG_FILE)):
+        for top, why in (('log-format = "json"\n', LOG_FORMAT), ('log-file = "/x.log"\n', LOG_FILE),
+                         ('log-level = "warn"\n', LOG_LEVEL % 5)):
             with self.subTest(top=top):
                 r, u = self.rig(on_state(), cfg=config(top=top))
                 raw = u.raw()
@@ -1415,15 +1416,22 @@ class TestPass(unittest.TestCase):
                 self.assertEqual(core_calls(r), [])
                 self.assertEqual(u.raw(), raw)
 
-    def test_a_held_family_the_families_file_does_not_name_is_no_facts(self):
-        for fz in (fam(candidate=cand()), fam(back_until=T0)):
-            with self.subTest(fz=fz):
-                r, u = self.rig(state(on=True, families={'fz': fz}))
-                res = r.cmd('pass', ok=False)
-                self.assertEqual(res.returncode, 1, res.stdout)
-                self.assertIn('runner-updater: REFUSE no facts: the state holds a candidate or a back_until for the '
-                              'family fz, which %s does not name\n' % r.families, res.stdout)
-                self.assertEqual(core_calls(r), [])
+    def test_a_held_candidate_of_a_family_the_families_file_does_not_name_is_no_facts(self):
+        r, u = self.rig(state(on=True, families={'fz': fam(candidate=cand())}))
+        res = r.cmd('pass', ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: REFUSE no facts: the state holds a candidate for the family fz, which %s does '
+                      'not name\n' % r.families, res.stdout)
+        self.assertEqual(core_calls(r), [])
+
+    def test_a_family_dropped_from_the_families_file_with_a_back_until_is_no_refusal(self):
+        # S3b-2a r1 carry: its previous image is kept until back_until, then the pass deletes it
+        # (test_runner_updater_pass, TestDeletion); every pass in between runs
+        r, u = self.rig(state(on=True, families={'fz': fam(previous={'mac-c': IMG0}, back_until=int(time.time()) + 86400)}))
+        res = r.cmd('pass', ok=False)
+        self.assertEqual(res.returncode, 0, res.stdout)
+        self.assertEqual(core_calls(r), ['idle', 'r1', 'keep', 'status'])
+        self.assertEqual(lines_of(u.protected), [IMG0])
 
     def test_control_a_held_family_the_families_file_names(self):
         r, u = self.rig(state(on=True, families={'fz': fam(candidate=cand()), 'fw': fam(rejected=[V1])}),
@@ -1458,6 +1466,10 @@ LOG_FILE = (' line 5: a top-level log-file key: runscaler then writes its log el
 LOG_FORMAT = (' line 5: log-format is not "text": runscaler then writes records that the core\'s log reader ignores, so R1 '
               'would be blind while the facts look normal; set log-format = "text" or remove the line')
 
+LOG_LEVEL = (' line %d: log-level is not "info" or "debug": runscaler then writes no INFO record (no job-completed record, '
+             'the proof of life R1 and KEEP read), so a quiet log would look like a healthy one; set log-level = "info" '
+             '(what config/config.toml.example sets) or remove the line')
+
 
 class TestLogKeys(unittest.TestCase):
     """A config whose log the core cannot read is no facts (S3b-1 review r1 P3-1): a top-level log-file key (runscaler
@@ -1483,6 +1495,25 @@ class TestLogKeys(unittest.TestCase):
                      'log-format = "text" x'):
             with self.subTest(line=line):
                 self.refused(line + '\n', LOG_FORMAT)
+
+    def test_a_log_level_that_writes_no_info_record_is_refused(self):
+        # S3b-4b (liveapp-9f, S2b-3a r1 F2): at warn or error runscaler writes no INFO record, so no job-completed record
+        for line in ('log-level = "warn"', 'log-level = "error"', 'log-level = "INFO"', 'log-level = ""',
+                     "log-level = 'info'", '"log-level" = "info"', 'log-level = "info" x'):
+            with self.subTest(line=line):
+                self.refused(line + '\n', LOG_LEVEL % 5)
+
+    def test_control_log_level_info_or_debug_no_line_or_one_in_a_table(self):
+        plain = config()
+        self.assertEqual(plain.count('log-level = "info"\n'), 1)
+        for cfg in (plain, plain.replace('log-level = "info"\n', 'log-level = "debug"\n'),
+                    plain.replace('log-level = "info"\n', 'log-level = "info"   # the default\n'),
+                    plain.replace('log-level = "info"\n', ''),
+                    plain.replace('[tart]\n', '[tart]\nlog-level = "error"\n')):
+            with self.subTest(cfg=cfg[:300]):
+                r = Rig(self, cfg=cfg)
+                r.report()
+                self.assertEqual(r.facts()['format'], 1)
 
     def test_control_log_format_text_and_a_log_file_key_in_a_table(self):
         for cfg in (config(top='log-format = "text"\n'), config(top='log-format = "text"   # the default\n'),

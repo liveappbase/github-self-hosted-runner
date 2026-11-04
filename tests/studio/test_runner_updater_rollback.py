@@ -427,8 +427,19 @@ class TestRetry(unittest.TestCase):
         self.assertEqual([s['stop'] for s in f['stops']],
                          ['HAND CHANGE', 'POOL DOWN', 'NO IDLE', 'DISK', 'PINNED RUNNER RETIRED'])
         self.assertEqual(f['rejected'], ['2.0.1'])            # a retired version stays rejected
+        # S3b-4a r3 P3-b: while a STOP still holds, it never says the next pass may proceed
         self.assertIn('runner-updater: retry %s: cleared check failed, ROLLED BACK, NO EVIDENCE, JOBS FAIL ON THE NEW '
-                      'IMAGE, ROLLBACK FAILED; rejected now: 2.0.1; the next pass may proceed' % FAM, res.stdout)
+                      'IMAGE, ROLLBACK FAILED; rejected now: 2.0.1; still held: HAND CHANGE, POOL DOWN, NO IDLE, DISK, '
+                      'PINNED RUNNER RETIRED (`runner-updater status` names the next step of each)\n' % FAM, res.stdout)
+        self.assertNotIn('may proceed', res.stdout)
+
+    def test_control_nothing_left_the_next_pass_may_proceed(self):
+        w = Win(self, s=state(on=True, families={FAM: fam(rejected=[V2], stops=[stop(FAM, 'check failed',
+                                                                                      detail={'text': 'x'})])},
+                              images={OLD: V0}))
+        res = w.r.cmd('retry', FAM)
+        self.assertIn('runner-updater: retry %s: cleared check failed; rejected now: none; the next pass may proceed\n'
+                      % FAM, res.stdout)
 
     def test_another_family_s_stops_stay(self):
         other = 'linux-tart'

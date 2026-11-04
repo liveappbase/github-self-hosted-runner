@@ -76,7 +76,8 @@ returned unchanged, rc 0.
                                         not two process reads and a position: rc != 0 on every program
   "config": {"installed": EPOCH, "lines": {"SET": "IMAGE", ...}},
                                         the config installed now and its install time (Studio: its mtime; the
-                                        Linux host: the journaled `renamed` epoch)
+                                        Linux host: the later of config.toml's mtime and the journaled `renamed`
+                                        epoch of the newest closed window whose target sha is config.toml's sha)
   "families": {"FAMILY": {"provider": "tart" | "docker", "sets": ["SET", ...],
                           "candidate": {"version": "V", "lines": {"SET": "IMAGE", ...}, "closed_at": EPOCH} | null,
                                         (closed_at: when the switch window closed; a retry's new window has its

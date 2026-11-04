@@ -288,16 +288,21 @@ jq_tested() {
   fi
 }
 
-# PROGRAM's output in DIR/PROGRAM.json is one decision: one JSON object with a verdict and lines
+# DIR PROGRAM: its output DIR/PROGRAM.json is one decision: one JSON object with lines, and a verdict core/README.md
+# gives that program ("The programs' outputs": idle: idle | not-idle | wait; r1, keep, status: ok | wait). Any other
+# verdict, or none, is not one: the core could not decide
 decided() {
-  $JQ -e -s 'length == 1 and (.[0] | type) == "object" and (.[0].verdict | type) == "string"
-             and (.[0].lines | type) == "array"' $1/$2.json > /dev/null 2>&1
+  $JQ -e -s --arg p $2 'length == 1 and (.[0] | type) == "object" and (.[0].lines | type) == "array"
+             and (.[0].verdict as $v | (if $p == "idle" then ["idle", "not-idle", "wait"] else ["ok", "wait"] end)
+                  | any(.[]; . == $v))' $1/$2.json > /dev/null 2>&1
 }
 
 # DIR STATEREF NOW: idle, r1, keep and status on DIR's facts.json, log.txt, healthz.json and state.json (the pass's
 # copy of the core state: written back by rename after idle and after r1, so a later program reads it). A program
-# that exits non-zero or decides nothing: "core could not decide", "the pass did nothing: STATEREF is as it was", exit
-# 1. It prints each program's verdict and reason (r1 and keep: each family's too), then status.jq's lines.
+# that exits non-zero or decides nothing (decided): "core could not decide", "the pass did nothing: STATEREF is as it
+# was", exit 1. A program whose verdict is `wait` (a core state of another format): "WAIT the core waits", the same
+# line, exit 4: STATEREF is byte-equal. It prints each program's verdict and reason (r1 and keep: each family's too),
+# then status.jq's lines.
 run_core() {
   local dir=$1 ref=$2 now=$3 prog rc
   for prog in idle r1 keep status; do
@@ -308,6 +313,11 @@ run_core() {
       say "core could not decide ($prog): exit $rc${$(/usr/bin/head -n 1 $dir/$prog.err 2>/dev/null):+: $(/usr/bin/head -n 1 $dir/$prog.err)}"
       say "the pass did nothing: $ref is as it was"
       exit 1
+    fi
+    if [[ $($JQ -r '.verdict' $dir/$prog.json) == wait ]]; then
+      say "WAIT the core waits ($prog): $($JQ -r '"\(.reason): \(.lines[0] // "")"' $dir/$prog.json)"
+      say "the pass did nothing: $ref is as it was"
+      exit 4
     fi
     if [[ $prog == (idle|r1) ]]; then   # the new state, for the next program of this pass: by rename
       $JQ -e '.state | if type == "object" then . else error("no state") end' $dir/$prog.json > $dir/state.json.new \
@@ -356,7 +366,7 @@ do_status() {
           --slurpfile facts <(print -r -- $facts) --arg now $now 2>&1)
   rc=$?
   if (( rc != 0 )) || ! print -r -- $out | $JQ -e -s 'length == 1 and (.[0] | type) == "object"
-       and (.[0].verdict | type) == "string" and (.[0].lines | type) == "array"' > /dev/null 2>&1; then
+       and (.[0].verdict == "ok" or .[0].verdict == "wait") and (.[0].lines | type) == "array"' > /dev/null 2>&1; then
     stop "core could not decide (status): exit $rc${${out%%$'\n'*}:+: ${out%%$'\n'*}}"
   fi
   print -r -- $out | $JQ -r 'def yn: if . == true then "yes" elif . == false then "no" elif . == null then "unknown" else tostring end;
@@ -486,9 +496,13 @@ do_retry() {
       | .stops = $left
       | .rejected = [(.rejected // [])[] | select(. as $v | any($left[]; .stop == "PINNED RUNNER RETIRED" and .version == $v))])' \
       --arg f $family --argjson i $idx
+  # it says the next pass may proceed only when the family holds no STOP any more (S3b-4a r3 P3-b)
   print -r -- $out | $JQ -r --arg f $family --argjson i $idx --argjson n $n --argjson rej "$(print -r -- $ru_state | $JQ -c --arg f $family '.families[$f].rejected // []')" \
+      --argjson left "$(print -r -- $ru_state | $JQ -c --arg f $family '[.families[$f].stops // [] | .[].stop]')" \
       '"runner-updater: retry \($f): cleared " + (if ($i | length) == 0 then "no STOP" else ([.stops[:$n] as $s | $i[] | $s[.].stop] | join(", ")) end)
-       + "; rejected now: " + (if $rej == [] then "none" else ($rej | join(", ")) end) + "; the next pass may proceed"'
+       + "; rejected now: " + (if $rej == [] then "none" else ($rej | join(", ")) end)
+       + (if $left == [] then "; the next pass may proceed"
+          else "; still held: \($left | join(", ")) (`runner-updater status` names the next step of each)" end)'
   exit 0
 }
 
@@ -562,6 +576,7 @@ do_pass() {
   [[ -d $PASSDIR ]] || /bin/mkdir -m 700 $PASSDIR || refuse "cannot create $PASSDIR"
   print -r -- $ru_state | $JQ -c '.core // empty' > $PASSDIR/state.json || refuse "cannot copy the core's state into $PASSDIR"
   /bin/rm -f -- $PASSDIR/{idle,r1,keep,status}.json
+  pass_ci_up
   # the STOPs the core reads: a family with a candidate holds no NO BASELINE or recipe changed (a rebuild's candidate:
   # its ACCEPT writes the baseline; pass_recipe drops them from the state)
   held=$(print -r -- $ru_state | $JQ -c '{families: (.families | map_values({candidate: (.candidate // null),
@@ -580,9 +595,29 @@ do_pass() {
           | if (($r1[0].families // {})[$f].verdict // "") == "rollback" then .value.r1_since //= $now
             else .value |= del(.r1_since) end)' \
     --slurpfile c $PASSDIR/state.json --slurpfile r1 $PASSDIR/r1.json --argjson now $now
+  [[ -z $pass_ci_msg ]] || say $pass_ci_msg
   write_protected $now
   pass_act $now   # the pass acts on its verdicts
   exit $(( recovered || pass_rc ))
+}
+# RECOVER's no-action STOP CI DISABLED (S3b-4a r3 P3-b; bin/runner-updater-window, RECOVER step 0) holds the family
+# until a window of it disables CI again: CI was down, and the journal showed no runner-disable of its own. When no
+# window journal is open, CI's flag is present and ONE runscaler runs (ru_proc), CI is up again (a person ran
+# runner-enable): the pass removes every CI DISABLED, before the core reads the STOPs (RECOVER's 75-min CI DISABLED
+# is held only while its journal is open). In the pass's copy of the state (ru_state): the core's write after it keeps
+# it, and a core that could not decide leaves STATE as it was (pass_ci_msg is printed after that write)
+pass_ci_msg=
+pass_ci_up() {
+  local fams new
+  [[ ! -e $WINDOW && ! -L $WINDOW && -e $FLAG ]] || return 0
+  ru_proc && [[ $REPLY == '{"pid":'* ]] || return 0
+  fams=$(print -r -- $ru_state | $JQ -r '[.families | to_entries[] | select(any((.value.stops // [])[]; .stop == "CI DISABLED"))
+           | .key] | join(" ")') || return 0
+  [[ -n $fams ]] || return 0
+  new=$(print -r -- $ru_state | $JQ -c '.families |= map_values(.stops = [(.stops // [])[] | select(.stop != "CI DISABLED")])') \
+    && [[ -n $new ]] || return 0
+  ru_state=$new
+  pass_ci_msg="pass: CI is enabled and runscaler runs: STOP CI DISABLED of ${fams// /, } is cleared"
 }
 # what the pass does on its verdicts, in order
 pass_act() {
