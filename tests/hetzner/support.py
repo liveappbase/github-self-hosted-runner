@@ -1023,6 +1023,36 @@ if sys.argv[1:] == ['--version']:
 os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
 '''
 
+SWAP_STUB = r'''#!/usr/bin/python3 -I
+# mktemp, for the hostile-file cells (support.Pool.swap): RUN_USER's rename between a reader's lookups. On its Nth call
+# for a build record's private copy (a template that ends in /record.XXXXXX: runner-release.sh's rr_record_read makes
+# that copy before it opens the record), it first renames swap.json's KIND over swap.json's PATH: a FIFO, a symlink to
+# TARGET, or a plain file of TEXT; then (every call) it runs the real mktemp. swap.json's `done` is the evidence it did.
+import json, os, sys
+SB = @SB@
+if any(a.endswith('/record.XXXXXX') for a in sys.argv[1:]):
+    c = json.load(open(SB + '/swap.json'))
+    c['seen'] = c.get('seen', 0) + 1
+    if c['seen'] == c['at']:
+        t = os.path.join(os.path.dirname(c['path']), '.swap.%d' % os.getpid())
+        if c['kind'] == 'fifo':
+            os.mkfifo(t, 0o640)
+        elif c['kind'] == 'link':
+            os.symlink(c['target'], t)
+        else:
+            with open(t, 'w') as f:
+                f.write(c['text'])
+            os.chmod(t, 0o640)
+        os.rename(t, c['path'])
+        c['done'] = True
+    with open(SB + '/swap.json.new', 'w') as f:
+        json.dump(c, f)
+    os.replace(SB + '/swap.json.new', SB + '/swap.json')
+os.execv('/usr/bin/mktemp', ['mktemp'] + sys.argv[1:])
+'''
+
+HANG = 120   # bounded(): the seconds after which a run counts as HUNG (timeout's exit 124); never a time a cell asserts
+
 D1_STUB = r'''#!/usr/bin/python3 -I
 # 02-d1.sh, for the build pass cells (support.Pool.d1_stub): logs its call to logs/d1.log, one JSON line: argv; fd9: is
 # its fd 9 the updater lock (the same file); held: does a NEW open of the lock find it held (by its parent, then);
@@ -1409,6 +1439,26 @@ class Pool(Sandbox):
     def d1_calls(self):
         """The calls of the 02-d1.sh substitute: [{argv, fd9, held, shares}]."""
         return self.calls('d1')
+
+    # ---- RUN_USER's files are hostile to RS_USER (PLAN D1)
+
+    def swap(self, path, kind, at=1, target=None):
+        """From now on `mktemp` is SWAP_STUB: at the AT-th private copy of a build record (rr_record_read's mktemp), it
+        renames KIND over PATH first: 'fifo', 'link' (a symlink to TARGET) or 'plain' (a new plain file of PATH's
+        text now). swapped() says whether it did."""
+        text = self.read(path) if kind == 'plain' else None
+        self.write(self.path('swap.json'), json.dumps({'path': path, 'kind': kind, 'at': at, 'target': target,
+                                                        'text': text}))
+        self.write(self.path('stubs', 'mktemp'), SWAP_STUB.replace('@SB@', repr(self.root)), 0o755)
+
+    def swapped(self):
+        """The swap's evidence: did SWAP_STUB rename its KIND over the path?"""
+        return json.loads(self.read(self.path('swap.json'))).get('done', False)
+
+    def bounded(self, argv):
+        """argv as run() runs it, under `timeout HANG` (and a KILL 10 s later): a run that hangs ends with timeout's
+        exit 124. A bound on a hang, never a time a cell asserts."""
+        return self.run(['timeout', '-k', '10', str(HANG)] + list(argv))
 
 
 def iso(t):

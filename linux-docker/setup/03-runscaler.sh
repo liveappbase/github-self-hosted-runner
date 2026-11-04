@@ -12,7 +12,8 @@
 # THE IMAGE: DIGEST (sha256:<64 hex>) is an image of the local registry. With none, the image the installed config.toml
 # RUNS NOW (image_of, pool-image.sh's own function), so a `03 real` after a change of pool.env's numbers, or after a
 # release that changes an installed file, keeps the running image; RUN_USER's ~/run/image.ref (the full 02-d1.sh run's)
-# is read only when there is no config.toml (a fresh host). A REJECTED image is refused in every mode, before anything.
+# is read only when there is no config.toml (a fresh host), and as hostile (PLAN D1): runner-release.sh's rr_read, one
+# open that never follows a symlink and never blocks. A REJECTED image is refused in every mode, before anything.
 # REJECTED: ~/.local/state/runner-updater/rejected (the folder of the updater lock, runner-release.sh's RR_LOCK), which
 # the updater writes: one `sha256:<64 hex>` per line. No file, or an empty one, rejects nothing; any other content (a
 # blank line, a CR, other text, not a regular file) REFUSES: a list that cannot be read is never read as "none".
@@ -153,7 +154,12 @@ elif [ -e "$R/config.toml" ] || [ -L "$R/config.toml" ]; then
   IMAGE=$(image_of "$R/config.toml") || die "config.toml does not name ONE runner image for both sets, so there is no image it runs now to render: read $R/config.toml, or name the image (DIGEST); nothing changed"
   from="the image config.toml runs now"
 else
-  IMAGE=$(cat /home/${RUN_USER}/run/image.ref) || die "no config.toml and no image.ref from B2"
+  # RUN_USER's file, so read as hostile: runner-release.sh's rr_read (one open, no symlink, never blocks)
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (~/build: this release's linux-docker/)"
+  rr_read "/home/${RUN_USER}/run/image.ref" 1024 > "$tmp/image.ref" \
+    || die "no config.toml and no image.ref from B2: /home/${RUN_USER}/run/image.ref: $RR_WHY"
+  IMAGE=$(cat -- "$tmp/image.ref")
   from="image.ref: there is no config.toml yet"
 fi
 [[ $IMAGE =~ $IMGRE ]] && ok "image $IMAGE ($from)" || die "the image is not one strict digest reference: [$IMAGE]"

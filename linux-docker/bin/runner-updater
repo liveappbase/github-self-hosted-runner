@@ -43,9 +43,11 @@
 # RUN_USER's state is its own (one record per user, and no channel from RS_USER to RUN_USER: PLAN D1), with the same
 #   format rule, REFUSE and WAIT:
 #   on         true | false: RUN_USER's own key (its pass builds nothing while it is OFF; D11: the install sets both)
-#   stops      [{stop: NAME, version, user, detail}]: the STOPs it holds. Its builds write one: `check failed` of a
-#              version whose build failed, user and detail.build_user RUN_USER, detail {text: 02-d1.sh's FAIL line,
-#              step: "build"} (core/README.md, facts.stops), ONE per version: a later failure replaces its text
+#   stops      [{stop: NAME, version, user, detail}]: the STOPs it holds. Its build PASS writes one (`build VERSION`
+#              writes no STOP): `check failed` of a version whose build failed, user and detail.build_user RUN_USER,
+#              detail {text: THE CAUSE 02-d1.sh printed (THE BUILD PASS), step: "build"} (core/README.md, facts.stops),
+#              ONE per version (a pass builds no version that such a STOP holds). A pass that finds the build record of
+#              that version (and this release's recipe), and a `build VERSION` that passes, clear it
 #   A member it does not read (at the top, in a STOP): WAIT, exit 4, as RS_USER's.
 # DIFFERS from the Studio's state: no `images` (this host has no host pin), no `recipe` (the BASELINE is RUN_USER's
 #   build record of the image config.toml runs: DUE, step 4), no protected list (this host deletes no image), and so no
@@ -86,7 +88,8 @@
 #   build VERSION   RUN_USER's only (a person's path, D7's retry of a build's `check failed`): it waits for the lock and
 #            runs 02-d1.sh build VERSION as its child (as the build pass does), while OFF too. Exit 0 of 02-d1.sh clears
 #            the `check failed` STOP of VERSION (by rename); 75 (GitHub's rate limit) is "WAIT ...", exit 4, and the
-#            state stays; any other is that STOP, written or kept with the new FAIL line, exit 1.
+#            state stays; any other is a line with THE CAUSE 02-d1.sh printed, exit 1, and it writes no STOP (one that
+#            is there stays): the person sees why, and a typo of a version would hold a STOP nothing clears.
 # THE JQ CHECK: `jq --version` must be a row of core/TESTED_JQ for the area core (runner-facts.sh's tested_jq), else
 #   "STOP untested jq" and exit 3: no core program runs (status, and a pass that is ON, of either user: RUN_USER's pass
 #   reads its STOPs with the core's lib/stops.jq; an OFF pass ends before it). `build VERSION` runs no core program.
@@ -117,13 +120,18 @@
 #   It downloads no tarball: RUN_USER's build checked the tarball's digest.
 # THE BUILD PASS (RUN_USER's pass; ON, the jq check passed): the latest release (rr_eligible: "WAIT ..." or why it is
 #   not eligible, exit 0, nothing built); this release's recipe of ~/build/image (it cannot be computed: REFUSE,
-#   exit 1); the build record of (V, recipe) (rr_record, BUILDS) is there: "runner V is built ...", exit 0; a STOP that holds
-#   V (DUE's rule: a `check failed` of V; a newer release proceeds alone past one of an older version, so a version
-#   whose build failed is never built again by a pass): its line, exit 0, nothing built. Else it runs
-#   `~/build/setup/02-d1.sh build V` as its CHILD, its output shown and kept in BUILDOUT, on the lock it holds: fd 9,
-#   which the child inherits and so shares (rr_lock's rule: 02-d1.sh's own rr_lock takes it there at once; a new open
-#   would wait for its own parent). 02-d1.sh's exit 0: "built runner V", exit 0; 75 (GitHub's rate limit): "WAIT ...",
-#   exit 0, no STOP; any other: STOP `check failed` of V with 02-d1.sh's last FAIL line (the state, by rename), exit 1.
+#   exit 1); the build record of (V, recipe) (rr_record, BUILDS) is there: "runner V is built ...", exit 0, and a
+#   `check failed` STOP of V is cleared (by rename: a person's `02-d1.sh build V` passed); a STOP that holds V (DUE's
+#   rule: a `check failed` of V; a newer release proceeds alone past one of an older version, so a version whose build
+#   failed is never built again by a pass): its line, exit 0, nothing built. Else it runs `~/build/setup/02-d1.sh build
+#   V` as its CHILD, its output shown and kept in BUILDOUT, on the lock it holds: fd 9, which the child inherits and so
+#   shares (rr_lock's rule: 02-d1.sh's own rr_lock takes it there at once; a new open would wait for its own parent).
+#   02-d1.sh's exit 0: "built runner V", exit 0; 75 (GitHub's rate limit): "WAIT ...", exit 0, no STOP; 129, 141 or 143
+#   (SIGHUP, SIGPIPE, SIGTERM: an ssh drop, a reboot, a stop): "CUT ...", exit 0, no STOP, and the next pass builds V
+#   again; any other (137 too, SIGKILL or an OOM kill: a build that fails each time must not loop): STOP `check failed`
+#   of V with THE CAUSE 02-d1.sh printed (the state, by rename), exit 1. THE CAUSE: the REFUSE line right before its
+#   last FAIL line (that FAIL line then says only "the REFUSE line above says why"), else that FAIL line; with no FAIL
+#   line, its last REFUSE line (a host config it refuses); with neither, what it exited with.
 # THE FACTS (core/README.md, "facts", host "hz"), RS_USER's pass, in this ORDER (the Studio's, bin/runner-updater-lib's
 # ru_collect):
 #   1. proc before: runscaler as systemd reports it, in ONE `systemctl --user show` read (runner-facts.sh's
@@ -163,10 +171,10 @@
 #
 # Exit codes:
 #   0  done; also a pass that finds the lock held or the updater OFF, and a pass whose DUE line or build pass says why
-#      nothing is due or built (a WAIT of GitHub's, or of 02-d1.sh in a pass, too)
+#      nothing is due or built (a WAIT of GitHub's, or of 02-d1.sh in a pass, too; a build CUT by a signal)
 #   1  a REFUSE (a state it does not read, a fact it cannot read, a recipe it cannot compute, off while a window is
 #      open, a user other than RS_USER and RUN_USER, build as RS_USER) or a STOP (a state it cannot write, the core
-#      could not decide, RECOVER needed, a build that failed: check failed)
+#      could not decide, RECOVER needed, a pass's build that failed: check failed); a `build VERSION` that failed
 #   2  usage
 #   3  STOP untested jq
 #   4  WAIT: a state of another format, or with a member this release does not read; a pass, or status, whose decision
@@ -664,17 +672,31 @@ do_pass() {
 
 # ---- RUN_USER: THE BUILD PASS, build VERSION (the header)
 # VERSION: ~/build/setup/02-d1.sh build VERSION as this run's CHILD, on the updater lock it holds (fd 9, inherited:
-# rr_lock's rule), its output shown and kept in BUILDOUT; its exit code. REPLY = its last WAIT line (exit 75) or its
-# last FAIL line (another), or what it exited with
+# rr_lock's rule), its output shown and kept in BUILDOUT; its exit code. REPLY = its last WAIT line (exit 75), or THE
+# CAUSE it printed (another exit): the REFUSE line right before its last FAIL line (that FAIL line then says only "the
+# REFUSE line above says why"), else that FAIL line; with no FAIL line, its last REFUSE line; or what it exited with
 build_child() {
-  local rc w=FAIL
+  local rc
   rm -f -- "$BUILDOUT"
   /bin/bash "$B/setup/02-d1.sh" build "$1" < /dev/null 2>&1 | tee "$BUILDOUT" 9>&-
   rc=${PIPESTATUS[0]}
-  [ "$rc" != 75 ] || w=WAIT
-  REPLY=$(grep "^$w " "$BUILDOUT" 2> /dev/null | tail -n 1)
-  [ -n "$REPLY" ] || REPLY="02-d1.sh build $1 exited $rc and printed no $w line (its output: $BUILDOUT)"
+  if [ "$rc" = 75 ]; then
+    REPLY=$(grep '^WAIT ' "$BUILDOUT" 2> /dev/null | tail -n 1)
+    [ -n "$REPLY" ] || REPLY="02-d1.sh build $1 exited $rc and printed no WAIT line (its output: $BUILDOUT)"
+  else
+    REPLY=$(awk '/^FAIL / { fail = $0; before = prev } /^[A-Za-z0-9._-]+: REFUSE / { refuse = $0 } { prev = $0 }
+                 END { if (fail != "") print (before ~ /^[A-Za-z0-9._-]+: REFUSE / ? before : fail)
+                       else if (refuse != "") print refuse }' "$BUILDOUT" 2> /dev/null)
+    [ -n "$REPLY" ] || REPLY="02-d1.sh build $1 exited $rc and printed no FAIL or REFUSE line (its output: $BUILDOUT)"
+  fi
   return "$rc"
+}
+# VERSION WHO: a `check failed` STOP of VERSION is cleared (by rename), and WHO's line says so; none: nothing is written
+clear_check_failed() {
+  printf '%s\n' "$ST" | jq -e --arg v "$1" 'any((.stops // [])[]; .stop == "check failed" and .version == $v)' \
+    > /dev/null || return 0
+  change_state '.stops = [(.stops // [])[] | select(.stop != "check failed" or .version != $v)]' --arg v "$1"
+  say "$2: the STOP check failed of runner $1 is cleared"
 }
 # VERSION LINE: the STOP `check failed` of VERSION (ONE per version: it replaces an older one's text), by rename; exit 1
 check_failed() {
@@ -687,7 +709,7 @@ check_failed() {
   exit 1
 }
 do_build_pass() {
-  local now v rec
+  local now v rec rc
   load_state
   [ "$(printf '%s\n' "$ST" | jq -r '.on')" = true ] || { say "pass: the updater is OFF: nothing to do"; exit 0; }
   jq_check
@@ -706,14 +728,20 @@ do_build_pass() {
   rec=$RR_RECIPE
   if rr_record "$BUILDS" "$v" "$rec"; then
     say "pass: runner $v is built for this release's image (its build record: $RR_RECORD): nothing to build"
+    clear_check_failed "$v" pass      # a person's build of V passed (02-d1.sh build V): its STOP has no cause left
     exit 0
   fi
   stop_holds "$v"; [ "$?" = 1 ] || { say "pass: no build of runner $v: $REPLY"; exit 0; }
   say "pass: building runner $v for this release's image (recipe $rec): 02-d1.sh build $v, its output also in $BUILDOUT"
   build_child "$v"
-  case $? in
+  rc=$?
+  case $rc in
     0) say "pass: built runner $v"; exit 0 ;;
     75) say "pass: WAIT 02-d1.sh build $v waits (exit 75): $REPLY; no STOP: a later pass builds it"; exit 0 ;;
+    129|141|143)   # SIGHUP, SIGPIPE, SIGTERM: an ssh drop, a reboot, a stop; no check failed
+       say "pass: CUT 02-d1.sh build $v ended by SIG$(kill -l "$((rc - 128))") (exit $rc): no STOP;" \
+         "the next pass builds it again"
+       exit 0 ;;
     *) check_failed "$v" "$REPLY" ;;
   esac
 }
@@ -723,14 +751,11 @@ do_build() {
   say "build: runner $v: 02-d1.sh build $v, its output also in $BUILDOUT"
   build_child "$v"
   case $? in
-    0) say "build: built runner $v"
-       if printf '%s\n' "$ST" | jq -e --arg v "$v" 'any((.stops // [])[]; .stop == "check failed" and .version == $v)' > /dev/null; then
-         change_state '.stops = [(.stops // [])[] | select(.stop != "check failed" or .version != $v)]' --arg v "$v"
-         say "build: the STOP check failed of runner $v is cleared"
-       fi
-       exit 0 ;;
+    0) say "build: built runner $v"; clear_check_failed "$v" build; exit 0 ;;
     75) wait4 "02-d1.sh build $v waits (exit 75): $REPLY; the state is as it was: run it again later" ;;
-    *) check_failed "$v" "$REPLY" ;;
+    *) say "build: runner $v is not built: ${REPLY//[[:cntrl:]]/?}; the state is as it was (only a pass holds" \
+         "\`check failed\`: you see why here). Fix the cause, then run it again"
+       exit 1 ;;
   esac
 }
 

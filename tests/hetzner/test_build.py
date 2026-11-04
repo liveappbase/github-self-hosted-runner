@@ -15,6 +15,8 @@ only for the digest of the image just built. Every download checks the filtered 
 
 Each cell runs a copy of the real 02-d1.sh and runner-release.sh (only their pin lines rewritten) against the stubs and
 the local HTTPS GitHub of tests/hetzner/support.py, in a container. The Header cell reads text and runs anywhere.
+OtherUsersFiles and ReadOnce: RS_USER reads a file of RUN_USER's (a build record, image.ref) only through
+runner-release.sh's rr_read: one open, no symlink, never blocking, a regular file only (PLAN D1: they are hostile).
 """
 import calendar
 import fcntl
@@ -649,6 +651,114 @@ class OneCopy(unittest.TestCase):
         with open(RR) as f:
             rr = f.read()
         self.assertEqual(rr.count('recipe ([0-9a-f]{64})'), 1)
+
+
+# a path in RUN_USER's home, as the scripts and the README spell it
+RUN_HOME = re.compile(r'/home/(?:\$\{RUN_USER\}|<RUN_USER>|\$\(sed -n .s/\^RUN_USER=//p.)')
+# what a line that names RUN_USER's home may do without reading a file of it: the one reader, or no read at all
+NO_FILE_READ = (('rr_read ', 'the one reader of another user\'s file'),
+                ('docker.sock', 'a socket: a connection to D1 (the design), no file read'),
+                ('df -Pk', 'the free space of its filesystem (statfs), no file read'),
+                ('DISK_WHY=', 'a message'),
+                ('BUILDS=', 'the folder\'s name: rr_record and rr_record_of read its records, through rr_read'))
+
+
+class OtherUsersFiles(unittest.TestCase):
+    """THE CLASS of Opus r1 F1 (PLAN D1: RUN_USER's files are HOSTILE to RS_USER): every read by RS_USER of a file
+    RUN_USER owns goes through runner-release.sh's rr_read (ONE open that never follows a symlink and never blocks; a
+    regular file only, by fstat of that open). The census: each line of linux-docker/ (scripts, README) that names a
+    path in RUN_USER's home either calls rr_read or reads no file (NO_FILE_READ, each with why); RUN_USER's build
+    records are read only by rr_record and rr_record_of, whose reader rr_record_read opens its file only through
+    rr_read. Before this, 03-runscaler.sh and the README's move check read ~/run/image.ref with `cat`, and
+    rr_record_read with a type check and then `head`. Text: runs anywhere."""
+
+    def test_every_line_that_names_run_user_s_home_reads_its_file_through_rr_read(self):
+        """A line is a command's whole text: a line that ends in a backslash goes on in the next (its number: the
+        first)."""
+        bad, seen = [], 0
+        for d, _, names in sorted(os.walk(os.path.join(REPO, 'linux-docker'))):
+            for n in sorted(names):
+                p = os.path.join(d, n)
+                with open(p, encoding='utf-8', errors='replace') as f:
+                    raw = f.read().splitlines()
+                lines, k = [], 0
+                while k < len(raw):
+                    start, text = k + 1, raw[k]
+                    while text.endswith('\\') and k + 1 < len(raw):
+                        k += 1
+                        text = text[:-1] + raw[k]
+                    lines.append((start, text))
+                    k += 1
+                for i, l in lines:
+                    if not RUN_HOME.search(l) or l.lstrip().startswith('#'):
+                        continue
+                    seen += 1
+                    if not any(m in l for m, _ in NO_FILE_READ):
+                        bad.append('%s:%d' % (os.path.relpath(p, REPO), i))
+        self.assertGreater(seen, 5, 'the census found almost nothing: its pattern is broken')
+        self.assertEqual(bad, [], 'these lines name a path in RUN_USER\'s home and read it without rr_read')
+
+    def test_the_build_record_reader_opens_its_file_only_through_rr_read(self):
+        with open(RR) as f:
+            body = f.read().split('\nrr_record_read() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('rr_read "$f" ', body)
+        self.assertEqual(body.count('"$f"'), body.count('rr_read "$f" '), 'another use of the record\'s path')
+        for p in (PIMG, UPD):
+            with open(p) as f:
+                uses = [l for l in f.read().splitlines() if '"$BUILDS' in l and not l.lstrip().startswith('#')]
+            with self.subTest(os.path.basename(p)):
+                self.assertTrue(uses)
+                for l in uses:
+                    self.assertRegex(l, r'\brr_record(_of)? "\$BUILDS"', 'a read of the records but rr_record')
+
+
+@needs_container
+class ReadOnce(unittest.TestCase):
+    """runner-release.sh's rr_read FILE MAX (OtherUsersFiles): at most MAX bytes of FILE on stdout through ONE open
+    (O_NONBLOCK, O_NOFOLLOW) whose fstat must say a regular file; else rc 1 and RR_WHY: `there is none`, `it is not a
+    plain file` (a FIFO, with a writer or none, a symlink, a folder, a device), `it cannot be read`. Never blocks: each
+    call runs under `timeout` (60 s: a bound on a hang, never a time it asserts; its exit 124 is a hang)."""
+
+    RUN = (r'''timeout -k 5 60 bash -c '. "$0" || exit 9; rr_read "$1" "$2" > "$3"; echo "rc=$? why=$RR_WHY"' '''
+           r'''"$0" "$@"; echo "bounded=$?"''')
+
+    def read(self, sb, path, cap=1025):
+        out = sb.path('out')
+        r = sb.lib(self.RUN, path, str(cap), out)
+        self.assertIn('bounded=0', r.stdout, 'rr_read hung, or its bash did not run: ' + r.stdout + r.stderr)
+        rc_why = [l for l in r.stdout.splitlines() if l.startswith('rc=')]
+        self.assertEqual(len(rc_why), 1, r.stdout + r.stderr)
+        with open(out, 'rb') as f:
+            return rc_why[0], f.read()
+
+    def test_a_plain_file_and_its_first_max_bytes(self):
+        sb = Sandbox(self)
+        p = sb.write(sb.path('home', 'a-record'), 'format 1\n' + 'x' * 2000, 0o640)
+        self.assertEqual(self.read(sb, p), ('rc=0 why=', ('format 1\n' + 'x' * 2000).encode()[:1025]))
+        self.assertEqual(self.read(sb, p, 3), ('rc=0 why=', b'for'))
+
+    def test_anything_but_a_regular_file_is_none_at_once(self):
+        sb = Sandbox(self)
+        good = sb.write(sb.path('home', 'good'), 'format 1\n', 0o640)
+        fifo = sb.path('home', 'fifo')
+        os.mkfifo(fifo)
+        busy = sb.path('home', 'busy')                       # a FIFO whose writer is there and wrote a record's text
+        os.mkfifo(busy)
+        w = os.open(busy, os.O_RDWR)
+        self.addCleanup(os.close, w)
+        os.write(w, b'format 1\nversion 2.339.0\n')
+        link = sb.path('home', 'link')
+        os.symlink(good, link)
+        folder = sb.path('home', 'folder')
+        os.mkdir(folder)
+        for why, path, says in (('none', sb.path('home', 'none'), 'there is none'),
+                                ('a FIFO with no writer', fifo, 'it is not a plain file'),
+                                ('a FIFO whose writer wrote a record', busy, 'it is not a plain file'),
+                                ('a symlink to a plain file', link, 'it is not a plain file'),
+                                ('a folder', folder, 'it is not a plain file'),
+                                ('a device', '/dev/null', 'it is not a plain file')):
+            with self.subTest(why):
+                self.assertEqual(self.read(sb, path), ('rc=1 why=' + says, b''))
 
 
 def plant(build, kind, name):

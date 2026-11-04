@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # runner-release.sh — SOURCED, never run: ONE copy of how the Linux host reads an actions/runner release, and of the
-# trust every such download uses; and ONE copy of a release's image RECIPE and of its BUILD RECORD reader. 02-d1.sh
+# trust every such download uses; ONE copy of a release's image RECIPE and of its BUILD RECORD reader; and ONE reader
+# of a file that the host's other user owns (rr_read). 02-d1.sh
 # sources it (`02-d1.sh build VERSION` and its full run), and so do pool-image.sh (its `up` and its unattended modes)
 # and bin/runner-updater (both users: RS_USER's DUE, RUN_USER's build pass), so a person's build and the updater read a
 # release, a recipe and a record the same way. It reads no host config. Needs bash 5, GNU coreutils, curl, python3 and
@@ -30,15 +31,27 @@
 #                           tarball's name in a build context). With CTX (02-d1.sh's build context), each file is copied
 #                           into CTX first and the COPY is hashed: what the build reads is what the recipe names
 #   rr_record DIR VERSION RECIPE
-#                           THE BUILD RECORD of (VERSION, RECIPE): DIR/<VERSION>-<RECIPE>, read ONCE (a private copy in
-#                           RR_DIR, then only the copy), exactly 02-d1.sh's four lines, at most 1024 bytes, no NUL byte,
-#                           never sourced; its version and recipe must be its name's. Sets RR_RECORD (its path),
-#                           RR_REC_VERSION, RR_REC_DIGEST and RR_REC_RECIPE. RR_WHY: there is none; it is not a plain
-#                           file; it cannot be read; it is not the four lines; it names another version, or recipe
+#                           THE BUILD RECORD of (VERSION, RECIPE): DIR/<VERSION>-<RECIPE>, read ONCE, by rr_read (a
+#                           private copy in RR_DIR, then only the copy), exactly 02-d1.sh's four lines, at most 1024
+#                           bytes, no NUL byte, never sourced; its version and recipe must be its name's. Sets
+#                           RR_RECORD (its path), RR_REC_VERSION, RR_REC_DIGEST and RR_REC_RECIPE. RR_WHY: there is
+#                           none; it is not a plain file; it cannot be read; it is not the four lines; it names another
+#                           version, or recipe
 #   rr_record_of DIR DIGEST the ONE build record in DIR whose digest is DIGEST (the image a config runs: the updater's
 #                           BASELINE, PLAN D2 HETZNER). A record is a plain file of DIR named <VERSION>-<RECIPE> that
 #                           rr_record reads as that version and recipe; any other file of DIR is none. The same
 #                           variables; RR_COUNT = how many records name DIGEST: none, or more than one, is rc 1
+# ANOTHER USER'S FILE (PLAN D1: RUN_USER's files are HOSTILE to RS_USER). EVERY read by one host user of a file the
+# other one owns is rr_read: RUN_USER's build records (rr_record_read, for rr_record and rr_record_of: RS_USER's DUE and
+# pool-image.sh's `up`) and RUN_USER's ~/run/image.ref (03-runscaler.sh with no config.toml, and the README's check of
+# a moved host). A type check and then an open are two lookups of the path: RUN_USER can rename a FIFO over the name
+# between them, and that open waits for a writer for ever, while the updater lock is held (review r1 of S2b-3b-2,
+# measured); a symlink renamed in there is followed. So:
+#   rr_read FILE MAX        at most MAX bytes of FILE on stdout, through ONE open (python3: O_NONBLOCK, O_NOFOLLOW)
+#                           that never blocks and never follows a symlink; the type is that open's own fstat, a
+#                           regular file only: a FIFO (with a writer or none), a symlink, a device or a folder under the
+#                           name is none, at once. 0, or 1 and RR_WHY: there is none; it is not a plain file; it cannot
+#                           be read
 #
 # TRUST (plan D2): every download is rr_curl, curl with ~/.curlrc ignored (-q first), https only (redirects too), TLS
 # 1.2 or newer, OPENSSL_X509_TEA_DISABLE=1, --cacert RR_BUNDLE and --capath RR_CAPATH, an EMPTY folder. That folder
@@ -284,22 +297,52 @@ rr_recipe() {   # rr_recipe DIR [CTX]: RR_RECIPE and RR_NAMES of an image/ folde
   RR_RECIPE=$h RR_NAMES=$names
 }
 
-rr_record_read() {   # rr_record_read FILE: one build record, read ONCE into a private copy, then only the copy (the
-  # header: rr_record): RR_REC_VERSION, RR_REC_DIGEST, RR_REC_RECIPE; 1 + RR_WHY
+rr_read() {   # rr_read FILE MAX: ANOTHER USER'S FILE (the header), at most MAX bytes of it on stdout; 1 + RR_WHY
+  local rc
+  RR_WHY="it cannot be read"
+  [[ ${2-} =~ ^[1-9][0-9]{0,6}$ ]] || { RR_WHY="rr_read: MAX is not a count: [${2-}]"; return 1; }
+  python3 -I -c '
+import errno, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC)
+except OSError as e:
+    sys.exit(3 if e.errno == errno.ENOENT else 4 if e.errno == errno.ELOOP else 5)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        sys.exit(4)
+    want, data = int(sys.argv[2]), b""
+    while len(data) < want:
+        b = os.read(fd, want - len(data))
+        if not b:
+            break
+        data += b
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+except OSError:
+    sys.exit(5)
+' "${1-}" "$2" < /dev/null
+  rc=$?
+  case $rc in
+    0) RR_WHY= ;;
+    3) RR_WHY="there is none" ;;
+    4) RR_WHY="it is not a plain file" ;;
+    *) RR_WHY="it cannot be read" ;;
+  esac
+  [ "$rc" = 0 ]
+}
+
+rr_record_read() {   # rr_record_read FILE: one build record, read ONCE into a private copy (rr_read: RUN_USER's file),
+  # then only the copy (the header: rr_record): RR_REC_VERSION, RR_REC_DIGEST, RR_REC_RECIPE; 1 + RR_WHY
   local f=${1-} t size= nonul text
   local re=$'^format 1\nversion ([0-9]+\\.[0-9]+\\.[0-9]+)\ndigest (sha256:[0-9a-f]{64})\nrecipe ([0-9a-f]{64})\n$'
   RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE=
-  RR_WHY="there is none"
-  [ -e "$f" ] || [ -L "$f" ] || return 1
-  RR_WHY="it is not a plain file"
-  { [ -f "$f" ] && [ ! -L "$f" ]; } || return 1
   RR_WHY="it cannot be read"
   { install -d -m 700 "$RR_DIR" && t=$(mktemp "$RR_DIR/record.XXXXXX"); } 2> /dev/null || return 1
-  if head -c 1025 -- "$f" > "$t" < /dev/null; then
+  if rr_read "$f" 1025 > "$t"; then
     size=$(wc -c < "$t"); nonul=$(tr -d '\000' < "$t" | wc -c); text=$(cat -- "$t"; echo .); text=${text%.}
   fi
   rm -f -- "$t"
-  [ -n "$size" ] || return 1
+  [ -n "$size" ] || { RR_WHY=${RR_WHY:-it cannot be read}; return 1; }
   RR_WHY="it is not 02-d1.sh's four lines (format 1, version, digest, recipe)"
   { [ "$size" -le 1024 ] && [ "$size" = "$nonul" ] && [[ $text =~ $re ]]; } || return 1
   RR_REC_VERSION=${BASH_REMATCH[1]} RR_REC_DIGEST=${BASH_REMATCH[2]} RR_REC_RECIPE=${BASH_REMATCH[3]}

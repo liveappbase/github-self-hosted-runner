@@ -16,7 +16,10 @@ AFTER ACCEPT, D7): RS_USER's pass, after its core calls, prints ONE line for hz-
   12. "would switch hz-docker to V (this release takes no action)".
 
 Steps 1-6 ask GitHub nothing; no step downloads a tarball (RUN_USER's build checked the digest). DUE never fails the pass
-and writes nothing into the state (NO BASELINE and recipe changed are printed, not stored).
+and writes nothing into the state (NO BASELINE and recipe changed are printed, not stored). Step 10 compares versions
+field by field, as numbers. RUN_USER's records are HOSTILE (PLAN D1, class Hostile): a FIFO or a symlink renamed over a
+record's name while the pass reads it is no record, at once (runner-release.sh's rr_read: one open, no symlink, never
+blocks), and the pass ends as always.
 
 Every cell runs the real scripts (pin lines rewritten: support.Pool) in a throwaway container, with the fake clock
 (support.Pool.fake_clock): the release's published_at is set relative to it, and no cell reads a wall-clock time.
@@ -48,10 +51,10 @@ def stop(name, version=None, **detail):
 
 class Due:
     """A Pool whose production runs OLD; the updater ON, the fake clock. The BASELINE (base=True): RUN_USER's build record
-    of OLD's digest, runner CUR, this release's recipe. GitHub's latest release VERSION, published AGE before the fake
-    now (STATUS: the API's answer), and its build record of NEW's digest (built=True)."""
+    of OLD's digest, runner CUR (or cur), this release's recipe. GitHub's latest release VERSION, published AGE before
+    the fake now (STATUS: the API's answer), and its build record of NEW's digest (built=True)."""
 
-    def __init__(self, test, family=None, base=True, built=True, age=3 * DAY, status=200, version=V):
+    def __init__(self, test, family=None, base=True, built=True, age=3 * DAY, status=200, version=V, cur=CUR):
         self.t = test
         self.p = p = Pool(test)
         p.curl['served'] = [OLD, NEW]
@@ -60,7 +63,7 @@ class Due:
         self.now = p.clock()
         p.gh.release(version, tarball(version), latest=True, published=iso(self.now - age), status=status)
         if base:
-            p.record(CUR, OLD)
+            p.record(cur, OLD)
         if built:
             p.record(version, NEW)
         self.put({'format': 1, 'on': True, 'families': {FAM: family} if family is not None else {}})
@@ -235,6 +238,21 @@ class Steps(unittest.TestCase):
                 g = Due(self, version=latest, built=False)    # its record would be the baseline's name
                 self.held(g, 'release v%s is not newer than its runner %s' % (latest, CUR), network=True)
 
+    def test_10_the_version_compare_is_numeric_field_by_field(self):
+        """Opus r1 F5: the patch number decides when major and minor are equal (2.338.3 over 2.338.2), and each field is
+        a number, not text (2.1000.0 over 2.999.0); each reverse is not newer. Red on a string compare and on a compare
+        that ignores the patch number (the review's mutants m1 and m2)."""
+        for latest, cur, due in (('2.338.3', '2.338.2', True), ('2.1000.0', '2.999.0', True),
+                                 ('2.338.2', '2.338.3', False), ('2.999.0', '2.1000.0', False)):
+            with self.subTest(latest=latest, cur=cur):
+                g = Due(self, version=latest, cur=cur)
+                line = g.due(g.run())
+                if due:
+                    self.assertEqual(line, 'runner-updater: pass: would switch hz-docker to %s (this release takes no '
+                                           'action)' % latest)
+                else:
+                    self.assertEqual(line, NOT + 'release v%s is not newer than its runner %s' % (latest, cur))
+
     def test_11_no_build_record_of_the_release_waits_for_run_user_s_build(self):
         g = Due(self, built=False)
         line = self.held(g, "it waits for root's build of runner %s (no usable build record of runner %s for this "
@@ -243,6 +261,55 @@ class Steps(unittest.TestCase):
         g.p.record(V, NEW)                                        # the control: its record, then would switch
         g.p.gh.seen.clear()
         self.assertEqual(g.due(g.run()), SWITCH)
+
+
+@needs_container
+class Hostile(unittest.TestCase):
+    """PLAN D1: RUN_USER's files are HOSTILE to RS_USER (Opus r1 F1). RUN_USER renames a FIFO, or a symlink to a good
+    record, over a record's name at the moment the pass's reader makes its private copy (support.Pool.swap: the
+    deterministic form of the race between the old reader's type check and its open). The reader (runner-release.sh's
+    rr_read) opens the name ONCE, never follows a symlink and never blocks: the name is no record, AT ONCE. At step 4
+    (the baseline): STOP NO BASELINE; at step 11 (the release's own record): it waits for RUN_USER's build. The pass
+    exits 0 as always, under `timeout` (support.Pool.bounded: a bound on a hang, never a time a cell asserts: exit 124
+    is a hang), and the next pass finds the updater lock free. Control: the same swap of a PLAIN record is a record."""
+
+    def swapped(self, kind, at, version):
+        g = Due(self)
+        rec = os.path.join(BUILDS, '%s-%s' % (version, g.p.recipe()))
+        target = g.p.write(g.p.path('good-record'), g.p.read(rec), 0o640)
+        g.p.swap(rec, kind, at=at, target=target)
+        before = g.families()
+        updater = os.path.join(g.p.build, 'bin', 'runner-updater')
+        r = g.p.bounded([updater, 'pass'])
+        self.assertNotEqual(r.returncode, 124, 'the pass hung on a %s renamed over %s' % (kind, rec))
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertTrue(g.p.swapped(), 'the swap did not happen: the cell proves nothing')
+        self.assertEqual(g.families(), before, 'the pass wrote into the families')
+        again = g.p.bounded([updater, 'pass'])
+        self.assertEqual(again.returncode, 0, again.stdout[-4000:] + again.stderr)
+        self.assertNotIn('another run holds the updater lock', again.stdout)
+        return g.due(r)
+
+    def test_4_a_fifo_or_a_symlink_renamed_over_the_baseline_record_is_no_record(self):
+        for kind in ('fifo', 'link', 'plain'):
+            with self.subTest(kind):
+                line = self.swapped(kind, 1, CUR)
+                if kind == 'plain':                               # the control
+                    self.assertEqual(line, SWITCH)
+                else:
+                    self.assertTrue(line.startswith(NOT + "STOP NO BASELINE: no build record of RUN_USER (%s) names "
+                                                          "its image's digest %s" % (BUILDS, OLD)), line)
+
+    def test_11_a_fifo_or_a_symlink_renamed_over_the_release_s_record_is_no_record(self):
+        """Step 4 made two private copies (the baseline's record and the release's): step 11's is the third."""
+        for kind in ('fifo', 'link', 'plain'):
+            with self.subTest(kind):
+                line = self.swapped(kind, 3, V)
+                if kind == 'plain':                               # the control
+                    self.assertEqual(line, SWITCH)
+                else:
+                    self.assertTrue(line.startswith(NOT + "it waits for root's build of runner %s" % V), line)
+                    self.assertTrue(line.endswith(': it is not a plain file)'), line)
 
 
 @needs_container

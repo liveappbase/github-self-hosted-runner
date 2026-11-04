@@ -3,7 +3,9 @@ after `02-d1.sh build VERSION` as RUN_USER, `up VERSION` as RS_USER reads RUN_US
 untrusted data, and puts its digest into the pool with `03-runscaler.sh real DIGEST`; it never reads ~/run/image.ref.
 
 The record it reads is ~/run/builds/<VERSION>-<RECIPE> of RUN_USER, RECIPE being 02-d1.sh's recipe of this release's
-image/ (RS_USER's ~/build/image/, the same release's files). It is copied once and parsed from that copy: exactly the four
+image/ (RS_USER's ~/build/image/, the same release's files). It is copied once, through ONE open that never follows a
+symlink and never blocks (runner-release.sh's rr_read: a FIFO or a symlink renamed over its name is no record, at
+once), and parsed from that copy: exactly the four
 lines 02-d1.sh writes (`format 1`, `version N.N.N`, `digest sha256:<64 hex>`, `recipe <64 hex>`), the version the one
 asked for, the recipe the one of its name, never sourced. A record that is missing, not a plain file, of another form,
 of another version or recipe, or whose digest the local registry does not serve: REFUSED, nothing changed, and the line
@@ -159,6 +161,26 @@ class UpReadsTheRecord(unittest.TestCase):
                     self.assertEqual(f.read(), bad, 'the hook did not run: the cell proves nothing')
                 self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
                 self.assertEqual(g.p.images(), [ref(NEW)] * 2)
+
+    def test_a_record_swapped_for_a_fifo_or_a_symlink_is_refused_at_once(self):
+        """PLAN D1, Opus r1 F1: RUN_USER renames a FIFO, or a symlink to a good record, over the record's name at the
+        moment up makes its private copy (support.Pool.swap: between the old reader's type check and its open). up's
+        reader (runner-release.sh's rr_read) opens it once, never follows a symlink and never blocks: its no-record
+        refusal at once, exit 1, under `timeout` (support.Pool.bounded: exit 124 is a hang; no time is asserted).
+        Control: the same swap of a PLAIN record is the record, and up puts it into the pool."""
+        for kind in ('fifo', 'link', 'plain'):
+            with self.subTest(kind):
+                g = Rig(self)
+                rec = g.p.record(V, NEW)
+                g.p.swap(rec, kind, target=g.p.write(g.p.path('good-record'), g.p.read(rec), 0o640))
+                r = g.p.bounded(['bash', os.path.join(g.p.build, 'setup', 'pool-image.sh'), 'up', V])
+                self.assertNotEqual(r.returncode, 124, 'up hung on a %s renamed over %s' % (kind, rec))
+                self.assertTrue(g.p.swapped(), 'the swap did not happen: the cell proves nothing')
+                if kind == 'plain':
+                    self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                    self.assertEqual(g.p.images(), [ref(NEW)] * 2)
+                else:
+                    g.refused(r, FIX, 'no usable build record of runner %s' % V, ': it is not a plain file.')
 
     def test_a_pinned_file_that_is_not_this_release_s_refuses(self):
         for rel in ('bin/validate-class', 'bin/runner-start', 'setup/03-runscaler.sh', 'config/runscaler.service'):

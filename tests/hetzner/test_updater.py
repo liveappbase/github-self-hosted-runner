@@ -1396,8 +1396,10 @@ class Text(unittest.TestCase):
     def test_the_readme_names_the_files_the_install_line_and_the_commands(self):
         with open(README) as f:
             text = f.read()
-        for row in ('| `bin/runner-updater` | RS_USER, RUN_USER |', '| `setup/runner-facts.sh` | RS_USER |'):
+        for row in ('| `bin/runner-updater` | RS_USER, RUN_USER |', '| `setup/runner-facts.sh` | RS_USER, RUN_USER |',
+                    '| `setup/03-runscaler.sh` | RS_USER |'):            # 03: the control, RS_USER's alone
             self.assertIn(row, text)
+        self.assertNotIn('| `setup/runner-facts.sh` | RS_USER |', text)   # Opus r1 F6: both users' updater reads it
         sec = text.split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         for s in ('runner-updater status', 'runner-updater on', 'runner-updater off', 'runner-updater pass',
                   'STOP RECOVER needed', '~/.local/state/runner-updater/state.json'):

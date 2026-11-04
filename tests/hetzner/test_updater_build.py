@@ -6,12 +6,14 @@ held; a member it does not read: WAIT, exit 4), and its commands:
 - `status` (no lock, writes nothing), `on`, `off` (they wait for the updater lock);
 - `pass`, THE BUILD PASS (a timer's entry later): the lock only tried; OFF ends it with no network; the latest release
   (rr_eligible): WAIT or not eligible is its line, exit 0; this release's recipe of ~/build/image (rr_recipe); a build
-  record of (V, recipe) is "built", exit 0; a STOP that holds V (stops.jq: a `check failed` of V; a newer release
-  proceeds alone past an older one) is its line, exit 0, and no build; else `~/build/setup/02-d1.sh build V` runs as its
-  CHILD on the lock it holds (fd 9). 02-d1.sh exit 0: "built"; 75: WAIT, exit 0, no STOP; else STOP `check failed` of V
-  with 02-d1.sh's FAIL line, written by rename, exit 1;
+  record of (V, recipe) is "built", exit 0, and it clears a `check failed` STOP of V (by rename); a STOP that holds V
+  (stops.jq: a `check failed` of V; a newer release proceeds alone past an older one) is its line, exit 0, and no
+  build; else `~/build/setup/02-d1.sh build V` runs as its CHILD on the lock it holds (fd 9). 02-d1.sh exit 0:
+  "built"; 75: WAIT, exit 0, no STOP; 129, 141, 143 (SIGHUP, SIGPIPE, SIGTERM): CUT, exit 0, no STOP; else STOP `check
+  failed` of V with the cause 02-d1.sh printed (the REFUSE line right before its last FAIL line, else that FAIL line),
+  written by rename, exit 1;
 - `build V`, a person's path: it waits for the lock, runs 02-d1.sh build V while OFF too; exit 0 clears the `check
-  failed` STOP of V, a failure writes it (or keeps it, with the new line).
+  failed` STOP of V; a failure prints the cause, exit 1, and writes no STOP (one that is there stays).
 
 02-d1.sh is ALWAYS its substitute here (support.Pool.d1_stub, in the cell's copy of ~/build): it logs its argv, whether
 its fd 9 is the updater lock, whether a new open finds the lock held, and whether fd 9 takes it. The real build runs
@@ -338,6 +340,80 @@ class BuildPass(unittest.TestCase):
                 else:
                     self.assertEqual(state(p)['stops'], stops, 'the older STOP stays')
 
+    def test_a_build_cut_by_a_signal_holds_no_stop_and_the_next_pass_builds_again(self):
+        """Opus r1 F2: 02-d1.sh ended by SIGHUP, SIGPIPE or SIGTERM (exit 129, 141, 143: an ssh drop, a reboot, a timer
+        stop) was CUT, and no check failed: a line, no STOP, exit 0, and the next pass builds V again. Control:
+        SIGKILL's 137 (an OOM kill too: a build that fails each time must not loop) and 1 are `check failed`, and the
+        next pass builds nothing."""
+        for rc, cut in ((129, 'SIGHUP'), (141, 'SIGPIPE'), (143, 'SIGTERM'), (137, None), (1, None)):
+            with self.subTest(rc=rc):
+                p, _ = run_pool(self, V, rc=rc, out='== 5. the runner image of release v%s\n' % V)
+                r = p.updater('pass')
+                if cut:
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn('runner-updater: pass: CUT 02-d1.sh build %s ended by %s (exit %d): no STOP; the '
+                                  'next pass builds it again' % (V, cut, rc), r.stdout)
+                    self.assertEqual(state(p)['stops'], [])
+                else:
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertEqual([(s['stop'], s['version']) for s in state(p)['stops']], [('check failed', V)])
+                ok(self, p.updater('pass'))
+                self.assertEqual(len(p.d1_calls()), 2 if cut else 1)
+
+    def test_a_pass_that_finds_the_record_of_v_clears_its_check_failed_stop(self):
+        """Opus r1 F3 (a): a person built V by README "A new runner release" step 1 (02-d1.sh build V), after a pass's
+        build of V failed: the next pass finds the record of (V, this recipe), builds nothing, and removes the `check
+        failed` STOP of V (by rename). A STOP of another version, and another STOP of V, stay. Control: the same pass
+        with no STOP of V to clear writes nothing (the state byte-equal)."""
+        held = stop('check failed', V, text='FAIL x', step='build', build_user='root')
+        others = [stop('check failed', OLDER, text='FAIL y', step='build', build_user='root'), stop('DISK', V)]
+        for why, stops in (('a check failed of V', [held] + others), ('control: none of V', others)):
+            with self.subTest(why):
+                p, _ = run_pool(self, V, stops=stops)
+                p.record(V, digest(39))
+                p.hooks()
+                before, ino = p.read(STATE), os.stat(STATE).st_ino
+                r = ok(self, p.updater('pass'))
+                self.assertIn('runner-updater: pass: runner %s is built for this release\'s image' % V, r.stdout)
+                self.assertEqual(p.d1_calls(), [])
+                if held in stops:
+                    self.assertIn('runner-updater: pass: the STOP check failed of runner %s is cleared' % V, r.stdout)
+                    self.assertEqual(state(p)['stops'], others)
+                    self.assertNotEqual(os.stat(STATE).st_ino, ino, 'not written by rename')
+                    self.assertIn('mv state.json', p.events())
+                else:
+                    self.assertNotIn('is cleared', r.stdout)
+                    self.assertEqual(p.read(STATE), before)
+
+    def test_the_stop_names_the_cause_02_d1_sh_printed(self):
+        """Opus r1 F4: the STOP's text (and status's line) is the cause 02-d1.sh printed: the REFUSE line right before
+        its last FAIL line (that FAIL line then says only "the REFUSE line above says why"), else that FAIL line; with
+        no FAIL line, its last REFUSE line. Controls: a FAIL line alone is that line; a REFUSE line earlier than the
+        line before the FAIL line is no cause of it."""
+        why = ("http://gh/actions-runner-linux-x64-%s.tar.gz: its sha256 is %s, not the release asset's digest "
+               "sha256:%s" % (V, 'a' * 64, 'b' * 64))
+        refuse = 'runner-release: REFUSE ' + why
+        fail = 'FAIL release v%s: nothing was built (the REFUSE line above says why)' % V
+        host = '02-d1.sh: REFUSE no host config /etc/liveapp-ci/host.conf (linux-docker/README.md)'
+        for case, out, text in (
+                ('a REFUSE line right before the FAIL line', 'OK   the recipe\n%s\n%s\n' % (refuse, fail), refuse),
+                ('a REFUSE line and no FAIL line', host + '\n', host),
+                ('control: a FAIL line alone', 'OK   x\n' + FAIL, FAIL.strip()),
+                ('control: an earlier REFUSE line', 'runner-release: REFUSE early\nOK   y\n' + FAIL, FAIL.strip())):
+            with self.subTest(case):
+                p, _ = run_pool(self, V, rc=1, out=out)
+                r = p.updater('pass')
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual([s['detail']['text'] for s in state(p)['stops']], [text])
+                self.assertIn('runner-updater: STOP check failed (runner %s): %s;' % (V, text), r.stdout)
+                self.assertIn('hz-docker: STOP check failed (runner %s): %s. Next: as root: `runner-updater build %s`'
+                              % (V, text, V), ok(self, p.updater('status')).stdout)
+        p, _ = run_pool(self, V, rc=1, out='no line of either kind\n')
+        p.updater('pass')
+        self.assertEqual([s['detail']['text'] for s in state(p)['stops']],
+                         ['02-d1.sh build %s exited 1 and printed no FAIL or REFUSE line (its output: %s)'
+                          % (V, os.path.join(STATEDIR, 'build.out'))])
+
     def test_a_recipe_it_cannot_compute_refuses_and_builds_nothing(self):
         p, _ = run_pool(self, V)
         os.symlink('Dockerfile', os.path.join(p.build, 'image', 'link'))
@@ -364,17 +440,31 @@ class BuildCommand(unittest.TestCase):
         self.assertIn('mv state.json', p.events())
         self.assertEqual(p.gh.seen, [], 'build V asks GitHub nothing itself (02-d1.sh does)')
 
-    def test_a_failed_build_v_writes_its_stop_and_keeps_it_with_the_new_line(self):
-        p, _ = run_pool(self, V, on=False, rc=1, out=FAIL)
-        r = p.updater('build', V)
+    def test_a_failed_build_v_writes_no_stop_and_keeps_the_one_there(self):
+        """Opus r1 F3 (b): a person's `build V` that fails prints why and exits 1, and the state stays byte for byte: no
+        new STOP (a typo such as 2.399.0, which GitHub answers 404, would otherwise hold a STOP nothing clears), and a
+        STOP that is there stays. Only a pass writes `check failed`. Control: a pass whose build fails the same way
+        holds the STOP."""
+        typo = '2.399.0'
+        refuse = ('runner-release: REFUSE GitHub answered 404 for http://gh/repos/actions/runner/releases/tags/v%s'
+                  % typo)
+        out = ('OK   the recipe\n%s\nFAIL release v%s: nothing was built (the REFUSE line above says why)\n'
+               % (refuse, typo))
+        held = stop('check failed', typo, text='FAIL x', step='build', build_user='root')
+        for why, stops in (('no STOP', []), ('a STOP of that version', [held])):
+            with self.subTest(why):
+                p, _ = run_pool(self, V, on=False, rc=1, out=out, stops=stops)
+                before = p.read(STATE)
+                r = p.updater('build', typo)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('runner-updater: build: runner %s is not built: %s; the state is as it was'
+                              % (typo, refuse), r.stdout)
+                self.assertEqual(p.read(STATE), before)
+                self.assertEqual(p.d1_calls()[0]['argv'], ['build', typo])
+        p, _ = run_pool(self, typo, rc=1, out=out)                     # the control: a pass's failure
+        r = p.updater('pass')
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertEqual(state(p)['stops'], [stop('check failed', V, text=FAIL.strip(), step='build',
-                                                  build_user='root')])
-        p.d1_stub(rc=1, out='FAIL another line\n')
-        r = p.updater('build', V)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertEqual(state(p)['stops'], [stop('check failed', V, text='FAIL another line', step='build',
-                                                  build_user='root')])
+        self.assertEqual(state(p)['stops'], [stop('check failed', typo, text=refuse, step='build', build_user='root')])
 
     def test_a_build_v_that_waits_keeps_the_state(self):
         held = stop('check failed', V, text='FAIL x', step='build', build_user='root')
@@ -407,7 +497,7 @@ class Text(unittest.TestCase):
         with open(os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')) as f:
             h = ' '.join(l.lstrip('#').strip() for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines())
         for s in ('RUN_USER', 'build VERSION', 'THE BUILD PASS', '02-d1.sh build', 'check failed', 'fd 9',
-                  'the build record', 'DUE'):
+                  'the build record', 'DUE', 'CUT', 'SIGPIPE', 'writes no STOP'):
             self.assertIn(s, h)
 
     def test_the_readme_names_run_user_s_commands(self):
@@ -416,7 +506,8 @@ class Text(unittest.TestCase):
         self.assertIn('| `bin/runner-updater` | RS_USER, RUN_USER |', text)
         sec = text.split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         for s in ("ssh <RUN_USER>@<host> '~/bin/runner-updater build <runner version>'", 'runner-updater pass',
-                  'check failed', 'would switch hz-docker to'):
+                  'check failed', 'would switch hz-docker to', 'cut by a signal', 'holds no STOP',
+                  'clears that STOP when it finds'):
             self.assertIn(s, sec)
         self.assertRegex(text, r'(?s)\n10\. \*\*The updater \(RS_USER and RUN_USER\)\.\*\*.*Then the same line with '
                                r'`<RUN_USER>`')

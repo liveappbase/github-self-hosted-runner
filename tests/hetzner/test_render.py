@@ -3,7 +3,8 @@ D5; the changed-lines list, items 30-33 and 41).
 
 - `real [DIGEST]`: with a DIGEST, that digest of the local registry; with none, the image the installed
   config.toml runs NOW (pool-image.sh's image_of, the same function), and ~/run/image.ref of RUN_USER only when there is
-  no config.toml (a fresh host). So a person's `03 real` after a change of pool.env's numbers keeps the running image.
+  no config.toml (a fresh host), read as hostile (runner-release.sh's rr_read: a FIFO, a symlink or a folder in its
+  place is refused at once). So a person's `03 real` after a change of pool.env's numbers keeps the running image.
   The one-off modes `probe` and `c1` are cut (the changed-lines list, item 34): `real` and `render` are the modes, and the
   host config's five keys only they read are gone with them.
 - `render DIGEST STAGED` (the updater's switch): renders the real sets with that digest into STAGED (a .toml file of
@@ -116,6 +117,29 @@ class DefaultImage(unittest.TestCase):
         r = p.s03('real')
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertEqual(p.images(), [ref(V0)] * 2)
+
+    def test_a_hostile_image_ref_is_refused_at_once(self):
+        """PLAN D1: RUN_USER's files are HOSTILE to RS_USER. With no config.toml, 03 reads RUN_USER's image.ref through
+        runner-release.sh's rr_read (one open, no symlink, never blocks): a FIFO (no writer: `cat` would wait for ever),
+        a symlink (to a file that names another image) or a folder in its place is refused at once, exit 1, and nothing
+        is installed. Under `timeout` (support.Pool.bounded: exit 124 is a hang; no time is asserted). Control: the
+        plain image.ref above (test_control_with_no_config_toml_it_renders_image_ref)."""
+        for kind in ('fifo', 'link', 'folder'):
+            with self.subTest(kind):
+                p = Pool(self)
+                f = os.path.join(p.HOME, 'run', 'image.ref')
+                if kind == 'fifo':
+                    os.mkfifo(f)
+                elif kind == 'link':
+                    os.symlink(p.write(p.path('elsewhere'), ref(X) + '\n'), f)
+                else:
+                    os.mkdir(f)
+                r = p.bounded(['bash', os.path.join(p.build, 'setup', '03-runscaler.sh'), 'real'])
+                self.assertNotEqual(r.returncode, 124, '03 hung on a %s as image.ref' % kind)
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertIn('FAIL no config.toml and no image.ref from B2: %s: it is not a plain file' % f, r.stdout)
+                self.assertIsNone(p.config())
+                self.assertNotIn(ref(X), r.stdout)
 
     def test_a_digest_argument_renders_that_digest_and_nothing_else_changes(self):
         p = Pool(self)
