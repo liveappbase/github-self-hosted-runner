@@ -304,10 +304,9 @@ class Win:
 
 
 def hold_runner_lock(w):
-    """the rig's runner lock held by a REAL lockf (as runscaler's runner-start holds it) until the test ends"""
-    w.sb.start(['/usr/bin/lockf', '-k', '-t', '0', w.r.lock, '/bin/sleep', '600'], name='runner-lock-holder')
-    w.sb.wait_for(lambda: subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', w.r.lock, '/usr/bin/true']).returncode
-                  == 75, 'the runner lock to be held')
+    """the rig's runner lock held by a REAL lockf (as runscaler's runner-start holds it) until the test ends; the
+    holder waits for the lock (Sandbox.hold_lock)"""
+    w.sb.hold_lock(w.r.lock, name='runner-lock-holder')
 
 
 def healthz(*names):

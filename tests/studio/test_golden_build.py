@@ -163,10 +163,7 @@ class Rig:
         return cmds[0]
 
     def hold_lock(self):
-        p = self.sb.start(['/usr/bin/lockf', '-k', '-t', '0', self.lock, '/bin/zsh', '-f', '-c',
-                           'print -r -- held; exec /bin/sleep 600'], name='holder')
-        self.sb.wait_for(lambda: self.sb.output('holder')[0] == 'held\n' or p.poll() is not None, 'the lock holder')
-        self.test.assertIsNone(p.poll(), 'the test could not take the lock: %r' % (self.sb.output('holder'),))
+        self.sb.hold_lock(self.lock, name='holder')
 
 
 class TestDate(unittest.TestCase):

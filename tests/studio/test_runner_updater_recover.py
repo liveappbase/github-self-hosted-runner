@@ -276,9 +276,10 @@ class TestStep2Quiet(unittest.TestCase):
         lock, blocked in its build until scn/go exists -> (the lockf process, the pid of its zsh)"""
         w.hook('build-hook', 'until [[ -f %s/go ]]; do /bin/sleep 0.05; done\n' % w.scn)
         pidf = w.sb.path('builder.pid')
-        p = w.sb.start(['/usr/bin/lockf', '-k', '-t', '0', w.r.lock, '/bin/zsh', '-f', '-c',
-                        'print -r -- $$ > %s; exec /bin/zsh -f %s --date %s' % (pidf, os.path.join(w.tools, 'golden-build'),
-                                                                               today())], name='builder')
+        p = w.sb.hold_lock(w.r.lock, name='builder', argv=[
+            '/bin/zsh', '-f', '-c',
+            'print -r -- $$ > %s; exec /bin/zsh -f %s --date %s' % (pidf, os.path.join(w.tools, 'golden-build'),
+                                                                   today())])
         w.sb.wait_for(lambda: os.path.exists(pidf) and read_text(pidf).strip(), 'the builder to start')
         zpid = int(read_text(pidf))
         w.sb.wait_for(lambda: self.lock_reads(w) == 'held', 'lockf to hold the lock')
@@ -360,7 +361,7 @@ class TestStep2Quiet(unittest.TestCase):
 
     def test_a_held_runner_lock_holds_recover(self):
         w = killed(self, 'build-start', Win(self, extra_rewrites=[('RECOVER_WAIT=20', 'RECOVER_WAIT=1')]))
-        hold = w.sb.start(['/usr/bin/lockf', '-k', '-t', '0', w.r.lock, '/bin/sleep', '600'], name='holder')
+        hold = w.sb.hold_lock(w.r.lock, name='holder')
         w.sb.wait_for(lambda: self.lock_reads(w) == 'held', 'the lock to be held')
         res = recover(w, ok=1)
         self.assertIn('runner-updater: STOP CI DISABLED: ', res.stdout)

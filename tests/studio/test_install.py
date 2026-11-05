@@ -483,9 +483,7 @@ class TestTheUpdaterLock(unittest.TestCase):
     def test_the_runner_lock_held_alone_is_the_existing_stop_and_the_updater_lock_is_free_after(self):
         h = Inst(self)
         h.statedir_with_list()
-        h.sb.start(['/usr/bin/lockf', '-k', '-t', '0', h.lock, '/bin/sleep', '600'], name='runner-lock-holder')
-        h.sb.wait_for(lambda: subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', h.lock, '/usr/bin/true'])
-                      .returncode == 75, 'the runner lock to be held')
+        h.sb.hold_lock(h.lock, name='runner-lock-holder')       # a REAL lockf, as runscaler's runner-start
         res = h.install(ok=False)
         self.assertEqual(res.returncode, 1)
         self.assertEqual(res.stdout, "install: STOP runner-lock-free says 'held': runscaler, wall-check, golden-build or "
