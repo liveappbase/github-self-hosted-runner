@@ -19,6 +19,8 @@
 #   rr_lock ROLE [-n]       THE UPDATER LOCK (below), held on fd 9 until this process and its children end, after
 #                           THE MODES of its folder by ROLE (below; rs or run: the caller's host user); -n (a timer pass
 #                           of the updater) only tries it: 75 when another run holds it
+#   rr_held                 THE UPDATER'S CHILD (below): this process holds THE UPDATER LOCK on an fd 9 its holder
+#                           handed it; it takes, opens and waits for nothing. 0, or 1 and RR_WHY (it prints nothing)
 # Each returns 0, or 1 with a REFUSE line on stderr; rr_release and rr_eligible return 75 with a WAIT line on stderr
 # when GitHub answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its
 # rr_bundle refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own
@@ -79,11 +81,19 @@
 # flock(2) ties the lock to the OPEN FILE, so a child that inherits fd 9 shares its parent's lock: when fd 9 already
 # is RR_LOCK, rr_lock takes it there (at once, if the parent holds it), and so a holder can run 02-d1.sh as its child.
 # A new open of RR_LOCK would be another holder, and that child would wait for its own parent.
+# THE UPDATER'S CHILD (S2b-3c-1 D-a; PLAN D7 "the unattended modes are the updater's only"): pool-image.sh's unattended
+# modes, and 03-runscaler.sh's render inside a window, run only as the child of the lock's holder, and rr_held is that
+# test, three conditions: (1) /dev/fd/9 is RR_LOCK (the same file); (2) a FRESH open of RR_LOCK cannot take it (flock -n
+# fails: someone holds it); (3) fd 9 can (flock -n 9: this open file description is the holder's, handed down). Without
+# (2), a shell that opened the lock on fd 9 and holds nothing would pass: flock -n 9 would TAKE the free lock (measured,
+# Opus r2 F9). RESIDUAL, named: a person who takes the lock on fd 9 by hand (`( flock 9; ... ) 9>> RR_LOCK`, the
+# flock(1) idiom) passes; the open-window refusal still serializes such a window, and the next pass ends its journal.
 # THE MODES (PLAN D1, "Hetzner: one record per user", 11-05): RR_LOCK's folder holds the updater's state, RR_STATE, which
 # RS_USER's `status` prints of RUN_USER's (D7), by the same channel as RUN_USER's build records: RUN_USER's group, whose
 # only member is RS_USER (01-users.sh checks that). rr_lock sets them, by the ROLE its caller names, BEFORE it opens the
-# lock, so every holder of it (both users' updaters, 02-d1.sh in both modes as RUN_USER, pool-image.sh as RS_USER) sets
-# the same ones, a lock take that finds the lock held too, and a folder left with older modes is set at the next one:
+# lock, so every holder of it (both users' updaters, 02-d1.sh in both modes as RUN_USER; pool-image.sh's unattended
+# modes take none: they run as RS_USER's updater's child, rr_held) sets the same ones, a lock take that finds the lock
+# held too, and a folder left with older modes is set at the next one:
 #   run  each folder from the home to RR_LOCK's: one it makes 0710, one that is there gains the group's search (g+x)
 #        and keeps every other bit (so others get nothing they did not have; the home itself is 01-users.sh's 0750);
 #        RR_LOCK's own folder 0710 each time; RR_STATE 0640
@@ -427,4 +437,19 @@ rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command:
   [ "${2-}" != -n ] || return 75
   echo "WAIT another run holds the updater lock $RR_LOCK (a build, or a pass of the updater): waiting for it to end"
   flock 9 || { rr_no "cannot take the updater lock $RR_LOCK"; return 1; }
+}
+
+rr_held() {   # rr_held: THE UPDATER'S CHILD (the header): 0, or 1 and RR_WHY; prints nothing, waits for nothing
+  local rc
+  RR_WHY="fd 9 is not the updater lock $RR_LOCK (no holder handed it down)"
+  [ /dev/fd/9 -ef "$RR_LOCK" ] || return 1
+  flock -n -E 75 "$RR_LOCK" true 9>&- 2> /dev/null < /dev/null; rc=$?
+  case $rc in
+    75) ;;
+    0) RR_WHY="nobody holds the updater lock $RR_LOCK (a fresh open of it took it at once)"; return 1 ;;
+    *) RR_WHY="the updater lock $RR_LOCK cannot be tested by a fresh open (flock exited $rc)"; return 1 ;;
+  esac
+  RR_WHY="fd 9 is the updater lock, but another run holds it (fd 9 is no holder's)"
+  flock -n 9 || return 1
+  RR_WHY=
 }

@@ -12,6 +12,18 @@
 #                        with no PID or no start): the window's journal reads none, a pass has no facts. A unit that
 #                        is deactivating (runscaler draining after a stop) reads none too, though its process still
 #                        runs: a pass then sees no boundary of one process, an evidence gap (the safe direction)
+#   unit_read            runscaler's unit in ONE read (`systemctl --user show runscaler`): UNIT_ACTIVE (ActiveState),
+#                        UNIT_FILE (UnitFileState: `enabled` is CI on, S2b-3c-1 operator (1)), UNIT_PID (MainPID, 0 for
+#                        none), UNIT_START (ActiveEnterTimestamp, epoch seconds, or empty). rc 1 when the read failed or
+#                        its answer is not one this reads (an ActiveState of another word, no MainPID, no UnitFileState)
+#   runs AFTER FILE SET...
+#                        THE RUNS RULE (S2b-3c-1 r3 FOLD, Opus r3 F1): runscaler RUNS when its /healthz answers and
+#                        lists every SET on two reads 3 s apart (healthz_pair, into FILE, which it empties first), and
+#                        proc_now gives the same "PID START" before and after those reads, with START after AFTER (an
+#                        epoch: the install time). Never one `active` read: runscaler.service is Type=simple with
+#                        Restart=always, so a runner-start that refuses is `active` for a second of each 31, a fresh
+#                        ActiveEnterTimestamp each time, and one that hangs is `active` while it serves nothing. 0 and
+#                        RUNS_PROC = that "PID START"; 1 and RUNS_WHY (it prints nothing)
 #   log_pos [OUT [INODE OFFSET SHA]]
 #                        runscaler's log position, R/runner.log opened ONCE: "INODE OFFSET SHA" (its inode and size from
 #                        that open, and the sha256 of the 64 bytes before the size, or of all of them when fewer). With
@@ -61,6 +73,46 @@ proc_now() {
   if [ "$s" = active ] && [[ $p =~ ^[1-9][0-9]*$ ]] && [[ $a =~ ^[0-9]+$ ]]; then echo "$p $a"; return 0; fi
   echo none
   [ -n "$s" ] && [ "$s" != active ]   # 0: systemd answered that no runscaler runs; 1: an answer this does not read
+}
+
+unit_read() {
+  local o k v
+  UNIT_ACTIVE= UNIT_FILE= UNIT_PID= UNIT_START=
+  o=$(systemctl --user show runscaler -p ActiveState -p UnitFileState -p MainPID -p ActiveEnterTimestamp \
+    --timestamp=unix 2> /dev/null < /dev/null) || return 1
+  while IFS='=' read -r k v; do
+    case $k in ActiveState) UNIT_ACTIVE=$v ;; UnitFileState) UNIT_FILE=$v ;; MainPID) UNIT_PID=$v ;;
+      ActiveEnterTimestamp) UNIT_START=${v#@} ;; esac
+  done <<< "$o"
+  [[ $UNIT_ACTIVE =~ ^(active|inactive|failed|activating|deactivating|reloading|maintenance)$ ]] \
+    && [[ $UNIT_PID =~ ^[0-9]+$ ]] && [[ $UNIT_FILE =~ ^[a-z-]+$ ]] && [[ $UNIT_START =~ ^[0-9]*$ ]]
+}
+
+runs() {
+  local a=${1-} f=${2-} p q
+  shift 2
+  RUNS_PROC= RUNS_WHY=
+  [[ $a =~ ^[0-9]+$ ]] && [ "$#" -ge 1 ] || { RUNS_WHY="runs: no install time or no set"; return 1; }
+  p=$(proc_now)
+  [ "$p" != none ] || { RUNS_WHY="no runscaler process runs (systemd: not active)"; return 1; }
+  [ "${p#* }" -gt "$a" ] || { RUNS_WHY="runscaler ($p) started at or before $a, the install"; return 1; }
+  : > "$f" || { RUNS_WHY="cannot write $f"; return 1; }
+  healthz_pair "$f"
+  python3 -I -c '
+import json, sys
+lines = open(sys.argv[1], "rb").read().decode("utf-8", "replace").splitlines()
+want = set(sys.argv[2:])
+def lists(l):
+    try:
+        h = json.loads(l)
+        return want <= {s.get("name") for s in (h.get("scale_sets") or []) if isinstance(s, dict)}
+    except (ValueError, AttributeError):
+        return False
+sys.exit(0 if len(lines) == 2 and all(lists(l) for l in lines) else 1)' "$f" "$@" < /dev/null \
+    || { RUNS_WHY="runscaler's /healthz did not list every set ($*) on two reads 3 s apart"; return 1; }
+  q=$(proc_now)
+  [ "$q" = "$p" ] || { RUNS_WHY="runscaler changed during the /healthz reads ($p, then $q)"; return 1; }
+  RUNS_PROC=$p
 }
 
 log_pos() {

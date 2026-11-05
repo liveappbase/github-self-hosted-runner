@@ -3,7 +3,8 @@ user", its 11-05 line), so RS_USER's `status` can print it (D7): RUN_USER's stat
 folder from RUN_USER's home to its STATEDIR (~/.local/state/runner-updater) gives the group search (x) and gives others
 nothing they did not have; RS_USER's STATEDIR stays 0700 and its state.json 0600 (no channel from RS_USER to RUN_USER);
 the lock file, PASSDIR and RR_DIR stay private. ONE place decides those modes by the user's role: runner-release.sh's
-rr_lock, which every holder of the updater lock runs (both users' updaters, 02-d1.sh in both modes, pool-image.sh), and
+rr_lock, which every holder of the updater lock runs (both users' updaters, 02-d1.sh in both modes; pool-image.sh's
+unattended modes take none: they are the updater's child, S2b-3c-1 D-a), and
 the updater writes its state with the mode rr_lock named. A folder made there gets its mode set, never the umask's or
 coreutils' own (install -d made parents 0700 on Ubuntu 26.04 and 0755 on 24.04, measured).
 
@@ -413,9 +414,9 @@ class OnePlace(unittest.TestCase):
     def test_every_holder_of_the_lock_names_its_role_and_one_place_sets_the_modes(self):
         """rr_lock is the one place that sets the modes of the updater's folder, its lock and (by the mode it names)
         the state, by the ROLE its caller names: every call of it in linux-docker/ names one, 02-d1.sh's `run` (it runs
-        as RUN_USER), pool-image.sh's `rs` (RS_USER's only), the updater's its own ROLE. No other line of linux-docker/
-        sets the mode of that folder (an `install -d` or a chmod of it), and the state's mode comes from rr_lock's
-        RR_STATE_MODE alone. Text only: it runs anywhere."""
+        as RUN_USER), the updater's its own ROLE. pool-image.sh's unattended modes take none: they are the updater's
+        child (S2b-3c-1 D-a: rr_held). No other line of linux-docker/ sets the mode of that folder (an `install -d` or a
+        chmod of it), and the state's mode comes from rr_lock's RR_STATE_MODE alone. Text only: it runs anywhere."""
         calls = {}
         for rel in ('setup/02-d1.sh', 'setup/pool-image.sh', 'bin/runner-updater', 'setup/runner-release.sh',
                     'setup/03-runscaler.sh', 'setup/04-timer.sh', 'setup/runner-facts.sh'):
@@ -424,8 +425,9 @@ class OnePlace(unittest.TestCase):
                 m = re.search(r'(?:^\s*|[;&|{(!]\s*)rr_lock(?=\s|$)([^|;&)]*)', code)   # a call: a word of its own
                 if m and 'rr_lock()' not in code:
                     calls.setdefault(rel, []).append(' '.join(('rr_lock' + m.group(1)).split()))
-        self.assertEqual(calls, {'setup/02-d1.sh': ['rr_lock run'], 'setup/pool-image.sh': ['rr_lock rs'],
+        self.assertEqual(calls, {'setup/02-d1.sh': ['rr_lock run'],
                                  'bin/runner-updater': ['rr_lock "$ROLE" -n', 'rr_lock "$ROLE"']})
+        self.assertRegex(text('setup/pool-image.sh'), r'(?m)^\s*rr_held \|\| die ')
         rr = text('setup/runner-release.sh')
         body = rr.split('\nrr_lock() {', 1)[1].split('\n}\n', 1)[0]
         self.assertIn('RR_STATE_MODE=', body)
