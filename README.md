@@ -109,7 +109,7 @@ Copy the two lines only from the assets of the release you chose — never from 
 ## Update
 
 1. `/Users/ci/bin/runner-updater status` FIRST (a host on a release before 0.2.0 has no such link: go to step 2). When it shows an open window journal, run `/Users/ci/bin/runner-updater pass` before anything else: its RECOVER then sees CI as the window left it, and ends the window. When that pass prints "another run holds the updater lock", a window is RUNNING: wait, and run `status` again until it shows no open window. Never run runner-disable while a run holds the updater lock: it can make a good switch fail and undo it. When the pass says RECOVER cannot read or act on the window record: "An unfinished window the updater cannot end" below.
-2. Wait until no job runs, then `/Users/ci/bin/runner-disable` (it waits for a running job; a stop kills a running VM — see [SECURITY.md](SECURITY.md)).
+2. Wait until no job runs. When step 1 ran `status`: just before runner-disable, check again that no run holds the updater lock: `/usr/sbin/lsof /Users/ci/.local/state/runner-updater/lock` prints nothing (while the updater is ON, a window may start just as CI goes idle). When it prints a line, go back to step 1. Then `/Users/ci/bin/runner-disable` (it waits for a running job; a stop kills a running VM — see [SECURITY.md](SECURITY.md)).
 3. Run the new release's `install-line.txt` as ci. Read what install prints. It refuses while an updater run holds its lock, or a window record is open (it names the `pass` to run).
 4. Only if install prints `ROOT LINE NEEDED`: the new release's `root-line.txt`, in the admin's own session.
 5. If install prints `WALL-CHECK needed`: `/Users/ci/bin/wall-check`.

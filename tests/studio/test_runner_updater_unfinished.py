@@ -452,5 +452,23 @@ class TestTheEnableStepsBranches(unittest.TestCase):
             self.assertTrue([d for d in dies if d.startswith(q)], (q, dies))
 
 
+
+class TestUpdateStep2ReadsTheLock(unittest.TestCase):
+    """review r1 P3-4: while the updater is ON, a due window may start just as CI goes idle, and a runner-disable during
+    it can make a good switch fail and undo it. README "Update" step 2 reads the updater lock again after the wait for
+    the jobs and just before runner-disable, and goes back to step 1 when a run holds it. (A host with no updater has no
+    lock file, and lsof then prints its error: the check is for a host where step 1 ran `status`.)"""
+
+    def test_step_2_reads_the_lock_just_before_runner_disable(self):
+        step = readme_steps('Update')[2]
+        jobs = step.find('Wait until no job runs')
+        lock = step.find('just before runner-disable, check again that no run holds the updater lock: %s prints nothing'
+                         % LOCK_LINE)
+        back = step.find('When it prints a line, go back to step 1.')
+        disable = step.find('`/Users/ci/bin/runner-disable`')
+        self.assertTrue(0 <= jobs < lock < back < disable, (jobs, lock, back, disable, step))
+        self.assertIn('When step 1 ran `status`', step)
+
+
 if __name__ == '__main__':
     unittest.main()
