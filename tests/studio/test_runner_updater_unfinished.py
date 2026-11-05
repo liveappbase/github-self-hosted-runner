@@ -326,7 +326,8 @@ class TestTheHandStepsText(unittest.TestCase):
               'On the first choice that passes', 'Tell the maintainer')
     # every step reference in the steps, by the step that makes it
     REFS = {1: ['wait as "Update" step 1 says'], 3: ['do steps 4 and 5 only, then step 9'],
-            7: ['go to step 8', 'the copy of step 6'], 8: ["go back to step 6's wait", "step 3's `TZ=UTC0 ps` line"]}
+            7: ['go to step 8', 'the copy of step 6'], 8: ["go back to step 6's wait", "step 3's `TZ=UTC0 ps` line",
+                                                           "is one of step 5's (a record VM still runs): step 5, then"]}
 
     def test_the_first_step_checks_that_no_run_holds_the_updater_lock(self):
         first = readme_steps(HAND)[1]
@@ -420,6 +421,35 @@ class TestTheStartChecksReadOneClock(unittest.TestCase):
         line = self.readme_line(r'\bdate\b.*EPOCH')
         res = sb.run(['/bin/zsh', '-f', '-c', line.replace('EPOCH', str(t))], extra_env={'TZ': WEST})
         self.assertEqual(calendar.timegm(time.strptime(res.stdout.strip(), '%a %b %d %H:%M:%S UTC %Y')), t, res.stdout)
+
+
+
+class TestTheEnableStepsBranches(unittest.TestCase):
+    """review r1 P3-3: step 8 names each branch of a runner-enable refusal, as the DOCS WALK's row 18 has them: the
+    runner lock is not free (back to step 6's wait), a record VM still runs (step 5, then again), any other text (stop:
+    the validated choice stays in place, CI down, the maintainer told at once). When every choice fails, the last one
+    tried did not validate, or did not start. Each refusal step 8 quotes is a text runner-enable prints."""
+
+    def test_each_refusal_has_its_branch(self):
+        enable = readme_steps(HAND)[8]
+        self.assertIn("When it says `the runner lock is not free`, a runscaler still drains: go back to step 6's wait, "
+                      "then runner-enable again.", enable)
+        self.assertIn("When it says `a VM outside runscaler is running` and each VM it names is one of step 5's (a record "
+                      "VM still runs): step 5, then runner-enable again.", enable)
+        self.assertIn('Any other text (another VM too): stop here, with the validated choice in place and CI down, and '
+                      'tell the maintainer at once.', enable)
+
+    def test_every_choice_fails_says_did_not_validate_or_did_not_start(self):
+        enable = readme_steps(HAND)[8]
+        self.assertIn('When every choice fails, CI stays down and the last choice tried is the config left in place: it '
+                      'did not validate, or did not start.', enable)
+
+    def test_each_refusal_it_quotes_is_runner_enable_s(self):
+        quoted = re.findall(r'When it says `([^`]+)`', readme_steps(HAND)[8])
+        self.assertEqual(len(quoted), 2, quoted)
+        dies = re.findall(r'\bdie "([^"]*)"', read_text(os.path.join(REPO, 'bin', 'runner-enable')))
+        for q in quoted:
+            self.assertTrue([d for d in dies if d.startswith(q)], (q, dies))
 
 
 if __name__ == '__main__':
