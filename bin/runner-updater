@@ -1,5 +1,5 @@
 #!/bin/zsh -f
-# runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY
+# runner-updater status | on | off | pass [--log FILE] | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY
 #                | report [--observe FAMILY]... [--observe-clear FAMILY]...
 # The runner-image updater on the Studio, as ci. Design: docs/operations.md ("The updater: status, on, off, pass,
 # protect", "The switch window: rebuild and switch-now", "RECOVER", "Rollback: back and retry" and "The updater's
@@ -69,7 +69,12 @@
 #            (not one line VERSION SHA256)`): a journal it cannot write is a STOP before that removal (the pin stays;
 #            run off again). A PINDIR entry that is not a file, a PINDIR that is not a folder, or one it cannot read and
 #            search (it would list as empty): STOP, and the pins stay.
-#   pass     the timer's entry (its LaunchAgent comes later). It TRIES the lock: held, "another run holds the
+#   pass     the timer's entry: install loads config/sh.liveapp.runner-updater.plist, which runs `pass --log FILE`
+#            every 600 s. --log FILE (pass only; another command: usage, exit 2): FILE over 1 MiB is renamed to FILE.1
+#            first; the pass's output goes to FILE, after a line `=== pass <UTC> pid N`, and its last line is `=== end rc
+#            N <UTC>` (also when it finds the lock held). A FILE it cannot rename or open never stops the pass (RECOVER
+#            must run): its output stays where it was (the plist's .err). Its one writer is the timer: a person runs
+#            `pass` without --log. It TRIES the lock: held, "another run holds the
 #            updater lock", exit 0 at once. Then RECOVER FIRST (below), even while OFF. OFF: "the updater is OFF", exit 0
 #            (1 when RECOVER held a STOP) at once, no core call. ON: the jq check
 #            (as report's step 2), RECOVER's no-action CI DISABLED and a window's POOL DOWN cleared when no journal is
@@ -261,7 +266,7 @@ say() { print -r -- "runner-updater: $*" }
 refuse() { print -r -- "runner-updater: REFUSE $*"; exit 1 }
 stop() { print -r -- "runner-updater: STOP $*"; exit 1 }
 usage() {
-  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
+  print -u2 -r -- "runner-updater: usage: runner-updater status | on | off | pass [--log FILE] | protect | rebuild FAMILY | switch-now FAMILY | back FAMILY | retry FAMILY | report [--observe FAMILY]... [--observe-clear FAMILY]...${1:+ ($1)}"
   exit 2
 }
 
@@ -269,8 +274,16 @@ usage() {
 (( $# >= 1 )) || usage "no command"
 cmd=$1
 shift
+logf=
 case $cmd in
-  (status|on|off|pass|protect) (( $# == 0 )) || usage "$cmd takes no argument" ;;
+  (pass)
+    if [[ ${1-} == --log ]]; then
+      (( $# == 2 )) && [[ $2 == /?* ]] || usage "pass --log takes one absolute FILE"
+      logf=$2
+      shift 2
+    fi
+    (( $# == 0 )) || usage "pass takes no argument but --log FILE" ;;
+  (status|on|off|protect) (( $# == 0 )) || usage "$cmd takes no argument" ;;
   (rebuild|switch-now|back|retry)
     (( $# == 1 )) || usage "$cmd takes one FAMILY"
     [[ $1 =~ '^[a-z][a-z0-9-]{0,40}$' ]] || usage "not a family name: '$1'"
@@ -279,6 +292,22 @@ case $cmd in
   (report) ;;
   (*) usage "unknown command '$cmd'" ;;
 esac
+# pass --log FILE (the timer's: config/sh.liveapp.runner-updater.plist; a person runs pass without it): FILE over 1 MiB
+# is renamed to FILE.1 first, then this pass's output goes to FILE, between its start and end lines. A FILE it cannot
+# rename or open never stops the pass (RECOVER must run): zsh says why and goes on, and the output stays where it was
+# (the plist's .err). So no `|| exit` after the exec
+if [[ -n $logf ]]; then
+  zmodload zsh/datetime
+  zmodload -F zsh/stat b:zstat
+  typeset -A logst
+  if [[ -f $logf ]] && zstat -H logst -- $logf 2> /dev/null && (( logst[size] > 1048576 )); then
+    /bin/mv -f -- $logf $logf.1 2> /dev/null \
+      || print -u2 -r -- "runner-updater: pass: cannot rename $logf to $logf.1: this pass writes on"
+  fi
+  exec >> $logf 2>&1
+  print -r -- "=== pass $(strftime '%Y-%m-%d %H:%M:%S UTC' $EPOCHSECONDS) pid $$"
+  trap 'logrc=$?; print -r -- "=== end rc $logrc $(strftime "%Y-%m-%d %H:%M:%S UTC" $EPOCHSECONDS)"' EXIT
+fi
 source $RELBIN/runner-updater-lib || refuse "cannot load $RELBIN/runner-updater-lib"
 # every folder on the path to STATEDIR's files must be one it can search (the lib's ru_reach), before any command reads
 # one: behind a folder it cannot search, the state would read as fresh (OFF), the list as missing, a pin as absent
