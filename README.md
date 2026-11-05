@@ -1,5 +1,16 @@
 # mac-github-self-hosted-runner
 
+Run GitHub Actions jobs on your own hardware, each job in a fresh environment that is deleted after it. Two host types, each with its own install:
+
+| Host | Each job runs in | Install |
+|---|---|---|
+| **Apple-silicon Mac** | a fresh macOS VM ([Tart](https://github.com/openai/tart)), behind a network wall | [Install](#install), below |
+| **Linux server** (Ubuntu, x86_64) | a fresh Docker container from a local runner image, on a rootless Docker daemon | [linux-docker/README.md](linux-docker/README.md) |
+
+On both, [runscaler](https://github.com/ysya/runscaler) takes the jobs from GitHub runner scale sets. The rest of this page is about the Mac host; the Linux server has its own page, [linux-docker/README.md](linux-docker/README.md).
+
+## The Mac host
+
 Turn an Apple-silicon Mac into a GitHub Actions host that runs every job in a **fresh Tart VM behind a network wall**.
 
 - Each job gets a new macOS VM, cloned from a golden image and deleted after the job. At most 2 jobs run at once (Apple allows 2 macOS VMs per Mac).
@@ -9,8 +20,6 @@ Turn an Apple-silicon Mac into a GitHub Actions host that runs every job in a **
 - You install it from ONE published release, with ONE root step whose exact line is an immutable release asset.
 
 Status: **v0.2.0, pre-release.** The design and its reasons: [docs/design.md](docs/design.md). Day-to-day work: [docs/operations.md](docs/operations.md). What the wall does and does not protect: [SECURITY.md](SECURITY.md).
-
-A Linux host that runs each job in a fresh Docker container has its own folder and install: [linux-docker/README.md](linux-docker/README.md).
 
 Licence: [Apache-2.0](LICENSE) for the code in this repository. What it downloads keeps its own licence (below).
 

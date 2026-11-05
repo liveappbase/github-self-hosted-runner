@@ -1,6 +1,6 @@
 # linux-docker — a Linux CI host that runs every job in a fresh Docker container
 
-This folder is the Linux half of the repository: a Linux host where [runscaler](https://github.com/ysya/runscaler) takes jobs from GitHub runner scale sets and starts each one in a new container from a local runner image. The Mac product is the rest of the repository ([../README.md](../README.md)).
+This folder is the repository's Linux host type: a Linux server where [runscaler](https://github.com/ysya/runscaler) takes jobs from GitHub runner scale sets and starts each one in a new container from a local runner image. The other host type, an Apple-silicon Mac, is the rest of the repository ([../README.md](../README.md)).
 
 - Two host users. **RUN_USER** runs a rootless Docker daemon ("D1") and a local image registry, and holds no secret. **RS_USER** runs only runscaler (a systemd user unit) and holds the GitHub token; it reaches D1 through a second socket, as a member of RUN_USER's group. No job reaches a root Docker daemon.
 - Jobs run on a `runners` network, with a pinned seccomp profile, no-new-privileges and an init process; `docker.dind` is always false. `runner-start` refuses to start runscaler with a config that would give a job a Docker socket.
