@@ -1,4 +1,4 @@
-# mac-github-self-hosted-runner
+# github-self-hosted-runner
 
 Run GitHub Actions jobs on your own hardware, each job in a fresh environment that is deleted after it. Two host types, each with its own install:
 
@@ -98,18 +98,18 @@ Copy the two lines only from the assets of the release you chose — never from 
 
 1. Download the two lines and compare them with the release's `SHA256SUMS` (any gh version):
    ```
-   gh release download <tag> -R liveappbase/mac-github-self-hosted-runner -p install-line.txt -p root-line.txt -p SHA256SUMS && for f in install-line.txt root-line.txt; do [[ "$(shasum -a 256 < $f)" == "$(awk -v f=$f '$2 == f {print $1}' SHA256SUMS)  -" ]] && echo "$f matches SHA256SUMS" || echo "$f DIFFERS — do not run it"; done
+   gh release download <tag> -R liveappbase/github-self-hosted-runner -p install-line.txt -p root-line.txt -p SHA256SUMS && for f in install-line.txt root-line.txt; do [[ "$(shasum -a 256 < $f)" == "$(awk -v f=$f '$2 == f {print $1}' SHA256SUMS)  -" ]] && echo "$f matches SHA256SUMS" || echo "$f DIFFERS — do not run it"; done
    ```
    This compares the files only with another asset of the same release.
 2. Check them against the release's attestation. This needs gh 2.102.0 or newer: `gh --version` shows yours; `brew upgrade gh` updates it. An older gh may not read this repository's attestations, and gh 2.92.0 or older also sends your GitHub token to another host while it checks (GitHub advisory GHSA-8xvp-7hj6-mcj9).
    ```
-   gh release verify <tag> -R liveappbase/mac-github-self-hosted-runner
+   gh release verify <tag> -R liveappbase/github-self-hosted-runner
    ```
    ```
-   gh release verify-asset <tag> install-line.txt -R liveappbase/mac-github-self-hosted-runner
+   gh release verify-asset <tag> install-line.txt -R liveappbase/github-self-hosted-runner
    ```
    ```
-   gh release verify-asset <tag> root-line.txt -R liveappbase/mac-github-self-hosted-runner
+   gh release verify-asset <tag> root-line.txt -R liveappbase/github-self-hosted-runner
    ```
    Each must pass. `verify-asset` binds the file you will paste to the release's attestation.
 

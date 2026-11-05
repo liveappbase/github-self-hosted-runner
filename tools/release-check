@@ -1,5 +1,5 @@
 #!/bin/zsh -f
-# release-check — the release gate of mac-github-self-hosted-runner. ONE script, not a test framework.
+# release-check — the release gate of github-self-hosted-runner. ONE script, not a test framework.
 #
 #   tools/release-check [--rev REV] [--private-list FILE] [--softnet-tarball FILE]
 #   tools/release-check --build TAG --private-list FILE [--out DIR] [--softnet-tarball FILE]
@@ -85,7 +85,7 @@ LIVE_CONF_SHA=dbe64c3daa692d33b3a1998749ed2e038a25cfaeb8ffe9f69b32024a05c5fdaa
 LIVE_SOFTNET_SHA=e5e35d61a6dd7e35a3134732e766c897b7cb6f097080ff00e1e75adeab0471c7
 LIVE_SOFTNET_TARBALL_SHA=8ff8ff099c2b5ac1b1128e7999c4a730ac85f486c8a4cb0239eb98432859a0f7
 LICENSE_SHA=cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30   # apache.org/licenses/LICENSE-2.0.txt, fetched 2026-10-22
-REPO_SLUG=liveappbase/mac-github-self-hosted-runner
+REPO_SLUG=liveappbase/github-self-hosted-runner
 # the Mac's scripts:
 CONSTANT_NAMES=(REAL SHIM FLAG STAMP LOCK RUNNER SOFTNET CONFIG LOGDIR STATEDIR REALRUN PINDIR PROTECTED DD BIN DF FLOOR_GIB LSOF LOCKF LOCKFILE WINDOW)
 CONSTANT_NAMES_LINUX=(HOST_CONF MARK)                                     # linux-docker/'s scripts
@@ -618,7 +618,7 @@ else
   /bin/mkdir -p $out || bfail "cannot create $out"
   [[ -z $(/bin/ls -A $out) ]] || bfail "$out is not empty"
 fi
-name=mac-github-self-hosted-runner-$tag.tar.gz
+name=github-self-hosted-runner-$tag.tar.gz
 git archive --format=tar.gz --prefix=$version/ -o $out/$name $commit || bfail "git archive failed"
 sha $out/$name || bfail "cannot hash the tarball"
 tsha=$REPLY

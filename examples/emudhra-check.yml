@@ -145,7 +145,7 @@ jobs:
           mkdir -p .emudhra-probe/node24 .emudhra-probe/node20
           cat > .emudhra-probe/probe.cjs <<'EOF'
           'use strict';
-          // One row of the eMudhra verdict table (docs/design.md, "The eMudhra stage" of mac-github-self-hosted-runner).
+          // One row of the eMudhra verdict table (docs/design.md, "The eMudhra stage" of github-self-hosted-runner).
           const fs = require('fs'), path = require('path'), { spawnSync } = require('child_process');
           const label = process.env.PROBE_LABEL || 'node';
           const state = {};

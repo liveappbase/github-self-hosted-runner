@@ -40,7 +40,7 @@ You need: a dedicated x86_64 Linux host with systemd, root ssh with your key, Do
 Run every line below from your laptop, in a checkout of the release you chose (replace `<host>`, `<version>` and the user names with yours):
 
 ```
-git clone --branch v<version> --depth 1 https://github.com/liveappbase/mac-github-self-hosted-runner && cd mac-github-self-hosted-runner
+git clone --branch v<version> --depth 1 https://github.com/liveappbase/github-self-hosted-runner && cd github-self-hosted-runner
 ```
 
 1. **The host config (root).** Copy `linux-docker/host.conf.example` to `host.conf`, set every value (each key's comment says what it is), then install it as root's file:
