@@ -26,6 +26,7 @@ import plistlib
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import unittest
 
@@ -497,22 +498,55 @@ class TestAnOpenWindowRecord(unittest.TestCase):
     nothing changes (no move-in, no download, no link, no launchctl call). The STOP names the link when it exists, else
     BASE/current/bin/runner-updater when current is a 0.2.x release, else the 0.2.x folder written down at the way back."""
 
-    def record(self, h, symlink=False):
+    def record(self, h, shape='lines'):
+        """STATEDIR/window as SHAPE: 'lines', 'symlink' (dangling), 'empty' (a power loss before its first line was
+        flushed), 'folder'. -> its path"""
         h.statedir_with_list()
         w = os.path.join(h.statedir, 'window')
-        if symlink:
+        if shape == 'symlink':
             os.symlink(h.sb.path('no-such-record'), w)
+        elif shape == 'folder':
+            os.mkdir(w, 0o700)
         else:
-            h.sb.write(w, 'window 20261105000000-1\nfamily mac-golden\n', 0o600)
+            h.sb.write(w, '' if shape == 'empty' else 'window 20261105000000-1\nfamily mac-golden\n', 0o600)
+        return w
 
-    def stopped(self, h, text, flag=False):
+    def stopped(self, h, text, flag=False, hide=None):
+        """install STOPs with TEXT and changes nothing. HIDE: a file made mode 000 for the install only (the tree is
+        read before and after with its mode 0600; it is still 000 when install has ended)"""
         if flag:
             h.sb.write(h.flag, '')
         unpacked = h.unpack()
         before = tree(h.ci)
+        if hide:
+            os.chmod(hide, 0)
+            self.assertFalse(os.access(hide, os.R_OK))
         res = h.install(unpacked, ok=False)
+        if hide:
+            self.assertEqual(stat.S_IMODE(os.lstat(hide).st_mode), 0)
+            os.chmod(hide, 0o600)
         self.assertEqual((res.returncode, res.stdout), (1, text), res.stderr)
         h.unchanged(before, unpacked)
+
+    def written_down(self, h):
+        return RECORD_STOP % ('the runner-updater of the 0.2.x folder written down at the way back (%s/<VERSION>'
+                              '/bin/runner-updater)' % h.base)
+
+    # review r1 P3-1: a record of any shape is a record (install tests -e or -L, never its size, kind or mode)
+    def test_an_empty_record_is_a_record(self):
+        h = Inst(self)
+        self.record(h, 'empty')
+        self.stopped(h, self.written_down(h))
+
+    def test_a_record_install_cannot_read_is_a_record(self):
+        h = Inst(self)
+        w = self.record(h)
+        self.stopped(h, self.written_down(h), hide=w)
+
+    def test_a_folder_record_is_a_record(self):
+        h = Inst(self)
+        self.record(h, 'folder')
+        self.stopped(h, self.written_down(h))
 
     def test_with_the_link_the_stop_names_it(self):
         h = Inst(self)
@@ -532,7 +566,7 @@ class TestAnOpenWindowRecord(unittest.TestCase):
 
     def test_with_no_link_and_an_older_current_the_stop_names_the_written_down_folder(self):
         h = Inst(self)
-        self.record(h, symlink=True)                 # a dangling symlink is a record too
+        self.record(h, 'symlink')                    # a dangling symlink is a record too
         h.sb.write(os.path.join(h.base, '0.1.0', 'VERSION'), '0.1.0\n')
         # rc.6 had a report-only runner-updater: its `pass` runs no RECOVER
         h.sb.write(os.path.join(h.base, '0.1.0', 'bin', 'runner-updater'), '#!/bin/zsh -f\n', 0o755)
