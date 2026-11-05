@@ -143,7 +143,7 @@ The census reads the build VM while it runs, before `tart stop`; the image is wh
 
 ## Layout on the host
 
-- `/Users/ci/mac-runner/<VERSION>/` — an unpacked release (`v0.1.0-rc.N` and `v0.1.0` share `0.1.0/`). `/Users/ci/mac-runner/current` points at one of them. The switch is one rename: `ln -sfh <VERSION> current.new && mv -fh current.new current`, then `current` must read back as `<VERSION>`, before any other link changes.
+- `/Users/ci/mac-runner/<VERSION>/` — an unpacked release (`v0.2.0-rc.N` and `v0.2.0` share `0.2.0/`; install never removes another version's folder, so an older release stays there as the way back: `/Users/ci/mac-runner/<older VERSION>/install`). `/Users/ci/mac-runner/current` points at one of them. The switch is one rename: `ln -sfh <VERSION> current.new && mv -fh current.new current`, then `current` must read back as `<VERSION>`, before any other link changes.
 - `/Users/ci/mac-runner/runscaler.sha256` — the sha256 of the runscaler the last complete install left.
 - `/Users/ci/bin/<tool>` → `/Users/ci/mac-runner/current/bin/<tool>`. `/Users/ci/bin/runner` (runscaler) and `/Users/ci/Applications/tart.app` stay real files.
 - `/Users/ci/.config/runner/` (0700): `config.toml` (0600), `token-*` (0600), `enabled`, `wall-stamp`, `wall-proof`, `wall.conf`. Logs: `/Users/ci/Library/Logs/mac-runner/` (0700).

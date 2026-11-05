@@ -25,7 +25,7 @@
 # The constants below are the named inputs; tools/release-check pins STAGE_SHIM to VERSION and the four literals.
 WANT_UID=0
 OWNER=root:wheel
-STAGE_SHIM=/Users/ci/mac-runner/0.1.0/bin/tart-shim
+STAGE_SHIM=/Users/ci/mac-runner/0.2.0/bin/tart-shim
 STAGE_SOFTNET=/Users/ci/mac-runner/downloads/softnet-0.24.1/softnet
 BINDIR=/usr/local/bin
 LIBDIR=/usr/local/libexec/liveapp-ci

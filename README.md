@@ -8,7 +8,7 @@ Turn an Apple-silicon Mac into a GitHub Actions host that runs every job in a **
 - A root-owned `tart` shim admits a VM start only when a **live proof** of that wall (`wall-check`) matches the installed Tart, softnet and shim.
 - You install it from ONE published release, with ONE root step whose exact line is an immutable release asset.
 
-Status: **v0.1.0, pre-release.** The design and its reasons: [docs/design.md](docs/design.md). Day-to-day work: [docs/operations.md](docs/operations.md). What the wall does and does not protect: [SECURITY.md](SECURITY.md).
+Status: **v0.2.0, pre-release.** The design and its reasons: [docs/design.md](docs/design.md). Day-to-day work: [docs/operations.md](docs/operations.md). What the wall does and does not protect: [SECURITY.md](SECURITY.md).
 
 A Linux host that runs each job in a fresh Docker container has its own folder and install: [linux-docker/README.md](linux-docker/README.md).
 
