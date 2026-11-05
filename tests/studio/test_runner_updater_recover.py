@@ -19,6 +19,9 @@ from tests.studio.test_runner_updater_state import fam, lines_of, state, stop
 from tests.studio.test_runner_updater_window import (FAM, KILLED, OLD, REFUSE_TEXT, SHA0, V0, Win, sha,
                                                      switched_config, today)
 
+# a builder's VM that is NOT the record's own (another day's work VM): it holds RECOVER's wait, and RECOVER never stops
+# it (the record's own VMs, which RECOVER stops: test_runner_updater_recover_vms)
+OTHER_VM = 'gold-20290101'
 RESTART_OLD = {'from': {'pid': 1, 'start': 2}, 'to': {'pid': 3, 'start': 4},
                'stopped': {'inode': '5', 'offset': 0, 'sha': '6' * 64}}
 
@@ -264,7 +267,8 @@ class TestPoolDown(unittest.TestCase):
 
 class TestStep2Quiet(unittest.TestCase):
     """RECOVER step 2, FLAG absent: it waits until no process of this user has a journaled tool open (by dev+inode,
-    EVERY open file: the real lsof), no gold-*, n1-* or s1-* VM runs, and the runner lock is free (the real
+    EVERY open file: the real lsof), no gold-*, n1-* or s1-* VM runs (the record's own VMs it stops first:
+    test_runner_updater_recover_vms; these cells run another one, OTHER_VM), and the runner lock is free (the real
     runner-lock-free). One bound (RECOVER_WAIT, 20 s in the rig): then STOP CI DISABLED, and the journal stays open."""
 
     def builder_under_lockf(self, w):
@@ -318,15 +322,15 @@ class TestStep2Quiet(unittest.TestCase):
 
     def test_a_running_builder_vm_holds_recover_until_ci_disabled(self):
         w = killed(self, 'build-start', Win(self, extra_rewrites=[('RECOVER_WAIT=20', 'RECOVER_WAIT=1')]))
-        w.sb.write(os.path.join(w.vms, 'gold-' + today()), '')
-        w.put('running-gold-' + today())
+        w.sb.write(os.path.join(w.vms, OTHER_VM), '')
+        w.put('running-' + OTHER_VM)
         res = recover(w, ok=1)
         self.assertIn('runner-updater: STOP CI DISABLED: ', res.stdout)
-        self.assertIn('gold-' + today(), res.stdout)
+        self.assertIn(OTHER_VM, res.stdout)
         self.assertTrue(os.path.exists(w.u.window))              # the journal stays open: the next pass tries again
         self.assertEqual((w.enables(), stops(w)), ([], ['CI DISABLED']))
         self.assertIn('\n%s: STOP CI DISABLED' % FAM, w.status())
-        os.remove(os.path.join(w.scn, 'running-gold-' + today()))   # the VM ends
+        os.remove(os.path.join(w.scn, 'running-' + OTHER_VM))   # the VM ends
         res = recover(w, ok=1)
         assert_closed(self, w)
         assert_runs(self, w, w.pre)
@@ -338,8 +342,8 @@ class TestStep2Quiet(unittest.TestCase):
         w = killed(self, 'build-start')
         with open(w.u.window, 'a') as f:
             f.write('recover-wait %d\n' % (int(time.time()) - 4600))
-        w.sb.write(os.path.join(w.vms, 'gold-' + today()), '')
-        w.put('running-gold-' + today())
+        w.sb.write(os.path.join(w.vms, OTHER_VM), '')
+        w.put('running-' + OTHER_VM)
         t0 = time.monotonic()
         res = recover(w, ok=1)
         self.assertLess(time.monotonic() - t0, 10)                # RECOVER_WAIT is 20 s in the rig
@@ -348,8 +352,8 @@ class TestStep2Quiet(unittest.TestCase):
 
     def test_control_within_the_bound_it_waits(self):
         w = killed(self, 'build-start')
-        w.sb.write(os.path.join(w.vms, 'gold-' + today()), '')
-        w.put('running-gold-' + today())
+        w.sb.write(os.path.join(w.vms, OTHER_VM), '')
+        w.put('running-' + OTHER_VM)
         t0 = time.monotonic()
         recover(w, ok=1)
         self.assertGreaterEqual(time.monotonic() - t0, 19)
@@ -787,13 +791,13 @@ class TestRecoverDecidesOnce(unittest.TestCase):
     def test_ci_disabled_left_open_then_quiet(self):
         # RECOVER #1 leaves the journal open on purpose: CI DISABLED after its bound ("the next pass checks again")
         w = self.lost_disable_start('switch', Win(self, extra_rewrites=[('RECOVER_WAIT=20', 'RECOVER_WAIT=1')]))
-        w.sb.write(os.path.join(w.vms, 'gold-' + today()), '')
-        w.put('running-gold-' + today())
+        w.sb.write(os.path.join(w.vms, OTHER_VM), '')
+        w.put('running-' + OTHER_VM)
         res = recover(w, ok=1)
         self.assertIn('runner-updater: STOP CI DISABLED: ', res.stdout)
         self.assertIn('the next pass checks again', res.stdout)
         self.assertTrue(os.path.exists(w.u.window))
-        os.remove(os.path.join(w.scn, 'running-gold-' + today()))   # the VM ends
+        os.remove(os.path.join(w.scn, 'running-' + OTHER_VM))   # the VM ends
         self.back_up(w, 'switch', recover(w, ok=1))
 
     def test_a_lost_enable_start_then_recover_killed_after_running(self):
