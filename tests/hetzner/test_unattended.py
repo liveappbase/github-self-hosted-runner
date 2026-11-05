@@ -615,13 +615,15 @@ class Switch(unittest.TestCase):
                      ('back', '--unattended', '--why', 'r1', '--verdict', g.p.path('no-such-file')),
                      ('back', '--unattended', '--why', 'r1', '--verdict'),
                      ('back', '--unattended', '--why', 'r1', '--verdict', verdict, '--verdict', verdict),
-                     ('back', '--unattended', '--why', 'r1', 'x')):
+                     ('back', '--unattended', '--why', 'r1', 'x'),
+                     ('recover', '--unattended', 'x'), ('recover',), ('recover', '--attended')):
             with self.subTest(args=args):
                 r = g.p.unattended(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn('usage', r.stdout)
                 self.assertIn('--unattended', r.stdout)
                 self.assertIn('--why r1|r1-connect|back', r.stdout)
+                self.assertIn('recover --unattended', r.stdout)
                 g.unchanged(r, 2)
                 self.assertFalse(os.path.lexists(os.path.join(g.p.STATE, 'window')))
 
@@ -693,8 +695,8 @@ class UpdaterOnly(unittest.TestCase):
                 self.assertEqual(g.p.config(), g.old)
                 self.assertEqual(g.p.closed(), [])
 
-    def test_back_runs_only_as_the_updater_s_child(self):
-        for mode in ('back',):
+    def test_back_and_recover_run_only_as_the_updater_s_child(self):
+        for mode in ('back', 'recover'):
             for i in range(self.ROWS):
                 if self.callers(None)[i][2]:
                     continue                   # PASS: every other cell of back and recover runs as row 3
@@ -1544,11 +1546,13 @@ class Text(unittest.TestCase):
 
     def test_the_header_names_the_modes_their_journal_and_exit_codes(self):
         h = self.header()
-        for s in ('up --unattended VERSION DIGEST', 'back --unattended --why', '~/.local/state/runner-updater/window'):
+        for s in ('up --unattended VERSION DIGEST', 'back --unattended --why', 'recover --unattended',
+                  '~/.local/state/runner-updater/window', 'An unfinished window the updater cannot end'):
             self.assertIn(s, h)
-        for k in sorted(set(SWITCH_KEYS + BACK_KEYS + ['hand-change', 'stop', 'end', 'pre-close-failure'])):
+        for k in sorted(set(SWITCH_KEYS + BACK_KEYS + ['hand-change', 'stop', 'end', 'pre-close-failure',
+                                                       'recover-start', 'recover-target', 'restore'])):
             self.assertRegex(h, r'#\s+\[?%s[ \]]' % re.escape(k), 'the header names no journal line %s' % k)
-        for code in ('0', '1', '2', '3'):
+        for code in ('0', '1', '2', '3', '4', '5', '6'):
             self.assertRegex(h, r'#\s+%s\s' % code, 'the header names no exit code %s' % code)
 
     def test_the_readme_says_what_the_journal_shows_and_how_back_is_used_by_hand(self):
