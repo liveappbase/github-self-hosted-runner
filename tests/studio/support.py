@@ -5,6 +5,8 @@ A test makes a Sandbox: a temporary folder, removed by the test's cleanup. In it
   then hold no host path (HOST_PATHS) except the strings the test names, so a missed rewrite fails the test
   instead of touching the host;
 - writes stubs: small zsh scripts that log each call (one line, its argv quoted) and then run a body;
+- holds a lock with a REAL lockf that WAITS for it (hold_lock), so a probe that takes the lock for a moment delays
+  the holder and never ends it;
 - runs a command with a clean environment: HOME and TMPDIR in the sandbox, PATH = the stubs folder and the
   system folders, LC_ALL=C. Nothing else of the caller's environment passes.
 """
@@ -19,6 +21,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 HOST_PATHS = ('/Users/ci', '/tmp/runner.lock', '/usr/local/libexec/liveapp-ci')
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+LOCK_WAIT = 120   # seconds a lock holder waits for its lock (hold_lock): well over wait_for's 60 s
 
 
 def _rmtree(path):
@@ -127,6 +130,21 @@ class Sandbox:
             out = f.read()
         with open(self.path('logs', name + '.err')) as f:
             return out, f.read()
+
+    def hold_lock(self, lock, argv=('/bin/sleep', '600'), name='lock-holder'):
+        """Hold lock (an flock, as runscaler's runner-start takes it) with a REAL lockf that runs argv until the test
+        ends -> the lockf process, once it holds the lock. The holder WAITS for the lock (-t LOCK_WAIT): another
+        process that takes it for a moment (a probe: lockf -t 0) delays the holder and never ends it. lockf runs its
+        command only once it holds the lock, and the command prints `held` first: that line is the proof. A holder
+        that ends before it fails the test."""
+        p = self.start(['/usr/bin/lockf', '-k', '-t', str(LOCK_WAIT), lock, '/bin/zsh', '-f', '-c',
+                        'print -r -- held; exec "$@"', 'holder'] + list(argv), name=name)
+        self.wait_for(lambda: self.output(name)[0].startswith('held\n') or p.poll() is not None,
+                      'the holder of ' + lock)
+        self.test.assertIsNone(p.poll(), 'the holder could not take %s: %r' % (lock, self.output(name)))
+        rc = subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', lock, '/usr/bin/true']).returncode
+        self.test.assertEqual(rc, 75, 'a probe reads %s free under its holder' % lock)
+        return p
 
     def wait_for(self, check, what, timeout=60):
         """Poll until check() is true; fail the test with `what` when it never is."""
