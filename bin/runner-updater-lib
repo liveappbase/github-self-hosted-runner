@@ -96,6 +96,9 @@ zmodload -F zsh/stat b:zstat || { print -r -- "runner-updater-lib: zsh/stat cann
 zmodload zsh/datetime || { print -r -- "runner-updater-lib: zsh/datetime cannot be loaded"; return 1 }
 
 ru_say() { print -r -- "runner-updater: $*" }
+# the README section every text names for a window record RECOVER cannot read or act on (S3b-5 A5; PLAN D1 "A RECORD
+# RECOVER CANNOT READ OR ACT ON"): no tool ends such a record; its hand steps bring CI back, and the maintainer clears it
+typeset -g ru_hand_readme='README "An unfinished window the updater cannot end"'
 
 # ru_reach PATH: 0 when every folder on the path to PATH that exists is a folder this process can search. A test of a
 # name behind a folder it cannot search fails as if nothing were there, so a state would read as fresh (OFF), a list

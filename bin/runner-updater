@@ -54,7 +54,8 @@
 #   status   no lock, and it writes no file anywhere (the core gets its inputs through pipes). It reads STATE once
 #            and calls status.jq with facts from it (each family's candidate and back_until, the STOPs it holds) and
 #            its core state; a status.jq that does not decide is a STOP. It prints ON or OFF; each family: its candidate
-#            or "no candidate", back_until, its rejected versions; an open window journal; each family of BUILDERS in
+#            or "no candidate", back_until, its rejected versions; an open window journal (one RECOVER cannot read or
+#            act on: the README section, below, RECOVER FIRST); each family of BUILDERS in
 #            the state: its host pin (`host pin V`, or none: D2's ONE RULE removes a pin whose version is not known);
 #            status.jq's verdict and lines (the STOP lines with their next step, the evidence lines, each back_until);
 #            and per STOP its D7 properties, `known false` and "unknown" for a STOP this core does not know (never
@@ -146,6 +147,12 @@
 # DISABLED, a person's file that fails validate, a journal it cannot read, a state it cannot write): STOP, exit 1, and
 # nothing else starts. status only names it (no lock); report takes no action and runs no RECOVER; protect writes the
 # list (it reads an open journal's names) and runs no RECOVER.
+# A RECORD RECOVER CANNOT READ OR ACT ON (S3b-5 A5; PLAN D1): a line no pattern reads or a key it does not know, or a
+# record that is not complete (its backup gone or changed). No tool ends it: RECOVER's STOP, this file's last line for
+# it, `status`'s window line (it reads the record by RECOVER's own route, ru_rc_route, which writes nothing) and a state
+# WAIT or REFUSE that comes before RECOVER while a record is open each name README "An unfinished window the updater
+# cannot end" (the lib's ru_hand_readme): its hand steps bring CI back, and the maintainer clears the record. Every
+# other RECOVER STOP names its cause, and fixing it lets the next pass end the window.
 #
 # REPORT: ONE pass that measures, asks the decision core (core/) and prints. It TAKES NO ACTION: it stops, starts,
 # edits, pins, deletes and enables nothing, and it runs none of runner-disable, runner-enable, golden-build,
@@ -317,17 +324,21 @@ ru_reach $STATE || refuse "$REPLY, so the files in $STATEDIR would look absent (
 # or with a member this release does not read, REFUSE on one it does not read, and on a missing state beside a list
 # that is not empty (a lost state): in each case nothing is written
 load_state() {
+  local open=
+  # a WAIT or REFUSE here comes before RECOVER: while a window record is open, no pass can end it, so the line names the
+  # README's hand steps (S3b-5 A5); with no record it does not
+  [[ -e $WINDOW || -L $WINDOW ]] && open="; an updater window is unfinished ($WINDOW): $ru_hand_readme"
   ru_state_load $STATE
   case $? in
     (0) ;;
-    (2) print -r -- "runner-updater: WAIT $REPLY"; exit 4 ;;
-    (*) refuse "$REPLY: it is left as it is" ;;
+    (2) print -r -- "runner-updater: WAIT $REPLY$open"; exit 4 ;;
+    (*) refuse "$REPLY: it is left as it is$open" ;;
   esac
   # a missing state is fresh, but the updater writes a name into the list only from a state: a list that is not an
   # empty regular file says a state existed and is lost, and a fresh state would drop what the list protects
   if (( ru_state_absent )) && [[ -e $PROTECTED || -L $PROTECTED ]] \
      && ! [[ -f $PROTECTED && ! -L $PROTECTED && ! -s $PROTECTED ]]; then
-    refuse "there is no state $STATE, but the protected list $PROTECTED is not empty: a state existed and is lost, and a fresh one would drop what the list protects. Put the state back; or, when no image in the list must be kept, move the list aside and run $cmd again"
+    refuse "there is no state $STATE, but the protected list $PROTECTED is not empty: a state existed and is lost, and a fresh one would drop what the list protects. Put the state back; or, when no image in the list must be kept, move the list aside and run $cmd again$open"
   fi
 }
 # JQFILTER [JQ OPTION...]: the state changed by it, written by rename
@@ -443,11 +454,18 @@ do_status() {
 }
 
 # status's window lines: an open window journal, and each family's host pin (D2's ONE RULE removes a pin when the
-# version of the image the family runs is not known: status says so). It reads, and writes nothing
+# version of the image the family runs is not known: status says so). It reads, and writes nothing. An open journal is
+# read by RECOVER's own route (bin/runner-updater-window, ru_rc_route: read only): one RECOVER cannot read or act on
+# names the README's hand steps (S3b-5 A5), since no pass ends it
 status_window() {
   local f c
-  [[ ! -e $WINDOW && ! -L $WINDOW ]] \
-    || say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, the next pass's RECOVER ends it)"
+  if [[ -e $WINDOW || -L $WINDOW ]]; then
+    if source $RELBIN/runner-updater-window && ru_rc_route && [[ $REPLY == (unreadable|cannot-act) ]]; then
+      say "status: a window journal is open: $WINDOW, and RECOVER cannot read or act on it ($ru_rc_why): $ru_hand_readme"
+    else
+      say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, the next pass's RECOVER ends it)"
+    fi
+  fi
   for f in ${(f)"$(print -r -- $ru_state | $JQ -r '.families | keys[]')"}; do
     (( ${BUILDERS[(Ie)$f]} )) || continue
     if [[ -f $PINDIR/$f && ! -L $PINDIR/$f && -r $PINDIR/$f ]]; then
@@ -471,7 +489,11 @@ run_recover() {
   case $? in
     (0) ;;
     (1) recovered=1 ;;
-    (*) print -r -- "runner-updater: STOP the window journal $WINDOW stays open: the next run's RECOVER tries again; nothing else starts"
+    (*) if (( ru_rc_cannot )); then
+          print -r -- "runner-updater: STOP the window journal $WINDOW stays open, and RECOVER cannot read or act on it: $ru_hand_readme. Nothing else starts"
+        else
+          print -r -- "runner-updater: STOP the window journal $WINDOW stays open: the next run's RECOVER tries again; nothing else starts"
+        fi
         exit 1 ;;
   esac
 }

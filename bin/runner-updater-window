@@ -229,7 +229,11 @@
 # RECOVER (PLAN D5, RECOVER 1-5), ru_recover: an open window journal that no run holds (the window holds the updater
 # lock for its whole run) is ended by the next pass or command, under the updater lock, before anything else starts. It
 # reads the journal ONLY by the patterns above (a line no pattern reads, or a key it does not know: STOP, RECOVER
-# changes nothing) and the facts. No step on CI depends on jq: jq only reads and writes the state (the STOPs, the image
+# changes nothing) and the facts. That STOP, and the one for a journal it cannot act on (ru_rc_complete: a line it needs
+# is missing, or the backup is not the config-sha), name README "An unfinished window the updater cannot end" (S3b-5
+# A5; ru_rc_cannot tells the caller): no tool ends such a record. Its ROUTE (ru_rc_route: unreadable, closed, nothing,
+# cannot-act, act) is read only, so `status` reads it too.
+# No step on CI depends on jq: jq only reads and writes the state (the STOPs, the image
 # record of D2's ONE RULE), so an untested jq (new work only) never stops it; a jq that fails leaves the journal open
 # after CI is back. RESIDUAL (S3b-4a r1 P3-6): the caller loads the state with jq BEFORE RECOVER (load_state), so a jq
 # that cannot run at all keeps RECOVER from running (the run refuses, and CI stays as the kill left it); PLAN :60's "no
@@ -1365,7 +1369,7 @@ ru_rc_first() {
   REPLY=$ru_rc_v[i]
 }
 
-# the window's globals from the journal (ru_rc_read's), as ru_window sets them
+# the window's globals from the journal (ru_rc_read's), as ru_window sets them. It writes nothing (status runs it)
 ru_rc_load() {
   local i v
   local -a img t
@@ -1414,7 +1418,6 @@ ru_rc_load() {
   ru_w_failname="check failed"
   [[ $ru_w_kind == rollback ]] && ru_w_failname="ROLLBACK FAILED"
   ru_w_dir=$WINDOWS/${ru_w_id:-recovered}.d
-  [[ -d $ru_w_dir ]] || /bin/mkdir -m 700 -p -- $ru_w_dir 2>/dev/null
 }
 
 # a journal RECOVER acts on names its family, its kind, the pre-window config and its backup (that file, whole), and
@@ -1661,27 +1664,27 @@ ru_rc_archive() {
   ru_w_archive || return 3
 }
 
-# RECOVER (the header): -> 0 the journal closed (a window that switched or rolled back, or nothing was disabled); 1 it
-# closed with a STOP held; 3 it stays open (a STOP printed, held when the state can be written). The caller holds the
-# updater lock, loaded the state (ru_state) and sourced this file and the lib
-ru_recover() {
-  local flag=0 lds ldd le e wn rc h lines pre
-  [[ -e $WINDOW || -L $WINDOW ]] || return 0
-  ru_rcsay "the window journal $WINDOW is open and no run holds the updater lock: RECOVER ends it"
-  ru_rc_read || { print -r -- "runner-updater: STOP RECOVER cannot read the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
+# RECOVER's ROUTE for the open journal WINDOW, read only (it writes nothing: status runs it too) -> REPLY =
+#   unreadable  a line no pattern reads, or a key it does not know (ru_rc_why: which)
+#   closed      its last line is `closed`: only the rename
+#   nothing     nothing was disabled (step 0, FLAG first: the header)
+#   cannot-act  RECOVER would act, but the record is not complete (ru_rc_complete; ru_rc_why: what)
+#   act         RECOVER acts on it (steps 1-5)
+# and the globals ru_recover reads: ru_rc_wn (the window's own lines), ru_rc_wl (its last), ru_rc_lds ru_rc_ldd
+# ru_rc_le (the last disable-start, disable-done, enable-start), ru_rc_flag, ru_rc_pre
+ru_rc_route() {
+  ru_rc_why= ru_rc_wn=0 ru_rc_wl= ru_rc_lds=0 ru_rc_ldd=0 ru_rc_le=0 ru_rc_flag=0 ru_rc_pre=backup
+  ru_rc_read || { ru_rc_why=$REPLY; REPLY=unreadable; return 0 }
   ru_rc_load
-  if [[ ${ru_rc_k[-1]-} == closed ]]; then
-    ru_rcsay "the window had closed (its last line is \`closed\`): its journal goes to $WINDOWS"
-    ru_rc_archive
-    return $?
-  fi
+  [[ ${ru_rc_k[-1]-} == closed ]] && { REPLY=closed; return 0 }
   # THE WINDOW'S OWN LINES (S3b-4a r2 N1): the lines before RECOVER's first `recover-start` (every line when there is
   # none). The F5 rules read the WINDOW's last line, never a line an earlier RECOVER appended
-  wn=$(( ${ru_rc_k[(i)recover-start]} - 1 ))
+  ru_rc_wn=$(( ${ru_rc_k[(i)recover-start]} - 1 ))
   ru_rc_wl=
-  (( wn )) && ru_rc_wl=$ru_rc_k[wn]
-  lds=${ru_rc_k[(I)disable-start]} ldd=${ru_rc_k[(I)disable-done]} le=${ru_rc_k[(I)enable-start]}
-  [[ -e $FLAG ]] && flag=1
+  (( ru_rc_wn )) && ru_rc_wl=$ru_rc_k[ru_rc_wn]
+  ru_rc_lds=${ru_rc_k[(I)disable-start]} ru_rc_ldd=${ru_rc_k[(I)disable-done]} ru_rc_le=${ru_rc_k[(I)enable-start]}
+  ru_rc_flag=0
+  [[ -e $FLAG ]] && ru_rc_flag=1
   # FLAG first (step 1; S3b-4a r1 F5). FLAG present and no disable-done (or no disable-start): nothing was disabled.
   # FLAG absent and no disable-start: D1 loses only the journal's LAST line, so disable-start can be the lost line only
   # when the journal ends at the line written just before it (`backup`; a rollback's `edited-sha`). Then its
@@ -1690,9 +1693,42 @@ ru_recover() {
   # Decided ONCE (S3b-4a r2 N1): a journal with a `recover-start` line had an earlier RECOVER act on it (it decided CI
   # was down because of the window, or reached the window's enable), and RECOVER never decides "nothing was disabled"
   # for it again: the FLAG it reads now may be that RECOVER's own runner-enable
-  pre=backup
-  [[ $ru_w_kind == rollback ]] && pre=edited-sha
-  if (( wn == ${#ru_rc_k} )) && { (( flag && ! ldd )) || { (( ! lds )) && [[ $ru_rc_wl != "$pre" ]] } }; then
+  ru_rc_pre=backup
+  [[ $ru_w_kind == rollback ]] && ru_rc_pre=edited-sha
+  if (( ru_rc_wn == ${#ru_rc_k} )) \
+     && { (( ru_rc_flag && ! ru_rc_ldd )) || { (( ! ru_rc_lds )) && [[ $ru_rc_wl != "$ru_rc_pre" ]] } }; then
+    REPLY=nothing
+    return 0
+  fi
+  ru_rc_complete || { ru_rc_why=$REPLY; REPLY=cannot-act; return 0 }
+  REPLY=act
+}
+
+# RECOVER (the header): -> 0 the journal closed (a window that switched or rolled back, or nothing was disabled); 1 it
+# closed with a STOP held; 3 it stays open (a STOP printed, held when the state can be written; ru_rc_cannot=1 when
+# RECOVER cannot read or act on the record: no tool ends it, and the caller names the README's hand steps). The caller
+# holds the updater lock, loaded the state (ru_state) and sourced this file and the lib
+ru_rc_cannot=0
+ru_recover() {
+  local flag lds ldd le e wn rc h lines pre route
+  [[ -e $WINDOW || -L $WINDOW ]] || return 0
+  ru_rcsay "the window journal $WINDOW is open and no run holds the updater lock: RECOVER ends it"
+  ru_rc_route
+  route=$REPLY
+  if [[ $route == unreadable ]]; then
+    ru_rc_cannot=1
+    print -r -- "runner-updater: STOP RECOVER cannot read the window journal $WINDOW ($ru_rc_why): it changes nothing; $ru_hand_readme"
+    return 3
+  fi
+  [[ -d $ru_w_dir ]] || /bin/mkdir -m 700 -p -- $ru_w_dir 2>/dev/null
+  wn=$ru_rc_wn lds=$ru_rc_lds ldd=$ru_rc_ldd le=$ru_rc_le flag=$ru_rc_flag pre=$ru_rc_pre
+  if [[ $route == closed ]]; then
+    ru_rcsay "the window had closed (its last line is \`closed\`): its journal goes to $WINDOWS"
+    ru_rc_archive
+    return $?
+  fi
+  # step 0 (ru_rc_route has the rule): nothing was disabled
+  if [[ $route == nothing ]]; then
     if (( flag )); then
       if (( lds )); then ru_rcsay "nothing was disabled (FLAG present and no disable-done): the journal closes, no STOP"
       else ru_rcsay "nothing was disabled (no disable-start): the journal closes, no STOP"; fi
@@ -1709,7 +1745,11 @@ ru_recover() {
     return 1
   fi
   (( lds || flag )) || ru_rcsay "CI is disabled ($FLAG is absent) and the window's lines end at \`$pre\`: its lost last line may be disable-start, whose runner-disable ran: RECOVER brings CI back"
-  ru_rc_complete || { print -r -- "runner-updater: STOP RECOVER cannot act on the window journal $WINDOW ($REPLY): it changes nothing; look at the file"; return 3 }
+  if [[ $route == cannot-act ]]; then
+    ru_rc_cannot=1
+    print -r -- "runner-updater: STOP RECOVER cannot act on the window journal $WINDOW ($ru_rc_why): it changes nothing; $ru_hand_readme"
+    return 3
+  fi
   # RECOVER acts: its first line, once per journal, before any other line of its own
   if (( wn == ${#ru_rc_k} )); then ru_j recover-start $EPOCHSECONDS || return 3; fi
   # a journal that ended in POOL DOWN (its second pre-close failure): it closes held, and nothing more runs

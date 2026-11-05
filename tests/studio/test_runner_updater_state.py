@@ -741,8 +741,10 @@ class TestOnOff(unittest.TestCase):
         r.sb.write(u.window, 'family fx\nsurprise x\n', 0o600)
         res = r.cmd('off', ok=False)
         self.assertEqual(res.returncode, 1, res.stdout)
-        self.assertIn('runner-updater: STOP the window journal %s stays open: the next run\'s RECOVER tries again; '
-                      'nothing else starts\n' % u.window, res.stdout)
+        # a record RECOVER cannot read: the last line names the README's hand steps (S3b-5 A5), not "tries again"
+        self.assertIn('runner-updater: STOP the window journal %s stays open, and RECOVER cannot read or act on it: '
+                      'README "An unfinished window the updater cannot end". Nothing else starts\n' % u.window,
+                      res.stdout)
         self.assertNotIn('off: the updater is OFF', res.stdout)
         self.assertEqual(u.pin_files(), pins)
         self.assertEqual(u.raw(), raw)
