@@ -420,10 +420,19 @@ if urls and urls[0].startswith('http://127.0.0.1:') and urls[0].endswith('/healt
             os.replace(SB + '/curl.json.new', SB + '/curl.json')
     else:
         h = c.get('healthz')
-    if h is None:
-        sys.exit(7)
-    sys.stdout.write(json.dumps(h))
-    sys.exit(0)
+    hz = None
+    if os.path.exists(SB + '/stubs/hzlib.py'):  # a pool cell: a unit that plays runner-start (systemd.json's `runner`)
+        sys.path.insert(0, SB + '/stubs')      # answers only while it serves; the hooks of "healthz-read" fire after
+        import hzlib as hz                     # each read is answered
+        st = hz.load('systemd.json')
+        if st is not None and 'runner' in st and not hz.serving(st):
+            h = None
+    if h is not None:
+        sys.stdout.write(json.dumps(h))
+        sys.stdout.flush()
+    if hz is not None:
+        hz.fire('healthz-read')
+    sys.exit(7 if h is None else 0)
 sys.stderr.write('curl stub: no answer for: %s\n' % ' '.join(a))
 sys.exit(99)
 '''
@@ -653,15 +662,23 @@ def ref(d):
 POOL_RUNNER = r'''#!/usr/bin/python3 -I
 # runscaler, for the pool cells (03-runscaler.sh extracts it from the download whose pins the cell rewrote): `version`;
 # `validate --config FILE` answers as runner.json says ({rc, out}), except that a config with the bogus log-level of 03's
-# control fails runscaler's own check; `run` prints the UTC offset its clock reads. Logs argv, the names of the token
-# variables it got (never a value) and the config's sha256 (see tests/hetzner/support.py, Pool).
-import hashlib, json, os, subprocess, sys
+# control fails runscaler's own check; with {"hang": true} it ignores SIGTERM, writes its pid to logs/hang.pid and
+# waits (at most 60 s of the real clock: a validate that hangs); `run` prints the UTC offset its clock reads. Logs argv,
+# the names of the token variables it got (never a value), the config's sha256, and fd9: whether it has a file
+# descriptor 9 open (the updater lock must never reach it) (see tests/hetzner/support.py, Pool).
+import hashlib, json, os, signal, subprocess, sys, time
 SB = @SB@
 a = sys.argv[1:]
 conf = a[a.index('--config') + 1] if '--config' in a else None
+try:
+    os.fstat(9)
+    fd9 = True
+except OSError:
+    fd9 = False
 with open(SB + '/logs/runner.log', 'a') as f:
     f.write(json.dumps({'argv': a, 'tokens': sorted(k for k in os.environ if k.startswith('RUNNER_TOKEN_')),
-                        'config': hashlib.sha256(open(conf, 'rb').read()).hexdigest() if conf else None}) + '\n')
+                        'config': hashlib.sha256(open(conf, 'rb').read()).hexdigest() if conf else None,
+                        'fd9': fd9}) + '\n')
 
 
 def say(text, rc):
@@ -685,6 +702,13 @@ if a[:1] == ['validate']:
                 json.dump(v, f)
             os.replace(SB + '/runner.json.new', SB + '/runner.json')
         v = a0
+    if v.get('hang'):
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        with open(SB + '/logs/hang.pid', 'a') as f:
+            f.write('%d\n' % os.getpid())
+        sys.stdout.write('  hanging\n')
+        sys.stdout.flush()
+        time.sleep(60)
     say(v['out'], v['rc'])
 if a[:1] == ['run']:
     say('TZ-CHECK ' + subprocess.run(['date', '+%z'], capture_output=True, text=True).stdout, 0)
@@ -752,9 +776,49 @@ def take(at):
 
 def start(st):
     st['next_pid'] = st.get('next_pid', 100) + 1
-    st.update(active=True, pid=st['next_pid'], start=now())
+    st.update(active=True, pid=st['next_pid'], start=now(), failed=False)
     event('process %d started %d' % (st['pid'], st['start']))
     runlog('runscaler started pid=%d' % st['pid'])
+
+
+def advance(to):
+    """The fake clock moved on to TO (a wait that blocks until then: a drain): only with a fake clock."""
+    c = load('clock.json')
+    if c is None:
+        raise SystemExit('hzlib: a drain needs the fake clock (Pool.fake_clock)')
+    if c['now'] < to:
+        c['now'] = to
+        save('clock.json', c)
+        event('clock %d' % int(to))
+
+
+def shown(st):
+    """runscaler's unit as systemd shows it NOW (the clock): (ActiveState, MainPID, ActiveEnterTimestamp). A unit of
+    Type=simple with Restart=always (RestartSec=30) whose ExecStart, runner-start, plays st['runner'] (absent: serves):
+    serves = active and /healthz answers; hang = active, /healthz never answers; crash = runner-start exits 1 after 1 s,
+    so the unit is active for 1 s of each 31 s, each time a new pid and a fresh ActiveEnterTimestamp, and activating
+    (auto-restart, MainPID 0) between. st['drain_until']: a stop job that still drains (deactivating, the old pid) until
+    that second, also when its client is gone; then the stop ends (st changed: the caller saves it). st['failed']: an
+    inactive unit reads failed."""
+    t = now()
+    if st.get('drain_until') is not None:
+        if t < st['drain_until']:
+            return 'deactivating', st['pid'], st['start']
+        st.pop('drain_until')
+        stop(st)
+    if not st['active']:
+        return ('failed' if st.get('failed') else 'inactive'), 0, st['start']
+    if st.get('runner') == 'crash':
+        k, ph = divmod(t - st['start'], 31)
+        if ph < 1:
+            return 'active', st['pid'] + 1000 * k, st['start'] + 31 * k
+        return 'activating', 0, st['start'] + 31 * k
+    return 'active', st['pid'], st['start']
+
+
+def serving(st):
+    """runscaler answers /healthz now: its unit is active and its runner-start serves."""
+    return shown(st)[0] == 'active' and st.get('runner', 'serves') == 'serves'
 
 
 def fire(at):
@@ -779,6 +843,18 @@ def act(a):
             stop(st)
         start(st)
         st['independent'] = st.get('independent', 0) + 1
+        save('systemd.json', st)
+    elif a in ('disable', 'disable-only', 'enable', 'stop', 'fail', 'crash', 'hang', 'serve'):
+        st = load('systemd.json')          # a person's `systemctl --user disable --now` (disable), `disable` without
+        shown(st)                          # --now (disable-only), `enable`, a plain `stop`; the process fails (fail:
+        if a in ('disable', 'stop', 'fail'):   # inactive, failed); runner-start from now on crashes, hangs or serves
+            stop(st)
+        if a == 'fail':
+            st['failed'] = True
+        if a in ('disable', 'disable-only', 'enable'):
+            st['enabled'] = a == 'enable'
+        if a in ('crash', 'hang', 'serve'):
+            st['runner'] = 'serves' if a == 'serve' else a
         save('systemd.json', st)
     elif a == 'revive':                    # the stopped process runs again (a stop that did not stop it)
         st = load('systemd.json')
@@ -838,10 +914,13 @@ def act(a):
 '''
 
 SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
-# systemctl --user, for the pool cells: runscaler's unit as systemd.json holds it ({active, enabled, start, pid}); logs
-# each call, one line of its arguments. stop: the process logs its last line and exits; start: a new process (a new pid,
-# start = the clock) logs its first line; restart: both. show: ActiveState, MainPID, ActiveEnterTimestamp (see
-# tests/hetzner/support.py, Pool).
+# systemctl --user, for the pool cells: runscaler's unit as systemd.json holds it ({active, enabled, start, pid}, and
+# what hzlib.shown reads: runner, drain, drain_until, failed); logs each call, one line of its arguments. stop: the
+# process logs its last line and exits (with `drain` seconds: the unit is deactivating, the old pid, for that long of
+# the fake clock, the hooks of "systemctl:stop-begin" fire, and the client returns when the drain ends; a client killed
+# meanwhile leaves the stop job draining); start: a new process (a new pid, start = the clock) logs its first line,
+# unless the unit already is active; restart: both. show: ActiveState, UnitFileState, MainPID, ActiveEnterTimestamp,
+# as hzlib.shown gives them now (see tests/hetzner/support.py, Pool).
 import os, sys, time
 SB = @SB@
 sys.path.insert(0, SB + '/stubs')
@@ -850,14 +929,16 @@ a = sys.argv[1:]
 with open(SB + '/logs/systemctl.log', 'a') as f:
     f.write(' '.join(a) + '\n')
 st = hzlib.load('systemd.json')
+state, mpid, mstart = hzlib.shown(st)
+hzlib.save('systemd.json', st)
 if a[:1] == ['--user']:
     a = a[1:]
 cmd = a[0] if a else ''
 if cmd == 'daemon-reload':
     sys.exit(0)
 if cmd == 'is-active':
-    print('active' if st['active'] else 'inactive')
-    sys.exit(0 if st['active'] else 3)
+    print(state)
+    sys.exit(0 if state == 'active' else 3)
 if cmd == 'is-enabled':
     print('enabled' if st['enabled'] else 'disabled')
     sys.exit(0 if st['enabled'] else 1)
@@ -866,10 +947,10 @@ if cmd == 'show' and a[1:2] == ['runscaler']:
         sys.stdout.write(st['show_answer']['out'])
         sys.stdout.flush()
         sys.exit(st['show_answer']['rc'])
-    vals = {'ActiveEnterTimestamp': ('@%d' % st['start']) if '--timestamp=unix' in a else
-            time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(st['start'])),
-            'MainPID': str(st.get('pid', 0) if st['active'] else 0),
-            'ActiveState': 'active' if st['active'] else 'inactive'}
+    vals = {'ActiveEnterTimestamp': ('@%d' % mstart) if '--timestamp=unix' in a else
+            time.strftime('%a %Y-%m-%d %H:%M:%S UTC', time.gmtime(mstart)),
+            'MainPID': str(mpid), 'ActiveState': state,
+            'UnitFileState': 'enabled' if st['enabled'] else 'disabled'}
     props = [a[i + 1] for i, x in enumerate(a[:-1]) if x == '-p']
     if not props or any(p not in vals for p in props):
         sys.stderr.write('systemctl stub: no answer for: %s\n' % ' '.join(sys.argv[1:]))
@@ -888,9 +969,19 @@ if cmd == 'show' and a[1:2] == ['runscaler']:
         hzlib.fire('systemctl:show-after-stop-%d' % st['shows_since_stop'])
     sys.exit(0)
 if cmd in ('restart', 'stop', 'start') and a[1:] == ['runscaler']:
+    if state == 'deactivating' or (cmd != 'start' and state == 'active' and st.get('drain')):
+        if state != 'deactivating':        # this stop's own drain: the stop job starts, then the client waits for it
+            st['drain_until'] = hzlib.now() + st['drain']
+            hzlib.save('systemd.json', st)
+            hzlib.event('process %d draining until %d' % (st['pid'], st['drain_until']))
+            hzlib.fire('systemctl:stop-begin')
+            st = hzlib.load('systemd.json')
+        hzlib.advance(st['drain_until'])   # a client joins the stop job and returns when it ends
+        st = hzlib.load('systemd.json')
+        state = hzlib.shown(st)[0]
     if cmd in ('restart', 'stop'):
         hzlib.stop(st)
-    if cmd in ('restart', 'start') and not st['active']:
+    if cmd in ('restart', 'start') and (cmd == 'restart' or state != 'active'):
         hzlib.start(st)
     k = {'restart': 'restarts', 'stop': 'stops', 'start': 'starts'}[cmd]
     st[k] = st.get(k, 0) + 1
@@ -1023,6 +1114,21 @@ if sys.argv[1:] == ['--version']:
     print(v)
     sys.exit(0)
 os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
+'''
+
+TIMEOUT_STUB = r'''#!/usr/bin/python3 -I
+# timeout, for the bound cells (Pool.short_timeout): logs its argv (one JSON line), then execs the REAL timeout with
+# each duration divided by timeout.json's `scale` (at least 1 s): a 120-s bound becomes seconds of a cell, the real
+# timeout's own process group and its KILL after -k unchanged
+import json, os, sys
+SB = @SB@
+a = sys.argv[1:]
+with open(SB + '/logs/timeout.log', 'a') as f:
+    f.write(json.dumps(a) + '\n')
+k = json.load(open(SB + '/timeout.json'))['scale']
+s = lambda x: str(max(1, int(x) // k)) if x.isdigit() else x
+a = ['-k', s(a[1]), s(a[2])] + a[3:] if a[:1] == ['-k'] else [s(a[0])] + a[1:]
+os.execv('/usr/bin/timeout', ['timeout'] + a)
 '''
 
 SWAP_STUB = r'''#!/usr/bin/python3 -I
@@ -1303,13 +1409,16 @@ class Pool(Sandbox):
     def hooks(self, *hooks):
         """The cell's hooks, each (AT, ACTION, ...): AT `journal:KEY` (after that journal line is synced), `mv:NAME`
         or `mv-done:NAME` (around a rename onto NAME), `touch:NAME` or `touch-done:NAME` (around a touch of NAME),
-        `systemctl:stop-done` / `:start-done`; ACTION restart (an independent restart), start, revive (the stopped
-        process runs again), busy (/healthz turns busy), edit-config (a hand edit), edit-staged, edit-rollback (back's
-        STAGED), edit-prev (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for
-        the next second of the REAL clock), probe-lock (is the updater lock held?), kill (SIGKILL of pool-image.sh's
-        process group: only an unattended() run is one). An injection, AT with no ACTION: `ddfail:KEY` (the sync of
-        that journal line fails), `ddfail-file:NAME` (the sync of another file NAME fails). `systemctl:show-N` (after
-        the Nth `systemctl show`) needs count_shows() too."""
+        `systemctl:stop-done` / `:start-done`, `systemctl:stop-begin` (a stop with a drain: the stop job started, its
+        client waits), `healthz-read` (after a /healthz read is answered); ACTION restart (an independent restart),
+        start, revive (the stopped process runs again), disable (a person's `disable --now`), disable-only (`disable`
+        without --now), enable, stop (a person's plain stop), fail (the process ends, the unit failed), crash / hang /
+        serve (runner-start from now on: hzlib.shown), busy (/healthz turns busy), edit-config (a hand edit),
+        edit-staged, edit-rollback (back's STAGED), edit-prev (config.toml.prev), edit-prev-image (another image in its
+        runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
+        held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh). An injection, AT
+        with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another
+        file NAME fails). `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
         sb = repr(self.root)
         self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)
@@ -1352,11 +1461,22 @@ class Pool(Sandbox):
         self.write(self.path('clock.json'), json.dumps(c))
         return int(c['now'])
 
-    def unattended(self, *args, prefix=()):
-        """pool-image.sh ARGS (`up --unattended V D`, `back --unattended`) in a NEW SESSION (a `kill` hook kills its
-        group, never this process), PREFIX before it (a wrapper that holds the updater lock)."""
+    # THE UPDATER'S CHILD (S2b-3c-1 D-a): the unattended modes run only as the child of a process that holds the updater
+    # lock on fd 9, as runner-updater runs them. HOLDER is that parent: a bash that opens the lock on fd 9, takes it
+    # (flock -n), and runs its arguments as its CHILD (no exec), so the child inherits fd 9 and the lock is its parent's
+    # open file description. A `kill` hook kills the holder's whole group: the updater and its window.
+    HOLDER = 'install -d -m 700 "${0%/*}" && exec 9>> "$0" && flock -n 9 || exit 99; "$@"'
+
+    def holder(self):
+        return ['bash', '-c', self.HOLDER, os.path.join(self.STATE, 'lock')]
+
+    def unattended(self, *args, prefix=None, timeout=600):
+        """pool-image.sh ARGS (`up --unattended V D`, `back --unattended --why W`, `recover --unattended`) in a NEW
+        SESSION (a `kill` hook kills its group, never this process), as the child of PREFIX: by default the HOLDER
+        above (the updater's child); () runs it with no parent of its own (no fd 9)."""
         self.files()
-        p = subprocess.Popen(list(prefix) + ['bash', os.path.join(self.build, 'setup', 'pool-image.sh')] + list(args),
+        prefix = self.holder() if prefix is None else list(prefix)
+        p = subprocess.Popen(prefix + ['bash', os.path.join(self.build, 'setup', 'pool-image.sh')] + list(args),
                              env=self.env(), cwd=self.HOME, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True, start_new_session=True)
 
@@ -1366,15 +1486,42 @@ class Pool(Sandbox):
             except ProcessLookupError:
                 pass
         self.test.addCleanup(stop)
-        out, err = p.communicate(timeout=600)
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            stop()
+            out, err = p.communicate()
+            return subprocess.CompletedProcess(p.args, 124, out, err)
         return subprocess.CompletedProcess(p.args, p.returncode, out, err)
+
+    def recover(self, **kw):
+        """`pool-image.sh recover --unattended`, as the updater's child (unattended)."""
+        return self.unattended('recover', '--unattended', **kw)
 
     STATE = os.path.join(HOME, '.local', 'state', 'runner-updater')
 
     def window(self):
-        """The OPEN window journal's lines, or None when there is none."""
+        """The window journal's lines (WINDOW: open, or closed and not yet applied), or None when there is none."""
         t = self.read(os.path.join(self.STATE, 'window'))
         return None if t is None else t.splitlines()
+
+    def archive(self):
+        """What the updater's apply step does last (S2b-3c-1 D-b (b); its builder B2 makes the real one): the CLOSED
+        window journal renamed to windows/ID. A cell calls it where the updater's apply step would have run."""
+        lines = self.window()
+        if not lines or not lines[-1].startswith('closed ') or not lines[0].startswith('window '):
+            raise AssertionError('archive: no closed window journal: %r' % (lines,))
+        os.rename(os.path.join(self.STATE, 'window'), os.path.join(self.STATE, 'windows', lines[0].split(' ', 1)[1]))
+
+    def short_timeout(self, scale=40):
+        """From now on `timeout` is TIMEOUT_STUB: it logs its argv (timeouts()) and runs the real timeout with each
+        duration divided by SCALE (120 s -> 3 s; -k 10 -> 1 s)."""
+        self.write(self.path('timeout.json'), json.dumps({'scale': scale}))
+        self.write(self.path('stubs', 'timeout'), TIMEOUT_STUB.replace('@SB@', repr(self.root)), 0o755)
+
+    def timeouts(self):
+        """The argv of each `timeout` call since short_timeout."""
+        return self.calls('timeout')
 
     def closed(self):
         """[(ID, lines)] of the closed window journals (windows/ID), oldest first."""

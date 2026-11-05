@@ -415,6 +415,73 @@ class Rejected(unittest.TestCase):
 
 
 @needs_container
+class WhileAWindowIsThere(unittest.TestCase):
+    """S2b-3c-1 r3 FOLD (Opus r3 F8): `03 real` and `03 render` REFUSE while the updater's window journal is there
+    (~/.local/state/runner-updater/window: open, or closed and not yet applied), naming `runner-updater status`, and
+    change nothing: no config.toml, no STAGED (a STAGED of the window's own is left as it is), no validate. A person's
+    `03 real` of new numbers would otherwise complete a switch the window left waiting, as a hand change. The one
+    exception: `render` run BY the window, the updater's child holding the updater lock on fd 9 (runner-release.sh's
+    rr_held), which stages, and whose validate never gets fd 9 (03 closes it). The controls: no journal: `real`
+    installs the new numbers, `render` stages."""
+
+    OPEN = 'window 20261105000000-1\nkind switch\n'
+    CLOSED = 'window 20261105000000-1\nkind switch\nend nothing\nprev none\ninstalled none none none\nclosed 9\n'
+
+    def plant(self, g, text):
+        os.makedirs(Pool.STATE, mode=0o700, exist_ok=True)
+        return g.p.write(os.path.join(Pool.STATE, 'window'), text, 0o600)
+
+    def test_real_refuses_while_a_window_journal_is_there(self):
+        for why, text in (('open', self.OPEN), ('closed, not applied', self.CLOSED)):
+            with self.subTest(why):
+                g = Rig(self)
+                self.plant(g, text)
+                g.p.pool_env(CPU=5)
+                g.p.write(g.p.path('logs', 'runner.log'), '')
+                before = g.p.snapshot()
+                r = g.p.s03('real')
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertIn('runner-updater status', r.stdout)
+                self.assertIn('REFUSE', r.stdout)
+                self.assertEqual(g.p.snapshot(), before)
+                self.assertEqual(g.validated(), [])
+
+    def test_control_real_with_no_journal_installs_the_new_numbers(self):
+        g = Rig(self)
+        g.p.pool_env(CPU=5)
+        r = g.p.s03('real')
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertIn('\ncpu = 5\n', g.p.config())
+
+    def test_render_refuses_unless_the_window_runs_it(self):
+        """A person's render (no fd 9), and one with fd 9 open on the lock but held by nobody: REFUSE, and a STAGED that
+        was there stays as it was. The window's own (the HOLDER's child): it stages, and the validate it runs has no fd
+        9. With no journal, a person's render stages (the cells above)."""
+        unheld = ['bash', '-c', 'install -d -m 700 "${0%/*}" && exec 9>> "$0" && exec "$@"',
+                  os.path.join(Pool.STATE, 'lock')]
+        for why, holder, ok in (('a person', None, False), ('fd 9 on the lock, held by nobody', unheld, False),
+                                ('the window, the updater lock held', 'holder', True)):
+            for text in (self.OPEN, self.CLOSED):
+                with self.subTest(why, journal=text.splitlines()[-1]):
+                    g = Rig(self)
+                    self.plant(g, text)
+                    g.p.write(g.staged, 'a staged file of the window\n', 0o600)
+                    g.p.write(g.p.path('logs', 'runner.log'), '')
+                    argv = ['bash', os.path.join(g.p.build, 'setup', '03-runscaler.sh'), 'render', X, g.staged]
+                    r = g.p.run((g.p.holder() if holder == 'holder' else holder or []) + argv)
+                    if ok:
+                        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                        self.assertEqual(g.p.images('config.staged.toml'), [ref(X)] * 2)
+                        vs = [c for c in g.p.calls('runner') if c['argv'][:1] == ['validate']]
+                        self.assertEqual([c['fd9'] for c in vs], [False])
+                        continue
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    self.assertIn('runner-updater status', r.stdout)
+                    self.assertEqual(g.p.read(g.staged), 'a staged file of the window\n')
+                    self.assertEqual(g.validated(), [])
+
+
+@needs_container
 class Clock(unittest.TestCase):
     def unit_env(self, p):
         """The Environment= assignments of the INSTALLED unit (KEY=VALUE, one per line)."""

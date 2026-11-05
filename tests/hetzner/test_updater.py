@@ -1430,6 +1430,7 @@ class InstallTime(unittest.TestCase):
         g = Rig(self, on=True)
         up = g.p.unattended('up', '--unattended', V, NEW)
         self.assertEqual(up.returncode, 0, up.stdout[-3000:] + up.stderr)
+        g.p.archive()                  # the updater's apply step (S2b-3c-1 D-b; B2) archives the closed journal
         (wid, lines), = g.p.closed()
         renamed = int([l for l in lines if l.startswith('renamed ')][0].split()[1])
         mtime = int(os.stat(g.p.rpath('config.toml')).st_mtime)
@@ -1496,11 +1497,13 @@ class InstallTime(unittest.TestCase):
         g = Rig(self, on=True, clock=False)
         up = g.p.unattended('up', '--unattended', V, NEW)
         self.assertEqual(up.returncode, 0, up.stdout[-3000:] + up.stderr)
+        g.p.archive()                  # the updater's apply step (S2b-3c-1 D-b; B2) archives the closed journal
         (w1, l1), = g.p.closed()
         target = [l.split()[1] for l in l1 if l.startswith('staged-sha ')][-1]
         renamed1 = int([l.split()[1] for l in l1 if l.startswith('renamed ')][-1])
-        back = g.p.unattended('back', '--unattended')
+        back = g.p.unattended('back', '--unattended', '--why', 'back')
         self.assertEqual(back.returncode, 0, back.stdout[-3000:] + back.stderr)
+        g.p.archive()
         self.assertEqual(g.p.images(), [ref(OLD)] * 2)
         p = g.p.unit_now()
         wait_past(p['start'])
@@ -1747,6 +1750,7 @@ class NoAction(unittest.TestCase):
         g = Rig(self, on=True)
         up = g.p.unattended('up', '--unattended', V, NEW)     # pool-image.sh's files: config.toml.prev, windows/
         self.assertEqual(up.returncode, 0, up.stdout[-3000:] + up.stderr)
+        g.p.archive()                  # the updater's apply step (S2b-3c-1 D-b; B2) archives the closed journal
         self.assertTrue(os.path.isfile(g.p.rpath('config.toml.prev')))
         st = g.state()
         st['families'] = {FAM: {'candidate': candidate(g.p.clock() - 60, lines={MAIN: ref(NEW), SMALL: ref(NEW)})}}

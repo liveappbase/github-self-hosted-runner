@@ -33,6 +33,13 @@
 # before is removed too, also when the host config refuses: the cleanup is set before it is read); 2 usage.
 # THE VALIDATE: `runner-start validate`, its stdout AND stderr (runner-start refuses on stderr), is classified by the ONE
 # VALIDATE RULE (~/bin/validate-class): it prints the whole output, then `VALIDATE <class>`. real installs only on PASS.
+# WHILE A WINDOW IS THERE (S2b-3c-1 r3 FOLD, Opus r3 F8): real and render REFUSE, before anything else after the host
+# config, while the updater's window journal ~/.local/state/runner-updater/window is there (open, or closed and not yet
+# applied: `runner-updater status` says which), naming that status line; nothing changes (a STAGED that is there is the
+# window's, and is left). A person's `03 real` of new numbers would otherwise complete a switch the window left waiting,
+# and the next pass would read it as a hand change. The one exception: render run BY the window, the updater's child,
+# which holds the updater lock on fd 9 (runner-release.sh's rr_held). Then 03 closes fd 9, so no child of it
+# (runner-start, runscaler's validate) can keep the updater lock.
 # NUMBERS: ~/.config/runner/pool.env (0600; CONCURRENT CPU MEMORY MAX SMALL_CPU SMALL_MEMORY, whole numbers), written
 # once the pool's size is measured. real and render REFUSE without it. An env var of the same name that disagrees with
 # what is used is refused: change the record, not the call.
@@ -125,6 +132,16 @@ read_pins() {   # the PINS block of pool-image.sh, as data: one "PATH HEX" line 
   { [ "$end" = 1 ] && [ -n "$out" ]; } || return 1
   printf '%s' "$out"
 }
+WINDOW=$HOME/.local/state/runner-updater/window   # WHILE A WINDOW IS THERE (the header)
+if [ -e "$WINDOW" ] || [ -L "$WINDOW" ]; then
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || { kept=1; die "cannot read $B/setup/runner-release.sh (~/build: this release's linux-docker/); nothing changed"; }
+  if [ "$MODE" != render ] || ! rr_held; then
+    kept=1   # a STAGED that is there is the window's: left as it is
+    die "REFUSE 03 $MODE while the updater's window journal $WINDOW is there (a switch or a rollback the updater has not ended or applied): run \`runner-updater status\`, and run 03 again once it shows no window journal; nothing changed"
+  fi
+fi
+exec 9>&-   # no child of 03 holds the updater lock (the header)
 say "the numbers"
 [ -e "$POOL" ] || die "no $POOL: B4's numbers are not recorded, so '$MODE' is not rendered (plan §4 B4)"
 [ "$(stat -c '%a %U' "$POOL")" = "600 $(id -un)" ] || die "$POOL is not 0600 and owned by $(id -un)"
