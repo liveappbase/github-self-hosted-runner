@@ -20,6 +20,7 @@ The rig (Inst):
   that cannot exist.
 """
 import hashlib
+import json
 import os
 import plistlib
 import pwd
@@ -30,6 +31,7 @@ import unittest
 
 from tests.studio.support import REPO, Sandbox
 from tests.studio.test_runner_updater import read_text, the_jq
+from tests.studio.test_runner_updater_state import state
 
 UID = os.getuid()
 ME = pwd.getpwuid(UID).pw_name
@@ -138,8 +140,8 @@ class Inst:
         rw = [(a, b) for a, b in self.prefix if a in text] + list(extra)
         return self.sb.copy_script(rel, rw, dest=dest)
 
-    def unpack(self, name='.unpack.abc123'):
-        """the release tree at BASE/NAME/VERSION -> its install"""
+    def unpack(self, name='.unpack.abc123', updater=()):
+        """the release tree at BASE/NAME/VERSION (UPDATER: more rewrites of its runner-updater) -> its install"""
         rel = os.path.join(self.base, name, self.version)
         os.makedirs(os.path.join(rel, 'bin'))
         self.rewrite('install', [('ID=/usr/bin/id', 'ID=' + os.path.join(self.tools, 'id')),
@@ -154,7 +156,7 @@ class Inst:
         for f in ('02-wall.sh', 'downloads.manifest'):   # data: install reads them, never runs them
             shutil.copy(os.path.join(REPO, 'setup', f), os.path.join(rel, 'setup', f))
         relbin = os.path.join(rel, 'bin')
-        real = {'runner-updater': [('JQ=/usr/bin/jq', 'JQ=' + the_jq())],
+        real = {'runner-updater': [('JQ=/usr/bin/jq', 'JQ=' + the_jq())] + list(updater),
                 'runner-updater-lib': [], 'runner-updater-window': [], 'runner-journal': [], 'validate-class': [],
                 'runner-lock-free': [('CI_USER=ci', 'CI_USER=' + ME)]}
         for n, extra in real.items():
@@ -194,6 +196,41 @@ class Inst:
     def launchctl(self, verb=None):
         calls = self.sb.calls('launchctl')
         return [c for c in calls if verb is None or c[:1] == [verb]]
+
+    def updater(self, *args):
+        """the INSTALLED runner-updater (the link install made), as ci would run it"""
+        return self.sb.run(['/bin/zsh', '-f', os.path.join(self.bin, 'runner-updater')] + list(args))
+
+    def statedir_with_list(self, names=''):
+        """STATEDIR (0700) with its protected list (0600), as an earlier install or report made them"""
+        os.makedirs(self.statedir, mode=0o700)
+        self.sb.write(os.path.join(self.statedir, 'protected'), names, 0o600)
+
+    def hold_updater_lock(self):
+        """a process that holds the updater lock (zsystem flock, as a pass or a window) until the test ends"""
+        ready = self.sb.path('locked')
+        lockfile = os.path.join(self.statedir, 'lock')
+        self.sb.start(['/bin/zsh', '-f', '-c', 'zmodload zsh/system; : >> %s; zsystem flock -f fd %s || exit 1; '
+                       ': > %s; /bin/sleep 600' % (lockfile, lockfile, ready)], name='updater-lock-holder')
+        self.sb.wait_for(lambda: os.path.exists(ready), 'the updater lock to be held')
+
+    def try_updater_lock(self):
+        """zsystem flock -t 0.01 on the updater lock now: 0 free, 2 held"""
+        return subprocess.run(['/bin/zsh', '-f', '-c', 'zmodload zsh/system; zsystem flock -t 0.01 -f fd %s 2>/dev/null; '
+                               'print -r -- $?' % os.path.join(self.statedir, 'lock')],
+                              capture_output=True, text=True).stdout.strip()
+
+    def unchanged(self, before, unpacked):
+        """nothing changed: the host tree is BEFORE, the release is still in its unpack folder, no launchctl call,
+        no download"""
+        after = tree(self.ci)
+        lock = os.path.relpath(os.path.join(self.statedir, 'lock'), self.ci)
+        if lock not in before and lock in after:      # the lock file, made to take the lock (as runner-updater makes it)
+            self.test.assertEqual(after.pop(lock), ('file', 0o600, hashlib.sha256(b'').hexdigest()))
+        self.test.assertEqual(after, before)
+        self.test.assertTrue(os.path.isfile(unpacked))
+        self.test.assertEqual(self.launchctl(), [])
+        self.test.assertEqual(self.sb.calls('fetch.sh'), [])
 
     def tools_list(self):
         return TOOLS_RE.search(read_text(os.path.join(REPO, 'install'))).group(1).split()
@@ -256,6 +293,294 @@ class TestFreshInstall(unittest.TestCase):
         self.assertEqual({k: v for k, v in after.items() if k != 'mac-runner/runscaler.sha256'},
                          {k: v for k, v in before.items() if k != 'mac-runner/runscaler.sha256'})
 
+
+
+UPDATER = 'sh.liveapp.runner-updater'
+SECTION = 'README "An unfinished window the updater cannot end"'
+RECORD_STOP = ('install: STOP an updater window is unfinished: run %s pass (its RECOVER ends the window), then run '
+               'install again. If that pass says RECOVER cannot read or act on the window record: ' + SECTION + '\n')
+OFF_NEXT = ('install: NEXT (optional): the updater is OFF; README "The updater" says how to write its families file and '
+            'turn it on\n')
+
+
+class TestTheUpdaterAgent(unittest.TestCase):
+    """install links runner-updater (the link the plist and the watchdog run) and loads the second agent, by the ONE
+    function that loads the first: when its plist differs or it is not loaded, the old plist kept as
+    BASE/updater-plist.prev; the link exists before its bootstrap."""
+
+    def test_install_links_runner_updater_and_names_the_plist_s_label(self):
+        h = Inst(self)
+        self.assertIn('runner-updater', h.tools_list())
+        self.assertEqual(const('UPDATER_LABEL'), UPDATER)
+
+    def test_a_fresh_install_loads_both_agents_the_link_first(self):
+        h = Inst(self)
+        res = h.install()
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+        self.assertIn('install: LaunchAgent %s loaded from %s\n' % (UPDATER, os.path.join(h.agents, UPDATER + '.plist')),
+                      res.stdout)
+        links = dict(l.split(' ', 1) for l in read_text(os.path.join(h.launchd, 'bootstrap.links')).splitlines())
+        self.assertEqual(links[UPDATER], os.path.join(h.base, 'current', 'bin', 'runner-updater'))
+        with open(os.path.join(h.agents, UPDATER + '.plist'), 'rb') as f, \
+                open(os.path.join(REPO, 'config', UPDATER + '.plist'), 'rb') as g:
+            self.assertEqual(f.read(), g.read())
+        self.assertFalse(os.path.exists(os.path.join(h.base, 'updater-plist.prev')))
+
+    def test_a_changed_updater_plist_is_reloaded_and_the_old_one_kept(self):
+        h = Inst(self)
+        h.install()
+        dst = os.path.join(h.agents, UPDATER + '.plist')
+        old = read_text(dst).replace('<integer>600</integer>', '<integer>900</integer>')   # an older release's plist
+        h.sb.write(dst, old)
+        n = len(h.launchctl())
+        res = h.install(os.path.join(h.base, h.version, 'install'))
+        self.assertEqual([c[:2] for c in h.launchctl()[n:] if c[0] in ('bootout', 'bootstrap')],
+                         [['bootout', 'gui/%d/%s' % (UID, UPDATER)], ['bootstrap', 'gui/%d' % UID]])
+        self.assertEqual(read_text(os.path.join(h.base, 'updater-plist.prev')), old)
+        self.assertEqual(read_text(dst), read_text(os.path.join(REPO, 'config', UPDATER + '.plist')))
+        self.assertIn('install: kept the old plist as %s\n' % os.path.join(h.base, 'updater-plist.prev'), res.stdout)
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+
+    def test_an_updater_agent_that_is_not_loaded_is_loaded(self):
+        h = Inst(self)
+        h.install()
+        os.remove(os.path.join(h.launchd, 'loaded', UPDATER))       # booted out by hand
+        n = len(h.launchctl())
+        h.install(os.path.join(h.base, h.version, 'install'))
+        self.assertEqual([c[:2] for c in h.launchctl()[n:] if c[0] in ('bootout', 'bootstrap')],
+                         [['bootstrap', 'gui/%d' % UID]])
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+
+
+class TestTheStateFolder(unittest.TestCase):
+    """A host with no STATEDIR gets it, with its empty protected list, from the release's own `runner-updater protect`
+    (run for real: the one-step folder), before install tries the updater lock. Its failure is a STOP; an existing folder
+    and list are left byte-equal."""
+
+    AS_BEFORE = 'liveapp-mac-golden-20260815\nliveapp-mac-golden-20260901\n'   # golden-prune with no updater
+
+    def prune(self, h):
+        script = h.sb.copy_script('bin/golden-prune', [('STATEDIR=/Users/ci/.local/state/runner-updater',
+                                                        'STATEDIR=' + h.statedir)], dest=h.sb.path('prune', 'golden-prune'))
+        return h.sb.run(['/bin/zsh', '-f', script] + TestStateDirNames)
+
+    def test_a_fresh_host_gets_statedir_and_an_empty_list_by_the_real_protect(self):
+        h = Inst(self)
+        res = h.install()
+        protected = os.path.join(h.statedir, 'protected')
+        self.assertIn('install: runner-updater: created %s, with an empty protected list %s (it protects nothing)\n'
+                      % (h.statedir, protected), res.stdout)
+        self.assertEqual(os.stat(h.statedir).st_mode & 0o777, 0o700)
+        self.assertEqual((os.path.getsize(protected), os.stat(protected).st_mode & 0o777), (0, 0o600))
+        self.assertEqual(sorted(os.listdir(h.statedir)), ['lock', 'protected'])   # no state.json
+        p = self.prune(h)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, self.AS_BEFORE, ''))
+        # `on` passes the list check (no "protected list" refusal) with a families file
+        h.sb.write(os.path.join(h.ci, '.config', 'runner-updater', 'families'), 'mac-golden tart mac-ci-REPO\n')
+        on = h.updater('on')
+        self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
+        self.assertEqual(on.stdout, 'runner-updater: on: the updater is ON\n')
+
+    def test_protect_failing_is_a_stop_and_nothing_else_changes(self):
+        h = Inst(self)
+        state = os.path.join(h.ci, '.local', 'state')
+        os.makedirs(state)
+        os.chmod(state, 0o500)                                 # no new folder can be made beside STATEDIR
+        self.addCleanup(os.chmod, state, 0o700)
+        unpacked = h.unpack()
+        before = tree(h.ci)
+        res = h.install(unpacked, ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertEqual(res.stdout, "install: STOP the updater's state folder: runner-updater: REFUSE cannot create a "
+                                     "new folder beside %s\n" % h.statedir)
+        h.unchanged(before, unpacked)
+
+    def test_control_an_existing_folder_and_list_stay_byte_equal(self):
+        h = Inst(self)
+        h.statedir_with_list('liveapp-mac-golden-20260901\n')
+        h.sb.write(os.path.join(h.statedir, 'state.json'), json.dumps(state()) + '\n', 0o600)
+        before = tree(h.statedir)
+        res = h.install()
+        self.assertNotIn('protected list', res.stdout)
+        after = tree(h.statedir)
+        self.assertEqual(after.pop('lock'), ('file', 0o600, hashlib.sha256(b'').hexdigest()))   # the lock file, made
+        self.assertEqual(after, before)
+
+    KILL_BLOCK = 'if [[ ! -e $STATEDIR && ! -L $STATEDIR ]]; then\n'
+    KILL_AFTER = '[[ -d $STATEDIR && ! -L $STATEDIR ]] || refuse "$STATEDIR is not a folder"\n'
+
+    def test_a_kill_of_protect_at_each_step_never_leaves_statedir_without_its_list(self):
+        seen = {'no STATEDIR': 0, 'STATEDIR with its list': 0}
+        for n in range(1, 60):
+            h = Inst(self)
+            trap = "ru_k=0; trap '(( ! ZSH_SUBSHELL && ++ru_k == %d )) && kill -9 $$' DEBUG\n" % n
+            unpacked = h.unpack(updater=[(self.KILL_BLOCK, trap + self.KILL_BLOCK),
+                                         (self.KILL_AFTER, 'trap - DEBUG\n' + self.KILL_AFTER)])
+            res = h.install(unpacked, ok=False)
+            if res.returncode == 0:      # the block has fewer than n commands: no kill
+                break
+            with self.subTest(killed_before_command=n):
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertTrue(res.stdout.startswith("install: STOP the updater's state folder: "), res.stdout)
+                self.assertEqual(h.launchctl(), [])
+                if os.path.lexists(h.statedir):
+                    seen['STATEDIR with its list'] += 1
+                    p = os.path.join(h.statedir, 'protected')
+                    self.assertTrue(os.path.isfile(p) and not os.path.islink(p), os.listdir(h.statedir))
+                    self.assertEqual(os.path.getsize(p), 0)
+                else:
+                    seen['no STATEDIR'] += 1
+                p = self.prune(h)
+                self.assertEqual((p.returncode, p.stdout), (0, self.AS_BEFORE), p.stderr)
+        else:
+            self.fail('every run was killed: the trap never ran out of commands')
+        self.assertGreater(seen['no STATEDIR'], 0, seen)
+        self.assertGreater(seen['STATEDIR with its list'], 0, seen)
+        # the last host, after a run that was not killed: STATEDIR with its list, and install went on
+        self.assertEqual(sorted(os.listdir(h.statedir)), ['lock', 'protected'])
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+
+
+TestStateDirNames = ['liveapp-mac-golden-20261001', 'liveapp-mac-golden-20261001', 'liveapp-mac-golden-20260915',
+                     'liveapp-mac-golden-20260901', 'liveapp-mac-golden-20260815']
+
+
+class TestTheUpdaterLock(unittest.TestCase):
+    """install's OUTER process TRIES the updater lock (zsystem flock -t 0.01) and holds it to its end; the `--locked`
+    child never tries it. Held: STOP, nothing changed. The runner lock held alone: the existing STOP, and the updater
+    lock is free after the exit."""
+
+    def test_the_updater_lock_held_is_a_stop_and_nothing_changes(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        h.hold_updater_lock()
+        unpacked = h.unpack()
+        before = tree(h.ci)
+        res = h.install(unpacked, ok=False)
+        self.assertEqual((res.returncode, res.stdout), (1, 'install: STOP an updater run holds its lock (a pass or a '
+                                                           'window): run install again when it has ended\n'), res.stderr)
+        h.unchanged(before, unpacked)
+
+    def test_control_the_updater_lock_free_install_goes_on_and_its_child_does_not_try_it(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        h.install()                                      # the outer process holds the lock while its child runs
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+        self.assertEqual(h.try_updater_lock(), '0')     # and lets it go at its end
+
+    def test_a_lock_file_it_cannot_take_is_a_stop(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        os.mkdir(os.path.join(h.statedir, 'lock'))       # not a file: flock cannot open it
+        unpacked = h.unpack()
+        before = tree(h.ci)
+        res = h.install(unpacked, ok=False)
+        self.assertEqual(res.stdout, 'install: STOP cannot take the updater lock %s (rc 1)\n'
+                         % os.path.join(h.statedir, 'lock'))
+        h.unchanged(before, unpacked)
+
+    def test_the_runner_lock_held_alone_is_the_existing_stop_and_the_updater_lock_is_free_after(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        h.sb.start(['/usr/bin/lockf', '-k', '-t', '0', h.lock, '/bin/sleep', '600'], name='runner-lock-holder')
+        h.sb.wait_for(lambda: subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', h.lock, '/usr/bin/true'])
+                      .returncode == 75, 'the runner lock to be held')
+        res = h.install(ok=False)
+        self.assertEqual(res.returncode, 1)
+        self.assertEqual(res.stdout, "install: STOP runner-lock-free says 'held': runscaler, wall-check, golden-build or "
+                                     "golden-gate is running\n")
+        self.assertEqual(h.try_updater_lock(), '0')
+
+
+class TestAnOpenWindowRecord(unittest.TestCase):
+    """An open window record (STATEDIR/window, -e or -L), under the updater lock and BEFORE the FLAG check: STOP, and
+    nothing changes (no move-in, no download, no link, no launchctl call). The STOP names the link when it exists, else
+    BASE/current/bin/runner-updater when current is a 0.2.x release, else the 0.2.x folder written down at the way back."""
+
+    def record(self, h, symlink=False):
+        h.statedir_with_list()
+        w = os.path.join(h.statedir, 'window')
+        if symlink:
+            os.symlink(h.sb.path('no-such-record'), w)
+        else:
+            h.sb.write(w, 'window 20261105000000-1\nfamily mac-golden\n', 0o600)
+
+    def stopped(self, h, text, flag=False):
+        if flag:
+            h.sb.write(h.flag, '')
+        unpacked = h.unpack()
+        before = tree(h.ci)
+        res = h.install(unpacked, ok=False)
+        self.assertEqual((res.returncode, res.stdout), (1, text), res.stderr)
+        h.unchanged(before, unpacked)
+
+    def test_with_the_link_the_stop_names_it(self):
+        h = Inst(self)
+        self.record(h)
+        os.makedirs(h.bin)
+        h.sb.write(h.sb.path('old', 'runner-updater'), '#!/bin/zsh -f\n', 0o755)
+        os.symlink(h.sb.path('old', 'runner-updater'), os.path.join(h.bin, 'runner-updater'))
+        self.stopped(h, RECORD_STOP % os.path.join(h.bin, 'runner-updater'))
+
+    def test_with_no_link_and_a_0_2_x_current_the_stop_names_current(self):
+        h = Inst(self)
+        self.record(h)
+        h.sb.write(os.path.join(h.base, '0.2.0', 'VERSION'), '0.2.0\n')
+        h.sb.write(os.path.join(h.base, '0.2.0', 'bin', 'runner-updater'), '#!/bin/zsh -f\n', 0o755)
+        os.symlink('0.2.0', os.path.join(h.base, 'current'))
+        self.stopped(h, RECORD_STOP % os.path.join(h.base, 'current', 'bin', 'runner-updater'))
+
+    def test_with_no_link_and_an_older_current_the_stop_names_the_written_down_folder(self):
+        h = Inst(self)
+        self.record(h, symlink=True)                 # a dangling symlink is a record too
+        h.sb.write(os.path.join(h.base, '0.1.0', 'VERSION'), '0.1.0\n')
+        # rc.6 had a report-only runner-updater: its `pass` runs no RECOVER
+        h.sb.write(os.path.join(h.base, '0.1.0', 'bin', 'runner-updater'), '#!/bin/zsh -f\n', 0o755)
+        os.symlink('0.1.0', os.path.join(h.base, 'current'))
+        self.stopped(h, RECORD_STOP % ('the runner-updater of the 0.2.x folder written down at the way back (%s/<VERSION>'
+                                       '/bin/runner-updater)' % h.base))
+
+    def test_the_record_check_comes_before_the_flag_check(self):
+        h = Inst(self)
+        self.record(h)
+        self.stopped(h, RECORD_STOP % ('the runner-updater of the 0.2.x folder written down at the way back (%s/<VERSION>'
+                                       '/bin/runner-updater)' % h.base), flag=True)
+
+    def test_control_no_record_install_goes_on(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        h.install()
+        self.assertEqual(h.loaded(), [LABEL, UPDATER])
+
+    def test_control_no_record_with_flag_is_the_flag_stop(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        h.sb.write(h.flag, '')
+        res = h.install(ok=False)
+        self.assertEqual(res.stdout, 'install: STOP the agent is enabled: run %s/runner-disable first (it waits for a '
+                                     'running job), then run the same line again\n' % h.bin)
+
+
+class TestTheUpdaterState(unittest.TestCase):
+    """install never writes state.json and never runs `on` or `off`: a fresh install is OFF (D11), an upgrade keeps ON
+    or OFF. Step 6 prints the first line of `runner-updater status`, and when OFF the optional NEXT."""
+
+    def test_a_fresh_install_is_off_and_says_how_to_turn_it_on(self):
+        h = Inst(self)
+        res = h.install()
+        self.assertFalse(os.path.exists(os.path.join(h.statedir, 'state.json')))
+        self.assertIn('install: UPDATER     runner-updater: status: the updater is OFF\n', res.stdout)
+        self.assertTrue(res.stdout.endswith(OFF_NEXT), res.stdout)
+
+    def test_an_on_state_stays_on_byte_equal(self):
+        h = Inst(self)
+        h.statedir_with_list()
+        text = json.dumps(state(on=True), indent=2) + '\n'
+        h.sb.write(os.path.join(h.statedir, 'state.json'), text, 0o600)
+        res = h.install()
+        self.assertEqual(read_text(os.path.join(h.statedir, 'state.json')), text)
+        self.assertIn('install: UPDATER     runner-updater: status: the updater is ON\n', res.stdout)
+        self.assertNotIn('NEXT (optional)', res.stdout)
 
 
 def const(name, rel='install'):

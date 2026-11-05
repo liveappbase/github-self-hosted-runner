@@ -3,7 +3,8 @@ to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-
 golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune), DD (runner-updater,
 runner-journal), BIN (runner-updater, runner-enable), DF (runner-updater, tart-shim) and FLOOR_GIB (runner-updater,
 golden-build: the switch window's DISK check uses golden-build's floor) and LSOF (runner-updater's RECOVER, runner-lock-free:
-one lsof reads every open file) and LOCKF (install, runner-lock-free: the runner lock's one lockf). release-check runs on a temporary git repository with only the files the constants rule reads; it
+one lsof reads every open file) and LOCKF (install, runner-lock-free: the runner lock's one lockf), LOCKFILE and WINDOW (runner-updater, install:
+the updater lock install tries, the open window record it refuses). release-check runs on a temporary git repository with only the files the constants rule reads; it
 downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
@@ -41,7 +42,9 @@ class ReleaseCheckConstants(unittest.TestCase):
               'DF': ('/bin/df', 'runner-updater', 'tart-shim'),
               'FLOOR_GIB': ('200', 'runner-updater', 'golden-build'),
               'LSOF': ('/usr/sbin/lsof', 'runner-lock-free', 'runner-updater'),
-              'LOCKF': ('/usr/bin/lockf', 'install', 'runner-lock-free')}
+              'LOCKF': ('/usr/bin/lockf', 'install', 'runner-lock-free'),
+              'LOCKFILE': ('$STATEDIR/lock', 'install', 'runner-updater'),
+              'WINDOW': ('$STATEDIR/window', 'install', 'runner-updater')}
 
     def check(self, name, value):
         line, changed, other = self.WIRING[name]
@@ -104,6 +107,12 @@ class ReleaseCheckConstants(unittest.TestCase):
 
     def test_two_values_of_lockf_are_red(self):
         self.two_values_are_red('LOCKF')
+
+    def test_two_values_of_lockfile_are_red(self):
+        self.two_values_are_red('LOCKFILE')
+
+    def test_two_values_of_window_are_red(self):
+        self.two_values_are_red('WINDOW')
 
 
 class LockHolderMessages(unittest.TestCase):

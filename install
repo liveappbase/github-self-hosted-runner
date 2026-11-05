@@ -3,9 +3,16 @@
 # sha256, unpacks it into a fresh /Users/ci/mac-runner/.unpack.XXXXXX and runs <that>/<VERSION>/install. You can also
 # re-run the installed copy: /Users/ci/mac-runner/<VERSION>/install. It runs from nowhere else.
 # Design: docs/design.md ("Install and update"). In this order:
-#   1. It refuses unless it runs as ci, the agent is disabled (no FLAG), and runner-lock-free says free; then it holds
-#      the runner lock for its whole run, checks FLAG again under it, and removes the leftovers of earlier failed runs
-#      (.dl.*, .unpack.*, *.prev.<n>).
+#   1. It refuses unless it runs as ci. THE UPDATER (bin/runner-updater): when its state folder STATEDIR is absent, the
+#      release's own `bin/runner-updater protect` makes it with its empty protected list in ONE step (golden-prune reads
+#      an existing STATEDIR as "the updater is here"); its failure is a STOP. Then this process TRIES the updater lock
+#      (STATEDIR/lock, zsystem flock -t 0.01) and holds it to its end: held, STOP (a pass or a window runs). Under it, an
+#      open window record (STATEDIR/window) is a STOP that names the `pass` whose RECOVER ends it (install never runs
+#      beside a window, its VMs or its tools); this comes BEFORE the FLAG check, so that pass sees CI as the window left
+#      it. Then it refuses unless the agent is disabled (no FLAG) and runner-lock-free says free; then it holds the
+#      runner lock for its whole run (its `--locked` child, which never tries the updater lock), checks FLAG again under
+#      it, and removes the leftovers of earlier failed runs (.dl.*, .unpack.*, *.prev.<n>). Each STOP of this step
+#      changes nothing else.
 #   2. It refuses below 16 GB of RAM. It creates the config and log folders (0700).
 #   3. It moves this release in as /Users/ci/mac-runner/<VERSION>/ (an existing one: moved aside, the new one moved in,
 #      read back, the old one removed — never a folder moved onto a folder). From then on every path it uses is built
@@ -17,12 +24,16 @@
 #      names the check workflow — also on a re-run after a failed install. A fresh host has no runscaler to re-check.
 #   5. It needs ci's GUI session. It points /Users/ci/mac-runner/current at <VERSION> (one rename, read back), links
 #      each tool /Users/ci/bin/<tool> -> /Users/ci/mac-runner/current/bin/<tool>, removes a link into mac-runner/ whose
-#      target is gone, (re)loads the LaunchAgent when its plist differs or it is not loaded (the old plist is kept as
-#      /Users/ci/mac-runner/plist.prev), and creates config.toml from the example only when there is none.
+#      target is gone, (re)loads each LaunchAgent when its plist differs or it is not loaded (ONE function, agent: the
+#      runner's, sh.liveapp.mac-runner, then the updater's timer, sh.liveapp.runner-updater, after its link; the old
+#      plist is kept as /Users/ci/mac-runner/plist.prev and updater-plist.prev), and creates config.toml from the example
+#      only when there is none. It never writes the updater's state and never runs `on` or `off`: a fresh install is
+#      OFF, an upgrade keeps ON or OFF.
 #   6. It prints what is still needed — the ROOT LINE, WALL-CHECK, then runner-enable — from facts, never a version.
 #      WALL-CHECK is "needed" when the shim refuses on the stamp, the wall proof does not match the installed tools,
 #      or the stamp's macOS build is not this Mac's (runner-enable refuses on each of them). NEXT names the token and
-#      runner-start validate when config.toml is new or a token file it names is absent.
+#      runner-start validate when config.toml is new or a token file it names is absent. UPDATER is the first line of
+#      `runner-updater status`; when it is OFF, a last line `NEXT (optional)` says where the README turns it on.
 # A re-run after a failure at any step ends in the same state as one clean run. Every stop: "install: STOP <reason>".
 set -u
 umask 077
@@ -47,12 +58,16 @@ RUNNER_REC=/Users/ci/mac-runner/runscaler.sha256
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
 LABEL=sh.liveapp.mac-runner
 AGENTS=/Users/ci/Library/LaunchAgents
+STATEDIR=/Users/ci/.local/state/runner-updater   # the updater's (bin/runner-updater): its lock and its open window record
+LOCKFILE=$STATEDIR/lock
+WINDOW=$STATEDIR/window
+UPDATER_LABEL=sh.liveapp.runner-updater
 # the tools it runs that act on the host (tests/studio/test_install.py rewrites each into a stub)
 ID=/usr/bin/id
 SYSCTL=/usr/sbin/sysctl
 LOCKF=/usr/bin/lockf
 LAUNCHCTL=/bin/launchctl
-TOOLS=(golden-build golden-gate golden-prune real-run runner-disable runner-enable runner-lock-free runner-start wall-check wall-files-check)
+TOOLS=(golden-build golden-gate golden-prune real-run runner-disable runner-enable runner-lock-free runner-start runner-updater wall-check wall-files-check)
 MIN_RAM_GB=16
 
 stop() { print -r -- "install: STOP $*"; exit 1 }
@@ -99,8 +114,37 @@ elif [[ ${here:h:h} == $BASE && ${here:h:t} == .unpack.* ]]; then
 else
   stop "install runs only from the install line's folder ($BASE/.unpack.*/$version) or from $BASE/$version, not from $here"
 fi
-[[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
 if [[ ${1-} != --locked ]]; then
+  # the updater's state folder: absent, the release's own `protect` makes it with its empty list in ONE step
+  if [[ ! -e $STATEDIR && ! -L $STATEDIR ]]; then
+    out=$($here/bin/runner-updater protect 2>&1)
+    rc=$?
+    (( rc == 0 )) || stop "the updater's state folder: ${${out##*$'\n'}:-runner-updater protect exited $rc with no output}"
+    for l in ${(f)out}; do say $l; done
+  fi
+  # the updater lock, TRIED by this process and held to its end (the --locked child never tries it): no pass, window or
+  # other updater command runs while install does. Nothing in this shell may redirect to LOCKFILE (it would release it)
+  zmodload zsh/system || stop "zsh/system cannot be loaded: the updater lock cannot be taken"
+  [[ -e $LOCKFILE ]] || ( : >> $LOCKFILE ) 2> /dev/null   # zsystem flock does not create it (a missing file: rc 1)
+  zsystem flock -t 0.01 -f ulock $LOCKFILE 2> /dev/null
+  rc=$?
+  (( rc != 2 )) || stop "an updater run holds its lock (a pass or a window): run install again when it has ended"
+  (( rc == 0 )) || stop "cannot take the updater lock $LOCKFILE (rc $rc)"
+  # an open window record, BEFORE the FLAG check: the pass it names then runs RECOVER on CI as the window left it. The
+  # rule of bin/runner-updater-lib's ru_reach (behind a folder it cannot search a record would look absent) holds here:
+  # the lock file beside it was just opened, so every folder on its path can be searched
+  if [[ -e $WINDOW || -L $WINDOW ]]; then
+    u="the runner-updater of the 0.2.x folder written down at the way back ($BASE/<VERSION>/bin/runner-updater)"
+    cv=
+    [[ -f $BASE/current/VERSION ]] && cv=$(<$BASE/current/VERSION)
+    if [[ -L $BIN/runner-updater && -x $BIN/runner-updater ]]; then
+      u=$BIN/runner-updater
+    elif [[ $cv =~ '^([0-9]+)\.([0-9]+)\.[0-9]+$' ]] && (( match[1] > 0 || match[2] >= 2 )) && [[ -x $BASE/current/bin/runner-updater ]]; then
+      u=$BASE/current/bin/runner-updater
+    fi
+    stop "an updater window is unfinished: run $u pass (its RECOVER ends the window), then run install again. If that pass says RECOVER cannot read or act on the window record: README \"An unfinished window the updater cannot end\""
+  fi
+  [[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
   lf=$($here/bin/runner-lock-free) || stop "runner-lock-free says '$lf': runscaler, wall-check, golden-build or golden-gate is running"
   $LOCKF -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked
   rc=$?
@@ -175,27 +219,34 @@ for l in $BIN/*(N@); do
   [[ $(/usr/bin/readlink $l) == $BASE/* && ! -e $l ]] || continue
   /bin/rm -f -- $l && say "removed the dangling link $l"
 done
-src=$R/config/$LABEL.plist dst=$AGENTS/$LABEL.plist
-loaded=0; $LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1 && loaded=1
-if ! /usr/bin/cmp -s $src $dst || (( ! loaded )); then
-  /bin/mkdir -p $AGENTS || stop "cannot create $AGENTS"
-  if [[ -f $dst ]] && ! /usr/bin/cmp -s $src $dst; then
-    if [[ -e $BASE/plist.prev ]]; then
-      say "kept the earlier $BASE/plist.prev (the way back to the plist before the first install)"
-    else
-      /bin/cp -X $dst $BASE/plist.prev || stop "cannot keep the old plist as $BASE/plist.prev"
-      say "kept the old plist as $BASE/plist.prev"
+# LABEL PREV: the LaunchAgent LABEL from this release's config/LABEL.plist, (re)loaded when its plist differs or it is
+# not loaded; an old plist that differs is kept as PREV (only the first one: the way back to the plist before the first
+# install that changed it). ONE function for both agents
+agent() {
+  local label=$1 prev=$2 src=$R/config/$1.plist dst=$AGENTS/$1.plist loaded=0 n=0
+  $LAUNCHCTL print gui/$uid/$label > /dev/null 2>&1 && loaded=1
+  if ! /usr/bin/cmp -s $src $dst || (( ! loaded )); then
+    /bin/mkdir -p $AGENTS || stop "cannot create $AGENTS"
+    if [[ -f $dst ]] && ! /usr/bin/cmp -s $src $dst; then
+      if [[ -e $prev ]]; then
+        say "kept the earlier $prev (the way back to the plist before the first install)"
+      else
+        /bin/cp -X $dst $prev || stop "cannot keep the old plist as $prev"
+        say "kept the old plist as $prev"
+      fi
     fi
+    if (( loaded )); then
+      $LAUNCHCTL bootout gui/$uid/$label || stop "launchctl bootout gui/$uid/$label failed"
+      while $LAUNCHCTL print gui/$uid/$label > /dev/null 2>&1; do (( n++ < 20 )) || stop "the LaunchAgent $label did not unload"; /bin/sleep 0.5; done
+    fi
+    /bin/cp -X $src $BASE/.plist.new && /bin/chmod 644 $BASE/.plist.new && /bin/mv -f $BASE/.plist.new $dst || stop "cannot install $dst"
+    $LAUNCHCTL bootstrap gui/$uid $dst || stop "launchctl bootstrap gui/$uid $dst failed"
+    say "LaunchAgent $label loaded from $dst"
   fi
-  if (( loaded )); then
-    $LAUNCHCTL bootout gui/$uid/$LABEL || stop "launchctl bootout gui/$uid/$LABEL failed"
-    n=0; while $LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1; do (( n++ < 20 )) || stop "the LaunchAgent did not unload"; /bin/sleep 0.5; done
-  fi
-  /bin/cp -X $src $BASE/.plist.new && /bin/chmod 644 $BASE/.plist.new && /bin/mv -f $BASE/.plist.new $dst || stop "cannot install $dst"
-  $LAUNCHCTL bootstrap gui/$uid $dst || stop "launchctl bootstrap gui/$uid $dst failed"
-  say "LaunchAgent $LABEL loaded from $dst"
-fi
-$LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1 || stop "the LaunchAgent $LABEL is not loaded after the install"
+  $LAUNCHCTL print gui/$uid/$label > /dev/null 2>&1 || stop "the LaunchAgent $label is not loaded after the install"
+}
+agent $LABEL $BASE/plist.prev
+agent $UPDATER_LABEL $BASE/updater-plist.prev   # after the links: its program is $BIN/runner-updater
 config_new=0
 if [[ ! -e $CONFIG ]]; then
   cpu=$(( (ncpu - 2) / 2 )); (( cpu < 2 )) && cpu=2
@@ -248,6 +299,8 @@ else
   [[ -z $wall ]] && ! stamp_macos && wall="needed ($REPLY)"
 fi
 say "WALL-CHECK  ${wall:-not needed}"
+updater=$($R/bin/runner-updater status 2>&1)
+say "UPDATER     ${updater%%$'\n'*}"
 next=()
 [[ -n $root ]] && next+=("the root line (root-line.txt of the release you chose, in the ADMIN's own session)")
 imgs=$(/usr/bin/env -i HOME=/Users/ci PATH=$PATH $REAL list --source local -q 2>/dev/null | /usr/bin/grep -cE '^liveapp-mac-golden-[0-9]{8}$')
@@ -262,3 +315,5 @@ next+=("$BIN/runner-enable")
 (( runner_changed )) && next+=("the check workflow (runscaler was replaced)")
 record_runner || stop "cannot write $RUNNER_REC (the record of the installed runscaler); run the same line again"
 say "NEXT        ${(j: -> :)next}"
+[[ ${updater%%$'\n'*} != 'runner-updater: status: the updater is OFF' ]] \
+  || say "NEXT (optional): the updater is OFF; README \"The updater\" says how to write its families file and turn it on"
