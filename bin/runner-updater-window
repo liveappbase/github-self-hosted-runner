@@ -266,7 +266,10 @@
 #      RECOVER's: S3b-4a r2 N2) is decided already: no new wait, no second `pre-close-failure`; RECOVER runs the
 #      runner-disable it decided and goes on at 3. FLAG present after the last `disable-done` with no `enable-start`
 #      after it: a person enabled CI: STOP HAND CHANGE, no action.
-#   2. FLAG absent: it waits until nothing is busy (ru_rc_busy): no process of this user has a journaled tool open (by
+#   2. FLAG absent: at each read it first stops the record's OWN VMs that tart lists running (ru_rc_stop_own: the
+#      `gate-clone` name; a switch's work VM, its second `image` line; `tart stop` by that name exactly, never a
+#      rollback's image lines, never a prefix; S3b-5 A6), then
+#      it waits until nothing is busy (ru_rc_busy): no process of this user has a journaled tool open (by
 #      the `tool` lines' dev+inode, over EVERY open file: `LSOF -n -P -a -u UID -F pDi`, never only the executables:
 #      zsh holds its script on a descriptor, so a builder whose lockf was killed alone still holds its tool while the
 #      lock reads free), no gold-*, n1-* or s1-* VM runs (tart's list), and the release's runner-lock-free says free.
@@ -1426,13 +1429,15 @@ ru_rc_complete() {
     || { REPLY="its backup $ru_w_backup is not the config-sha it journaled"; return 1 }
 }
 
-# STEP 2 (FLAG absent): BUSY -> 0 + REPLY = what still runs; 1 nothing does. A process of this user that has a
+# STEP 2 (FLAG absent): BUSY -> 0 + REPLY = what still runs; 1 nothing does. FIRST, at each read (S3b-5 A6): the
+# record's OWN VMs that tart lists running are stopped (ru_rc_stop_own). Then busy: a process of this user that has a
 # journaled tool open (by its dev+inode, over EVERY open file: the REAL lsof, never only `-d txt`, as zsh holds its
 # script on a descriptor), a gold-*, n1-* or s1-* VM running (tart's list), or a runner lock that is not free (the
 # release's runner-lock-free). A read that fails is busy (never "free")
 ru_rc_busy() {
   local out l p= d= lf
   local -a hits vms w
+  ru_rc_stop_own
   if (( ${#ru_rc_tools} )); then
     out=$(/usr/bin/env -i $LSOF -n -P -a -u $UID -F pDi 2>/dev/null) && [[ -n $out ]] \
       || { REPLY="lsof failed: it cannot tell whether a tool of the window still runs"; return 0 }
@@ -1456,6 +1461,31 @@ ru_rc_busy() {
   [[ $lf == free ]] || { REPLY="the runner lock $LOCK is not free (${lf:-no answer})"; return 0 }
   return 1
 }
+# THE RECORD'S OWN VMs (S3b-5 A6; PLAN D1: the busy wait stops the journaled gate clone, as it stops a journaled
+# builder's VM): the `gate-clone` names (s1-gate-<14 digits>) and, for a `kind switch` record, its work VM (the second
+# `image` line, golden-build's gold-<8 digits>). Each one tart lists running gets `tart stop NAME`, by that name matched
+# EXACTLY (never a prefix), at EACH busy read (a stop that failed is tried again at the next), before the tool check: a
+# golden-emudhra that still drives the VM ends when it stops, and so does real-run (after its exec it holds no tool).
+# Never a rollback record's `image` lines (its second is the rollback target). RECOVER holds the updater lock, so the
+# window that started them is gone. Each stop prints the name and its exit code; step 3 deletes them by its rules
+ru_rc_stop_own() {
+  local i out l rc
+  local -a own w
+  for (( i = 1; i <= ${#ru_rc_k}; i++ )); do
+    [[ $ru_rc_k[i] == gate-clone && $ru_rc_v[i] =~ '^s1-gate-[0-9]{14}$' ]] && own+=($ru_rc_v[i])
+  done
+  [[ $ru_w_kind == switch && $ru_w_work =~ '^gold-[0-9]{8}$' ]] && own+=($ru_w_work)
+  (( ${#own} )) || return 0
+  out=$(ru_tart list --source local 2>/dev/null) || return 0   # the busy read's own tart list says it failed
+  for l in ${${(f)out}[2,-1]}; do
+    w=(${=l})
+    (( ${#w} >= 3 )) && [[ $w[-1] == running ]] && (( ${own[(Ie)$w[2]]} )) || continue
+    ru_tart stop $w[2] > /dev/null 2>&1
+    rc=$?
+    ru_rcsay "tart stop $w[2] (the window's own VM, still running): exit $rc"
+  done
+}
+
 # STEP 2: wait until nothing is busy. ONE bound: RECOVER_WAIT s from the journal's first `recover-wait` line (a later
 # run that finds it past checks once). At its end STOP CI DISABLED, held; the journal stays open and the next pass tries
 # again. 0 quiet; 3 not
