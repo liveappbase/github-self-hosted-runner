@@ -15,6 +15,7 @@ import subprocess
 import time
 import unittest
 
+from tests.studio.support import group_alive, kill_group, members
 from tests.studio.support_emudhra import (BASE_ENV, REPO, ZSH, copy_script, excluded_copy, lines, read, run, stub, tmpdir,
                                           write)
 
@@ -153,12 +154,9 @@ class GateRig:
         return p
 
     def reap(self, p):
-        # the group the test started (its own session): kill what is left of it, the leader gone or not
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        p.wait()
+        # the group the test started (its own session): kill what is left of it, the leader gone or not. support.py's
+        # kill_group is the one copy of this cleanup (Sandbox.start's too), so EPERM for a group of zombies ends it.
+        kill_group(p)
 
 
 class GoldenGate(GateRig, unittest.TestCase):
@@ -263,6 +261,37 @@ class GoldenGate(GateRig, unittest.TestCase):
         r, out = self.gate()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assert_clone_deleted_under_the_lock()
+
+    # ---- the cleanup of a started group (reap)
+
+    def group(self, script, ready, what):
+        """/bin/sh -c SCRIPT in a process group of its own, once ready(the states of its members) holds"""
+        p = subprocess.Popen(['/bin/sh', '-c', script], start_new_session=True, stdin=subprocess.DEVNULL)
+        self.addCleanup(lambda: p.returncode is None and self.reap(p))   # not reaped yet: its group still exists
+        t0 = time.time()
+        while not ready(members(p.pid)):
+            self.assertLess(time.time() - t0, 30, 'the group is not ' + what + ': ' + repr(members(p.pid)))
+            time.sleep(0.05)
+        return p
+
+    def test_reap_of_a_group_of_zombies_ends_with_no_error_and_reaps_it(self):
+        # the end of a signal cell: golden-gate has ended, and its group holds only zombies for a moment (the leader,
+        # members launchd has not reaped yet). macOS answers EPERM, not ESRCH, to killpg then.
+        p = self.group('exit 0', lambda m: len(m) == 1 and m[0].startswith('Z'), 'one zombie')
+        with self.assertRaises(PermissionError):   # the injection is live: the host's real answer for this group
+            os.killpg(p.pid, signal.SIGKILL)
+        self.reap(p)
+        self.assertEqual(p.returncode, 0)          # reaped: its exit status is read
+
+    def test_control_reap_of_a_live_group_kills_its_members(self):
+        p = self.group('/bin/sleep 600 & exec /bin/sleep 600',
+                       lambda m: len(m) == 2 and not any(s.startswith('Z') for s in m), 'two live members')
+        self.reap(p)
+        self.assertEqual(p.returncode, -signal.SIGKILL)
+        t0 = time.time()
+        while group_alive(p.pid):                  # the member, too, is killed
+            self.assertLess(time.time() - t0, 30, 'a member lives on: ' + repr(members(p.pid)))
+            time.sleep(0.05)
 
     # ---- refusals and stops before any clone
 

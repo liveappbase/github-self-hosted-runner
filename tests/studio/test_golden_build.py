@@ -210,7 +210,7 @@ class TestDate(unittest.TestCase):
         self.assert_cleaned(r)
 
 
-GOOD_PIN ='%s %s\n' % (PIN_V, PIN_SHA)
+GOOD_PIN = '%s %s\n' % (PIN_V, PIN_SHA)
 
 
 def _symlink_pin(r):

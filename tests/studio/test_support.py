@@ -1,14 +1,15 @@
 """support.py's own guards: a rewrite that does not match, a host path left in a copy, the stub's argv log, the
-clean environment, the lock holder (hold_lock), which waits for its lock, and the wait for a process group's end
-(group_gone). Each guard has a control that must pass."""
+clean environment, the lock holder (hold_lock), which waits for its lock, the wait for a process group's end
+(group_gone) and the cleanup that kills what is left of a group (kill_group). Each guard has a control that must
+pass."""
 import fcntl
 import os
+import signal
 import subprocess
-import time
 import unittest
 from unittest import mock
 
-from tests.studio.support import Sandbox, group_gone
+from tests.studio.support import Sandbox, group_alive, group_gone, members
 
 
 class TestCopy(unittest.TestCase):
@@ -76,11 +77,28 @@ def probe(lock):
     return subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', lock, '/usr/bin/true']).returncode
 
 
-def held_at_start(sb, lock):
+def ended(p):
+    """the started process has ended (a lockf -t 0 ends at its one try)"""
+    return p.poll() is not None
+
+
+def waits(p):
+    """the started lockf waits for the lock, or it has ended. A lockf that waits sleeps in its open of the lock (ps:
+    S or I), so it has made its try. ps cannot tell that sleep from another: this relies on a lockf not sleeping
+    before its try (it reads no input and starts no child before it)."""
+    if ended(p):
+        return True
+    st = subprocess.run(['/bin/ps', '-o', 'stat=', '-p', str(p.pid)], capture_output=True, text=True,
+                        stdin=subprocess.DEVNULL).stdout.strip()
+    return st.startswith(('S', 'I'))
+
+
+def held_at_start(sb, lock, until):
     """From now on sb.start runs with lock held by THIS process (an flock, as lockf takes it) at the instant the
-    started process begins, and lets it go when that process has ended or 0.5 s have passed. start returns only
-    after that, so the caller's own wait begins with the lock free: a probe that held the lock for a moment just when
-    the holder tried it (the red on main, run 42035056492), made certain."""
+    started process begins, and lets it go once until(p) holds for the started process p: a state, never a time
+    (wait_for's bound fails the test when it never holds). start returns only after that, so the caller's own wait
+    begins with the lock free: a probe that held the lock for a moment just when the holder tried it (the red on
+    main, run 42035056492), made certain."""
     start = sb.start
 
     def injected(argv, extra_env=None, name='proc'):
@@ -88,9 +106,7 @@ def held_at_start(sb, lock):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             p = start(argv, extra_env, name)
-            end = time.monotonic() + 0.5
-            while p.poll() is None and time.monotonic() < end:
-                time.sleep(0.01)
+            sb.wait_for(lambda: until(p), 'the injected hold to end: %s' % until.__name__)
         finally:
             os.close(fd)
         return p
@@ -105,19 +121,24 @@ class TestHoldLock(unittest.TestCase):
     def test_a_hold_at_its_start_delays_the_holder_and_never_ends_it(self):
         sb = Sandbox(self)
         lock = sb.path('lock')
-        held_at_start(sb, lock)
+        held_at_start(sb, lock, waits)
         p = sb.hold_lock(lock)
         self.assertIsNone(p.poll())
         self.assertEqual(probe(lock), 75)
 
     def test_control_the_same_hold_ends_a_lockf_that_does_not_wait(self):
-        # the injection is live: a lockf -t 0 started at the same instant gives up, and the lock is free after
-        sb = Sandbox(self)
-        lock = sb.path('lock')
-        held_at_start(sb, lock)
-        p = sb.start(['/usr/bin/lockf', '-k', '-t', '0', lock, '/bin/sleep', '600'], name='no-wait')
-        self.assertEqual(p.poll(), 75, sb.output('no-wait'))
-        self.assertEqual(probe(lock), 0)
+        # the injection is live: a lockf -t 0 started at the same instant gives up, and the lock is free after. The
+        # hold lasts until that lockf has ended, so a lockf that reaches its try late (a busy host: 1 s) gives up too.
+        for late in (False, True):
+            with self.subTest(late=late):
+                sb = Sandbox(self)
+                lock = sb.path('lock')
+                held_at_start(sb, lock, ended)
+                no_wait = ['/usr/bin/lockf', '-k', '-t', '0', lock, '/bin/sleep', '600']
+                late_argv = ['/bin/zsh', '-f', '-c', '/bin/sleep 1; exec "$@"', 'late'] + no_wait
+                p = sb.start(late_argv if late else no_wait, name='no-wait')
+                self.assertEqual(p.poll(), 75, sb.output('no-wait'))
+                self.assertEqual(probe(lock), 0)
 
     def test_control_no_hold_the_holder_holds_it_at_once(self):
         sb = Sandbox(self)
@@ -126,6 +147,21 @@ class TestHoldLock(unittest.TestCase):
         self.assertIsNone(p.poll())
         self.assertEqual(probe(lock), 75)
         sb.wait_for(lambda: sb.output('h')[0] == 'held\nran\n', 'its command to run')
+
+    def test_a_holder_that_holds_nothing_fails_the_test(self):
+        # hold_lock's own probe: its holder runs without its lockf, so it prints `held` and holds no lock. The control:
+        # test_control_no_hold_the_holder_holds_it_at_once (the real lockf: the probe reads the lock held)
+        sb = Sandbox(self)
+        lock = sb.path('lock')
+        start = sb.start
+
+        def no_lockf(argv, extra_env=None, name='proc'):
+            self.assertEqual(argv[0], '/usr/bin/lockf')
+            return start(argv[argv.index(lock) + 1:], extra_env, name)   # the holder's command alone
+        sb.start = no_lockf
+        with self.assertRaisesRegex(AssertionError, 'a probe reads .* free under its holder'):
+            sb.hold_lock(lock)
+        self.assertTrue(sb.output('lock-holder')[0].startswith('held\n'))   # it did print held: only the probe saw it
 
     def test_a_holder_that_ends_before_it_holds_the_lock_fails_the_test(self):
         sb = Sandbox(self)
@@ -164,6 +200,44 @@ class TestGroupGone(unittest.TestCase):
             self.assertTrue(group_gone(p))
             self.sb.wait_for(lambda: group_gone(p), 'the group')  # the wait ends, it does not raise
         self.assertTrue(group_gone(p))                           # the control: the real killpg finds no group
+
+
+class TestKillGroup(unittest.TestCase):
+    """Sandbox.start's cleanup kills what is left of the group with kill_group (test_golden_gate's reap uses the same
+    helper). At the end of a cell the group can hold only zombies for a moment, and macOS answers EPERM to killpg then:
+    the cleanup must end with no error and reap the process. Real processes and the host's own killpg answers; the
+    control: a live group, whose members the cleanup kills."""
+
+    def cleanup_of(self, script, ready, what, eperm):
+        """/bin/sh -c SCRIPT started by sb.start in a test of its own, which ends once ready(the states of the group's
+        members) holds (EPERM: and killpg answers EPERM for the group then); unittest then runs that test's cleanups
+        -> (the process, the errors and failures of that run)"""
+        started = []
+
+        class Inner(unittest.TestCase):
+            def runTest(inner):
+                sb = Sandbox(inner)
+                p = sb.start(['/bin/sh', '-c', script], name='group')
+                started.append(p)
+                sb.wait_for(lambda: ready(members(p.pid)), 'the group to be ' + what, timeout=30)
+                if eperm:   # the injection is live: the host's real answer for this group
+                    with inner.assertRaises(PermissionError):
+                        os.killpg(p.pid, signal.SIGKILL)
+        r = unittest.TestResult()
+        Inner().run(r)
+        return started[0], [text for _, text in r.errors + r.failures]
+
+    def test_a_group_of_zombies_ends_with_no_error_and_is_reaped(self):
+        p, errors = self.cleanup_of('exit 0', lambda m: len(m) == 1 and m[0].startswith('Z'), 'one zombie', True)
+        self.assertEqual(errors, [])
+        self.assertEqual(p.returncode, 0)                        # reaped: its exit status is read
+
+    def test_control_a_live_group_is_killed(self):
+        p, errors = self.cleanup_of('/bin/sleep 600 & exec /bin/sleep 600',
+                                    lambda m: len(m) == 2 and not any(s.startswith('Z') for s in m), 'two live', False)
+        self.assertEqual(errors, [])
+        self.assertEqual(p.returncode, -signal.SIGKILL)
+        Sandbox(self).wait_for(lambda: not group_alive(p.pid), 'the member to be killed too', timeout=30)
 
 
 if __name__ == '__main__':

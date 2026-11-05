@@ -9,7 +9,9 @@ A test makes a Sandbox: a temporary folder, removed by the test's cleanup. In it
   the holder and never ends it;
 - runs a command with a clean environment: HOME and TMPDIR in the sandbox, PATH = the stubs folder and the
   system folders, LC_ALL=C. Nothing else of the caller's environment passes.
-A test that waits for a started process group to end waits with group_gone: the one place that reads killpg's answer.
+A test that waits for a started process group to end waits with group_gone, and a cleanup that kills what is left of
+one calls kill_group. They are the two helpers that catch an error of killpg: macOS can answer EPERM, not ESRCH, for
+a group whose members are all zombies. A killpg to a group with a live member (a TERM cell) needs neither.
 """
 import os
 import shlex
@@ -36,11 +38,16 @@ def _rmtree(path):
     shutil.rmtree(path, ignore_errors=True)
 
 
-def group_alive(pgid):
-    """a member of the process group PGID that is alive (not a zombie), by ps"""
+def members(pgid):
+    """the ps state of each process of the process group PGID (a state that starts with Z: a zombie)"""
     out = subprocess.run(['/bin/ps', '-A', '-o', 'pgid=,stat='], capture_output=True, text=True, check=True,
                          stdin=subprocess.DEVNULL).stdout
-    return any(l.split()[0] == str(pgid) and not l.split()[1].startswith('Z') for l in out.splitlines() if l.strip())
+    return [l.split()[1] for l in out.splitlines() if l.strip() and l.split()[0] == str(pgid)]
+
+
+def group_alive(pgid):
+    """a member of the process group PGID that is alive (not a zombie), by ps"""
+    return any(not s.startswith('Z') for s in members(pgid))
 
 
 def group_gone(p):
@@ -55,6 +62,17 @@ def group_gone(p):
     except PermissionError:
         return not group_alive(p.pid)
     return False
+
+
+def kill_group(p):
+    """Kill what is left of the process group of P (a process the test started in a session of its own), the leader
+    gone or not, then reap P. killpg answers ESRCH when no member is left, and on macOS EPERM when only zombies are
+    left (P itself, not reaped yet, or members launchd has not reaped yet): neither is an error of a cleanup."""
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    p.wait()
 
 
 class Sandbox:
@@ -137,14 +155,7 @@ class Sandbox:
                              stdout=out, stderr=err, start_new_session=True)
         out.close()
         err.close()
-
-        def stop():
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            p.wait()
-        self.test.addCleanup(stop)
+        self.test.addCleanup(kill_group, p)
         return p
 
     def output(self, name='proc'):
