@@ -1268,7 +1268,7 @@ ru_window() {
   # 14. CONFIG EDIT, under the runner lock
   ru_j edited-sha $ru_w_tsha || return 3
   [[ -e $LOCK ]] || ( : >> $LOCK ) 2> /dev/null   # the tmp cleaner may have removed it (runner-disable's header)
-  zsystem flock -t 0 -f ru_w_lfd $LOCK 2> /dev/null
+  zsystem flock -t 0.01 -f ru_w_lfd $LOCK 2> /dev/null   # -t 0 returns 1 on a held lock (measured): 0.01 returns 2
   case $? in
     (0) ;;
     (2) ru_w_back "the runner lock $LOCK is held: runscaler, an install, wall-check, golden-build or golden-gate is running"; return $? ;;
@@ -2086,7 +2086,7 @@ ru_rb_window() {
 
   # CONFIG EDIT, under the runner lock (CONFIG EDIT's rule: a STOP after the install is the BACKUP back, CI on it)
   [[ -e $LOCK ]] || ( : >> $LOCK ) 2> /dev/null
-  zsystem flock -t 0 -f ru_w_lfd $LOCK 2> /dev/null
+  zsystem flock -t 0.01 -f ru_w_lfd $LOCK 2> /dev/null   # -t 0 returns 1 on a held lock (measured): 0.01 returns 2
   case $? in
     (0) ;;
     (2) ru_rb_back ROLLBACK "the runner lock $LOCK is held: runscaler, an install, wall-check, golden-build or golden-gate is running"; return $? ;;

@@ -16,7 +16,7 @@ from tests.studio.test_runner_updater import config, read_text
 from tests.studio.test_runner_updater_recover import (assert_closed, assert_runs, cut, killed, n_disable, stops,
                                                       three_passes)
 from tests.studio.test_runner_updater_state import cand, fam, lines_of, state, stop
-from tests.studio.test_runner_updater_window import FAM, KILLED, OLD, SHA0, V0, Win, sha
+from tests.studio.test_runner_updater_window import FAM, KILLED, OLD, SHA0, V0, Win, hold_runner_lock, sha
 
 NEW = 'liveapp-mac-golden-20261020'
 V2 = '2.339.0'
@@ -186,6 +186,16 @@ class TestRollbackFailsAfterTheDisable(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(w.vms, NEW)))
         assert_closed(self, w)
         three_passes(self, w)
+
+    def test_the_runner_lock_held_at_the_config_edit_says_held(self):
+        # zsystem flock -t 0 returns 1 on a held lock: the text said "cannot take"; -t 0.01 returns 2 (S3b-5 A8)
+        w = rb_win(self)
+        hold_runner_lock(w)
+        res = rollback(w)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: STOP ROLLBACK FAILED: the runner lock %s is held: runscaler, an install, '
+                      'wall-check, golden-build or golden-gate is running' % w.r.lock, res.stdout)
+        assert_runs(self, w, w.pre)
 
     def test_post_validate_unknown_puts_the_backup_back_with_no_stop(self):
         w = rb_win(self)

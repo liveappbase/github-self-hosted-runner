@@ -303,6 +303,13 @@ class Win:
         return self.r.cmd('status').stdout
 
 
+def hold_runner_lock(w):
+    """the rig's runner lock held by a REAL lockf (as runscaler's runner-start holds it) until the test ends"""
+    w.sb.start(['/usr/bin/lockf', '-k', '-t', '0', w.r.lock, '/bin/sleep', '600'], name='runner-lock-holder')
+    w.sb.wait_for(lambda: subprocess.run(['/usr/bin/lockf', '-k', '-s', '-t', '0', w.r.lock, '/usr/bin/true']).returncode
+                  == 75, 'the runner lock to be held')
+
+
 def healthz(*names):
     """one /healthz read: every set NAMES ready and idle"""
     h = json.loads(json.dumps(HEALTHZ))
@@ -651,6 +658,14 @@ class TestAfterDisable(unittest.TestCase):
         self.assertEqual(lines_of(w.u.protected), [])
         self.assertIn('\n%s: STOP check failed (runner %s): %s' % (FAM, V0, text), w.status())
         return res
+
+    def test_the_runner_lock_held_at_the_config_edit_says_held(self):
+        # zsystem flock -t 0 returns 1 on a held lock (measured): the window read it as "cannot take"; with -t 0.01 it
+        # returns 2, and the text names who holds it (S3b-5 A8)
+        w = Win(self)
+        hold_runner_lock(w)
+        self.back(w, 'the runner lock %s is held: runscaler, an install, wall-check, golden-build or golden-gate is '
+                     'running' % w.r.lock)
 
     def test_the_build_fails(self):
         w = Win(self)
