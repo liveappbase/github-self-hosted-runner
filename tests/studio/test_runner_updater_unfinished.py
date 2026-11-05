@@ -10,13 +10,15 @@ means, and every `lsof` line reads the updater lock.
 
 The rig is test_runner_updater_window's (Win): a window SIGKILLed at a step leaves its record open.
 """
+import calendar
 import json
 import os
 import re
 import shutil
+import time
 import unittest
 
-from tests.studio.support import REPO
+from tests.studio.support import REPO, Sandbox
 from tests.studio.test_runner_updater import read_text
 from tests.studio.test_runner_updater_recover import killed, n_disable, recover
 from tests.studio.test_runner_updater_window import Win
@@ -324,7 +326,7 @@ class TestTheHandStepsText(unittest.TestCase):
               'On the first choice that passes', 'Tell the maintainer')
     # every step reference in the steps, by the step that makes it
     REFS = {1: ['wait as "Update" step 1 says'], 3: ['do steps 4 and 5 only, then step 9'],
-            7: ['go to step 8', 'the copy of step 6'], 8: ["go back to step 6's wait"]}
+            7: ['go to step 8', 'the copy of step 6'], 8: ["go back to step 6's wait", "step 3's `TZ=UTC0 ps` line"]}
 
     def test_the_first_step_checks_that_no_run_holds_the_updater_lock(self):
         first = readme_steps(HAND)[1]
@@ -350,6 +352,74 @@ class TestTheHandStepsText(unittest.TestCase):
         statedir = re.search(r'^STATEDIR=(\S+)', read_text(os.path.join(REPO, 'install')), re.M).group(1)
         self.assertEqual(LOCK_LINE, '`/usr/sbin/lsof %s/lock`' % statedir)
         self.assertEqual(set(re.findall(r'`[^`]*\blsof\b[^`]*`', read_text(README))), {LOCK_LINE})
+
+
+
+PS_LINE = "TZ=UTC0 ps -ax -o pid,lstart,args | grep '/Users/ci/bin/runne[r] run'"
+WEST = 'ABC8'          # a zone 8 h west of UTC (POSIX form: no zoneinfo file), as a person's shell may have
+
+
+def backticked(text, pattern):
+    """the `code` spans of TEXT that match PATTERN"""
+    return [c for c in re.findall(r'`([^`]+)`', text) if re.search(pattern, c)]
+
+
+class TestTheStartChecksReadOneClock(unittest.TestCase):
+    """review r1 P2-1: `ps -o lstart` prints a start time in the caller's zone, `date -u` in UTC. Step 3 (CI ALREADY
+    RIGHT) compares the runscaler's start with the record's EPOCH, and step 8's start check compares it with the time
+    of runner-enable: each reads both in UTC, so a host west of UTC never reads a later start as an earlier one."""
+
+    def test_each_start_is_read_in_utc_beside_a_utc_time(self):
+        steps = readme_steps(HAND)
+        right, enable = steps[3], steps[8]
+        self.assertEqual(backticked(right, r'\bps\b'), [PS_LINE])
+        self.assertIn('`date -u -r EPOCH`', right)
+        self.assertIn('note the time, `date -u`, then `/Users/ci/bin/runner-enable`', enable)
+        self.assertIn("ONE runscaler runs that started AFTER that time (step 3's `TZ=UTC0 ps` line; both are UTC)", enable)
+        # the class: no line of the README reads a start time in the caller's zone
+        for c in backticked(read_text(README), r'lstart'):
+            self.assertTrue(c.startswith('TZ=UTC0 ps '), c)
+
+    def start_read_by(self, line, zone):
+        """a process whose args end in `<sandbox>/bin/runner run`; LINE (README's, its /Users/ci now the sandbox) run
+        by zsh in ZONE -> (its start as epoch seconds, read as UTC, the earliest it can be, the latest)"""
+        sb = Sandbox(self)
+        runner = sb.write(sb.path('bin', 'runner'), '#!/bin/zsh -f\n/bin/sleep 600\n', 0o755)
+        line = line.replace('/Users/ci', sb.root)
+        self.assertNotIn('/Users/ci', line)
+        t0 = int(time.time())
+        p = sb.start(['/bin/zsh', '-f', runner, 'run'], name='runner')
+        t1 = int(time.time())
+        res = sb.run(['/bin/zsh', '-f', '-c', line], extra_env={'TZ': zone})
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        rows = res.stdout.splitlines()
+        self.assertEqual(len(rows), 1, res.stdout)
+        m = re.fullmatch(r'\s*(\d+)\s+(\w{3} \w{3} [ \d]\d \d\d:\d\d:\d\d \d{4})\s+/bin/zsh -f %s run'
+                         % re.escape(runner), rows[0])
+        self.assertTrue(m, rows[0])
+        self.assertEqual(int(m.group(1)), p.pid)
+        return calendar.timegm(time.strptime(m.group(2), '%a %b %d %H:%M:%S %Y')), t0, t1
+
+    def readme_line(self, pattern):
+        """step 3's one `code` span that matches PATTERN"""
+        lines = backticked(readme_steps(HAND)[3], pattern)
+        self.assertEqual(len(lines), 1, lines)
+        return lines[0]
+
+    def test_step_3s_ps_line_reads_the_start_in_utc_in_a_zone_west_of_it(self):
+        start, t0, t1 = self.start_read_by(self.readme_line(r'\bps\b'), WEST)
+        self.assertTrue(t0 <= start <= t1, (start, t0, t1))
+
+    def test_control_that_line_without_a_zone_setting_reads_8_h_early_there(self):
+        start, t0, t1 = self.start_read_by(self.readme_line(r'\bps\b').replace('TZ=UTC0 ', ''), WEST)
+        self.assertTrue(t0 - 8 * 3600 <= start <= t1 - 8 * 3600, (start, t0, t1))
+
+    def test_step_3s_date_line_prints_the_epoch_in_utc_in_that_zone(self):
+        sb = Sandbox(self)
+        t = int(time.time())
+        line = self.readme_line(r'\bdate\b.*EPOCH')
+        res = sb.run(['/bin/zsh', '-f', '-c', line.replace('EPOCH', str(t))], extra_env={'TZ': WEST})
+        self.assertEqual(calendar.timegm(time.strptime(res.stdout.strip(), '%a %b %d %H:%M:%S UTC %Y')), t, res.stdout)
 
 
 if __name__ == '__main__':
