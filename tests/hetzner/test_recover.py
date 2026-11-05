@@ -252,7 +252,7 @@ class NoEffectYet(unittest.TestCase):
         x.run(0)
         lines = x.closed('pre')
         self.assertEqual(len(x.stops(lines)), 1)
-        self.assertTrue(value(lines, 'stop').startswith('DISK: '))
+        self.assertTrue((value(lines, 'stop') or '').startswith('DISK: '))
         self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
 
     def test_an_enabled_unit_that_is_down_is_started_on_config_sha(self):
@@ -274,7 +274,7 @@ class NoEffectYet(unittest.TestCase):
                     self.assertIsNone(value(lines, 'stop'))
                 else:
                     self.assertEqual(x.calls('start'), [])
-                    self.assertTrue(value(lines, 'stop').startswith('CI DISABLED: '), lines)
+                    self.assertTrue((value(lines, 'stop') or '').startswith('CI DISABLED: '), lines)
 
 
 @needs_container
@@ -301,7 +301,7 @@ class PreWindowFile(unittest.TestCase):
                 x.run(0)
                 lines = x.closed('pre')
                 self.assertEqual(len(x.calls('start')), 1 if started else 0)
-                self.assertEqual(value(lines, 'stop') is not None and value(lines, 'stop').startswith('CI DISABLED'),
+                self.assertEqual((value(lines, 'stop') or '').startswith('CI DISABLED'),
                                  not started)
 
 
@@ -479,7 +479,7 @@ class TheStart(unittest.TestCase):
                 lines = x.closed(installed(x.lines())[2])
                 self.assertNotIn('running', keys(lines))
                 self.assertEqual(own(lines)[:3], ['pre-close-failure', 'starting', 'stop'], lines)
-                self.assertTrue(value(lines, 'stop').startswith('POOL DOWN: '), lines)
+                self.assertTrue((value(lines, 'stop') or '').startswith('POOL DOWN: '), lines)
                 self.assertIn(installed(lines)[2], ('target-idle', 'target-old'))
                 self.assertEqual(keys(lines).count('starting'), 2)
 
@@ -496,7 +496,7 @@ class TheStart(unittest.TestCase):
         x.run(0)
         lines = x.lines()
         self.assertEqual(own(lines)[:4], ['starting', 'pre-close-failure', 'starting', 'stop'], lines)
-        self.assertTrue(value(lines, 'stop').startswith('POOL DOWN: '), lines)
+        self.assertTrue((value(lines, 'stop') or '').startswith('POOL DOWN: '), lines)
         self.assertEqual(len(x.calls('start')), 2)
         self.assertNotIn('CI DISABLED', '\n'.join(lines))
 
@@ -540,7 +540,7 @@ class TheStart(unittest.TestCase):
                 if cls:
                     x.closed(cls)
                 else:
-                    self.assertTrue(value(lines, 'stop').startswith('POOL DOWN: '), lines)
+                    self.assertTrue((value(lines, 'stop') or '').startswith('POOL DOWN: '), lines)
 
 
 @needs_container
@@ -576,7 +576,7 @@ class UnitNotEnabled(unittest.TestCase):
         x = Rec(self, g)
         x.run(0)
         lines = x.closed('target-running')
-        self.assertTrue(value(lines, 'stop').startswith('CI DISABLED: '), lines)
+        self.assertTrue((value(lines, 'stop') or '').startswith('CI DISABLED: '), lines)
         self.assertIn('reboot', value(lines, 'stop'))
         self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
 
@@ -623,7 +623,7 @@ class Decided(unittest.TestCase):
         lines = x.closed('pre', sha(g.candidate))
         self.assertEqual(g.p.config(), g.candidate)
         self.assertEqual(own(lines)[:6], ['validate', 'stop', 'restore', 'rename-start', 'renamed', 'recover-target'])
-        self.assertTrue(value(lines, 'stop').startswith('ROLLBACK FAILED: '))
+        self.assertTrue((value(lines, 'stop') or '').startswith('ROLLBACK FAILED: '))
         self.assertEqual(len(g.validates()), 1, 'one validate: no new validate of the TARGET')
         self.assertGreaterEqual(int(os.stat(g.p.rpath('config.toml')).st_mtime), int(value(lines, 'rename-start')))
         self.assertGreater(int(value(lines, 'running').split()[1]), int(value(lines, 'renamed')))
@@ -715,7 +715,7 @@ class Decided(unittest.TestCase):
         x.run(0)
         lines = x.closed('pre')
         self.assertEqual(own(lines)[:3], ['pre-close-failure', 'stop', 'restore'], lines)
-        self.assertTrue(value(lines, 'stop').startswith('ROLLBACK FAILED: '))
+        self.assertTrue((value(lines, 'stop') or '').startswith('ROLLBACK FAILED: '))
         self.assertEqual(len(x.calls('start')), 1)
         self.assertEqual(g.p.config(), g.candidate)
         self.assertEqual(g.validates(), [])
@@ -780,7 +780,7 @@ class OtherFile(unittest.TestCase):
         x.run(0)
         lines = x.closed('other')
         self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
-        self.assertTrue(value(lines, 'stop').startswith('HAND CHANGE: '))
+        self.assertTrue((value(lines, 'stop') or '').startswith('HAND CHANGE: '))
 
     def test_a_person_s_file_with_none_running_is_started_only_once_it_validates(self):
         for seq, ok in (([PASS], True), ([NONAPI], False)):
