@@ -138,6 +138,50 @@ class TestTheStateBeforeRecover(unittest.TestCase):
         self.assertNotIn(SECTION, res.stdout)
         self.assertNotIn('unfinished', res.stdout)
 
+    def lost_state(self, w):
+        """state.json is lost, and the protected list holds a name: the lost-state REFUSE of load_state, which comes
+        before RECOVER"""
+        os.remove(w.u.state)
+        w.sb.write(w.u.protected, 'gold-20290101\n', 0o600)
+
+    def lost_state_refused(self, w, cmd, record):
+        """CMD exits 1 with ONE line, the lost-state REFUSE; nothing acts; the state stays lost, the list and the
+        record as they were. -> that line"""
+        listed = read_text(w.u.protected)
+        window = read_text(w.u.window) if record else None
+        before = counts(w)
+        res = recover(w, cmd=cmd)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertTrue(res.stdout.startswith('runner-updater: REFUSE there is no state %s, but the protected list %s '
+                                              'is not empty: ' % (w.u.state, w.u.protected)), res.stdout)
+        self.assertEqual(res.stdout.count('\n'), 1, res.stdout)
+        self.assertEqual(acted(w, before), {})
+        self.assertEqual((os.path.lexists(w.u.state), read_text(w.u.protected)), (False, listed))
+        if record:
+            self.assertEqual(read_text(w.u.window), window)
+        return res.stdout
+
+    def test_a_lost_state_with_a_record_open_names_the_section(self):
+        # review r1 P2-2: the third `$open` site of load_state, the lost-state REFUSE
+        for cmd in ('pass', 'off'):
+            with self.subTest(cmd=cmd):
+                w = killed(self, 'build-start')
+                self.lost_state(w)
+                out = self.lost_state_refused(w, cmd, record=True)
+                self.assertTrue(out.endswith('move the list aside and run %s again; an updater window is unfinished (%s): '
+                                             '%s\n' % (cmd, w.u.window, SECTION)), out)
+
+    def test_control_the_same_lost_state_with_no_record_names_no_section(self):
+        for cmd in ('pass', 'off'):
+            with self.subTest(cmd=cmd):
+                w = Win(self)
+                self.lost_state(w)
+                self.assertFalse(os.path.lexists(w.u.window))
+                out = self.lost_state_refused(w, cmd, record=False)
+                self.assertTrue(out.endswith('move the list aside and run %s again\n' % cmd), out)
+                self.assertNotIn(SECTION, out)
+                self.assertNotIn('unfinished', out)
+
 
 class TestStatus(unittest.TestCase):
     """status runs no RECOVER and writes nothing; its window line names the section for a record RECOVER cannot read or
