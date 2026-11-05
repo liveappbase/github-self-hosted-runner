@@ -257,5 +257,53 @@ class TestFreshInstall(unittest.TestCase):
                          {k: v for k, v in before.items() if k != 'mac-runner/runscaler.sha256'})
 
 
+
+def const(name, rel='install'):
+    """NAME's value on its NAME=VALUE line (column 0) of REPO/rel"""
+    m = re.findall(r'^%s=(\S+)' % name, read_text(os.path.join(REPO, rel)), re.M)
+    assert len(m) == 1, (name, m)
+    return m[0]
+
+
+class TestUpdaterPlist(unittest.TestCase):
+    """config/sh.liveapp.runner-updater.plist, the updater's timer, pinned against install: it runs the link install
+    makes (BIN/runner-updater) as `pass --log FILE`, FILE and both output paths in the folder install creates (LOGDIR);
+    every 600 s, not at load, no KeepAlive, no AbandonProcessGroup, ProcessType Interactive."""
+
+    def plist(self):
+        with open(os.path.join(REPO, 'config', 'sh.liveapp.runner-updater.plist'), 'rb') as f:
+            return plistlib.load(f)
+
+    def test_it_runs_the_link_install_makes_as_a_logged_pass(self):
+        p = self.plist()
+        self.assertEqual(p['Label'], 'sh.liveapp.runner-updater')
+        args = p['ProgramArguments']
+        self.assertEqual(args[0], const('BIN') + '/runner-updater')
+        self.assertEqual(args[1:3], ['pass', '--log'])
+        self.assertEqual(len(args), 4)
+        self.assertEqual(os.path.dirname(args[3]), const('LOGDIR'))
+        self.assertEqual(os.path.basename(args[3]), 'runner-updater.log')
+
+    def test_its_output_goes_to_logdir(self):
+        p = self.plist()
+        self.assertEqual(p['StandardOutPath'], const('LOGDIR') + '/runner-updater.err')
+        self.assertEqual(p['StandardErrorPath'], const('LOGDIR') + '/runner-updater.err')
+
+    def test_its_schedule_and_process_keys(self):
+        p = self.plist()
+        self.assertEqual(p['StartInterval'], 600)
+        self.assertIs(p['RunAtLoad'], False)
+        self.assertEqual(p['ProcessType'], 'Interactive')
+        for k in ('KeepAlive', 'AbandonProcessGroup', 'ExitTimeOut', 'EnvironmentVariables'):
+            self.assertNotIn(k, p)
+        self.assertEqual(sorted(p), ['Label', 'ProcessType', 'ProgramArguments', 'RunAtLoad', 'StandardErrorPath',
+                                     'StandardOutPath', 'StartInterval'])
+
+    def test_plutil_lints_it(self):
+        res = subprocess.run(['/usr/bin/plutil', '-lint', os.path.join(REPO, 'config', 'sh.liveapp.runner-updater.plist')],
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
