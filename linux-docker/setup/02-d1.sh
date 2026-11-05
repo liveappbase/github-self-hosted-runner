@@ -8,7 +8,8 @@
 # the whole run; a second run (a build, or a pass of the updater) waits for it, with a WAIT line that names it, and
 # then goes on (that WAIT is no exit). RUN_USER's updater (`runner-updater pass`, its build pass, and `runner-updater
 # build VERSION`) runs `02-d1.sh build VERSION` as its CHILD on the lock it holds (fd 9): this run then takes it there
-# at once.
+# at once. Its lock take sets the modes of the updater's folder as RUN_USER's updater does (runner-release.sh's rr_lock,
+# THE MODES: RS_USER reads RUN_USER's state through RUN_USER's group), the first time too, when it makes the folder.
 # THE IMAGE (step 5, both modes): release v<VERSION> of actions/runner, read with setup/runner-release.sh (GitHub's API;
 # the tarball's sha256 must be the release asset's digest; every download with the filtered CA bundle and no CA
 # folder), built with --no-cache on the base image/Dockerfile pins, from a fresh 0700 context outside ~/build that holds
@@ -80,7 +81,7 @@ wait_() { echo "WAIT $*"; exit 75; }
 sha() { [ "$(sha256sum "$1" | cut -d' ' -f1)" = "$2" ] || die "sha256 $1"; }
 quad() { [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ "$1" != 0.0.0.0 ]; }
 . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh: is this release's linux-docker/ ~/build?"
-rr_lock || die "the updater lock: nothing was done (the REFUSE line above says why)"
+rr_lock run || die "the updater lock: nothing was done (the REFUSE line above says why)"   # RUN_USER's: its modes too
 REC_DIR=$HOME/run/builds
 record() {   # the BUILD RECORD (the header says its form): written whole under a temporary name, fsynced, renamed
   local t

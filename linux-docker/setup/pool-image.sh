@@ -511,7 +511,7 @@ if [ "$UN" = 1 ]; then   # THE UPDATER LOCK first (fd 9: runner-release.sh's rr_
   # the measuring helpers (proc_now, log_pos, tested_jq, healthz_pair): ONE copy, shared with bin/runner-updater
   # shellcheck source=runner-facts.sh
   . "$B/setup/runner-facts.sh" || die "cannot read $B/setup/runner-facts.sh (is this release's linux-docker/ ~/build?): nothing changed"
-  rr_lock || die "the updater lock (the REFUSE line above says why): nothing changed"
+  rr_lock rs || die "the updater lock (the REFUSE line above says why): nothing changed"   # RS_USER's modes too
 fi
 # fd 8, never 9: an unattended run holds the updater lock on fd 9, which its parent may have handed it
 exec 8>> "$LOCK" || die "cannot open the lock $LOCK; nothing changed"

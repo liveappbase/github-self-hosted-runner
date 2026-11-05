@@ -29,7 +29,7 @@ import signal
 import time
 import unittest
 
-from tests.hetzner.support import REPO, RS_USER, Pool, digest, needs_container, run_pool
+from tests.hetzner.support import HANG, REPO, RS_USER, Pool, digest, needs_container, run_pool
 
 V = '2.339.0'
 OLDER, NEWER = '2.338.2', '2.340.0'
@@ -38,6 +38,30 @@ STATE = os.path.join(STATEDIR, 'state.json')
 LOCK = os.path.join(STATEDIR, 'lock')
 DAY = 86400
 FAIL = 'FAIL docker build failed: no record, image.ref NOT changed\n'
+
+
+# rm, for the TERM-window cell: an rm whose arguments name BUILDOUT (build.out: build_child's first step, right before
+# the fork of 02-d1.sh) writes barrier.json {pid: its own, ppid: the updater's}, ignores SIGTERM (the updater gets it),
+# and waits until the cell writes barrier.go (at most 600 s; then barrier.timeout, exit 124). Then, and for any other
+# arguments, it is the real rm.
+RM_BARRIER = r'''#!/usr/bin/python3 -I
+import json, os, signal, sys, time
+SB = @SB@
+a = sys.argv[1:]
+if any(x.endswith('/build.out') for x in a):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(SB + '/barrier.json.new', 'w') as f:
+        json.dump({'pid': os.getpid(), 'ppid': os.getppid()}, f)
+    os.replace(SB + '/barrier.json.new', SB + '/barrier.json')
+    for _ in range(12000):
+        if os.path.exists(SB + '/barrier.go'):
+            break
+        time.sleep(0.05)
+    else:
+        open(SB + '/barrier.timeout', 'w').close()
+        sys.exit(124)
+os.execv('/bin/rm', ['rm'] + a)
+'''
 
 
 def stop(name, version=None, **detail):
@@ -123,10 +147,12 @@ class RunState(unittest.TestCase):
         self.assertIn('runner-updater: pass: the updater is OFF: nothing to do', r.stdout)
 
     def test_on_and_off(self):
+        """RUN_USER's state is 0640 (fix round 1, PLAN D1 11-05: RS_USER reads it through RUN_USER's group; until then
+        0600): test_modes.py runs it as two real users."""
         p, _ = run_pool(self, V, on=None)
         self.assertIn('runner-updater: on: the updater is ON', ok(self, p.updater('on')).stdout)
         self.assertEqual(state(p), {'format': 1, 'on': True, 'stops': []})
-        self.assertEqual(os.stat(STATE).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(STATE).st_mode & 0o777, 0o640)
         self.assertIn('the updater is ON', ok(self, p.updater('status')).stdout)
         self.assertIn('runner-updater: off: the updater is OFF', ok(self, p.updater('off')).stdout)
         self.assertEqual(state(p), {'format': 1, 'on': False, 'stops': []})
@@ -406,6 +432,47 @@ class BuildPass(unittest.TestCase):
                 r = ok(self, p.updater('pass'))
                 self.assertIn('runner-updater: pass: built runner %s' % V, r.stdout)
                 self.assertEqual(len(p.d1_calls()), 2)
+
+    def test_a_term_before_the_fork_starts_no_build(self):
+        """Codex F1 (fix round 1): the build pass's TERM trap is set before build_child's `rm` of BUILDOUT and the fork
+        of 02-d1.sh. A TERM there (systemd's stop of the unit: every process of it) is recorded, and the pass checks it
+        right before the fork: "CUT ... (no build started)", exit 0, no 02-d1.sh start, no STOP, the state byte for byte
+        the same. The barrier is that `rm` (RM_BARRIER, the cell's own substitute): it waits until the cell lets it
+        go, so the TERM comes at a known point; every wait is bounded (timeout's 124: HUNG). Controls: no TERM, and the
+        same pass starts 02-d1.sh; a TERM while 02-d1.sh runs is the CUT after it ends
+        (test_systemd_s_stop_of_the_unit_during_a_build_is_a_cut)."""
+        for why, term in (('a TERM at the barrier', True), ('no TERM (the control): the build starts', False)):
+            with self.subTest(why):
+                p, _ = run_pool(self, V)
+                p.write(p.path('stubs', 'rm'), RM_BARRIER.replace('@SB@', repr(p.root)), 0o755)
+                before = p.read(STATE)
+                pr = p.start(['timeout', '-k', '10', str(HANG), os.path.join(p.build, 'bin', 'runner-updater'), 'pass'])
+                b = None
+                for _ in range(2400):                  # the state "rm waits at the barrier", never a time; a bound
+                    t = p.read(p.path('barrier.json'))
+                    if t:
+                        b = json.loads(t)
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(b, 'the pass never reached the barrier')
+                self.assertEqual(p.d1_calls(), [], 'a build started before the barrier')
+                if term:
+                    os.kill(b['ppid'], signal.SIGTERM)     # the updater, and its rm: what systemd's stop reaches
+                    os.kill(b['pid'], signal.SIGTERM)
+                p.write(p.path('barrier.go'), '')
+                out, _ = pr.communicate(timeout=HANG + 30)
+                self.assertNotEqual(pr.returncode, 124, 'HUNG: ' + out)
+                self.assertFalse(os.path.exists(p.path('barrier.timeout')), 'the barrier was never let go')
+                if term:
+                    self.assertEqual(pr.returncode, 0, out)
+                    self.assertEqual(p.d1_calls(), [], 'a build started after the TERM: ' + out)
+                    self.assertIn('runner-updater: pass: CUT 02-d1.sh build %s by SIGTERM before it started (no build '
+                                  'started): no STOP; the next pass builds it again' % V, out)
+                    self.assertEqual(p.read(STATE), before)
+                else:
+                    self.assertEqual(pr.returncode, 0, out)
+                    self.assertEqual(len(p.d1_calls()), 1, out)
+                    self.assertIn('runner-updater: pass: built runner %s' % V, out)
 
     def test_a_pass_that_finds_the_record_of_v_clears_its_check_failed_stop(self):
         """Opus r1 F3 (a): a person built V by README "A new runner release" step 1 (02-d1.sh build V), after a pass's

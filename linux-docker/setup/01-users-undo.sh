@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 01-users-undo.sh — removes ONLY what 01-users.sh made (users that carry its marker, the lock rule). As root:
 #   ssh root@<host> 'bash -s' < linux-docker/setup/01-users-undo.sh
-# BEFORE it, in this order: move every repository's jobs to another runner first; as RS_USER
+# BEFORE it, in this order: move every repository's jobs to another runner first; as RS_USER and as RUN_USER,
+# `runner-updater off` and `systemctl --user disable --now runner-updater.timer` (a pass of the updater's timer is a
+# process of that user, and the pre-flight below refuses while there is one); as RS_USER
 # `systemctl --user disable --now runscaler` (runscaler holds its lock while it runs, and a delete is refused then);
 # `runner-start delete NAME` for each set ("Deleted …", a second run "No runner scale set named …") — with the config
 # that NAMES each set, only for a config file that exists (a missing one is a named skip), and ANY other answer stops

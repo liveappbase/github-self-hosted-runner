@@ -16,8 +16,9 @@
 #                           caller's UTC clock): 0, with the RR_ facts above set; younger: 1 and a REFUSE line that
 #                           names when it becomes eligible (PLAN D2: "at least 2 days old (latest only)")
 #   rr_tarball FILE         downloads RR_URL into FILE, then its sha256 must be RR_DIGEST
-#   rr_lock                 THE UPDATER LOCK (below), held on fd 9 until this process and its children end;
-#                           rr_lock -n (a timer pass of the updater) only tries it: 75 when another run holds it
+#   rr_lock ROLE [-n]       THE UPDATER LOCK (below), held on fd 9 until this process and its children end, after
+#                           THE MODES of its folder by ROLE (below; rs or run: the caller's host user); -n (a timer pass
+#                           of the updater) only tries it: 75 when another run holds it
 # Each returns 0, or 1 with a REFUSE line on stderr; rr_release and rr_eligible return 75 with a WAIT line on stderr
 # when GitHub answers 403 or 429 (a rate limit: try again later); rr_curl returns curl's own exit code, or 126 when its
 # rr_bundle refused (the REFUSE line says why). Call each in a condition (`rr_bundle || …`): they test their own
@@ -78,6 +79,22 @@
 # flock(2) ties the lock to the OPEN FILE, so a child that inherits fd 9 shares its parent's lock: when fd 9 already
 # is RR_LOCK, rr_lock takes it there (at once, if the parent holds it), and so a holder can run 02-d1.sh as its child.
 # A new open of RR_LOCK would be another holder, and that child would wait for its own parent.
+# THE MODES (PLAN D1, "Hetzner: one record per user", 11-05): RR_LOCK's folder holds the updater's state, RR_STATE, which
+# RS_USER's `status` prints of RUN_USER's (D7), by the same channel as RUN_USER's build records: RUN_USER's group, whose
+# only member is RS_USER (01-users.sh checks that). rr_lock sets them, by the ROLE its caller names, BEFORE it opens the
+# lock, so every holder of it (both users' updaters, 02-d1.sh in both modes as RUN_USER, pool-image.sh as RS_USER) sets
+# the same ones, a lock take that finds the lock held too, and a folder left with older modes is set at the next one:
+#   run  each folder from the home to RR_LOCK's: one it makes 0710, one that is there gains the group's search (g+x)
+#        and keeps every other bit (so others get nothing they did not have; the home itself is 01-users.sh's 0750);
+#        RR_LOCK's own folder 0710 each time; RR_STATE 0640
+#   rs   one it makes 0700, one that is there is left; RR_LOCK's own folder 0700 each time; RR_STATE 0600 (no channel
+#        from RS_USER to RUN_USER)
+# and RR_LOCK 0600 for both (it is made so: a lock RS_USER could open, it could hold). Its folders are made 0700 first and
+# opened only after the lock and the state have their modes, so nothing in them is the group's before it is set. A
+# folder is made with its mode, never the umask's or coreutils' own (install -d made parents 0700 on Ubuntu 26.04 and
+# 0755 on 24.04 under umask 077, measured). RR_STATE_MODE names the state's mode for the caller: the updater writes its
+# state (by rename) with it, and only under the lock. Everything else there stays private: the updater makes PASSDIR
+# 0700 and its files under umask 077; RR_DIR is 0700.
 # THE DATA FILE: setup/tls-excluded-spki of the repository (the install line puts it into ~/build/setup/, beside this
 # file). Its own header gives the format and the refusals.
 
@@ -89,10 +106,11 @@ RR_FLOOR=100
 RR_AGE=172800   # the seconds a latest release must be old before an updater takes it (2 days: PLAN D2)
 RR_DIR=$HOME/.cache/liveapp-ci
 RR_LOCK=$HOME/.local/state/runner-updater/lock
+RR_STATE=${RR_LOCK%/*}/state.json   # the updater's state (bin/runner-updater's STATE): THE MODES (above)
 case ${BASH_SOURCE[0]} in */*) RR_EXCLUDED=${BASH_SOURCE[0]%/*}/tls-excluded-spki ;; *) RR_EXCLUDED=./tls-excluded-spki ;; esac
 case $(uname -m) in x86_64) RR_ARCH=x64 ;; aarch64) RR_ARCH=arm64 ;; *) RR_ARCH= ;; esac
 RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
-RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY=
+RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY= RR_STATE_MODE=
 
 rr_no() { echo "runner-release: REFUSE $*" >&2; }
 rr_sha() {   # rr_sha FILE: its sha256, 64 hex, or rc 1
@@ -377,12 +395,36 @@ rr_record_of() {   # rr_record_of DIR DIGEST: the ONE build record whose digest 
   esac
 }
 
-rr_lock() {   # rr_lock: THE UPDATER LOCK (the header), for a command: it waits, and says so first. rr_lock -n, for
-  # a timer pass: it only tries, and returns 75 (no line) when another run holds it
-  install -d -m 700 "${RR_LOCK%/*}" || { rr_no "cannot make ${RR_LOCK%/*}"; return 1; }
+rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command: it waits, and says so first. -n, for
+  # a timer pass: it only tries, and returns 75 (no line) when another run holds it. First THE MODES (the header), by ROLE
+  local role=${1-} dm sm top=${RR_LOCK%/*} rel d p
+  case $role in
+    run) dm=710 sm=640 ;;
+    rs) dm=700 sm=600 ;;
+    *) rr_no "rr_lock: the role is rs or run, not [$role]"; return 1 ;;
+  esac
+  rel=${top#"$HOME"/} d=$HOME
+  IFS=/ read -r -a p <<< "$rel"
+  for rel in "${p[@]}"; do    # each folder from the home to RR_LOCK's: one it makes is 0700, never the umask's mode
+    d=$d/$rel
+    [ -d "$d" ] || mkdir -m 700 -- "$d" 2> /dev/null || [ -d "$d" ] || { rr_no "cannot make $d"; return 1; }
+  done
+  { [ -e "$RR_LOCK" ] || (umask 077 && : >> "$RR_LOCK"); } && chmod 600 -- "$RR_LOCK" \
+    || { rr_no "cannot make the updater lock $RR_LOCK, or set its mode"; return 1; }
+  if [ -f "$RR_STATE" ] && [ ! -L "$RR_STATE" ]; then
+    chmod "$sm" -- "$RR_STATE" || { rr_no "cannot set the mode of $RR_STATE"; return 1; }
+  fi
+  d=$HOME
+  for rel in "${p[@]}"; do    # then the folders' modes (a parent made above is 0700: g+x gives it 0710), the state and
+    d=$d/$rel                 # the lock in them set already
+    if [ "$d" = "$top" ]; then chmod "$dm" -- "$d"
+    elif [ "$role" = run ]; then chmod g+x -- "$d"
+    else continue; fi || { rr_no "cannot set the mode of $d"; return 1; }
+  done
+  RR_STATE_MODE=$sm
   [ /dev/fd/9 -ef "$RR_LOCK" ] || exec 9>> "$RR_LOCK" || { rr_no "cannot open the updater lock $RR_LOCK"; return 1; }
   flock -n 9 && return 0
-  [ "${1-}" != -n ] || return 75
+  [ "${2-}" != -n ] || return 75
   echo "WAIT another run holds the updater lock $RR_LOCK (a build, or a pass of the updater): waiting for it to end"
   flock 9 || { rr_no "cannot take the updater lock $RR_LOCK"; return 1; }
 }

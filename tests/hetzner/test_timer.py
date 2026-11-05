@@ -9,8 +9,9 @@ users, and linux-docker/setup/04-timer.sh, the install step each user runs (linu
   daemon-reload`, then `systemctl --user enable --now runner-updater.timer`, in that order; a second run rewrites no
   file; linger read only (`loginctl show-user`): none is a REFUSE with the root line (01-users.sh owns linger) and
   nothing written; so is a user other than RS_USER and RUN_USER, and a missing ~/bin/runner-updater.
-- A pass started as the timer starts it (the installed ExecStart, %h expanded; cwd /, systemd's minimal environment, no
-  terminal) runs, and while OFF (a fresh install, D11) it ends at once with exit 0 and writes no state.
+- A pass started as the timer starts it (the installed ExecStart, %h expanded; cwd the user's home, as systemd starts a
+  user service with no WorkingDirectory=, and / too: it needs no cwd; systemd's minimal environment, no terminal) runs,
+  and while OFF (a fresh install, D11) it ends at once with exit 0 and writes no state.
 
 The unit-file cells read text and run anywhere; the others run the REAL 04-timer.sh and runner-updater in a throwaway
 container (tests/hetzner/support.py: Pool), with systemctl and loginctl substitutes (TIMER_SYSTEMCTL, LOGINCTL) over the
@@ -330,32 +331,39 @@ class TimerPass(unittest.TestCase):
             line = unit(f.read())['Service']['ExecStart']
         return line.replace('%h', Pool.HOME).split()
 
-    def timer_run(self, g):
+    def timer_run(self, g, cwd):
         env = {'HOME': Pool.HOME, 'USER': 'root', 'LOGNAME': 'root', 'SHELL': '/bin/sh', 'PATH': TIMER_PATH,
                'XDG_RUNTIME_DIR': g.p.path('xdg')}
-        return subprocess.run(self.execstart(), env=env, cwd='/', stdin=subprocess.DEVNULL, capture_output=True,
+        return subprocess.run(self.execstart(), env=env, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=300, start_new_session=True)
 
     def test_a_pass_as_the_timer_starts_it_runs_and_ends_at_once_while_off(self):
-        """A fresh install is OFF (D11): the timer's pass of each user, as systemd starts it (cwd /, the user
-        manager's environment, no terminal), runs its ExecStart, ends at once with exit 0, asks GitHub nothing and
+        """A fresh install is OFF (D11): the timer's pass of each user, as systemd starts it (cwd the user's home: a
+        user service with no WorkingDirectory= runs there, systemd.exec; and / too, which shows it needs no cwd; the
+        user manager's environment, no terminal), runs its ExecStart, ends at once with exit 0, asks GitHub nothing and
         writes no state. Control: without Install step 10's link, the same ExecStart cannot start."""
         for role in ('rs', 'run'):
-            with self.subTest(role):
-                g = Rig(self, role=role)
-                g.ok()
-                r = self.timer_run(g)
-                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-                self.assertIn('runner-updater: pass: the updater is OFF: nothing to do', r.stdout)
-                self.assertFalse(os.path.lexists(STATE), 'a pass while OFF wrote a state')
-                self.assertEqual(g.p.gh.seen, [])
-                os.remove(LINK)                                                   # the control
-                with self.assertRaises(FileNotFoundError):
-                    self.timer_run(g)
+            for cwd in (Pool.HOME, '/'):
+                with self.subTest(role=role, cwd=cwd):
+                    g = Rig(self, role=role)
+                    g.ok()
+                    r = self.timer_run(g, cwd)
+                    self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                    self.assertIn('runner-updater: pass: the updater is OFF: nothing to do', r.stdout)
+                    self.assertFalse(os.path.lexists(STATE), 'a pass while OFF wrote a state')
+                    self.assertEqual(g.p.gh.seen, [])
+                    os.remove(LINK)                                               # the control
+                    with self.assertRaises(FileNotFoundError):
+                        self.timer_run(g, cwd)
 
 
 def readme():
     with open(README) as f:
+        return f.read()
+
+
+def shipped_text(name):
+    with open(os.path.join(CONFIG, name)) as f:
         return f.read()
 
 
@@ -420,6 +428,47 @@ class Text(unittest.TestCase):
                   "RUN_USER's record", 'rr_read', 'as RUN_USER'):
             self.assertIn(s, h)
         self.assertNotIn('the timers are a later release', h)
+
+
+    def test_the_unit_and_the_readme_say_where_and_when_a_pass_runs(self):
+        """Codex F6 (fix round 1): a user service with no WorkingDirectory= runs in the user's home (systemd.exec), not
+        in /; the first pass after `enable --now` comes at once only when the boot is 10 minutes past, else 10 minutes
+        after the boot (OnBootSec). Control: the timer's header still says when the first pass comes at once."""
+        svc = shipped_text('runner-updater.service')
+        self.assertNotIn('systemd runs it in /', svc)
+        self.assertIn('WorkingDirectory=', svc)
+        self.assertIn("the user's home", svc)
+        text = readme()
+        self.assertNotRegex(text, r'the first time at once(?! when the host has been up for 10 minutes)')
+        for part in (section(text, 'Install').split("\n11. **The updater's timer", 1)[1].split('\n## ', 1)[0],
+                     section(text, 'The updater: status, on, off, pass, build')):
+            self.assertIn('10 minutes after a boot', part)
+        self.assertIn('at once', shipped_text('runner-updater.timer'))                          # the control
+
+    def test_the_unit_and_the_readme_say_what_systemd_s_sigkill_leaves(self):
+        """Codex F5 (fix round 1): after the TERM of a stop, systemd sends SIGKILL at TimeoutStopSec (the unit's, or
+        the manager's default): then no CUT line, the build context may stay, the lock is free once every holder has
+        exited, and the state stays valid (it is written by rename). CUT is not unconditional. Control: the CUT of a
+        cooperative stop is still named."""
+        for name, part in (('runner-updater.service', shipped_text('runner-updater.service')),
+                           ('README, The updater', section(readme(), 'The updater: status, on, off, pass, build'))):
+            with self.subTest(name):
+                one = ' '.join(part.replace('#', ' ').split())
+                for s in ('TimeoutStopSec', 'SIGKILL', 'no CUT line', 'build context', 'every holder', 'rename'):
+                    self.assertIn(s, one)
+                self.assertIn('CUT', one.replace('no CUT line', ''))                            # the control
+
+    def test_the_uninstall_s_before_list_stops_the_updater_as_each_user(self):
+        """Opus F3 (fix round 1): 01-users-undo.sh's pre-flight refuses while a user has a process (a timer's pass), so
+        its header's BEFORE list, which the README's Uninstall sends a person to, names the updater: `runner-updater
+        off` and `systemctl --user disable --now runner-updater.timer`, as each user. Control: it still names
+        runscaler's and docker's stops."""
+        h = header('setup/01-users-undo.sh')
+        before = h.split('BEFORE it', 1)[1].split('PRE-FLIGHT', 1)[0]
+        self.assertRegex(before, r'as RS_USER and as RUN_USER,? `runner-updater off` and `systemctl --user disable '
+                                 r'--now runner-updater\.timer`')
+        for s in ('`systemctl --user disable --now runscaler`', '`systemctl --user disable --now docker`'):  # control
+            self.assertIn(s, before)
 
 
 if __name__ == '__main__':

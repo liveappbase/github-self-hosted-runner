@@ -15,7 +15,8 @@
 # WOULD do, and which runner release it would switch to (DUE, below): it runs no pool-image.sh and no `systemctl --user
 # start|stop|restart`, and changes no config. RUN_USER's pass builds the image of the release DUE waits for (THE BUILD
 # PASS, below), with 02-d1.sh, and changes nothing of the pool. Each user's writes: under STATEDIR, the state (by
-# rename), a pass's files (PASSDIR) and the lock file, and RUN_USER's BUILDOUT; under runner-release.sh's RR_DIR
+# rename), a pass's files (PASSDIR) and the lock file, and RUN_USER's BUILDOUT (their modes: runner-release.sh's
+# rr_lock, THE MODES, by the user's role); under runner-release.sh's RR_DIR
 # (~/.cache/liveapp-ci), the filtered CA bundle and the private copy of each build record it reads; and RUN_USER's
 # 02-d1.sh build what that writes (its header). status writes nothing.
 #
@@ -45,11 +46,15 @@
 #   STOP, in the restart): every command WAITs (exit 4), names it, and writes nothing. So a later release may add one
 #   under format 1, and an older one (a rollback across it) never writes a state that drops it or hides a STOP.
 # RUN_USER's state is its own (one record per user, and no channel from RS_USER to RUN_USER: PLAN D1), with the same
-#   format rule, REFUSE and WAIT:
+#   format rule, REFUSE and WAIT. It goes by the build records' channel, so RS_USER's status can print it (PLAN D1,
+#   11-05): 0640, group RUN_USER, its folders open to that group for search only; RS_USER's stays 0600 in a 0700
+#   folder. runner-release.sh's rr_lock sets those modes, by this run's ROLE, at every lock take (THE MODES, its header),
+#   and put_state writes the state with the mode it named (RR_STATE_MODE):
 #   on         true | false: RUN_USER's own key (its pass builds nothing while it is OFF; D11: the install sets both)
 #   stops      [{stop: NAME, version, user, detail}]: the STOPs it holds. Its build PASS writes one (`build VERSION`
 #              writes no STOP): `check failed` of a version whose build failed, user and detail.build_user RUN_USER,
-#              detail {text: THE CAUSE 02-d1.sh printed (THE BUILD PASS), step: "build"} (core/README.md, facts.stops),
+#              detail {text: THE CAUSE 02-d1.sh printed (THE BUILD PASS) by RUN_TEXT's one rule (printable ASCII, each
+#              other character "?", at most 900 characters), step: "build"} (core/README.md, facts.stops),
 #              ONE per version (a pass builds no version that such a STOP holds). A pass that finds the build record of
 #              that version (and this release's recipe), and a `build VERSION` that passes, clear it
 #   A member it does not read (at the top, in a STOP): WAIT, exit 4, as RS_USER's.
@@ -70,14 +75,19 @@
 #            does not know: never guessed). status.jq's answer is checked as a pass checks it (`decided`): a `wait` is
 #            its lines, then "runner-updater: WAIT the decision core waits ...", exit 4; another answer is
 #            "runner-updater: STOP core could not decide (status)", exit 1.
-#            RS_USER's status then prints RUN_USER's record (PLAN D7: both users' records), after its own lines and
-#            before such a WAIT line (run_record): RUN_USER's STATE (RUN_STATE) read as hostile (PLAN D1: ONE open by
-#            runner-release.sh's rr_read, at most RUN_MAX bytes, never sourced; RUN_USER's own format, shape and member
-#            rules), each line "runner-updater: as RUN_USER: ...": ON or OFF (no file: a fresh install, OFF), then
-#            status.jq's lines of its STOPs, the user each names the host config's RUN_USER (a `check failed` of a
-#            build: `runner-updater build V`, as RUN_USER), each control character "?"; or ONE line that names why
-#            it is not shown (none of it is guessed) and RUN_USER's own `runner-updater status`. Its exit code is
-#            RS_USER's own:
+#            RS_USER's status then prints RUN_USER's record (PLAN D7: both users' records), after ALL of its own lines,
+#            whatever they end with (its own lines run in a subshell: a WAIT or REFUSE on its own state, a core that
+#            could not decide or waits, a clock it cannot read; do_status), and then exits with its own code
+#            (run_record): RUN_USER's STATE (RUN_STATE) read as hostile (PLAN D1: ONE open by runner-release.sh's
+#            rr_read, at most RUN_MAX bytes, never sourced; RUN_USER's own format, shape and member rules), and shown
+#            ONLY in the shape RUN_USER's own writer makes (RUN_SHOWN: each STOP a `check failed` of a build, version
+#            N.N.N, detail {text, step, build_user}, its text by RUN_TEXT), each line "runner-updater: as RUN_USER:
+#            ...": ON or OFF (no file: a fresh install, OFF), then status.jq's lines of its STOPs, the user each names
+#            the host config's RUN_USER (a `check failed` of a build: `runner-updater build V`, as RUN_USER); or ONE
+#            line that names why it is not shown, a fixed text of this program that holds no text of the record (no
+#            member name, no value), and RUN_USER's own `runner-updater status`. Under an untested jq no record is
+#            parsed: its STOP untested jq line (exit 3) says so, with no line of RUN_USER's; an earlier end (its own
+#            state) is followed by ONE such line. Its exit code is RS_USER's own:
 #            nothing of RUN_USER's record changes it, as no STOP of RS_USER's own does (status reports; the watchdog
 #            reads only the lines). A host config whose RUN_USER is RS_USER has one record: none is printed twice.
 #   on       on = true.
@@ -143,9 +153,15 @@
 #   02-d1.sh's exit 0: "built runner V", exit 0; 75 (GitHub's rate limit): "WAIT ...", exit 0, no STOP; 129, 141 or 143
 #   (SIGHUP, SIGPIPE, SIGTERM: an ssh drop, a reboot, a stop): "CUT ...", exit 0, no STOP, and the next pass builds V
 #   again. systemd's stop of the timer's unit (its TimeoutStartSec, a shutdown, `systemctl --user stop`) is SIGTERM to
-#   every process of the unit, this run too: while the build runs, this run has a TERM trap (not an ignore, which the
+#   every process of the unit, this run too: around the build, this run has a TERM trap (not an ignore, which the
 #   child would inherit), so it waits for 02-d1.sh's 143 and prints that CUT; anywhere else in a pass a TERM ends it at
-#   once (STATE is written by rename: it is the old state or the new one). Any other (137 too, SIGKILL or an OOM kill:
+#   once (STATE is written by rename: it is the old state or the new one). THE TERM WINDOW: the trap is set before
+#   build_child's rm and its fork, so it records a TERM, and a TERM that came before the fork starts no 02-d1.sh: "CUT
+#   ... (no build started)", exit 0, no STOP, the state as it was. The residual, a TERM between that check and the
+#   fork: systemd's TERM reaches only the processes that exist when it sends it, so that 02-d1.sh runs until systemd's
+#   SIGKILL at TimeoutStopSec, which ends this run too, with no CUT line (config/runner-updater.service names what that
+#   leaves: no STOP, the state valid, a build context that may stay, the lock free once every holder has exited). Any
+#   other (137 too, SIGKILL or an OOM kill:
 #   a build that fails each time must not loop): STOP `check failed` of V with THE CAUSE 02-d1.sh printed (the state,
 #   by rename), exit 1. THE CAUSE: the REFUSE line right before its last FAIL line (that FAIL line then says only "the
 #   REFUSE line above says why"), else that FAIL line; with no FAIL line, its last REFUSE line (a host config it
@@ -272,7 +288,7 @@ FAMILY=hz-docker
 # shellcheck source=../setup/runner-facts.sh
 . "$B/setup/runner-facts.sh" || refuse "cannot read $B/setup/runner-facts.sh (is this release's linux-docker/ ~/build?)"
 STATEDIR=${RR_LOCK%/*}
-STATE=$STATEDIR/state.json
+STATE=$RR_STATE   # STATEDIR/state.json: its mode is rr_lock's (RR_STATE_MODE)
 PASSDIR=$STATEDIR/pass
 WINDOW=$STATEDIR/window
 WINDOWS=$STATEDIR/windows
@@ -343,6 +359,23 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
      | "stops[\($i)].\(shown)"]
 | join(", ")'
 [ "$ROLE" != run ] || { FRESH=$RUN_FRESH CHECK=$RUN_CHECK MEMBERS=$RUN_MEMBERS; }
+# THE TEXT OF A `check failed` STOP, ONE rule for RUN_USER's writer (check_failed makes the text by it) and RS_USER's
+# reader (RUN_SHOWN: a text it would change is not the writer's): printable ASCII, each other character "?", at most
+# 900 characters. A character outside 0x20-0x7e is never shown by RS_USER: the writer never stores one, so a record that
+# holds one is not its writer's, and it is not shown at all (a reader that replaced it would show a record its writer
+# never made)
+RUN_TEXT='def run_text: explode | map(if . < 32 or . > 126 then 63 else . end) | implode | .[:900];'
+# THE SHAPE RS_USER's status shows of RUN_USER's record (fix round 1 of S2b-3b-3; RUN_USER's files are hostile, PLAN
+# D1): only what RUN_USER's own writer (check_failed) makes, beyond RUN_CHECK and RUN_MEMBERS: `on` a boolean; each STOP
+# exactly {stop, version, user, detail}, stop `check failed`, version N.N.N (the whole string), user a string, detail
+# exactly {text, step, build_user}, step `build`, build_user a string, text by RUN_TEXT. status.jq puts a STOP's
+# version, detail.hand and detail.jq.path into its "Next" commands: none of a record of another shape reaches a line
+RUN_SHOWN=$RUN_TEXT'
+def writer_stop: type == "object" and keys == ["detail", "stop", "user", "version"] and .stop == "check failed"
+  and (.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z")) and (.user | type) == "string"
+  and (.detail | type == "object" and keys == ["build_user", "step", "text"] and .step == "build"
+       and (.build_user | type) == "string" and (.text | type == "string" and run_text == .));
+(.on | type) == "boolean" and ((.stops // []) | type == "array" and all(.[]; writer_stop))'
 
 # TEXT CHECK MEMBERS: a state's text read by the rules of one user's state (its format, CHECK's shape, MEMBERS' list
 # of the members this release does not read). 0 + REPLY = the state, compact JSON; 1: not one JSON object (or no jq
@@ -384,6 +417,8 @@ put_state() {
   local out
   rm -f -- "$STATE.new" 2> /dev/null
   { printf '%s\n' "$1" > "$STATE.new"; } 2> /dev/null || { rm -f -- "$STATE.new"; stop "the state cannot be written ($STATE.new): $STATE is as it was"; }
+  chmod "$RR_STATE_MODE" -- "$STATE.new" 2> /dev/null \
+    || { rm -f -- "$STATE.new"; stop "the state's mode cannot be set (rr_lock's, [$RR_STATE_MODE]): $STATE is as it was"; }
   out=$(dd if=/dev/null of="$STATE.new" conv=notrunc,fsync 2>&1 < /dev/null) \
     || { rm -f -- "$STATE.new"; stop "the state cannot be synced to disk (dd: ${out%%$'\n'*}): $STATE is as it was"; }
   mv -f -- "$STATE.new" "$STATE" || { rm -f -- "$STATE.new"; stop "the state cannot be renamed into place: $STATE is as it was"; }
@@ -396,13 +431,15 @@ change_state() {
   ST=$new
 }
 
-# THE JQ CHECK (the header): exit 3 when the jq is not one core/TESTED_JQ lists for the core
+# THE JQ CHECK (the header): exit 3 when the jq is not one core/TESTED_JQ lists for the core. [MORE]: a sentence the
+# STOP line ends with (status as RS_USER: RUN_USER's record is not read either)
 jq_check() {
+  local more=${1:+ ($1)}
   tested_jq && return 0
   if [ "$JQV" = "no jq" ]; then
-    echo "runner-updater: STOP untested jq: no jq answers \`jq --version\` here: install one that $CORE/TESTED_JQ lists for core (the jq package of Ubuntu 26.04 and of 24.04 is one); no new work starts"
+    echo "runner-updater: STOP untested jq: no jq answers \`jq --version\` here: install one that $CORE/TESTED_JQ lists for core (the jq package of Ubuntu 26.04 and of 24.04 is one); no new work starts$more"
   else
-    echo "runner-updater: STOP untested jq: jq here prints [$JQV], which is no core row of $CORE/TESTED_JQ: the decision core is not tested with it, and no new work starts. Next, in the repository: \`JQ=$(command -v jq) python3 -I -B -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass"
+    echo "runner-updater: STOP untested jq: jq here prints [$JQV], which is no core row of $CORE/TESTED_JQ: the decision core is not tested with it, and no new work starts. Next, in the repository: \`JQ=$(command -v jq) python3 -I -B -m unittest discover -s tests/core -t .\`, then add its row to core/TESTED_JQ when they pass$more"
   fi
   exit 3
 }
@@ -453,9 +490,15 @@ STATUS_LINES='def yn: if . == true then "yes" elif . == false then "no" elif . =
 # and RUN_USER's own `runner-updater status` as the way to read it. It writes nothing, takes no lock, and changes no
 # exit code. A host config whose RUN_USER is RS_USER: no second record (the one above is that user's)
 RUN_MAX=262144
+# WHY: RUN_USER's record is not shown, the ONE line that says so (WHY is a fixed text of this program)
+run_not_shown() {
+  local why=${1:0:400}
+  echo "runner-updater: as ${RUN_USER}: status: its record $RUN_STATE is not shown: ${why//[[:cntrl:]]/?}; as ${RUN_USER}, \`runner-updater status\` reads it"
+}
 run_record() {
   local pre="runner-updater: as ${RUN_USER}: " raw tail body st= why= fresh= facts out rc
   [ "${RUN_USER}" != "$ME" ] || return 0
+  [[ ${1-} =~ ^[0-9]+$ ]] || { run_not_shown "the clock gave no time"; return 0; }
   raw=$({ rr_read "$RUN_STATE" "$((RUN_MAX + 1))"; printf '\n%s %s' "$?" "$RR_WHY"; } | tr '\000' '\001')
   tail=${raw##*$'\n'} body=${raw%$'\n'*}
   if [[ ! $tail =~ ^([0-9]+)\ (.*)$ ]]; then why="it cannot be read"
@@ -466,14 +509,17 @@ run_record() {
     why="it holds a byte no JSON text holds (a NUL or another control byte)"
   else
     parse_state "$body" "$RUN_CHECK" "$RUN_MEMBERS"
-    case $? in
+    case $? in      # each why is a fixed text: none holds a text of the record (no member name, no value)
       0) st=$REPLY ;;
       1) why="it is not one JSON object" ;;
-      2) why="it has format $REPLY; this release reads format 1" ;;
+      2) why="it has another format; this release reads format 1" ;;
       3) why="it is not a state of format 1 this release reads" ;;
-      5) why="it holds members this release does not read ($REPLY)" ;;
+      5) why="it holds members this release does not read" ;;
       *) why="jq could not list its members" ;;
     esac
+  fi
+  if [ -z "$why" ] && ! printf '%s\n' "$st" | jq -e "$RUN_SHOWN" > /dev/null 2>&1; then
+    why="its STOPs are not what its own updater writes (only a \`check failed\` of a build: a version N.N.N and a text of at most 900 printable ASCII characters)"
   fi
   if [ -z "$why" ]; then
     facts=$(printf '%s\n' "$st" | status_facts run "${RUN_USER}") || why="jq could not build its facts"
@@ -484,20 +530,34 @@ run_record() {
     { [ "$rc" = 0 ] && printf '%s\n' "$out" | decided status && [ "$(printf '%s\n' "$out" | jq -r '.verdict')" = ok ]; } \
       || why="the decision core did not render it (status.jq, exit $rc)"
   fi
-  if [ -n "$why" ]; then
-    why=${why:0:400}
-    echo "${pre}status: its record $RUN_STATE is not shown: ${why//[[:cntrl:]]/?}; as ${RUN_USER}, \`runner-updater status\` reads it"
-    return 0
-  fi
+  if [ -n "$why" ]; then run_not_shown "$why"; return 0; fi
   if [ -n "$fresh" ]; then echo "${pre}status: the updater is OFF (no record: $RUN_STATE is not there: a fresh install)"
   else echo "${pre}status: the updater is $(printf '%s\n' "$st" | jq -r 'if .on then "ON" else "OFF" end') (its record: $RUN_STATE)"; fi
   printf '%s\n' "$out" | jq -r --arg pre "$pre" "$STATUS_LINES"
 }
 
+# RS_USER's status (and RUN_USER's own): its own lines, its own exit code. As RS_USER with another RUN_USER, they run in
+# a subshell, so that every end of them (a WAIT or REFUSE on its own state, a core that could not decide or waits, a
+# clock it cannot read, or exit 0) is followed by RUN_USER's record (run_record; PLAN D7: status prints both users'
+# records), and then that exit code. Under an untested jq no record is parsed: when its own STOP untested jq ended it
+# (exit 3), that line says so and no line of RUN_USER's follows; when an earlier end came first, ONE line of RUN_USER's
+# says so
 do_status() {
+  local rc
+  if [ "$ROLE" = rs ] && [ "${RUN_USER}" != "$ME" ]; then
+    ( status_own "${RUN_USER}'s record is not read either: no record parse runs under an untested jq" )
+    rc=$?
+    if tested_jq; then run_record "$(date +%s)"
+    elif [ "$rc" != 3 ]; then run_not_shown "the jq here is untested (no core/TESTED_JQ row for core): no record is read under it"
+    fi
+    exit "$rc"
+  fi
+  status_own
+}
+status_own() {   # [MORE]: jq_check's
   local now core facts out rc
   load_state
-  jq_check
+  jq_check "${1-}"
   now=$(date +%s)
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
   core=$(printf '%s\n' "$ST" | jq -c '.core // empty') && facts=$(printf '%s\n' "$ST" | status_facts "$ROLE") \
@@ -519,7 +579,6 @@ do_status() {
     stop "core could not decide (status): exit $rc: ${out%%$'\n'*}"
   fi
   printf '%s\n' "$out" | jq -r --arg pre "" "$STATUS_LINES"
-  [ "$ROLE" != rs ] || run_record "$now"
   [ "$(printf '%s\n' "$out" | jq -r '.verdict')" != wait ] \
     || wait4 "the decision core waits ($(printf '%s\n' "$out" | waits_why status)): status decides nothing, and it writes nothing"
   exit 0
@@ -786,7 +845,10 @@ do_pass() {
 # REFUSE line above says why"), else that FAIL line; with no FAIL line, its last REFUSE line; or what it exited with
 build_child() {
   local rc
+  FORKED=
   rm -f -- "$BUILDOUT"
+  [ -z "${TERMED-}" ] || return 0      # THE TERM WINDOW (do_build_pass): a TERM came first, so no 02-d1.sh starts
+  FORKED=1
   /bin/bash "$B/setup/02-d1.sh" build "$1" < /dev/null 2>&1 | tee "$BUILDOUT" 9>&-
   rc=${PIPESTATUS[0]}
   if [ "$rc" = 75 ]; then
@@ -809,8 +871,9 @@ clear_check_failed() {
 }
 # VERSION LINE: the STOP `check failed` of VERSION (ONE per version: it replaces an older one's text), by rename; exit 1
 check_failed() {
-  local text=${2//[[:cntrl:]]/?}
-  text=${text:0:900}
+  local text
+  text=$(jq -nr --arg t "$2" "$RUN_TEXT"' $t | run_text' < /dev/null) \
+    || stop "jq could not make the text of the STOP check failed (runner $1): $STATE is as it was"
   change_state '.stops = [(.stops // [])[] | select(.stop != "check failed" or .version != $v)]
                  + [{stop: "check failed", version: $v, user: $u, detail: {text: $t, step: "build", build_user: $u}}]' \
     --arg v "$1" --arg u "$ME" --arg t "$text"
@@ -844,11 +907,23 @@ do_build_pass() {
   say "pass: building runner $v for this release's image (recipe $rec): 02-d1.sh build $v, its output also in $BUILDOUT"
   # systemd's stop of the timer's unit (TimeoutStartSec, a shutdown) is SIGTERM to EVERY process of the unit, this one
   # too: a trap (not an ignore, which the child would inherit) keeps this run alive until 02-d1.sh, which got it too,
-  # has exited (143), so the CUT below says so. Only while the build runs: elsewhere a TERM ends a pass at once
-  trap : TERM
+  # has exited (143), so the CUT below says so. Only around the build: elsewhere a TERM ends a pass at once.
+  # THE TERM WINDOW: the trap is set before build_child's rm and its fork of 02-d1.sh, so it RECORDS a TERM (TERMED), and
+  # build_child checks it right before the fork: a TERM that came first starts no build (the CUT "no build started",
+  # exit 0, no STOP, the state as it was). The residual: a TERM between that check and the fork. systemd's TERM reaches
+  # only the processes of the unit that exist when it sends it, so a 02-d1.sh forked after it runs until systemd's
+  # SIGKILL at TimeoutStopSec (the unit's, or the manager's default), which ends this run too: no CUT line, no STOP
+  # (nothing is written), a build context that 02-d1.sh's own trap did not remove, and the lock free once every holder
+  # has exited
+  TERMED=
+  trap 'TERMED=1' TERM
   build_child "$v"
   rc=$?
   trap - TERM
+  if [ -z "$FORKED" ]; then
+    say "pass: CUT 02-d1.sh build $v by SIGTERM before it started (no build started): no STOP; the next pass builds it again"
+    exit 0
+  fi
   case $rc in
     0) say "pass: built runner $v"; exit 0 ;;
     75) say "pass: WAIT 02-d1.sh build $v waits (exit 75): $REPLY; no STOP: a later pass builds it"; exit 0 ;;
@@ -875,14 +950,14 @@ do_build() {
 
 [ "$cmd" != status ] || do_status
 if [ "$cmd" = pass ]; then   # a timer pass only TRIES the lock: held, and it ends at once
-  rr_lock -n
+  rr_lock "$ROLE" -n
   case $? in
     0) if [ "$ROLE" = rs ]; then do_pass; else do_build_pass; fi ;;
     75) say "pass: another run holds the updater lock $RR_LOCK; this pass ends"; exit 0 ;;
     *) refuse "cannot take the updater lock $RR_LOCK (runner-release.sh said why, above)" ;;
   esac
 fi
-rr_lock || refuse "cannot take the updater lock $RR_LOCK (runner-release.sh said why, above)"
+rr_lock "$ROLE" || refuse "cannot take the updater lock $RR_LOCK (runner-release.sh said why, above)"
 case $cmd in
   on) do_on ;;
   off) do_off ;;
