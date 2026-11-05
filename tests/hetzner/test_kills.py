@@ -21,9 +21,9 @@ from tests.hetzner.test_unattended import BACK_KEYS, NONAPI, SWITCH_KEYS, BackRi
 SWITCH_END = {
     'window': ('none', 'old', 0, 0), 'kind': ('none', 'old', 0, 0), 'version': ('none', 'old', 0, 0),
     'digest': ('none', 'old', 0, 0), 'process': ('none', 'old', 0, 0), 'old': ('none', 'old', 0, 0),
-    'config-sha': ('pre', 'old', 0, 0), 'staged': ('pre', 'old', 0, 0), 'validate': ('pre', 'old', 0, 0),
-    'staged-sha': ('pre', 'old', 0, 0), 'target': ('pre', 'old', 0, 0), 'target-content': ('pre', 'old', 0, 0),
-    'idle': ('pre', 'old', 0, 0),
+    'config-sha': ('pre', 'old', 0, 0), 'start-state': ('pre', 'old', 0, 0), 'staged': ('pre', 'old', 0, 0),
+    'validate': ('pre', 'old', 0, 0), 'staged-sha': ('pre', 'old', 0, 0), 'target': ('pre', 'old', 0, 0),
+    'target-content': ('pre', 'old', 0, 0), 'idle': ('pre', 'old', 0, 0),
     'backup': ('pre', 'old', 0, 0), 'rename-start': ('pre', 'old', 0, 0),       # 4: nothing installed
     'renamed': ('target-running', 'new', 1, 1), 'from': ('target-running', 'new', 1, 1),   # 3c: the idle restart
     'stopping': ('target-running', 'new', 1, 1),
@@ -36,13 +36,13 @@ BACK_END = {
     'window': ('none', 'old', 0, 0), 'kind': ('none', 'old', 0, 0), 'why': ('none', 'old', 0, 0),
     'verdict': ('none', 'old', 0, 0), 'old-version': ('none', 'old', 0, 0), 'target-version': ('none', 'old', 0, 0),
     'process': ('none', 'old', 0, 0), 'old': ('none', 'old', 0, 0),
-    'config-sha': ('pre', 'old', 0, 0), 'staged': ('pre', 'old', 0, 0), 'validate': ('pre', 'old', 0, 0),
-    'staged-sha': ('pre', 'old', 0, 0), 'target': ('pre', 'old', 0, 0), 'target-content': ('pre', 'old', 0, 0),
-    'backup': ('pre', 'old', 0, 0), 'rename-start': ('pre', 'old', 0, 0),
+    'config-sha': ('pre', 'old', 0, 0), 'start-state': ('pre', 'old', 0, 0), 'staged': ('pre', 'old', 0, 0),
+    'validate': ('pre', 'old', 0, 0), 'staged-sha': ('pre', 'old', 0, 0), 'target': ('pre', 'old', 0, 0),
+    'target-content': ('pre', 'old', 0, 0), 'backup': ('pre', 'old', 0, 0), 'rename-start': ('pre', 'old', 0, 0),
     'renamed': ('target-running', 'new', 1, 1), 'from': ('target-running', 'new', 1, 1),   # 3c: at once
     'stopping': ('target-running', 'new', 1, 1),
     'stopped': ('target-running', 'new', 1, 0),                                  # 3b: validated, then THE START
-    'starting': ('pre', 'old', 1, 0),                                            # DECIDED: THE RESTORE
+    'starting': ('target-running', 'new', 1, 0),                                 # 3: its start in progress, waited for
     'running': ('target-running', 'new', 0, 0),
     'installed': ('target-running', 'new', 0, 0),
 }
