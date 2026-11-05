@@ -5,6 +5,8 @@ or changed) STOPs, a state WAIT or REFUSE that comes before RECOVER while a reco
 record that stays open, and `status`'s window line, each name README "An unfinished window the updater cannot end" in
 these cases, and only in these. And the plan owner's cells: `off` while such a record is open refuses; after the
 maintainer's move, `off`, then a pass is OFF and does nothing; a pass with a record it cannot read takes no action.
+And the README's hand steps as text (review r1): the first checks the updater lock, each "step N" names the step it
+means, and every `lsof` line reads the updater lock.
 
 The rig is test_runner_updater_window's (Win): a window SIGKILLed at a step leaves its record open.
 """
@@ -281,6 +283,73 @@ class TestTheSectionExists(unittest.TestCase):
         for rel in ('install', 'bin/runner-updater', 'bin/runner-updater-window', 'bin/runner-updater-lib'):
             for name in re.findall(r'README \\?"([^"\\]+)\\?"', read_text(os.path.join(REPO, rel))):
                 self.assertIn(name, headings, rel)
+
+
+# ---- README's hand steps, as text (S3b-5 review r1)
+README = os.path.join(REPO, 'README.md')
+HAND = 'An unfinished window the updater cannot end'
+LOCK_LINE = '`/usr/sbin/lsof /Users/ci/.local/state/runner-updater/lock`'
+
+
+def readme_steps(heading):
+    """the FIRST numbered list of README's section HEADING: {N: step N's text, its indented lines joined by newlines}"""
+    lines = read_text(README).split('\n')
+    at = [i for i, l in enumerate(lines) if re.fullmatch(r'#+ ' + re.escape(heading), l)]
+    if len(at) != 1:
+        raise AssertionError('README has %d sections %r' % (len(at), heading))
+    steps, n = {}, None
+    for l in lines[at[0] + 1:]:
+        if l.startswith('#'):
+            break
+        m = re.match(r'(\d+)\. (.*)$', l)
+        if m:
+            n = int(m.group(1))
+            if n in steps:
+                raise AssertionError('README %r numbers step %d twice' % (heading, n))
+            steps[n] = m.group(2)
+        elif n is not None and (l == '' or l.startswith('   ')):
+            steps[n] += '\n' + l
+        elif n is not None:
+            break
+    return steps
+
+
+class TestTheHandStepsText(unittest.TestCase):
+    """README "An unfinished window the updater cannot end": its first step checks that no run holds the updater lock
+    (review r1 P3-2: a window that is RUNNING has its record open, and `status` may name the section during it); the
+    steps are numbered 1-9 in this order, and every "step N" in them names the step it means."""
+
+    STARTS = ('No run holds the updater lock', 'Leave the record as it is', 'CI ALREADY RIGHT', "The window's tools",
+              "The window's VMs", 'When `/Users/ci/.config/runner/enabled` exists', 'THE CHOICES',
+              'On the first choice that passes', 'Tell the maintainer')
+    # every step reference in the steps, by the step that makes it
+    REFS = {1: ['wait as "Update" step 1 says'], 3: ['do steps 4 and 5 only, then step 9'],
+            7: ['go to step 8', 'the copy of step 6'], 8: ["go back to step 6's wait"]}
+
+    def test_the_first_step_checks_that_no_run_holds_the_updater_lock(self):
+        first = readme_steps(HAND)[1]
+        self.assertIn(LOCK_LINE + ' prints nothing', first)
+        self.assertIn('wait as "Update" step 1 says, then run `/Users/ci/bin/runner-updater status` again', first)
+
+    def test_the_steps_in_their_order(self):
+        steps = readme_steps(HAND)
+        self.assertEqual(sorted(steps), list(range(1, len(self.STARTS) + 1)))
+        for n, start in enumerate(self.STARTS, 1):
+            self.assertTrue(steps[n].startswith(start), (n, steps[n][:80]))
+
+    def test_every_step_reference_names_the_step_it_means(self):
+        for n, text in readme_steps(HAND).items():
+            refs = self.REFS.get(n, [])
+            for ref in refs:
+                self.assertIn(ref, text, n)
+            self.assertEqual(len(re.findall(r'\bsteps? \d', text)), sum(len(re.findall(r'\bsteps? \d', r)) for r in refs),
+                             (n, re.findall(r'.{0,40}\bsteps? \d.{0,20}', text)))
+
+    def test_every_lsof_line_reads_the_updater_lock(self):
+        # one line in every place: the way back, the clear, the hand steps, Update step 2 (review r1 P3-4)
+        statedir = re.search(r'^STATEDIR=(\S+)', read_text(os.path.join(REPO, 'install')), re.M).group(1)
+        self.assertEqual(LOCK_LINE, '`/usr/sbin/lsof %s/lock`' % statedir)
+        self.assertEqual(set(re.findall(r'`[^`]*\blsof\b[^`]*`', read_text(README))), {LOCK_LINE})
 
 
 if __name__ == '__main__':
