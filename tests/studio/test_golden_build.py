@@ -9,10 +9,9 @@ import os
 import re
 import shlex
 import signal
-import subprocess
 import unittest
 
-from tests.studio.support import REPO, Sandbox
+from tests.studio.support import REPO, Sandbox, group_gone
 
 SCRIPT = 'bin/golden-build'
 D = '20261102'
@@ -78,27 +77,6 @@ fi
 
 def q(p):
     return shlex.quote(p)
-
-
-def group_alive(pgid):
-    """a member of the process group PGID that is alive (not a zombie), by ps"""
-    out = subprocess.run(['/bin/ps', '-A', '-o', 'pgid=,stat='], capture_output=True, text=True, check=True,
-                         stdin=subprocess.DEVNULL).stdout
-    return any(l.split()[0] == str(pgid) and not l.split()[1].startswith('Z') for l in out.splitlines() if l.strip())
-
-
-def group_gone(p, killpg=os.killpg):
-    """the process P has ended and no member of its process group is alive. killpg(pgid, 0) can raise EPERM while the
-    group's last members exit (at high load): then ps says whether a member is still alive"""
-    if p.poll() is None:
-        return False
-    try:
-        killpg(p.pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return not group_alive(p.pid)
-    return False
 
 
 class Rig:
@@ -232,34 +210,7 @@ class TestDate(unittest.TestCase):
         self.assert_cleaned(r)
 
 
-class TestGroupGone(unittest.TestCase):
-    """The helper the TERM cells wait with (FLAKE, 11-04): os.killpg(pgid, 0) can raise PermissionError (EPERM) at high
-    load while the group's last members exit. group_gone ends when no member of the group is alive, also on EPERM, and
-    keeps waiting while a member lives. EPERM is injected; the controls are the real killpg."""
-
-    def group(self, member):
-        """a process group whose leader has exited; MEMBER: a sleep of it still runs"""
-        sb = Sandbox(self)
-        p = sb.start(['/bin/sh', '-c', '/bin/sleep 30 & exit 0' if member else 'exit 0'], name='group')
-        p.wait(timeout=30)
-        return p
-
-    @staticmethod
-    def eperm(pgid, sig):
-        raise PermissionError(1, 'Operation not permitted')
-
-    def test_eperm_with_a_member_alive_keeps_waiting(self):
-        p = self.group(True)
-        self.assertFalse(group_gone(p, killpg=self.eperm))
-        self.assertFalse(group_gone(p))                          # the control: the real killpg finds the member
-
-    def test_eperm_with_no_member_alive_ends(self):
-        p = self.group(False)
-        self.assertTrue(group_gone(p, killpg=self.eperm))
-        self.assertTrue(group_gone(p))                           # the control: the real killpg finds no group
-
-
-GOOD_PIN = '%s %s\n' % (PIN_V, PIN_SHA)
+GOOD_PIN ='%s %s\n' % (PIN_V, PIN_SHA)
 
 
 def _symlink_pin(r):

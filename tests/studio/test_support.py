@@ -1,13 +1,14 @@
 """support.py's own guards: a rewrite that does not match, a host path left in a copy, the stub's argv log, the
-clean environment, and the lock holder (hold_lock), which waits for its lock. Each guard has a control that must
-pass."""
+clean environment, the lock holder (hold_lock), which waits for its lock, and the wait for a process group's end
+(group_gone). Each guard has a control that must pass."""
 import fcntl
 import os
 import subprocess
 import time
 import unittest
+from unittest import mock
 
-from tests.studio.support import Sandbox
+from tests.studio.support import Sandbox, group_gone
 
 
 class TestCopy(unittest.TestCase):
@@ -131,6 +132,38 @@ class TestHoldLock(unittest.TestCase):
         lock = sb.path('no-folder', 'lock')              # lockf cannot create it, and ends at once
         with self.assertRaisesRegex(AssertionError, 'the holder could not take'):
             sb.hold_lock(lock)
+
+
+class TestGroupGone(unittest.TestCase):
+    """The helper the TERM cells wait with (FLAKE, 11-04): os.killpg(pgid, 0) can raise PermissionError (EPERM) at high
+    load while the group's last members exit. group_gone ends when no member of the group is alive, also on EPERM, and
+    keeps waiting while a member lives. EPERM is injected; the controls are the real killpg."""
+
+    def group(self, member):
+        """a process group whose leader has exited; MEMBER: a sleep of it still runs (the test's cleanup kills it)"""
+        self.sb = Sandbox(self)
+        p = self.sb.start(['/bin/sh', '-c', '/bin/sleep 600 & exit 0' if member else 'exit 0'], name='group')
+        p.wait(timeout=30)
+        return p
+
+    @staticmethod
+    def eperm(pgid, sig):
+        raise PermissionError(1, 'Operation not permitted')
+
+    def test_eperm_with_a_member_alive_keeps_waiting(self):
+        p = self.group(True)
+        with mock.patch.object(os, 'killpg', self.eperm):
+            self.assertFalse(group_gone(p))
+            with self.assertRaisesRegex(AssertionError, 'timed out waiting for the group'):
+                self.sb.wait_for(lambda: group_gone(p), 'the group', timeout=0.2)
+        self.assertFalse(group_gone(p))                          # the control: the real killpg finds the member
+
+    def test_eperm_with_no_member_alive_ends(self):
+        p = self.group(False)
+        with mock.patch.object(os, 'killpg', self.eperm):
+            self.assertTrue(group_gone(p))
+            self.sb.wait_for(lambda: group_gone(p), 'the group')  # the wait ends, it does not raise
+        self.assertTrue(group_gone(p))                           # the control: the real killpg finds no group
 
 
 if __name__ == '__main__':

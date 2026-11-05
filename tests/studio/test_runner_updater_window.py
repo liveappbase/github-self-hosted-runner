@@ -13,6 +13,7 @@ identity and an interrupt at clone and at publication); golden-gate is a stub th
 df and du are stubs. runner-journal and validate-class are the real ones; a copy of runner-journal can SIGKILL its
 caller right after it wrote one KEY (RU_KILL_AT), so a cell sees what a kill at that step boundary leaves.
 """
+import errno
 import hashlib
 import json
 import os
@@ -21,7 +22,9 @@ import signal
 import subprocess
 import time
 import unittest
+from unittest import mock
 
+from tests.studio.support import group_gone
 from tests.studio.test_runner_updater import BACKGROUND, FIX, HEALTHZ, IMG, IMG2, P, Rig, config, proc_line, read_text
 from tests.studio.test_runner_updater_state import Paths, fam, lib_run, lines_of, state, stop
 from tests.studio import test_golden_build as gb
@@ -971,16 +974,7 @@ class TestRealBuildInterrupted(unittest.TestCase):
         w.sb.wait_for(lambda: os.path.exists(blocked) or p.poll() is not None, 'the clone to block', timeout=120)
         self.assertTrue(os.path.exists(blocked), w.sb.output('win'))
         os.killpg(p.pid, signal.SIGTERM)
-
-        def gone():
-            if p.poll() is None:
-                return False
-            try:
-                os.killpg(p.pid, 0)
-            except ProcessLookupError:
-                return True
-            return False
-        w.sb.wait_for(gone, 'every process of the window to end', timeout=60)
+        w.sb.wait_for(lambda: group_gone(p), 'every process of the window to end', timeout=60)
         self.assertEqual(w.keys()[-1], 'build-start')
         self.assertEqual(w.calls('golden-gate'), [])
         self.assertEqual(w.enables(), [])
@@ -1003,6 +997,23 @@ class TestRealBuildInterrupted(unittest.TestCase):
     def test_at_publication(self):
         w, d = self.interrupted('liveapp-mac-golden-D')
         self.assertIn(['stop', 'gold-' + d], w.calls('tart'))
+
+    def test_the_wait_ends_when_killpg_gives_eperm_for_a_group_with_no_live_member(self):
+        # macOS can answer EPERM, not ESRCH, for a group whose members are zombies or gone (the red: EPERM out of the
+        # wait). Here every such answer is EPERM. The control: test_at_the_first_clone, the same run with the real killpg.
+        real, answered = os.killpg, []
+
+        def killpg(pgid, sig):
+            if sig != 0:
+                return real(pgid, sig)
+            try:
+                return real(pgid, 0)
+            except OSError:
+                answered.append(pgid)
+                raise PermissionError(errno.EPERM, os.strerror(errno.EPERM)) from None
+        with mock.patch.object(os, 'killpg', killpg):
+            self.interrupted('gold-D')
+        self.assertTrue(answered, 'the EPERM never reached the wait')
 
 
 class TestPinRule(unittest.TestCase):

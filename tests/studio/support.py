@@ -9,6 +9,7 @@ A test makes a Sandbox: a temporary folder, removed by the test's cleanup. In it
   the holder and never ends it;
 - runs a command with a clean environment: HOME and TMPDIR in the sandbox, PATH = the stubs folder and the
   system folders, LC_ALL=C. Nothing else of the caller's environment passes.
+A test that waits for a started process group to end waits with group_gone: the one place that reads killpg's answer.
 """
 import os
 import shlex
@@ -33,6 +34,27 @@ def _rmtree(path):
             except OSError:
                 pass
     shutil.rmtree(path, ignore_errors=True)
+
+
+def group_alive(pgid):
+    """a member of the process group PGID that is alive (not a zombie), by ps"""
+    out = subprocess.run(['/bin/ps', '-A', '-o', 'pgid=,stat='], capture_output=True, text=True, check=True,
+                         stdin=subprocess.DEVNULL).stdout
+    return any(l.split()[0] == str(pgid) and not l.split()[1].startswith('Z') for l in out.splitlines() if l.strip())
+
+
+def group_gone(p):
+    """the process P has ended and no member of its process group is alive. killpg(pgid, 0) can raise EPERM while the
+    group's last members exit (at high load): then ps says whether a member is still alive"""
+    if p.poll() is None:
+        return False
+    try:
+        os.killpg(p.pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return not group_alive(p.pid)
+    return False
 
 
 class Sandbox:
