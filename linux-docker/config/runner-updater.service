@@ -21,7 +21,9 @@ ExecStart=%h/bin/runner-updater pass
 # TimeoutStopSec (this unit names none: the manager's default, DefaultTimeoutStopSec), and a process it kills runs no
 # trap. Then there is no CUT line, the build context may stay (under ~/.cache/liveapp-ci), the updater lock is free once
 # every holder has exited, and the state is valid (it is written only by rename): no STOP, and the next pass builds
-# again. The updater's TERM WINDOW (its header) is one such case.
+# again. The updater's TERM WINDOW (its header) is such a case when the 02-d1.sh it forked after the TERM runs until
+# then; when that 02-d1.sh ends first, the updater prints a CUT and writes no STOP, whatever it exited with (but 0:
+# built), as it recorded the TERM.
 # THE RESIDUAL: a build that hangs each time is cut each time, an hour each, then built again by the next pass, with no
 # STOP and no end. RUN_USER's journal shows one CUT line per try (journalctl --user -u runner-updater), and its updater
 # lock is held most of the time (a person's `runner-updater build V`, `on` and `off` wait for it). What reaches the

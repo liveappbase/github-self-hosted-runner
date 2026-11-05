@@ -153,9 +153,20 @@ class RealUsers:
     def upd(self, user, *args):
         return self.as_user(user, self.home(user, 'build', 'bin', 'runner-updater'), *args)
 
-    def d1(self, *args):
-        """The copied 02-d1.sh as RUN_USER, as a person runs it over ssh (`bash ~/build/setup/02-d1.sh ...`)."""
-        return self.as_user(self.run, 'bash', self.home(self.run, 'build', 'setup', '02-d1.sh'), *args)
+    def d1(self, *args, user=None):
+        """The copied 02-d1.sh as RUN_USER (or USER, from its own ~/build), as a person runs it over ssh (`bash
+        ~/build/setup/02-d1.sh ...`)."""
+        user = user or self.run
+        return self.as_user(user, 'bash', self.home(user, 'build', 'setup', '02-d1.sh'), *args)
+
+    def outside(self):
+        """What the Sandbox's substitutes and its local GitHub saw: {log name: its text} and the requests."""
+        d = self.sb.path('logs')
+        logs = {}
+        for n in sorted(os.listdir(d)):
+            with open(os.path.join(d, n), 'rb') as f:
+                logs[n] = f.read()
+        return logs, list(self.sb.gh.seen)
 
     def write_as(self, user, rel, text, m):
         """A file of USER's home written as that user would (owned by it), with mode m."""
@@ -259,8 +270,13 @@ class RunUsersRecord(unittest.TestCase):
         self.assertIn('runner-updater: STOP check failed (runner %s)' % V, r.stdout)
         lines = g.shown('a STOP written', 'ON')
         g.run_modes('a STOP written')
+        # RS_USER's status names the STOP and its next step, never its text (fix round 2): RUN_USER's own shows it
+        self.assertIn('hz-docker: STOP check failed (runner %s): its cause: as %s, `runner-updater status` shows it. '
+                      'Next: as %s: `runner-updater build %s`' % (V, g.run, g.run, V), lines)
+        self.assertEqual([l for l in lines if 'FAIL' in l], [], lines)
+        own = ok(self, g.upd(g.run, 'status'), "RUN_USER's own status")
         self.assertIn('hz-docker: STOP check failed (runner %s): FAIL docker build failed: no record, image.ref NOT '
-                      'changed. Next: as %s: `runner-updater build %s`' % (V, g.run, V), lines)
+                      'changed. Next: as %s: `runner-updater build %s`' % (V, g.run, V), own.stdout.splitlines())
         del g.sb.docker['build_rc']
         r = ok(self, g.upd(g.run, 'build', V), 'build V')
         self.assertIn('runner-updater: build: the STOP check failed of runner %s is cleared' % V, r.stdout)
@@ -354,6 +370,38 @@ class RsUserStaysPrivate(unittest.TestCase):
         r = ok(self, g.upd(g.rs, 'pass'), 'RS_USER\'s pass, the lock held')
         self.assertIn('another run holds the updater lock', r.stdout)
         g.rs_modes('RS_USER\'s pass, the lock held')
+
+    def test_02_d1_sh_as_rs_user_refuses_and_changes_nothing(self):
+        """Codex r2 F3 (fix round 2): 02-d1.sh runs as RUN_USER only. As RS_USER, `02-d1.sh build V` and the full run
+        REFUSE before rr_lock and before any other action, exit 1, and the line names the user to run it as (the
+        host config's RUN_USER): RS_USER's STATEDIR stays 0700 and its state 0600, nothing in its home changes, and no
+        substitute or the local GitHub sees a call (until fix round 2 its `rr_lock run` made them 0710 and 0640). The
+        control that comes out the other way: as RUN_USER both modes go on
+        (RunUsersRecord.test_02_d1_sh_first_then_its_build_and_rs_user_reads_the_record)."""
+        g = RealUsers(self)
+        ok(self, g.upd(g.rs, 'pass'), 'RS_USER\'s first timer pass')
+        ok(self, g.upd(g.rs, 'on'), 'RS_USER\'s on')
+        g.rs_modes('RS_USER\'s on')
+        before, outside = home_tree(g.home(g.rs)), g.outside()
+        for args in (('build', V), ()):
+            with self.subTest(args or 'the full run'):
+                r = g.d1(*args, user=g.rs)
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                g.rs_modes('02-d1.sh %s as RS_USER' % ' '.join(args))
+                self.assertEqual(home_tree(g.home(g.rs)), before)
+                self.assertEqual(g.outside(), outside)
+                self.assertIn('02-d1.sh: REFUSE run me as %s' % g.run, r.stderr)
+                self.assertEqual(r.stdout, '', 'it acted before it refused')
+
+
+def home_tree(home):
+    """{path: (mode, uid, gid, size, mtime_ns)} of HOME and every entry under it (lstat): what a write would change."""
+    out = {}
+    for d, dirs, names in os.walk(home):
+        for p in [d] + [os.path.join(d, n) for n in dirs + names]:
+            s = os.lstat(p)
+            out[p] = (s.st_mode, s.st_uid, s.st_gid, s.st_size, s.st_mtime_ns)
+    return out
 
 
 def text(rel):

@@ -81,9 +81,13 @@
 #            (run_record): RUN_USER's STATE (RUN_STATE) read as hostile (PLAN D1: ONE open by runner-release.sh's
 #            rr_read, at most RUN_MAX bytes, never sourced; RUN_USER's own format, shape and member rules), and shown
 #            ONLY in the shape RUN_USER's own writer makes (RUN_SHOWN: each STOP a `check failed` of a build, version
-#            N.N.N, detail {text, step, build_user}, its text by RUN_TEXT), each line "runner-updater: as RUN_USER:
-#            ...": ON or OFF (no file: a fresh install, OFF), then status.jq's lines of its STOPs, the user each names
-#            the host config's RUN_USER (a `check failed` of a build: `runner-updater build V`, as RUN_USER); or ONE
+#            N.N.N of 1 to 9 digits each (VERSION_RE), detail {text, step, build_user}, its text by RUN_TEXT), each
+#            line "runner-updater: as RUN_USER: ...": ON or OFF (no file: a fresh install, OFF), then status.jq's lines
+#            of its STOPs, each with the STOP, its version and its next step, never its text: in place of the cause, a
+#            fixed text of this program says that RUN_USER's own `runner-updater status` shows it (status_facts; a
+#            text of the writer's own shape can read as an instruction, and RUN_USER controls its ~/build), and the
+#            user each names is the host config's RUN_USER (a `check failed` of a build: `runner-updater build V`, as
+#            RUN_USER); or ONE
 #            line that names why it is not shown, a fixed text of this program that holds no text of the record (no
 #            member name, no value), and RUN_USER's own `runner-updater status`. Under an untested jq no record is
 #            parsed: its STOP untested jq line (exit 3) says so, with no line of RUN_USER's; an earlier end (its own
@@ -143,7 +147,9 @@
 #   they hold; DUE writes nothing into the state and never fails the pass: every line is "runner-updater: pass: ...".
 #   It downloads no tarball: RUN_USER's build checked the tarball's digest.
 # THE BUILD PASS (RUN_USER's pass; ON, the jq check passed): the latest release (rr_eligible: "WAIT ..." or why it is
-#   not eligible, exit 0, nothing built); this release's recipe of ~/build/image (it cannot be computed: REFUSE,
+#   not eligible, exit 0, nothing built); a version VERSION_RE refuses (a part of 10 digits or more): "no build",
+#   exit 0, nothing built (a STOP of it would hold a version RS_USER's status cannot show and `build VERSION` cannot
+#   retry); this release's recipe of ~/build/image (it cannot be computed: REFUSE,
 #   exit 1); the build record of (V, recipe) (rr_record, BUILDS) is there: "runner V is built ...", exit 0, and a
 #   `check failed` STOP of V is cleared (by rename: a person's `02-d1.sh build V` passed); a STOP that holds V (DUE's
 #   rule: a `check failed` of V; a newer release proceeds alone past one of an older version, so a version whose build
@@ -156,12 +162,14 @@
 #   every process of the unit, this run too: around the build, this run has a TERM trap (not an ignore, which the
 #   child would inherit), so it waits for 02-d1.sh's 143 and prints that CUT; anywhere else in a pass a TERM ends it at
 #   once (STATE is written by rename: it is the old state or the new one). THE TERM WINDOW: the trap is set before
-#   build_child's rm and its fork, so it records a TERM, and a TERM that came before the fork starts no 02-d1.sh: "CUT
-#   ... (no build started)", exit 0, no STOP, the state as it was. The residual, a TERM between that check and the
-#   fork: systemd's TERM reaches only the processes that exist when it sends it, so that 02-d1.sh runs until systemd's
-#   SIGKILL at TimeoutStopSec, which ends this run too, with no CUT line (config/runner-updater.service names what that
-#   leaves: no STOP, the state valid, a build context that may stay, the lock free once every holder has exited). Any
-#   other (137 too, SIGKILL or an OOM kill:
+#   build_child's rm and its fork, so it records a TERM (TERMED: set empty at the program's start, for every command,
+#   so an inherited TERMED never skips a build), and a TERM that came before the fork starts no 02-d1.sh: "CUT ... (no
+#   build started)", exit 0, no STOP, the state as it was. The residual, a TERM between that check and the fork:
+#   systemd's TERM reaches only the processes that exist when it sends it, so that 02-d1.sh runs on. When it ends
+#   before systemd's SIGKILL at TimeoutStopSec, this run (TERMED) prints a CUT and writes no STOP, whatever it exited
+#   with (but 0: built; 75: WAIT, no STOP either); else that SIGKILL ends this run too, with no CUT line
+#   (config/runner-updater.service names what that leaves: no STOP, the state valid, a build context that may stay, the
+#   lock free once every holder has exited). Any other (137 too, SIGKILL or an OOM kill, when no TERM reached this run:
 #   a build that fails each time must not loop): STOP `check failed` of V with THE CAUSE 02-d1.sh printed (the state,
 #   by rename), exit 1. THE CAUSE: the REFUSE line right before its last FAIL line (that FAIL line then says only "the
 #   REFUSE line above says why"), else that FAIL line; with no FAIL line, its last REFUSE line (a host config it
@@ -237,6 +245,13 @@ set -uo pipefail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH LC_ALL=C TZ=UTC
 umask 077
+# A RUNNER VERSION: N.N.N, each part 1 to 9 digits, the ONE pattern of this program (fix round 2 of S2b-3b-3). A real
+# runner's parts have at most 3 digits (2.339.0); 9 bounds a version at 29 characters, so a line that shows one is
+# bounded, and each part stays exact in bash's arithmetic (newer). `build VERSION`'s usage, THE BUILD PASS (it builds
+# no version the pattern refuses, so a STOP it writes holds a version RS_USER's status shows, and `build VERSION` can
+# retry) and RUN_SHOWN (the version RS_USER's status shows) use it. No backslash: the same text in bash and in jq
+VERSION_RE='[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}'
+TERMED=   # THE TERM WINDOW's record of a TERM (do_build_pass): empty at the start of every command, never inherited
 
 usage() { echo "runner-updater: usage: runner-updater status | on | off | pass | build VERSION${1:+ ($1)}" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage "no command"
@@ -244,7 +259,7 @@ cmd=$1
 shift
 case $cmd in
   status|on|off|pass) [ "$#" = 0 ] || usage "$cmd takes no argument" ;;
-  build) { [ "$#" = 1 ] && [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; } || usage "build takes one runner version, N.N.N" ;;
+  build) { [ "$#" = 1 ] && [[ $1 =~ ^${VERSION_RE}$ ]]; } || usage "build takes one runner version, N.N.N of 1 to 9 digits each" ;;
   *) usage "unknown command '$cmd'" ;;
 esac
 
@@ -367,12 +382,13 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
 RUN_TEXT='def run_text: explode | map(if . < 32 or . > 126 then 63 else . end) | implode | .[:900];'
 # THE SHAPE RS_USER's status shows of RUN_USER's record (fix round 1 of S2b-3b-3; RUN_USER's files are hostile, PLAN
 # D1): only what RUN_USER's own writer (check_failed) makes, beyond RUN_CHECK and RUN_MEMBERS: `on` a boolean; each STOP
-# exactly {stop, version, user, detail}, stop `check failed`, version N.N.N (the whole string), user a string, detail
-# exactly {text, step, build_user}, step `build`, build_user a string, text by RUN_TEXT. status.jq puts a STOP's
-# version, detail.hand and detail.jq.path into its "Next" commands: none of a record of another shape reaches a line
+# exactly {stop, version, user, detail}, stop `check failed`, version by VERSION_RE (the whole string), user a string,
+# detail exactly {text, step, build_user}, step `build`, build_user a string, text by RUN_TEXT. status.jq puts a STOP's
+# version, detail.hand and detail.jq.path into its "Next" commands: none of a record of another shape reaches a line.
+# Its text is never shown either (fix round 2: status_facts puts a fixed text in its place)
 RUN_SHOWN=$RUN_TEXT'
 def writer_stop: type == "object" and keys == ["detail", "stop", "user", "version"] and .stop == "check failed"
-  and (.version | type == "string" and test("\\A[0-9]+\\.[0-9]+\\.[0-9]+\\z")) and (.user | type) == "string"
+  and (.version | type == "string" and test("\\A'"$VERSION_RE"'\\z")) and (.user | type) == "string"
   and (.detail | type == "object" and keys == ["build_user", "step", "text"] and .step == "build"
        and (.build_user | type) == "string" and (.text | type == "string" and run_text == .));
 (.on | type) == "boolean" and ((.stops // []) | type == "array" and all(.[]; writer_stop))'
@@ -450,7 +466,10 @@ window_open() { [ -e "$WINDOW" ] || [ -L "$WINDOW" ]; }
 # ROLE [USER] (stdin: a checked state of ROLE's shape) -> the facts status.jq reads. RS_USER's: the family's
 # candidate, back_until and STOPs; RUN_USER's: its STOPs, of hz-docker (no family: it observes none). With USER
 # (RUN_USER's record, as RS_USER reads it): each STOP's user, and its detail's build_user, are USER, so a line names the
-# host config's user, never one the record names (PLAN D1: RUN_USER's files are hostile to RS_USER)
+# host config's user, never one the record names (PLAN D1: RUN_USER's files are hostile to RS_USER); and its text (the
+# cause, which status.jq puts into the STOP line) is a FIXED text of this program that names RUN_USER's own status, so
+# no text of the record reaches a line (fix round 2 of S2b-3b-3: a text of the writer's own shape can read as an
+# instruction, and RUN_USER controls its own ~/build, so no reader check can tell). RUN_USER's own status shows it all
 status_facts() {
   jq -c --arg role "$1" --arg u "${2-}" --arg f "$FAMILY" --arg m "$MAIN_SET" --arg s "$SMALL_SET" '
     {format: 1, host: "hz", sets: [], proc: null, position: null, continuous: false, restart: null, config: null}
@@ -461,7 +480,10 @@ status_facts() {
        else {families: {}, stops: [(.stops // [])[] | {family: $f} + .
                                    | if $u == "" then .
                                      else .user = $u
-                                          | if (.detail | type) == "object" then .detail.build_user = $u else . end
+                                          | if (.detail | type) == "object"
+                                            then .detail.build_user = $u
+                                                 | .detail.text = "its cause: as \($u), `runner-updater status` shows it"
+                                            else . end
                                      end]} end)'
 }
 # CORE FACTS NOW -> status.jq's answer, its stderr with it (anything but one decision is "could not decide"), and its
@@ -519,7 +541,7 @@ run_record() {
     esac
   fi
   if [ -z "$why" ] && ! printf '%s\n' "$st" | jq -e "$RUN_SHOWN" > /dev/null 2>&1; then
-    why="its STOPs are not what its own updater writes (only a \`check failed\` of a build: a version N.N.N and a text of at most 900 printable ASCII characters)"
+    why="its STOPs are not what its own updater writes (only a \`check failed\` of a build: a version N.N.N of 1 to 9 digits each and a text of at most 900 printable ASCII characters)"
   fi
   if [ -z "$why" ]; then
     facts=$(printf '%s\n' "$st" | status_facts run "${RUN_USER}") || why="jq could not build its facts"
@@ -869,10 +891,13 @@ clear_check_failed() {
   change_state '.stops = [(.stops // [])[] | select(.stop != "check failed" or .version != $v)]' --arg v "$1"
   say "$2: the STOP check failed of runner $1 is cleared"
 }
-# VERSION LINE: the STOP `check failed` of VERSION (ONE per version: it replaces an older one's text), by rename; exit 1
+# VERSION LINE: the STOP `check failed` of VERSION (ONE per version: it replaces an older one's text), by rename; exit 1.
+# LINE is cut in bash before jq gets it (fix round 2 of S2b-3b-3): an argument over Linux's limit for one (128 KiB,
+# MAX_ARG_STRLEN) starts no jq, and then no STOP would be written and every pass would build again. The cut keeps 3600
+# bytes, 900 characters of UTF-8's longest (4 bytes): every character RUN_TEXT keeps is in them, so its rule is unchanged
 check_failed() {
   local text
-  text=$(jq -nr --arg t "$2" "$RUN_TEXT"' $t | run_text' < /dev/null) \
+  text=$(jq -nr --arg t "${2:0:3600}" "$RUN_TEXT"' $t | run_text' < /dev/null) \
     || stop "jq could not make the text of the STOP check failed (runner $1): $STATE is as it was"
   change_state '.stops = [(.stops // [])[] | select(.stop != "check failed" or .version != $v)]
                  + [{stop: "check failed", version: $v, user: $u, detail: {text: $t, step: "build", build_user: $u}}]' \
@@ -896,6 +921,8 @@ do_build_pass() {
     *) say "pass: no build: $REPLY"; exit 0 ;;
   esac
   v=$RR_VERSION
+  [[ $v =~ ^${VERSION_RE}$ ]] \
+    || { say "pass: no build: the latest release's version is not N.N.N of 1 to 9 digits each (VERSION_RE; it is ${#v} characters): nothing is built"; exit 0; }
   rr_recipe "$B/image" || refuse "this release's image recipe cannot be computed: $RR_WHY"
   rec=$RR_RECIPE
   if rr_record "$BUILDS" "$v" "$rec"; then
@@ -908,14 +935,15 @@ do_build_pass() {
   # systemd's stop of the timer's unit (TimeoutStartSec, a shutdown) is SIGTERM to EVERY process of the unit, this one
   # too: a trap (not an ignore, which the child would inherit) keeps this run alive until 02-d1.sh, which got it too,
   # has exited (143), so the CUT below says so. Only around the build: elsewhere a TERM ends a pass at once.
-  # THE TERM WINDOW: the trap is set before build_child's rm and its fork of 02-d1.sh, so it RECORDS a TERM (TERMED), and
-  # build_child checks it right before the fork: a TERM that came first starts no build (the CUT "no build started",
-  # exit 0, no STOP, the state as it was). The residual: a TERM between that check and the fork. systemd's TERM reaches
-  # only the processes of the unit that exist when it sends it, so a 02-d1.sh forked after it runs until systemd's
-  # SIGKILL at TimeoutStopSec (the unit's, or the manager's default), which ends this run too: no CUT line, no STOP
-  # (nothing is written), a build context that 02-d1.sh's own trap did not remove, and the lock free once every holder
-  # has exited
-  TERMED=
+  # THE TERM WINDOW: the trap is set before build_child's rm and its fork of 02-d1.sh, so it RECORDS a TERM (TERMED,
+  # empty at the program's start: an inherited one is none), and build_child checks it right before the fork: a TERM
+  # that came first starts no build (the CUT "no build started", exit 0, no STOP, the state as it was). The residual: a
+  # TERM between that check and the fork. systemd's TERM reaches only the processes of the unit that exist when it
+  # sends it, so a 02-d1.sh forked after it runs on. When it ends before systemd's SIGKILL at TimeoutStopSec (the
+  # unit's, or the manager's default), this run, which recorded the TERM, prints a CUT and writes no STOP, whatever it
+  # exited with (but 0, built, and 75, WAIT: no STOP either): a stop of the unit never holds a version (in a shutdown its
+  # `docker info` fails). Else that SIGKILL ends this run too: no CUT line, no STOP (nothing is written), a build
+  # context that 02-d1.sh's own trap did not remove, and the lock free once every holder has exited
   trap 'TERMED=1' TERM
   build_child "$v"
   rc=$?
@@ -931,8 +959,13 @@ do_build_pass() {
        say "pass: CUT 02-d1.sh build $v ended by SIG$(kill -l "$((rc - 128))") (exit $rc): no STOP;" \
          "the next pass builds it again"
        exit 0 ;;
-    *) check_failed "$v" "$REPLY" ;;
   esac
+  if [ -n "$TERMED" ]; then   # a TERM reached this run while 02-d1.sh ran, and not 02-d1.sh (the residual above)
+    say "pass: CUT 02-d1.sh build $v exited $rc after a SIGTERM reached this run (a stop of its unit): no STOP;" \
+      "the next pass builds it again"
+    exit 0
+  fi
+  check_failed "$v" "$REPLY"
 }
 do_build() {
   local v=$1

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 02-d1.sh — D1: RUN_USER's rootless dockerd, its hardening, the `runners` network, the local registry and the runner
-# image. Runs AS RUN_USER, never root (linux-docker/README.md; needs this release's linux-docker/ as ~/build, with the
-# repository's setup/tls-excluded-spki in ~/build/setup/):
+# image. Runs AS RUN_USER, never root: as any other user (`id -un` is not the host config's RUN_USER) both modes
+# REFUSE right after the host config is read, before anything else (linux-docker/README.md; needs this release's
+# linux-docker/ as ~/build, with the repository's setup/tls-excluded-spki in ~/build/setup/):
 #   ssh RUN_USER@<host> 'bash -s' < linux-docker/setup/02-d1.sh               the FULL run: a fresh host (re-runnable)
 #   ssh RUN_USER@<host> 'bash ~/build/setup/02-d1.sh build RUNNER_VERSION'     BUILD: a runner release's image
 # ONE RUN AT A TIME: both modes hold this user's ONE updater lock (runner-release.sh's RR_LOCK, the updater's too) for
@@ -56,6 +57,11 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
 host_conf 02-d1.sh HOST_IP SSH_PORT RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME RUNNER_VERSION
+# THE USER: RUN_USER only, in both modes, before anything else (its lock take would set RUN_USER's modes on another
+# user's files: runner-release.sh's rr_lock, THE MODES)
+me=$(id -un)
+[ "$me" = "${RUN_USER}" ] \
+  || { echo "02-d1.sh: REFUSE run me as ${RUN_USER} (the host config's RUN_USER), not as $me: nothing was done" >&2; exit 1; }
 usage() { echo "usage: 02-d1.sh (no argument: the full run) | 02-d1.sh build RUNNER_VERSION (for example 2.339.0)"; exit 2; }
 MODE=full VERSION=$RUNNER_VERSION
 case $# in

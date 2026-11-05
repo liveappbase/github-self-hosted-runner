@@ -63,6 +63,32 @@ if any(x.endswith('/build.out') for x in a):
 os.execv('/bin/rm', ['rm'] + a)
 '''
 
+# 02-d1.sh, for the cell of a TERM that reaches the updater alone (fix round 2): it logs its call as support.D1_STUB
+# does (logs/d1.log), writes d1late.json {pid: its own, ppid: its parent's, the updater's}, waits until the cell writes
+# d1late.go (at most 600 s; then d1late.timeout, exit 124), then prints d1late.cfg's out and exits with its rc.
+D1_LATE = r'''#!/usr/bin/python3 -I
+import json, os, sys, time
+SB = @SB@
+with open(SB + '/logs/d1.log', 'a') as f:
+    f.write(json.dumps({'argv': sys.argv[1:]}) + '\n')
+with open(SB + '/d1late.json.new', 'w') as f:
+    json.dump({'pid': os.getpid(), 'ppid': os.getppid()}, f)
+os.replace(SB + '/d1late.json.new', SB + '/d1late.json')
+for _ in range(12000):
+    if os.path.exists(SB + '/d1late.go'):
+        break
+    time.sleep(0.05)
+else:
+    open(SB + '/d1late.timeout', 'w').close()
+    sys.exit(124)
+c = json.load(open(SB + '/d1late.cfg'))
+sys.stdout.write(c['out'])
+sys.stdout.flush()
+sys.exit(c['rc'])
+'''
+NINE = '9' * 9                    # the most digits of one part of a version (the updater's VERSION_RE)
+TEN = '1' + '0' * 9               # one more
+
 
 def stop(name, version=None, **detail):
     return {'stop': name, 'version': version, 'user': 'root', 'detail': detail}
@@ -131,6 +157,22 @@ class Role(unittest.TestCase):
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
         self.assertEqual(p.d1_calls(), [])
+
+    def test_build_takes_a_version_of_1_to_9_digits_in_each_part(self):
+        """Fix round 2 (Opus r2 F3): `build VERSION`'s usage is the ONE version pattern RS_USER's status shows a
+        version by (VERSION_RE: each part 1 to 9 digits), so a version a person retries is one RS_USER's status can
+        show: 10 digits in any part is usage (exit 2), and no 02-d1.sh runs. Control: 9 digits in each part runs
+        02-d1.sh build with it."""
+        p, _ = run_pool(self, V, on=False)
+        for v in (TEN + '.0.0', '2.' + TEN + '.0', '2.339.' + TEN):
+            with self.subTest(v):
+                r = p.updater('build', v)
+                self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+                self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
+        self.assertEqual(p.d1_calls(), [])
+        big = '.'.join([NINE] * 3)                                   # the control
+        ok(self, p.updater('build', big))
+        self.assertEqual([c['argv'] for c in p.d1_calls()], [['build', big]])
 
 
 # ---- RUN_USER's state
@@ -474,6 +516,83 @@ class BuildPass(unittest.TestCase):
                     self.assertEqual(len(p.d1_calls()), 1, out)
                     self.assertIn('runner-updater: pass: built runner %s' % V, out)
 
+    def test_a_term_that_reaches_only_the_updater_during_the_build_is_a_cut(self):
+        """Opus r2 F2, Codex r2 F4 (fix round 2): a TERM that reaches the updater while 02-d1.sh runs and not 02-d1.sh
+        (THE TERM WINDOW's residual: a 02-d1.sh forked after systemd's TERM runs on), then a 02-d1.sh that fails (exit
+        1: in a shutdown its `docker info` fails): CUT, exit 0, no STOP (the state byte for byte), and the next pass
+        builds V again (until fix round 2 it held `check failed`). The TERM goes to the updater's pid alone while
+        02-d1.sh waits for the cell (D1_LATE); every wait is bounded (timeout's 124: HUNG). Controls, the other way:
+        no TERM and the same exit 1 writes the STOP, exit 1; a TERM and exit 0 is still `built runner V`."""
+        for why, term, rc in (('a TERM, then exit 1', True, 1), ('no TERM, exit 1 (the control)', False, 1),
+                              ('a TERM, then exit 0 (the control)', True, 0)):
+            with self.subTest(why):
+                p, _ = run_pool(self, V)
+                p.write(p.path('stubs', 'd1late.py'), D1_LATE.replace('@SB@', repr(p.root)), 0o755)
+                p.write(os.path.join(p.build, 'setup', '02-d1.sh'),
+                        '#!/bin/bash\nexec /usr/bin/python3 -I %s "$@"\n' % p.path('stubs', 'd1late.py'), 0o755)
+                p.write(p.path('d1late.cfg'), json.dumps({'rc': rc, 'out': '== 5. the runner image\n' + FAIL}))
+                before = p.read(STATE)
+                pr = p.start(['timeout', '-k', '10', str(HANG), os.path.join(p.build, 'bin', 'runner-updater'), 'pass'])
+                b = None
+                for _ in range(2400):                  # the state "02-d1.sh waits for the cell", never a time; a bound
+                    t = p.read(p.path('d1late.json'))
+                    if t:
+                        b = json.loads(t)
+                        break
+                    time.sleep(0.05)
+                self.assertIsNotNone(b, 'the pass never started 02-d1.sh')
+                with open('/proc/%d/cmdline' % b['ppid'], 'rb') as f:
+                    self.assertIn(b'runner-updater', f.read(), "02-d1.sh's parent is not the updater")
+                if term:
+                    os.kill(b['ppid'], signal.SIGTERM)     # the updater alone: 02-d1.sh gets no TERM
+                p.write(p.path('d1late.go'), '')
+                out, _ = pr.communicate(timeout=HANG + 30)
+                self.assertNotEqual(pr.returncode, 124, 'HUNG: ' + out)
+                self.assertFalse(os.path.exists(p.path('d1late.timeout')), 'the cell never let 02-d1.sh go')
+                self.assertEqual(len(p.d1_calls()), 1, out)
+                if term and rc == 1:
+                    self.assertEqual(pr.returncode, 0, out)
+                    self.assertIn('runner-updater: pass: CUT 02-d1.sh build %s exited 1 after a SIGTERM reached this '
+                                  'run (a stop of its unit): no STOP; the next pass builds it again' % V, out)
+                    self.assertNotIn('STOP check failed', out)
+                    self.assertEqual(p.read(STATE), before)
+                    p.d1_stub(out='BUILD DONE (D1): a substitute\n', digest=digest(39))
+                    r = ok(self, p.updater('pass'))
+                    self.assertIn('runner-updater: pass: built runner %s' % V, r.stdout)
+                    self.assertEqual(len(p.d1_calls()), 2)
+                elif term:
+                    self.assertEqual(pr.returncode, 0, out)
+                    self.assertIn('runner-updater: pass: built runner %s' % V, out)
+                    self.assertNotIn('CUT', out)
+                    self.assertEqual(p.read(STATE), before)
+                else:
+                    self.assertEqual(pr.returncode, 1, out)
+                    self.assertIn('runner-updater: STOP check failed (runner %s): %s' % (V, FAIL.strip()), out)
+                    self.assertEqual([(s['stop'], s['version']) for s in state(p)['stops']], [('check failed', V)])
+
+    def test_a_pass_builds_no_version_the_reader_cannot_show(self):
+        """Fix round 2 (the writer half of Opus r2 F3: ONE version pattern, VERSION_RE): GitHub's latest release whose
+        version has a part of 10 digits is not built by a pass: one line, exit 0, no 02-d1.sh, no STOP (a STOP of it
+        would be one RS_USER's status cannot show and `build VERSION` cannot retry), and the line holds no such
+        version. Control: 9 digits in a part is built, and its failure holds the STOP of that version."""
+        for why, version, built in (('10 digits in a part', '2.' + TEN + '.0', False),
+                                    ('9 digits in a part (the control)', '2.' + NINE + '.0', True)):
+            with self.subTest(why):
+                p, _ = run_pool(self, version, rc=1, out=FAIL)
+                before = p.read(STATE)
+                r = p.updater('pass')
+                if built:
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertEqual(len(p.d1_calls()), 1, r.stdout)
+                    self.assertEqual([(s['stop'], s['version']) for s in state(p)['stops']], [('check failed', version)])
+                    continue
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(p.d1_calls(), [], r.stdout)
+                self.assertEqual(p.read(STATE), before)
+                self.assertIn("runner-updater: pass: no build: the latest release's version is not N.N.N of 1 to 9 "
+                              "digits each", r.stdout)
+                self.assertNotIn(TEN, r.stdout)
+
     def test_a_pass_that_finds_the_record_of_v_clears_its_check_failed_stop(self):
         """Opus r1 F3 (a): a person built V by README "A new runner release" step 1 (02-d1.sh build V), after a pass's
         build of V failed: the next pass finds the record of (V, this recipe), builds nothing, and removes the `check
@@ -589,6 +708,29 @@ class BuildCommand(unittest.TestCase):
         self.assertIn('runner-updater: WAIT 02-d1.sh build %s waits (exit 75)' % V, r.stdout)
         self.assertEqual(p.read(STATE), before)
 
+    def test_an_inherited_termed_never_skips_a_build(self):
+        """Codex r2 F4 (fix round 2): TERMED (the build pass's record of a TERM) is set empty at the program's start,
+        for every command, so a TERMED in the caller's environment never skips a build: `TERMED=1 runner-updater
+        build V` with a `check failed` STOP of V and a 02-d1.sh that fails starts 02-d1.sh, prints why, exits 1, and
+        the STOP stays (until fix round 2 it started none, said `built runner V` and cleared the STOP). A pass the
+        same (it set TERMED itself before, so it was never red). The control that comes out the other way: a TERM at
+        the pass's pre-fork barrier starts no 02-d1.sh (BuildPass.test_a_term_before_the_fork_starts_no_build)."""
+        held = stop('check failed', V, text='FAIL x', step='build', build_user='root')
+        for args in (('build', V), ('pass',)):
+            with self.subTest(args):
+                p, _ = run_pool(self, V, stops=[held] if args[0] == 'build' else [], rc=1, out=FAIL)
+                before = p.read(STATE)
+                r = p.updater(*args, env=dict(p.env(), TERMED='1'))
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertEqual(len(p.d1_calls()), 1, 'no 02-d1.sh started: ' + r.stdout)
+                if args[0] == 'build':
+                    self.assertIn('runner-updater: build: runner %s is not built: %s;' % (V, FAIL.strip()), r.stdout)
+                    self.assertNotIn('built runner', r.stdout)
+                    self.assertEqual(p.read(STATE), before)
+                else:
+                    self.assertEqual(state(p)['stops'], [stop('check failed', V, text=FAIL.strip(), step='build',
+                                                              build_user='root')])
+
     def test_build_v_waits_for_the_updater_lock(self):
         p, _ = run_pool(self, V)
         fd = hold_lock(self)
@@ -625,6 +767,28 @@ class Text(unittest.TestCase):
             self.assertIn(s, sec)
         self.assertRegex(text, r'(?s)\n10\. \*\*The updater \(RS_USER and RUN_USER\)\.\*\*.*Then the same line with '
                                r'`<RUN_USER>`')
+
+    def test_the_header_the_unit_and_the_readme_say_a_term_during_the_build_is_a_cut(self):
+        """Fix round 2 (Opus r2 F2, Codex r2 F4): the header's THE TERM WINDOW, the unit's comment and the README's
+        build pass say that a TERM that reached the updater while 02-d1.sh ran is a CUT with no STOP whatever 02-d1.sh
+        then exits with (so the residual's "no STOP" is true), and the header that an inherited TERMED never skips a
+        build. Control: each still names the CUT of a 02-d1.sh ended by SIGTERM."""
+        with open(os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')) as f:
+            h = ' '.join(l.lstrip('#').strip() for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines())
+        with open(os.path.join(REPO, 'linux-docker', 'config', 'runner-updater.service')) as f:
+            svc = ' '.join(f.read().replace('#', ' ').split())
+        with open(os.path.join(REPO, 'linux-docker', 'README.md')) as f:
+            sec = f.read().split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
+        for name, part, says in (
+                ('the header', h, ('an inherited TERMED never skips a build',
+                                   'prints a CUT and writes no STOP, whatever it exited with')),
+                ('the unit', svc, ('when that 02-d1.sh ends first, the updater prints a CUT and writes no STOP',)),
+                ('the README', sec, ('is a `CUT` too, whatever 02-d1.sh then exits with',))):
+            with self.subTest(name):
+                for s in says:
+                    self.assertIn(s, part)
+                self.assertIn('SIGTERM', part)                                       # the control
+                self.assertIn('CUT', part)
 
 
 if __name__ == '__main__':
