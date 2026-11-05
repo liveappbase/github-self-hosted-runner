@@ -14,6 +14,7 @@ import re
 import shutil
 import unittest
 
+from tests.studio.support import REPO
 from tests.studio.test_runner_updater import read_text
 from tests.studio.test_runner_updater_recover import killed, n_disable, recover
 from tests.studio.test_runner_updater_window import Win
@@ -224,6 +225,18 @@ class TestTheMaintainersClear(unittest.TestCase):
         self.assertIn(SECTION, res.stdout)
         self.assertEqual((acted(w, before), n_disable(w)), ({}, disabled))
         self.assertNotIn('runner-updater: pass: one pass at', res.stdout)
+
+
+class TestTheSectionExists(unittest.TestCase):
+    """every text that names the section names a heading the README has"""
+
+    def test_the_readme_has_the_section_and_the_updater_s(self):
+        headings = re.findall(r'^#+ (.+)$', read_text(os.path.join(REPO, 'README.md')), re.M)
+        self.assertIn('An unfinished window the updater cannot end', headings)
+        self.assertIn('The updater', headings)
+        for rel in ('install', 'bin/runner-updater', 'bin/runner-updater-window', 'bin/runner-updater-lib'):
+            for name in re.findall(r'README \\?"([^"\\]+)\\?"', read_text(os.path.join(REPO, rel))):
+                self.assertIn(name, headings, rel)
 
 
 if __name__ == '__main__':

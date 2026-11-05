@@ -150,9 +150,10 @@
 # A RECORD RECOVER CANNOT READ OR ACT ON (S3b-5 A5; PLAN D1): a line no pattern reads or a key it does not know, or a
 # record that is not complete (its backup gone or changed). No tool ends it: RECOVER's STOP, this file's last line for
 # it, `status`'s window line (it reads the record by RECOVER's own route, ru_rc_route, which writes nothing) and a state
-# WAIT or REFUSE that comes before RECOVER while a record is open each name README "An unfinished window the updater
-# cannot end" (the lib's ru_hand_readme): its hand steps bring CI back, and the maintainer clears the record. Every
-# other RECOVER STOP names its cause, and fixing it lets the next pass end the window.
+# WAIT or REFUSE that comes before RECOVER while a record is open each name the README section
+# "An unfinished window the updater cannot end" (the lib's ru_hand_readme): its hand steps bring CI back, and the
+# maintainer clears the record. Every other RECOVER STOP names its cause, and fixing it lets the next pass end the
+# window.
 #
 # REPORT: ONE pass that measures, asks the decision core (core/) and prints. It TAKES NO ACTION: it stops, starts,
 # edits, pins, deletes and enables nothing, and it runs none of runner-disable, runner-enable, golden-build,
