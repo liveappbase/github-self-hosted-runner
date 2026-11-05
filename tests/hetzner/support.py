@@ -806,6 +806,8 @@ def shown(st):
             return 'deactivating', st['pid'], st['start']
         st.pop('drain_until')
         stop(st)
+        if st.pop('start_after_drain', False):   # a start or restart came during the drain (job merge): it runs now
+            start(st)
     if not st['active']:
         return ('failed' if st.get('failed') else 'inactive'), 0, st['start']
     if st.get('runner') == 'crash':
@@ -839,9 +841,15 @@ def fire(at):
 def act(a):
     if a in ('restart', 'start'):          # an INDEPENDENT restart (systemd's own, or a person's), or a start
         st = load('systemd.json')
-        if a == 'restart':
-            stop(st)
-        start(st)
+        if st.get('drain_until') is not None and now() < st['drain_until']:
+            # a stop job drains: the manager's JOB MERGE: the start or restart cancels that stop job (its client
+            # exits 1), the old process drains on, and the new one starts when it has ended (shown)
+            st.update(stop_canceled=True, start_after_drain=True)
+            event('%s during the drain: the stop job canceled' % a)
+        else:
+            if a == 'restart':
+                stop(st)
+            start(st)
         st['independent'] = st.get('independent', 0) + 1
         save('systemd.json', st)
     elif a in ('disable', 'disable-only', 'enable', 'stop', 'fail', 'crash', 'hang', 'serve'):
@@ -849,6 +857,8 @@ def act(a):
         shown(st)                          # --now (disable-only), `enable`, a plain `stop`; the process fails (fail:
         if a in ('disable', 'stop', 'fail'):   # inactive, failed); runner-start from now on crashes, hangs or serves
             stop(st)
+        if a == 'stop' and st.get('start_job'):   # a stop while a start job is queued cancels that job (its client: 1)
+            st['start_canceled'] = True
         if a == 'fail':
             st['failed'] = True
         if a in ('disable', 'disable-only', 'enable'):
@@ -882,6 +892,19 @@ def act(a):
     elif a == 'edit-config':               # a person edits config.toml
         with open(os.path.join(os.path.dirname(LOG), 'config.toml'), 'a') as f:
             f.write('# a hand change\n')
+    elif a in ('hand-file', 'put-prev'):   # a person installs another file: the main set's max-runners 3 -> 2
+        d = os.path.dirname(LOG)           # (hand-file), or config.toml.prev, the file before the switch (put-prev)
+        if a == 'hand-file':
+            with open(os.path.join(d, 'config.toml')) as f:
+                text = f.read().replace('max-runners = 3\n', 'max-runners = 2\n', 1)
+        else:
+            with open(os.path.join(d, 'config.toml.prev')) as f:
+                text = f.read()
+        with open(os.path.join(d, 'config.toml.hand'), 'w') as f:
+            f.write(text)
+        os.chmod(os.path.join(d, 'config.toml.hand'), 0o600)
+        os.replace(os.path.join(d, 'config.toml.hand'), os.path.join(d, 'config.toml'))
+        event('hand install ' + a)
     elif a in ('edit-staged', 'edit-rollback'):   # the staged file (up's, back's) changes after it was validated
         name = 'config.staged.toml' if a == 'edit-staged' else 'config.rollback.toml'
         with open(os.path.join(os.path.dirname(LOG), name), 'a') as f:
@@ -919,15 +942,32 @@ SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
 # process logs its last line and exits (with `drain` seconds: the unit is deactivating, the old pid, for that long of
 # the fake clock, the hooks of "systemctl:stop-begin" fire, and the client returns when the drain ends; a client killed
 # meanwhile leaves the stop job draining); start: a new process (a new pid, start = the clock) logs its first line,
-# unless the unit already is active; restart: both. show: ActiveState, UnitFileState, MainPID, ActiveEnterTimestamp,
-# as hzlib.shown gives them now (see tests/hetzner/support.py, Pool).
-import os, sys, time
+# unless the unit already is active; restart: both. THE JOB MERGE of the real manager: a start or restart (hzlib.act)
+# while a stop job drains cancels that stop job (its client exits 1 "Job ... canceled"), the old process drains on and
+# the new one starts once it ended; a person's stop while a start job is queued (the hooks of "systemctl:start-begin")
+# cancels the start job (its client exits 1). show: ActiveState, UnitFileState, MainPID, ActiveEnterTimestamp,
+# as hzlib.shown gives them now. Each call also logs, one JSON line of logs/systemctl-fds.log, whether it has a file
+# descriptor 8 or 9 open (pool-image.sh's own lock, the updater lock: no systemctl call of the unattended modes may hold
+# either) (see tests/hetzner/support.py, Pool).
+import json, os, sys, time
 SB = @SB@
 sys.path.insert(0, SB + '/stubs')
 import hzlib
 a = sys.argv[1:]
 with open(SB + '/logs/systemctl.log', 'a') as f:
     f.write(' '.join(a) + '\n')
+
+
+def fd_open(n):
+    try:
+        os.fstat(n)
+        return True
+    except OSError:
+        return False
+
+
+with open(SB + '/logs/systemctl-fds.log', 'a') as f:
+    f.write(json.dumps({'argv': a, 'fd8': fd_open(8), 'fd9': fd_open(9)}) + '\n')
 st = hzlib.load('systemd.json')
 state, mpid, mstart = hzlib.shown(st)
 hzlib.save('systemd.json', st)
@@ -969,6 +1009,18 @@ if cmd == 'show' and a[1:2] == ['runscaler']:
         hzlib.fire('systemctl:show-after-stop-%d' % st['shows_since_stop'])
     sys.exit(0)
 if cmd in ('restart', 'stop', 'start') and a[1:] == ['runscaler']:
+    if cmd in ('restart', 'start'):        # the start job queued: the hooks of "systemctl:start-begin" (a person's stop
+        st['start_job'] = True             # then cancels it: the manager's job merge, this client exits 1)
+        hzlib.save('systemd.json', st)
+        hzlib.fire('systemctl:%s-begin' % cmd)
+        st = hzlib.load('systemd.json')
+        st.pop('start_job', None)
+        if st.pop('start_canceled', False):
+            hzlib.save('systemd.json', st)
+            sys.stderr.write('Job for runscaler.service canceled.\n')
+            sys.exit(1)
+        hzlib.save('systemd.json', st)
+        state = hzlib.shown(st)[0]
     if state == 'deactivating' or (cmd != 'start' and state == 'active' and st.get('drain')):
         if state != 'deactivating':        # this stop's own drain: the stop job starts, then the client waits for it
             st['drain_until'] = hzlib.now() + st['drain']
@@ -976,6 +1028,12 @@ if cmd in ('restart', 'stop', 'start') and a[1:] == ['runscaler']:
             hzlib.event('process %d draining until %d' % (st['pid'], st['drain_until']))
             hzlib.fire('systemctl:stop-begin')
             st = hzlib.load('systemd.json')
+            if st.pop('stop_canceled', False):   # a start or restart came during the drain: this stop job is canceled
+                hzlib.save('systemd.json', st)   # (the old process drains on; the new one starts after it)
+                sys.stderr.write('Job for runscaler.service canceled.\n')
+                sys.exit(1)
+        elif cmd == 'stop':
+            st.pop('start_after_drain', None)    # a stop joins the stop job: the start a merge queued is gone
         hzlib.advance(st['drain_until'])   # a client joins the stop job and returns when it ends
         st = hzlib.load('systemd.json')
         state = hzlib.shown(st)[0]
@@ -1119,12 +1177,15 @@ os.execv('/usr/bin/jq', ['jq'] + sys.argv[1:])
 TIMEOUT_STUB = r'''#!/usr/bin/python3 -I
 # timeout, for the bound cells (Pool.short_timeout): logs its argv (one JSON line), then execs the REAL timeout with
 # each duration divided by timeout.json's `scale` (at least 1 s): a 120-s bound becomes seconds of a cell, the real
-# timeout's own process group and its KILL after -k unchanged
+# timeout's own process group and its KILL after -k unchanged. Its pid (the real timeout's, after the exec) goes to
+# logs/timeout.pids, one per line (Pool.timeout_pids)
 import json, os, sys
 SB = @SB@
 a = sys.argv[1:]
 with open(SB + '/logs/timeout.log', 'a') as f:
     f.write(json.dumps(a) + '\n')
+with open(SB + '/logs/timeout.pids', 'a') as f:
+    f.write('%d\n' % os.getpid())
 k = json.load(open(SB + '/timeout.json'))['scale']
 s = lambda x: str(max(1, int(x) // k)) if x.isdigit() else x
 a = ['-k', s(a[1]), s(a[2])] + a[3:] if a[:1] == ['-k'] else [s(a[0])] + a[1:]
@@ -1410,12 +1471,14 @@ class Pool(Sandbox):
         """The cell's hooks, each (AT, ACTION, ...): AT `journal:KEY` (after that journal line is synced), `mv:NAME`
         or `mv-done:NAME` (around a rename onto NAME), `touch:NAME` or `touch-done:NAME` (around a touch of NAME),
         `systemctl:stop-done` / `:start-done`, `systemctl:stop-begin` (a stop with a drain: the stop job started, its
-        client waits), `healthz-read` (after a /healthz read is answered); ACTION restart (an independent restart),
+        client waits; a start or restart there cancels that stop job: the job merge), `systemctl:start-begin` /
+        `:restart-begin` (the start job queued: a person's `stop` there cancels it), `healthz-read` (after a /healthz read is answered); ACTION restart (an independent restart),
         start, revive (the stopped process runs again), disable (a person's `disable --now`), disable-only (`disable`
         without --now), enable, stop (a person's plain stop), fail (the process ends, the unit failed), crash / hang /
-        serve (runner-start from now on: hzlib.shown), busy (/healthz turns busy), edit-config (a hand edit),
-        edit-staged, edit-rollback (back's STAGED), edit-prev (config.toml.prev), edit-prev-image (another image in its
-        runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
+        serve (runner-start from now on: hzlib.shown), busy (/healthz turns busy), edit-config (a hand edit: a
+        comment), hand-file (a person installs another file: the main set's max-runners 3 -> 2), put-prev (a person
+        puts config.toml.prev back as config.toml), edit-staged, edit-rollback (back's STAGED), edit-prev
+        (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
         held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh). An injection, AT
         with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another
         file NAME fails). `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
@@ -1522,6 +1585,14 @@ class Pool(Sandbox):
     def timeouts(self):
         """The argv of each `timeout` call since short_timeout."""
         return self.calls('timeout')
+
+    def timeout_pids(self):
+        """The pid of each `timeout` call since short_timeout (the real timeout's: TIMEOUT_STUB execs it)."""
+        return [int(w) for w in (self.read(self.path('logs', 'timeout.pids')) or '').split()]
+
+    def systemctl_fds(self):
+        """[{argv, fd8, fd9}] of each systemctl call: did it have fd 8 or fd 9 open?"""
+        return self.calls('systemctl-fds')
 
     def closed(self):
         """[(ID, lines)] of the closed window journals (windows/ID), oldest first."""

@@ -52,12 +52,12 @@ V = '2.339.0'
 NEW, OLD = digest(39), digest(38)
 SETS = ('linux-ci-main', 'linux-ci-small')
 
-SWITCH_KEYS = ['window', 'kind', 'version', 'digest', 'process', 'old', 'config-sha', 'staged', 'validate',
-               'staged-sha', 'target', 'target-content', 'idle', 'backup', 'rename-start', 'renamed', 'from', 'stopping',
-               'stopped', 'starting', 'running', 'prev', 'installed', 'closed']
+SWITCH_KEYS = ['window', 'kind', 'version', 'digest', 'process', 'old', 'config-sha', 'start-state', 'staged',
+               'validate', 'staged-sha', 'target', 'target-content', 'idle', 'backup', 'rename-start', 'renamed', 'from',
+               'stopping', 'stopped', 'starting', 'running', 'prev', 'installed', 'closed']
 BACK_KEYS = ['window', 'kind', 'why', 'verdict', 'old-version', 'target-version', 'process', 'old', 'config-sha',
-             'staged', 'validate', 'staged-sha', 'target', 'target-content', 'backup', 'rename-start', 'renamed', 'from',
-             'stopping', 'stopped', 'starting', 'running', 'installed', 'closed']
+             'start-state', 'staged', 'validate', 'staged-sha', 'target', 'target-content', 'backup', 'rename-start',
+             'renamed', 'from', 'stopping', 'stopped', 'starting', 'running', 'installed', 'closed']
 
 
 def fixture(name):
@@ -149,7 +149,7 @@ class Rig:
         t.assertEqual(keys(lines)[-1], 'closed', lines)
         t.assertEqual(keys(lines)[-2], 'installed', lines)
         t.assertRegex(lines[-2], r'^installed ([0-9a-f]{64}|none) ([0-9a-f]{64}|none) '
-                                 r'(target-running|target-idle|target-old|pre|other|none)$')
+                                 r'(target-running|target-idle|target-old|target-failed|pre|other|none)$')
         if value(lines, 'kind') == 'switch':
             t.assertEqual(keys(lines)[-3], 'prev', lines)
             t.assertRegex(lines[-3], r'^prev ([0-9a-f]{64}|none)$')

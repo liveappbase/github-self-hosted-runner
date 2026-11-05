@@ -4,7 +4,8 @@
 # the idle pair with it), and so does bin/runner-updater (a pass's facts: core/README.md, "facts"). It acts on
 # nothing and writes only the files it is given. Needs bash 5, GNU coreutils, python3, curl, jq and `systemctl
 # --user`. The caller sets R (runscaler's folder, ~/.config/runner: runner.log, runner.log.1), CORE (the release's
-# core/) and RS_HEALTH_PORT (the host config's); it reads no host config itself.
+# core/) and RS_HEALTH_PORT (the host config's); it reads no host config itself. Its systemctl calls close fd 8 and fd 9
+# (pool-image.sh's own lock, the updater lock: no systemctl client holds either).
 #
 #   proc_now             runscaler as systemd reports it, in ONE read (`systemctl --user show runscaler`): "PID START"
 #                        (MainPID, ActiveEnterTimestamp in epoch seconds) when its unit is active, else "none". rc 1
@@ -67,7 +68,7 @@
 
 proc_now() {
   local o k v s= p= a=
-  o=$(systemctl --user show runscaler -p ActiveState -p MainPID -p ActiveEnterTimestamp --timestamp=unix 2> /dev/null < /dev/null) \
+  o=$(systemctl --user show runscaler -p ActiveState -p MainPID -p ActiveEnterTimestamp --timestamp=unix 2> /dev/null < /dev/null 8>&- 9>&-) \
     || { echo none; return 1; }
   while IFS='=' read -r k v; do case $k in ActiveState) s=$v ;; MainPID) p=$v ;; ActiveEnterTimestamp) a=${v#@} ;; esac; done <<< "$o"
   if [ "$s" = active ] && [[ $p =~ ^[1-9][0-9]*$ ]] && [[ $a =~ ^[0-9]+$ ]]; then echo "$p $a"; return 0; fi
@@ -79,7 +80,7 @@ unit_read() {
   local o k v
   UNIT_ACTIVE= UNIT_FILE= UNIT_PID= UNIT_START=
   o=$(systemctl --user show runscaler -p ActiveState -p UnitFileState -p MainPID -p ActiveEnterTimestamp \
-    --timestamp=unix 2> /dev/null < /dev/null) || return 1
+    --timestamp=unix 2> /dev/null < /dev/null 8>&- 9>&-) || return 1
   while IFS='=' read -r k v; do
     case $k in ActiveState) UNIT_ACTIVE=$v ;; UnitFileState) UNIT_FILE=$v ;; MainPID) UNIT_PID=$v ;;
       ActiveEnterTimestamp) UNIT_START=${v#@} ;; esac

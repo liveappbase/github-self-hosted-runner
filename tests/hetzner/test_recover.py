@@ -5,8 +5,8 @@ header's patterns (an unterminated last line dropped and kept aside; any other l
 nothing written) and decides by THE INSTALLED FILE (config.toml's CONTENT against the TARGET's, its sha against
 `config-sha`) and by the UNIT (one `systemctl --user show`), never by which lines survived. In order:
   0 closed: nothing (exit 0); 1 NO EFFECT YET (no `config-sha` or no `backup`): closed, STAGED removed;
-  DECIDED LINES (a rollback's failed validate, `restore`, `stop ROLLBACK FAILED`, a `starting` with no `running`):
-  THE RESTORE, a failed rollback whatever the unit shows; 2 THE UNIT: a drain waited for, NOT enabled: CI DISABLED,
+  DECIDED LINES (lines about a rollback's TARGET only: its failed `validate recover`, `restore`, `stop ROLLBACK
+  FAILED`, a `pre-close-failure` of a TARGET start; test_urecover.py's DecidedByItsTarget): THE RESTORE; 2 THE UNIT: a drain waited for, NOT enabled: CI DISABLED,
   nothing stopped or started; 3 the TARGET installed: it RUNS (closed), none runs it (THE START), an older runscaler
   runs (a switch's IDLE RESTART: never while busy, STOP NO IDLE after 3 days; a rollback's restart at once); 4 the
   pre-window file and no rename: closed; 5 OTHER: PLAN D5's ONE RULE, HAND CHANGE.
@@ -351,8 +351,8 @@ class TargetInstalled(unittest.TestCase):
 
     def test_3b_a_start_in_progress_is_waited_for_with_no_new_line(self):
         """A cut right after `starting` (before the start ran): that attempt is still inside its 10 min: the unit,
-        down, is started again with no new `starting` line, and it RUNS: closed. (A switch: a rollback's open start is
-        DECIDED, Decided below.)"""
+        down, is started again with no new `starting` line, and it RUNS: closed. (A rollback's: test_urecover.py,
+        DecidedByItsTarget.)"""
         g = cut(self, 'up', ('journal:starting', 'kill'))
         x = Rec(self, g)
         x.run(0)
@@ -599,9 +599,10 @@ class UnitNotEnabled(unittest.TestCase):
 
 @needs_container
 class Decided(unittest.TestCase):
-    """DECIDED LINES FIRST (Opus r3 F2, Codex r3 F4): right after steps 0 and 1, a ROLLBACK journal with a failed
-    validate of its TARGET, a `restore`, a `stop ROLLBACK FAILED` or a `starting` with no `running` goes to THE RESTORE,
-    with no new validate of the TARGET; its close is a failed rollback whatever the unit shows (class pre: the backup).
+    """DECIDED LINES FIRST (Opus r3 F2, Codex r3 F4; B1 DECISIONS): right after steps 0 and 1, a ROLLBACK journal with
+    a failed validate of its TARGET, a `restore`, a `stop ROLLBACK FAILED` or a `pre-close-failure` of a TARGET start
+    goes to THE RESTORE, with no new validate of the TARGET; its close is a failed rollback (class pre: the backup;
+    target-failed when the TARGET stays: test_urecover.py).
     THE RESTORE's order (Opus r3 F5): the copy of the backup checked, config.toml checked (the TARGET, or already the
     backup: a replay), `restore`, the stop, `rename-start`, the copy's mtime set, no process, config.toml still the
     TARGET, the rename, `renamed`, `recover-target`, THE START."""
@@ -705,20 +706,6 @@ class Decided(unittest.TestCase):
         x = Rec(self, g)
         x.run(0)
         x.closed('target-idle')
-
-    def test_a_rollback_whose_start_did_not_run_is_restored_not_started_again(self):
-        """Opus r3 F2 (c): a rollback cut at `starting`: its TARGET did not run (the Studio's N2): ONE pre-close failure,
-        STOP ROLLBACK FAILED, THE RESTORE, and no second start of the TARGET (the one start is the backup's). The
-        control: a switch cut at `starting`: a start of the TARGET (TargetInstalled)."""
-        g = cut(self, 'back', ('journal:starting', 'kill'))
-        x = Rec(self, g)
-        x.run(0)
-        lines = x.closed('pre')
-        self.assertEqual(own(lines)[:3], ['pre-close-failure', 'stop', 'restore'], lines)
-        self.assertTrue((value(lines, 'stop') or '').startswith('ROLLBACK FAILED: '))
-        self.assertEqual(len(x.calls('start')), 1)
-        self.assertEqual(g.p.config(), g.candidate)
-        self.assertEqual(g.validates(), [])
 
     def test_a_start_after_the_drain_and_before_the_rename_stops_the_restore(self):
         """Opus r3 F5 (b): a 60-s drain, then a start injected right after the restore's `rename-start`: no rename, the
