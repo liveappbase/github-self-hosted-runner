@@ -60,11 +60,14 @@ class ResumedStart(unittest.TestCase):
     """Item 1 (opus r2 F1): a rollback window cut right after its `starting` (its stop done, its start not issued), then
     a person's file in place and runscaler down: H, or the file from before the rollback put back. RECOVER's start of
     that file is no TARGET start: its own `starting E other` before it, and a failure of it is that start's own
-    pre-close failure: no ROLLBACK FAILED, no `restore`. The control: the TARGET still installed under that open start
-    and never running: ONE pre-close failure of the TARGET, THE RESTORE (test_urecover's never-runs cell)."""
+    pre-close failure: no ROLLBACK FAILED, no `restore`; and when its second start fails too (codex r3 F1), that is the
+    second failure of that file: STOP POOL DOWN, closed other, still no ROLLBACK FAILED and no `restore`. The control:
+    the TARGET still installed under that open start and never running: ONE pre-close failure of the TARGET, THE
+    RESTORE (test_urecover's never-runs cell)."""
 
     def test_another_file_under_the_window_s_open_target_start(self):
-        for what in ('H, inside the start\'s 10 min', 'the pre-window file, past them', 'control: the TARGET'):
+        for what in ('H, inside the start\'s 10 min', 'the pre-window file, past them',
+                     'the pre-window file, past them, its second start fails too', 'control: the TARGET'):
             with self.subTest(what):
                 g = cut(self, 'back', ('journal:starting', 'kill'))
                 x = Rec(self, g)
@@ -95,6 +98,17 @@ class ResumedStart(unittest.TestCase):
                     e = starts(lines)[-1].split(' ')[0]
                     self.assertEqual(value(lines, 'pre-close-failure').split(' ')[:4], ['the', 'start', 'at', e],
                                      'the failure is not of RECOVER\'s own start')
+                    if what.endswith('too'):    # the second start crash-loops too: that file's second failure
+                        x.run(0)
+                        lines = x.closed('other')
+                        self.assertEqual(len(stops(lines, 'POOL DOWN')), 1, lines)
+                        self.assertEqual(whats(lines), [[], ['other'], ['other']], lines)
+                        self.assertEqual(journaled_first(self, g, ev0), 2)
+                        self.assertEqual(keys(lines).count('pre-close-failure'), 1, lines)
+                        self.assertEqual(stops(lines, 'ROLLBACK FAILED'), [], lines)
+                        self.assertNotIn('restore', keys(lines))
+                        self.assertEqual(g.p.config(), text)
+                        continue
                     g.p.set_unit(runner='serves')
                     x.run(0)
                     pcf = 1

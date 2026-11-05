@@ -96,7 +96,8 @@
 #   started_after test, its restart starts the unit, and a `stop` or `end` before its rename leaves the journal OPEN
 #   (NO SILENT END WITH CI DOWN, review r2 codex F4: that last word says runscaler is down and CI is down until the
 #   updater's RECOVER starts it, which starts runscaler on the pre-window file, validated first; UNKNOWN stays an `end`,
-#   NON-API ROLLBACK FAILED); enabled and active:
+#   NON-API ROLLBACK FAILED; the sentence only while the unit is still down: A STOP THAT LEAVES CI DOWN, below); enabled
+#   and active:
 #   config.toml installed after runscaler started: STOP HAND CHANGE (a pending hand edit), else `start-state`;
 #   config.toml already the backup, checked ONCE (still `config-sha` and the backup, in one read, and runscaler RUNS
 #   since its install): done, `running`, no restart, else `end`; a start or a drain in progress: `end`. No backup, one
@@ -147,6 +148,16 @@
 #   before the rename reads as started after the install; a change of config.toml after the start's check and before
 #   runner-start reads the file is started on (the check after the start sees it: `hand-change`, the journal open,
 #   but that process may run either file).
+# A STOP THAT LEAVES CI DOWN SAYS SO (review r3, opus F2; the r3 FOLD's OPERATOR (1): "else a STOP that says CI is
+#   down"): every exit of the window or of RECOVER that leaves the journal OPEN with the enabled unit down and nothing
+#   started has a line of its own that says CI is down: a HAND CHANGE's STOP (the window's, before its rename or after
+#   it, and RECOVER's ONE RULE exits) carries the sentence "runscaler is down …: CI is down until the updater's RECOVER
+#   starts it"; a file that does not validate while no runscaler runs: STOP POOL DOWN with the validate's class and its
+#   output's path, once per file; a config.toml that cannot be read: STOP POOL DOWN, once. THE CI-DOWN WORDS ARE TRUE
+#   WHEN WRITTEN (review r3, codex F2): the sentence goes in only when ONE unit_read right then finds the unit enabled
+#   and down (inactive or failed, or activating with no process), never from the unit as it was when the window began;
+#   the journal stays open as before either way. A step that FAILED (a journal write, a copy, a touch, a rename, a
+#   systemctl call) writes no such line (ufail; RECOVER's: the line printed): the next pass tries that step again.
 # RECOVER, `recover --unattended` (S2b-3c-1 D-c, D-d and its r3 FOLD; PLAN D1, D5 RECOVER): it ends a window journal a
 #   cut left OPEN (the window's own process is gone: the updater's lock, which a window holds for its whole run, is the
 #   updater's, who runs RECOVER as its child), and leaves it CLOSED at WINDOW with THE CLOSING LINES for the updater's
@@ -196,8 +207,9 @@
 #   5. INSTALLED = OTHER (PLAN D5's ONE RULE; PRE after a window `renamed` too: a person put the old file back): STOP
 #      HAND CHANGE (`hand-change` first, once per sha); a runscaler that RUNS: nothing restarts, closed other; none: a
 #      copy validated (PASS, or API-ONLY after 3), `recover-target`, THE START past the file's mtime, closed other;
-#      NON-API or UNKNOWN: no start, the journal open (the next pass validates it again). config.toml = the last
-#      `recover-target`'s sha is RECOVER's own file (validated already), never OTHER.
+#      NON-API or UNKNOWN: no start, then STOP POOL DOWN (CI is down: the validate's class and its output's path; once
+#      per file), the journal open (the next pass validates it again). config.toml = the last `recover-target`'s sha
+#      is RECOVER's own file (validated already), never OTHER.
 #   "A runscaler that RUNS" is runner-facts.sh's RUNS everywhere (codex F7): /healthz lists every set on two reads
 #      3 s apart, the same process; never one `proc_now` (a process that hangs before it serves is no runscaler that
 #      runs: THE START, which reports CI down). Steps 1, 4, 5 take a process that RUNS whenever it started (one older
@@ -206,8 +218,9 @@
 #      NEEDS A VALIDATED SHA (codex F2): `staged-sha` (no failed `validate recover` after it), the last
 #      `recover-target`, or `config-sha` after the window's `start-state`; any other sha (a pending hand edit the
 #      window journaled before START STATE, a rollback that found the unit down) a copy validates first (`validate
-#      hand N`, the ONE VALIDATE RULE): NON-API or UNKNOWN: no start, the journal open: another file: STOP HAND CHANGE;
-#      the pre-window file: STOP POOL DOWN that says CI is down (once). A `recover-target` names only a proven sha, and
+#      hand N`, the ONE VALIDATE RULE): NON-API or UNKNOWN: no start, the journal open: another file: STOP HAND CHANGE,
+#      then STOP POOL DOWN that says CI is down; the pre-window file: STOP POOL DOWN that says CI is down (each once per
+#      file, with the validate's class and its output's path). A `recover-target` names only a proven sha, and
 #      only a value its own reader reads (digest images; else STOP HAND CHANGE that says why, no start). An attempt is
 #      a `starting E WHAT` (WHAT: target | pre | other, what it starts). A RESUMED START IS OF THE FILE IT STARTS
 #      (review r2, opus F1, codex F1): one in progress (now < E + 600) is waited for only when it is of the file now to
@@ -311,8 +324,8 @@
 #   3  no window journal: nothing to recover
 #   4  WAIT: another pool-image.sh run (a person's) holds this script's own lock: nothing read or changed
 #   5  the journal stays OPEN: the line printed says why (a STOP: HAND CHANGE, NO IDLE, POOL DOWN of a file that does
-#      not validate; a wait for idle; a start not run yet; a drain, a step that failed); the updater's next pass runs
-#      RECOVER again
+#      not validate or cannot be read; a wait for idle; a start not run yet; a drain, a step that failed); the
+#      updater's next pass runs RECOVER again
 #   6  a record RECOVER cannot read or act on: STOP, nothing written (README "An unfinished window the updater cannot
 #      end")
 set -uo pipefail
@@ -496,20 +509,26 @@ uclosing() {   # SHA CONTENT CLASS: THE CLOSING LINES (the header): a switch's `
   ujs closed "$(date +%s)"
 }
 BACKED=0   # THE BACKUP renamed its copy into place (up: config.toml.prev now holds this window's backup)
-UDOWN=0 UOPEN=0   # back found the enabled unit DOWN (CI on, nothing runs: operator (1)); a last word left it open
-udown_word() {   # TEXT: REPLY = TEXT, and in a rollback that found the enabled unit down (UDOWN), before its rename, the
-  # sentence that says so (NO SILENT END: the open journal's last word says CI is down); TEXT is cut to 700 first, so
-  # the sentence always fits a journal value
-  REPLY=$1
-  { [ "$UDOWN" = 1 ] && [ -z "${RENAMED-}" ]; } || return 0
-  REPLY="${1:0:700}. runscaler is down (its unit is enabled, and no runscaler ran when this rollback began): CI is down until the updater's RECOVER starts it"
+UDOWN=0 UOPEN=0 UWORD=0   # back found the enabled unit DOWN (CI on, nothing runs: operator (1)); a last word left it
+# open; that last word says CI is down (udown_word)
+udown_word() {   # TEXT [open]: REPLY = TEXT, and the sentence that says runscaler is down and CI is down (UWORD=1) when
+  # the journal stays OPEN after this last word (open: a HAND CHANGE's, the window's uhand or RECOVER's rc_hand; else a
+  # rollback that found the enabled unit down, UDOWN, ending before its rename) AND one unit_read right then finds the
+  # unit enabled and down (inactive or failed, or activating with no process: the auto-restart wait). A STOP THAT LEAVES
+  # CI DOWN SAYS SO; THE CI-DOWN WORDS ARE TRUE WHEN WRITTEN (review r3, codex F2): never from the unit as it was when
+  # the window began. TEXT is cut to 700 first, so the sentence always fits a journal value
+  REPLY=$1 UWORD=0
+  [ "${2-}" = open ] || [ "$UDOWN" = 1 ] || return 0
+  ( unit_read && [ "$UNIT_FILE" = enabled ] && [[ $UNIT_ACTIVE:$UNIT_PID =~ ^(inactive|failed|activating):0$ ]] ) || return 0
+  REPLY="${1:0:700}. runscaler is down (its unit is enabled and runs no process): CI is down until the updater's RECOVER starts it"
+  UWORD=1
 }
 uclose() {   # KEY TEXT: the window's last word (`stop NAME: TEXT` or `end TEXT`) and THE CLOSING LINES, the class from ONE
   # read of config.toml now (only before the rename: the pre-window file, or a hand change of it): pre (`config-sha`),
   # other (another file: with its STOP HAND CHANGE when the last word is another), none (no `config-sha` yet, or it
   # cannot be read). STAGED (this window's) is removed first. A rollback that found the enabled unit down (UDOWN) writes
-  # its last word only, and that word says CI is down (udown_word): the journal stays OPEN, so the updater's RECOVER
-  # starts runscaler (CI is never left down with no line: NO SILENT END)
+  # its last word only, and that word says CI is down while the unit is still down (udown_word): the journal stays OPEN,
+  # so the updater's RECOVER starts runscaler (CI is never left down with no line: NO SILENT END)
   local t c
   rm -f -- "$STAGED"
   clean "$2"; udown_word "$REPLY"; t=$REPLY; ujs "$1" "$t"
@@ -523,8 +542,10 @@ uclose() {   # KEY TEXT: the window's last word (`stop NAME: TEXT` or `end TEXT`
   REPLY=$t
 }
 unothing() {   # what a window that closed before its rename changed: nothing, or (up, after THE BACKUP) config.toml.prev
-  if [ "$UOPEN" = 1 ]; then
+  if [ "$UOPEN" = 1 ] && [ "$UWORD" = 1 ]; then
     echo "runscaler's unit is enabled (CI on) and runscaler is down: the window journal $J stays OPEN, and the updater's RECOVER starts runscaler on the config from before this window (validated first). config.toml is as it was"
+  elif [ "$UOPEN" = 1 ]; then
+    echo "runscaler was down when this rollback began, and its unit no longer reads down: the window journal $J stays OPEN, and the updater's RECOVER ends it. config.toml is as it was"
   elif [ "$BACKED" = 1 ] && [ "$KIND" = switch ]; then
     echo "config.toml is as it was and nothing restarted, but $KEEPP now holds this window's backup of it (the keep of an earlier switch is replaced) (the journal: $J, closed: the updater's next pass applies it)"
   else echo "Nothing changed: config.toml as it was, nothing restarted (the journal: $J, closed: the updater's next pass applies it)"; fi
@@ -550,10 +571,10 @@ unot() {   # TEXT: not now: nothing staged, nothing changed, and no journal is k
   echo "POOL IMAGE NOT NOW ($MODE --unattended): $1"; exit 3
 }
 uhand() {   # SHA WHAT: A HAND CHANGE found after `rename-start` (the header): `hand-change`, the STOP, the journal OPEN
-  # (before the rename of a rollback that found the unit down, the STOP says CI is down: udown_word)
+  # (the STOP says CI is down when the unit is enabled and down right then, before the rename or after it: udown_word)
   ujs hand-change "$1"
   clean "$CFG changed by hand $2. This window restarts nothing on that file: check it; to keep it, run RUNNER_START_CONFIG=$CFG ~/bin/runner-start validate, and only when that passes, systemctl --user restart runscaler at idle. The window journal $J stays open: the updater's next pass ends it"
-  udown_word "$REPLY"
+  udown_word "$REPLY" open
   ujs stop "HAND CHANGE: $REPLY"; echo "STOP HAND CHANGE: $REPLY"; exit 1
 }
 utarget() {   # WHEN NOTE: config.toml must still be the TARGET (TSHA), right before the step after WHEN; else uhand
@@ -635,7 +656,7 @@ urestart() {   # THE RESTART (the header): returns when the new process RUNS; el
   while [ "$(date +%s)" -le "$RENAMED" ]; do sleep 0.2; done   # past the install's second: the start proves it
   ujs from "$(proc_now)"
   ujs stopping "$(date +%s)"
-  utarget "after the rename, before the stop" "runscaler was not stopped, and runs on as it was"
+  utarget "after the rename, before the stop" "nothing was stopped, and runscaler is as it was"
   systemctl --user stop runscaler < /dev/null 8>&- 9>&- || ufail "systemctl --user stop runscaler failed (journalctl --user -u runscaler): the window journal $J stays open"
   p=none
   if [ "$(proc_now)" = none ] && o=$(log_pos) && [[ $o =~ ^[0-9]+\ [0-9]+\ [0-9a-f]{64}$ ]] && [ "$(proc_now)" = none ]; then p=$o; fi
@@ -995,8 +1016,10 @@ rc_handstop() {   # SHA TEXT: THE ONE RULE's two lines, each once: `hand-change 
   [ "$HSTOP" = "$1" ] || { rc_stopline "HAND CHANGE" "$2"; HSTOP=$1; }
 }
 rc_hand() {   # SHA TEXT: THE ONE RULE (PLAN D5): config.toml is no file RECOVER may act on: its lines (rc_handstop),
-  # the journal OPEN (the next pass looks again)
-  rc_handstop "$1" "$2. To keep it: RUNNER_START_CONFIG=$CFG ~/bin/runner-start validate, and only when that passes, systemctl --user restart runscaler at idle; the updater's next pass sees it"
+  # the journal OPEN (the next pass looks again). A STOP THAT LEAVES CI DOWN SAYS SO: its STOP says CI is down when the
+  # unit is enabled and down right then (udown_word)
+  udown_word "$2" open
+  rc_handstop "$1" "$REPLY. To keep it: RUNNER_START_CONFIG=$CFG ~/bin/runner-start validate, and only when that passes, systemctl --user restart runscaler at idle; the updater's next pass sees it"
   rc_open "config.toml (sha256 ${1:0:12}…) is no file RECOVER may act on: $2"
 }
 rc_dangling() {   # a `hand-change` whose STOP a cut lost (the window's or an earlier RECOVER's): the STOP first, once
@@ -1095,16 +1118,16 @@ rc_end() {   # [read] [ran]: RECOVER's close from ONE read of config.toml (rc_cl
 rc_vcopy() {   # STEP (recover: the TARGET; hand: another file): THE ONE VALIDATE RULE on a COPY of config.toml
   # (R/config.recover.toml, checked against the file read: NOW_SHA): up to 3 tries 20 s apart, each `validate STEP N
   # CLASS` (whole output WDIR/validate-STEP-N.out), each under vtry's bound: VCLS = PASS (API-ONLY after the third
-  # counts) | NON-API | UNKNOWN; VSHA, VLINES: the copy's
+  # counts) | NON-API | UNKNOWN; VSHA, VLINES: the copy's; VOUT: the last try's whole output
   local step=$1 c=$R/config.recover.toml n out rc
-  VCLS=UNKNOWN VSHA= VLINES=
+  VCLS=UNKNOWN VSHA= VLINES= VOUT=
   { cp -- "$CFG" "$c.tmp" && chmod 600 -- "$c.tmp" && mv -f -- "$c.tmp" "$c"; } 2> /dev/null < /dev/null \
     || { rm -f -- "$c.tmp"; rc_open "could not copy $CFG to $c to validate it"; }
   sha_of "$c"; VSHA=$REPLY
   [ "$VSHA" = "$NOW_SHA" ] || { rm -f -- "$c"; rc_hand "$VSHA" "config.toml changed while RECOVER read it"; }
   VLINES=$(targets "$c")
   for n in 1 2 3; do
-    out=$WDIR/validate-$step-$n.out
+    out=$WDIR/validate-$step-$n.out; VOUT=$out
     vtry - "$out" env RUNNER_START_CONFIG="$c" "$HOME/bin/runner-start" validate; rc=$?
     if vcut "$rc"; then VCLS=UNKNOWN
     else VCLS=$("$HOME/bin/validate-class" "$rc" "$out" 2> /dev/null) || VCLS=UNKNOWN; fi
@@ -1130,17 +1153,29 @@ rc_target() {   # SHA LINES: RECOVER's own TARGET (D1): `recover-target`, once p
   ujs recover-target "$1 $2"; RT_SHA=$1
 }
 rc_vproof() {   # WHAT (pre | other): THE START's sha (the read: NOW_SHA) proven: a line proves it (VALID), else a
-  # copy validates first (`validate hand N`) and `recover-target` names it. NON-API or UNKNOWN: no start: another file
-  # -> THE ONE RULE (STOP HAND CHANGE, the journal open); the pre-window file, or a journal with no config-sha -> STOP
-  # POOL DOWN (CI is down), once, the journal open: the next pass validates it again
+  # copy validates first (`validate hand N`) and `recover-target` names it. NON-API or UNKNOWN: no start, the journal
+  # open (the next pass validates it again): another file -> THE ONE RULE's lines (once per file: its caller's), then
+  # STOP POOL DOWN; the pre-window file, or a journal with no config-sha -> STOP POOL DOWN (rc_vdown: CI is down, once)
   if [ "$VALID" = 1 ]; then rc_target "$NOW_SHA" "$(targets "$NOW_COPY")"; return 0; fi
   rc_vcopy hand
   if [ "$VCLS" != PASS ]; then
-    [ "$1" != other ] || rc_hand "$NOW_SHA" "config.toml is no file of this window's and its copy's validate is $VCLS: no start, CI is down (the next pass validates it again)"
-    rc_once "POOL DOWN" "runscaler is down, and config.toml (sha256 ${NOW_SHA:0:12}…), the config from before this window, which no journal line proves ran, does not validate" " ($VCLS; its whole output: $WDIR/validate-hand-1.out): nothing is started, CI is down. Fix it, or put a config that validates in place (03-runscaler.sh real); the updater's next pass validates it again"
+    if [ "$1" = other ]; then
+      rc_handstop "$NOW_SHA" "config.toml (sha256 ${NOW_SHA:0:12}…) is no file of this window's and its copy's validate is $VCLS: nothing is started"
+      rc_vdown "a file this window did not write"
+    else rc_vdown "the config from before this window, which no journal line proves ran"; fi
     rc_open "config.toml's copy validates $VCLS and no line proves it ran: nothing is started, CI is down (STOP POOL DOWN)"
   fi
   rc_target "$VSHA" "$VLINES"
+}
+rc_vdown() {   # WHAT: A STOP THAT LEAVES CI DOWN SAYS SO (review r3, opus F2): config.toml (NOW_SHA), WHAT, does not
+  # validate and no runscaler runs (rc_vproof's callers): `stop POOL DOWN` that says CI is down and why (the validate's
+  # class, its whole output), ONCE per file (keyed on the STOP line itself, by its sha)
+  rc_once "POOL DOWN" "runscaler is down, and config.toml (sha256 ${NOW_SHA:0:12}…), $1, does not validate" " ($VCLS; its whole output: $VOUT): nothing is started, CI is down. Fix it, or put a config that validates in place (03-runscaler.sh real); the updater's next pass validates it again"
+}
+rc_unread() {   # config.toml cannot be read and no runscaler runs: `stop POOL DOWN` that says CI is down, once (its line),
+  # the journal open (the next pass reads it again)
+  rc_once "POOL DOWN" "config.toml cannot be read, and runscaler is down" ": nothing is started, CI is down. Put a config that validates in place (03-runscaler.sh real); the updater's next pass sees it"
+  rc_open "config.toml cannot be read, and runscaler is down: CI is down (STOP POOL DOWN)"
 }
 rc_stop_unit() {   # the unit stopped (`systemctl --user stop` also ends a drain in progress or an auto-restart wait),
   # until it is inactive or failed and MainPID 0; rc 1 when it is not
@@ -1264,7 +1299,7 @@ rc_noeffect() {   # step 1, NO EFFECT YET (the header): the window changed no co
     rc_finish
   fi
   ! rc_runs_any || rc_end read
-  [ "$NOW_SHA" != none ] || rc_open "config.toml cannot be read, and runscaler is down: CI is down"
+  [ "$NOW_SHA" != none ] || rc_unread
   if [ "$CLS" = PRE ] || [ -z "$CSHA" ]; then rc_vproof pre; rc_start "$NOW_SHA" "$AFTER" pre; fi
   rc_vproof other
   rc_start "$NOW_SHA" "$AFTER" other
@@ -1348,7 +1383,7 @@ rc_other() {   # 5: OTHER (PLAN D5's ONE RULE; the unit enabled): HAND CHANGE (o
   # then started past the file's mtime; else the journal open (the next pass validates again)
   [ "$CLS" = OWNOTHER ] || rc_handstop "$NOW_SHA" "config.toml (sha256 ${NOW_SHA:0:12}…) is no file of this window's: the updater restarts nothing on it. Check it; to keep it, RUNNER_START_CONFIG=$CFG ~/bin/runner-start validate, then systemctl --user restart runscaler at idle"
   ! rc_runs_any || rc_end read
-  [ "$NOW_SHA" != none ] || rc_open "config.toml cannot be read, and runscaler is down: CI is down"
+  [ "$NOW_SHA" != none ] || rc_unread
   rc_vproof other
   rc_start "$NOW_SHA" "$AFTER" other
 }
