@@ -47,6 +47,11 @@ RUNNER_REC=/Users/ci/mac-runner/runscaler.sha256
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
 LABEL=sh.liveapp.mac-runner
 AGENTS=/Users/ci/Library/LaunchAgents
+# the tools it runs that act on the host (tests/studio/test_install.py rewrites each into a stub)
+ID=/usr/bin/id
+SYSCTL=/usr/sbin/sysctl
+LOCKF=/usr/bin/lockf
+LAUNCHCTL=/bin/launchctl
 TOOLS=(golden-build golden-gate golden-prune real-run runner-disable runner-enable runner-lock-free runner-start wall-check wall-files-check)
 MIN_RAM_GB=16
 
@@ -81,7 +86,7 @@ switch_current() { # BASEDIR VERSION — point BASEDIR/current at VERSION (a rel
 }
 
 # ---- 1. who, where, the agent off, the lock
-[[ $(/usr/bin/id -un) == $CI_USER ]] || stop "run it as $CI_USER"
+[[ $($ID -un) == $CI_USER ]] || stop "run it as $CI_USER"
 here=${0:A:h}
 version=
 [[ -f $here/VERSION ]] && version=$(<$here/VERSION)
@@ -97,7 +102,7 @@ fi
 [[ ! -e $FLAG ]] || stop "the agent is enabled: run $BIN/runner-disable first (it waits for a running job), then run the same line again"
 if [[ ${1-} != --locked ]]; then
   lf=$($here/bin/runner-lock-free) || stop "runner-lock-free says '$lf': runscaler, wall-check, golden-build or golden-gate is running"
-  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked
+  $LOCKF -k -t 0 $LOCK /bin/zsh -f ${0:A} --locked
   rc=$?
   (( rc != 75 )) || stop "the runner lock is held: runscaler, wall-check, golden-build, golden-gate or another install is running"
   exit $rc
@@ -111,8 +116,8 @@ for p in $BASE/.dl.*(N) $BASE/.unpack.*(N) $BASE/*.prev.<->(N) $APPS/tart.app.pr
 done
 
 # ---- 2. RAM, folders
-mem=$(/usr/sbin/sysctl -n hw.memsize)
-ncpu=$(/usr/sbin/sysctl -n hw.ncpu)
+mem=$($SYSCTL -n hw.memsize)
+ncpu=$($SYSCTL -n hw.ncpu)
 [[ $mem =~ '^[0-9]+$' && $ncpu =~ '^[0-9]+$' ]] || stop "sysctl gave no RAM or CPU count"
 ram_gb=$(( mem / 1073741824 ))
 (( ram_gb >= MIN_RAM_GB )) || stop "this Mac has $ram_gb GB of RAM; at least $MIN_RAM_GB GB is needed"
@@ -150,8 +155,8 @@ if [[ -f $RUNNER_REC ]]; then
 fi
 
 # ---- 5. GUI session, current, links, LaunchAgent, config
-uid=$(/usr/bin/id -u)
-/bin/launchctl print gui/$uid > /dev/null 2>&1 \
+uid=$($ID -u)
+$LAUNCHCTL print gui/$uid > /dev/null 2>&1 \
   || stop "ci has no GUI session: log in as ci at the console, or restart the Mac (auto-login), then run the same line again"
 switch_current $BASE $version
 say "current -> $version"
@@ -171,7 +176,7 @@ for l in $BIN/*(N@); do
   /bin/rm -f -- $l && say "removed the dangling link $l"
 done
 src=$R/config/$LABEL.plist dst=$AGENTS/$LABEL.plist
-loaded=0; /bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1 && loaded=1
+loaded=0; $LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1 && loaded=1
 if ! /usr/bin/cmp -s $src $dst || (( ! loaded )); then
   /bin/mkdir -p $AGENTS || stop "cannot create $AGENTS"
   if [[ -f $dst ]] && ! /usr/bin/cmp -s $src $dst; then
@@ -183,14 +188,14 @@ if ! /usr/bin/cmp -s $src $dst || (( ! loaded )); then
     fi
   fi
   if (( loaded )); then
-    /bin/launchctl bootout gui/$uid/$LABEL || stop "launchctl bootout gui/$uid/$LABEL failed"
-    n=0; while /bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1; do (( n++ < 20 )) || stop "the LaunchAgent did not unload"; /bin/sleep 0.5; done
+    $LAUNCHCTL bootout gui/$uid/$LABEL || stop "launchctl bootout gui/$uid/$LABEL failed"
+    n=0; while $LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1; do (( n++ < 20 )) || stop "the LaunchAgent did not unload"; /bin/sleep 0.5; done
   fi
   /bin/cp -X $src $BASE/.plist.new && /bin/chmod 644 $BASE/.plist.new && /bin/mv -f $BASE/.plist.new $dst || stop "cannot install $dst"
-  /bin/launchctl bootstrap gui/$uid $dst || stop "launchctl bootstrap gui/$uid $dst failed"
+  $LAUNCHCTL bootstrap gui/$uid $dst || stop "launchctl bootstrap gui/$uid $dst failed"
   say "LaunchAgent $LABEL loaded from $dst"
 fi
-/bin/launchctl print gui/$uid/$LABEL > /dev/null 2>&1 || stop "the LaunchAgent $LABEL is not loaded after the install"
+$LAUNCHCTL print gui/$uid/$LABEL > /dev/null 2>&1 || stop "the LaunchAgent $LABEL is not loaded after the install"
 config_new=0
 if [[ ! -e $CONFIG ]]; then
   cpu=$(( (ncpu - 2) / 2 )); (( cpu < 2 )) && cpu=2

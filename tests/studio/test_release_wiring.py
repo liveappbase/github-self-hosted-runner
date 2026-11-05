@@ -3,7 +3,7 @@ to one value across the scripts (CONSTANT_NAMES): REALRUN (golden-build, golden-
 golden-prune), PINDIR (runner-updater, golden-build), PROTECTED (runner-updater, golden-prune), DD (runner-updater,
 runner-journal), BIN (runner-updater, runner-enable), DF (runner-updater, tart-shim) and FLOOR_GIB (runner-updater,
 golden-build: the switch window's DISK check uses golden-build's floor) and LSOF (runner-updater's RECOVER, runner-lock-free:
-one lsof reads every open file). release-check runs on a temporary git repository with only the files the constants rule reads; it
+one lsof reads every open file) and LOCKF (install, runner-lock-free: the runner lock's one lockf). release-check runs on a temporary git repository with only the files the constants rule reads; it
 downloads nothing there (no manifest, no 02-wall.sh). And every lock-holder message of a script names golden-gate.
 """
 import os
@@ -40,7 +40,8 @@ class ReleaseCheckConstants(unittest.TestCase):
               'BIN': ('/Users/ci/bin', 'runner-updater', 'runner-enable'),
               'DF': ('/bin/df', 'runner-updater', 'tart-shim'),
               'FLOOR_GIB': ('200', 'runner-updater', 'golden-build'),
-              'LSOF': ('/usr/sbin/lsof', 'runner-lock-free', 'runner-updater')}
+              'LSOF': ('/usr/sbin/lsof', 'runner-lock-free', 'runner-updater'),
+              'LOCKF': ('/usr/bin/lockf', 'install', 'runner-lock-free')}
 
     def check(self, name, value):
         line, changed, other = self.WIRING[name]
@@ -52,13 +53,14 @@ class ReleaseCheckConstants(unittest.TestCase):
                      'tools/release-check')
         write(os.path.join(d, 'tools', 'release-check'), rc_text, 0o755)
         for f in (changed, other):   # data for release-check: read, never run
-            text = read(os.path.join(REPO, 'bin', f))
+            rel = f if f == 'install' else os.path.join('bin', f)
+            text = read(os.path.join(REPO, rel))
             # the line NAME=VALUE, alone or before a comment
             self.assertEqual(len(re.findall(r'^%s=%s(?=[ \n])' % (re.escape(name), re.escape(line)), text, re.M)), 1, f)
             if f == changed:
                 self.assertEqual(text.count('\n%s=%s\n' % (name, line)), 1, f)
                 text = text.replace('\n%s=%s\n' % (name, line), '\n%s=%s\n' % (name, value))
-            write(os.path.join(d, 'bin', f), text, 0o755)
+            write(os.path.join(d, rel), text, 0o755)
         for argv in (['init', '-q'], ['add', '-A'], ['commit', '-q', '-m', 'wiring test']):
             r = run(['/usr/bin/git'] + argv, env=env, cwd=d)
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -99,6 +101,9 @@ class ReleaseCheckConstants(unittest.TestCase):
 
     def test_two_values_of_lsof_are_red(self):
         self.two_values_are_red('LSOF')
+
+    def test_two_values_of_lockf_are_red(self):
+        self.two_values_are_red('LOCKF')
 
 
 class LockHolderMessages(unittest.TestCase):
