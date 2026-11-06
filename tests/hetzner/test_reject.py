@@ -249,20 +249,25 @@ class ConnectOnly(unittest.TestCase):
 class TheFile(unittest.TestCase):
     def test_the_digest_is_added_once_by_a_rename_of_a_full_copy(self):
         """r3 Opus F9, Codex F5: no file: one line; a file that lists other digests: theirs kept, its own added; one
-        that lists it already: the same bytes (added only when absent). Each by rename (a new inode)."""
+        that lists it already: the same bytes (added only when absent). Each by rename (a new inode). Its mode is 0600
+        with no chmod of its own (B2b review r1, the CI red of test_modes OnePlace: rr_lock is the one place that sets
+        the modes of the updater's folder, and its files are made under the umask 077 THE MODES names): a new copy,
+        also when the file it replaces was 0644 (a file the person made)."""
         other = digest(30)
-        for what, before, after in (('no file', None, [dig(ref(NEW))]), ('others', [other], [other, dig(ref(NEW))]),
-                                    ('itself', [other, dig(ref(NEW))], [other, dig(ref(NEW))])):
+        for what, before, after, mode in (
+                ('no file', None, [dig(ref(NEW))], None), ('others', [other], [other, dig(ref(NEW))], 0o600),
+                ('others 0644', [other], [other, dig(ref(NEW))], 0o644),
+                ('itself', [other, dig(ref(NEW))], [other, dig(ref(NEW))], 0o600)):
             with self.subTest(what):
                 j = J(self)
                 if before is not None:
-                    j.p.write(REJECTED, ''.join(x + '\n' for x in before), 0o600)
+                    j.p.write(REJECTED, ''.join(x + '\n' for x in before), mode)
                 ino = os.stat(REJECTED).st_ino if before is not None else None
                 lines, v = rollback()
                 j.journal(lines, v)
                 j.run('off')
                 self.assertEqual(j.rejected_file(), ''.join(x + '\n' for x in after))
-                if what == 'others':
+                if what.startswith('others'):
                     self.assertNotEqual(os.stat(REJECTED).st_ino, ino, 'it was written in place, not renamed')
                 if what == 'itself':
                     self.assertEqual(os.stat(REJECTED).st_ino, ino, 'it was written again, though the digest was there')

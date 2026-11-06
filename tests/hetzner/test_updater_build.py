@@ -38,6 +38,7 @@ STATE = os.path.join(STATEDIR, 'state.json')
 LOCK = os.path.join(STATEDIR, 'lock')
 DAY = 86400
 FAIL = 'FAIL docker build failed: no record, image.ref NOT changed\n'
+USAGE = 'usage: runner-updater status | on | off | pass | back hz-docker | build VERSION'   # its one usage line
 
 
 # rm, for the TERM-window cell: an rm whose arguments name BUILDOUT (build.out: build_child's first step, right before
@@ -155,7 +156,7 @@ class Role(unittest.TestCase):
             with self.subTest(args):
                 r = p.updater(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
+                self.assertIn(USAGE, r.stderr)
         self.assertEqual(p.d1_calls(), [])
 
     def test_build_takes_a_version_of_1_to_9_digits_in_each_part(self):
@@ -168,7 +169,7 @@ class Role(unittest.TestCase):
             with self.subTest(v):
                 r = p.updater('build', v)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
+                self.assertIn(USAGE, r.stderr)
         self.assertEqual(p.d1_calls(), [])
         big = '.'.join([NINE] * 3)                                   # the control
         ok(self, p.updater('build', big))

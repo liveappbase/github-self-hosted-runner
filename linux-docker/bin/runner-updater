@@ -244,7 +244,9 @@
 #   `sha256:<64 hex>` per line: 03 refuses that image in every mode): the digest of the journal's `old` image added
 #   only when absent, by a rename of a full copy written and synced first, BEFORE the ONE state write, so a run cut
 #   after it and before the state write adds nothing twice (and one cut after the state write only archives:
-#   last_window). A file it cannot read (not a plain file, a line of another shape): a STOP, nothing written.
+#   last_window). A file it cannot read (not a plain file, a line of another shape): a STOP, nothing written. Its mode
+#   is 0600 with no chmod of its own: the copy is a new file, made under this program's umask 077, the mode THE MODES
+#   (runner-release.sh's rr_lock, the one place that sets the modes of STATEDIR) names for every other file there.
 #   THE OWN RESTART (core/README.md :68-121; the r3 FOLD): `restart` = {from, to: `running`, stopped} only from a
 #   journal with no `recover-start` (an uninterrupted window), its own `from` (a process), `stopped` (a position) and
 #   `running`, whose start is within 20 s of its `starting` (RestartSec=30: no Restart=always retry came between),
@@ -1169,9 +1171,8 @@ rejected_add() {
     fi
   fi
   if [ -n "$there" ]; then REPLY=there; return 0; fi
-  rm -f -- "$REJECTED.new" 2> /dev/null
+  rm -f -- "$REJECTED.new" 2> /dev/null   # so the copy is a NEW file: its mode is THE MODES' (umask 077), never a chmod
   { { [ -z "$text" ] || printf '%s\n' "${text%$'\n'}"; printf '%s\n' "$1"; } > "$REJECTED.new"; } 2> /dev/null \
-    && chmod 600 -- "$REJECTED.new" 2> /dev/null \
     && out=$(dd if=/dev/null of="$REJECTED.new" conv=notrunc,fsync 2>&1 < /dev/null) \
     && mv -f -- "$REJECTED.new" "$REJECTED" \
     || { rm -f -- "$REJECTED.new" 2> /dev/null; REPLY="$REJECTED.new cannot be written, synced or renamed into place"; return 1; }
