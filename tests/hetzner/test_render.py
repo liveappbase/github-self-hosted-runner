@@ -19,6 +19,12 @@ D5; the changed-lines list, items 30-33 and 41).
 - REJECTED: 03, as RS_USER, refuses a digest listed in ~/.local/state/runner-updater/rejected (the updater lock's folder):
   one `sha256:<64 hex>` per line; no file, or an empty one, lists none; any other content REFUSES, never "none".
 - The unit runs runscaler with TZ=UTC (runscaler stamps its log in local time with no zone; the core requires UTC).
+- THE LOG'S PLACE (runscaler 0.12 bump, slice H1): from runscaler v0.10.0 a config with no log-file key has runscaler
+  write its log to ~/.local/state/runner/runner.log, and the runner.log beside the config, the file the updater and
+  pool-image.sh read, stays and never grows (a quiet log that looks healthy: R1 blind, KEEP never accepts). 03 renders a
+  top-level log-file of that file, built from the host config's RS_USER; runner-start runs a config only when its
+  log-file is exactly that file, or, with no log-file key, only on the runscaler v0.9.5 runner (V095_SHA: the one
+  release that then writes runner.log beside the config); else it REFUSES, naming `03-runscaler.sh real`.
 The text cells run anywhere; the others run the real scripts (pin lines rewritten) in a container (support.Pool).
 """
 import os
@@ -31,6 +37,10 @@ S03 = os.path.join(REPO, 'linux-docker', 'setup', '03-runscaler.sh')
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 RR = os.path.join(REPO, 'linux-docker', 'setup', 'runner-release.sh')
 UNIT = os.path.join(REPO, 'linux-docker', 'config', 'runscaler.service')
+START = os.path.join(REPO, 'linux-docker', 'bin', 'runner-start')
+FACTS = os.path.join(REPO, 'linux-docker', 'setup', 'runner-facts.sh')
+UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
+README = os.path.join(REPO, 'linux-docker', 'README.md')
 FIX = os.path.join(REPO, 'tests', 'studio', 'fixtures', 'validate')
 V0, V2, X = digest(10), digest(12), digest(20)
 INSTALLED = ('bin/runner', 'bin/runner-start', 'bin/pool-ready', 'bin/validate-class',
@@ -91,6 +101,53 @@ class Text(unittest.TestCase):
             text = f.read()
         service = text.split('\n[Service]\n', 1)[1].split('\n[', 1)[0]
         self.assertIn('\nEnvironment=TZ=UTC\n', '\n' + service + '\n')
+
+    def test_the_readers_read_runner_log_in_runscaler_s_folder(self):
+        """THE LOG'S PLACE: the file 03's log-file names is the one the readers read. pool-image.sh and the updater set
+        R to ~/.config/runner; runner-facts.sh's log_pos opens "$R/runner.log", and so does pool-image.sh's restart-cut
+        scan. (LogFile's cells run log_pos with R set so.)"""
+        with open(PIMG) as f:
+            pimg = f.read()
+        with open(UPD) as f:
+            upd = f.read()
+        with open(FACTS) as f:
+            facts = f.read()
+        self.assertEqual(re.findall(r'^R=([^;\s]+)', pimg, re.M), ['$HOME/.config/runner'])
+        self.assertEqual(re.findall(r'^R=([^;\s]+)', upd, re.M), ['$HOME/.config/runner'])
+        self.assertEqual(facts.count('\' "$R/runner.log" "$@" 2> /dev/null < /dev/null\n}'), 1)   # log_pos's one open
+        cut = [l for l in pimg.splitlines() if l.startswith('cut=$(awk ')]
+        self.assertEqual(len(cut), 1, cut)
+        self.assertIn(' "$R/runner.log" ', cut[0])
+
+    def test_runner_start_s_v0_9_5_runner_is_the_one_03_installs(self):
+        """runner-start runs a config with NO log-file key only on the runner V095_SHA names (runscaler v0.9.5's): in
+        this release 03 installs that runner (its BIN_SHA), so a live config of an older 03, which has no log-file key,
+        keeps starting until 03 renders the line (03 real installs runner-start before it installs a config, and
+        installs no config on a validate that is not PASS). A release that moves BIN_SHA keeps V095_SHA: this cell then
+        compares it with v0.9.5's digest instead."""
+        self.assertEqual(len(assignment(START, 'V095_SHA')), 1, 'runner-start names the v0.9.5 runner once')
+        self.assertEqual(assignment(START, 'V095_SHA'), assignment(S03, 'BIN_SHA'))
+
+    def test_the_readme_says_03_renders_the_log_file_line_and_what_runner_start_refuses(self):
+        """Install step 9 says what 03 renders for runscaler's log and what runner-start refuses; the upgrade names the
+        line, and its section gives the two lines that put it into a host's config.toml once (03 real, then a restart
+        at a quiet time: else the next `pool-image.sh up` refuses a config.toml installed after runscaler started)."""
+        with open(README) as f:
+            text = f.read()
+        step9 = text.split('\n9. **runscaler (RS_USER).**', 1)[1].split('\n10. ', 1)[0]
+        for w in ('`log-file`', '`runner.log`', '`runner-start` refuses', 'v0.9.5'):
+            self.assertIn(w, step9)
+        up = text.split('\n## Upgrading from a release before this one\n', 1)[1].split('\n## ', 1)[0]
+        self.assertIn('"The log-file line"', up)
+        self.assertEqual(text.count('\n## The log-file line\n'), 1)
+        sec = text.split('\n## The log-file line\n', 1)[1].split('\n## ', 1)[0]
+        blocks = [b.strip() for b in re.findall(r'```\n(.*?)\n *```', sec, re.S)]
+        self.assertEqual(len(blocks), 2, blocks)
+        self.assertEqual(blocks[0], "ssh <RS_USER>@<host> 'bash -s -- real' < linux-docker/setup/03-runscaler.sh")
+        self.assertTrue(blocks[1].startswith("ssh <RS_USER>@<host> 'systemctl --user restart runscaler && "), blocks[1])
+        self.assertIn('pool-ready <MAIN_SET> <SMALL_SET>', blocks[1])
+        for w in ('`log-file`', 'v0.9.5', '`03 DONE (real)`', '`pool-image.sh up`'):
+            self.assertIn(w, sec)
 
 
 @needs_container
@@ -504,6 +561,129 @@ class Clock(unittest.TestCase):
                 self.assertEqual((r.returncode, r.stdout), (0, 'TZ-CHECK +0000\n'), r.stderr)
                 r = p.run([start, 'run'], env=base)
                 self.assertEqual((r.returncode, r.stdout), (0, 'TZ-CHECK %s\n' % offset), r.stderr)
+
+
+def without_log_file(text):
+    """A config less its log-file line: the render as 03 made it before this release."""
+    return re.sub(r'^log-file = .*\n', '', text, flags=re.M)
+
+
+@needs_container
+class LogFile(unittest.TestCase):
+    """THE LOG'S PLACE (the module's header): 03's render pins runscaler's log to the file the readers read, and
+    runner-start runs no config whose log is another file. Each refusal names `03-runscaler.sh real`, which renders the
+    right line. A config with no log-file key (the live config until 03 renders again) runs only on the runscaler
+    v0.9.5 runner, by sha256; the pool cells' runscaler is a substitute, so it is that runner only where a cell makes
+    the INSTALLED runner-start name it (its V095_SHA line)."""
+
+    def rig(self):
+        p = Pool(self)
+        p.production(V2)
+        return p, os.path.join(p.R, 'runner.log')
+
+    def start(self, p, text):
+        """runner-start validate (the installed one) of text as ~/.config/runner/c.toml: (its result, the configs
+        runscaler's validate ran on)."""
+        cfg = p.write(p.rpath('c.toml'), text, 0o600)
+        p.write(p.path('logs', 'runner.log'), '')
+        r = p.run([os.path.join(p.HOME, 'bin', 'runner-start'), 'validate'], env=dict(p.env(), RUNNER_START_CONFIG=cfg))
+        return r, [c['config'] for c in p.calls('runner') if c['argv'][:1] == ['validate']]
+
+    def variants(self, p, logf):
+        """The render with no log-file line (bare); top(v): bare with a top-level log-file of v; table(head): the right
+        top-level line, plus a log-file key of that file in the first table under head (so each config breaks ONE
+        rule: the table's key alone)."""
+        bare = without_log_file(p.config())
+        self.assertEqual(bare.count('\nlog-level = "info"\n'), 1)
+        for head in ('[docker]\n', '[[scaleset]]\n', '[scaleset.docker]\n'):
+            self.assertIn(head, bare)
+
+        def top(v):
+            return bare.replace('\nlog-level = "info"\n', '\nlog-level = "info"\nlog-file = %s\n' % v)
+
+        def table(head):
+            return top('"%s"' % logf).replace(head, head + 'log-file = "%s"\n' % logf, 1)
+        return bare, top, table
+
+    def test_the_render_names_the_file_the_readers_read_once_at_the_top_level(self):
+        """Item 1: config.toml, as 03 real renders and installs it, has exactly one log-file line, at the top level
+        (before its first table, and so in no [docker] or [[scaleset]] table), naming RS_USER's
+        ~/.config/runner/runner.log; and that is the file log_pos opens, R set as the readers set it (Text): the inode it
+        reports is that file's."""
+        import tomllib
+        p, logf = self.rig()
+        text = p.config()
+        lines = text.splitlines()
+        want = 'log-file = "%s"' % logf
+        self.assertEqual([l for l in lines if 'log-file' in l and not l.startswith('#')], [want])
+        first_table = next(i for i, l in enumerate(lines) if l.startswith('['))
+        self.assertLess(lines.index(want), first_table)
+        data = tomllib.loads(text)
+        self.assertEqual(data['log-file'], logf)
+        self.assertNotIn('log-file', data['docker'])
+        for s in data['scaleset']:
+            self.assertNotIn('log-file', s)
+            self.assertNotIn('log-file', s.get('docker', {}))
+        r = p.lib('R=$HOME/.config/runner; log_pos', source='runner-facts.sh')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(int(r.stdout.split()[0]), os.stat(data['log-file']).st_ino)
+
+    def test_runner_start_refuses_every_other_log_file_naming_03(self):
+        """Item 2: another file (v0.12.0's own default among them), a relative path, an empty one (no log at all), a
+        value that is no string, the key inside a table the render writes, or NO key while the runner is not v0.9.5's:
+        REFUSE (stderr, exit 1) by its own rule's line, naming `03-runscaler.sh real`, and runscaler's validate never
+        runs."""
+        p, logf = self.rig()
+        bare, top, table = self.variants(p, logf)
+        v012 = os.path.join(p.HOME, '.local', 'state', 'runner', 'runner.log')
+        other = 'log-file is %s, not the runner.log the updater reads'
+        intable = 'the key %slog-file is in a table'
+        for why, text, says in (
+                ("v0.12.0's own default", top('"%s"' % v012), other % repr(v012)),
+                ('another file', top('"/tmp/runner.log"'), other % "'/tmp/runner.log'"),
+                ('a relative path', top('"runner.log"'), other % "'runner.log'"),
+                ('an empty one (no log at all)', top('""'), other % "''"),
+                ('no string', top('1'), other % '1'),
+                ('in [docker]', table('[docker]\n'), intable % 'docker.'),
+                ('in a [[scaleset]]', table('[[scaleset]]\n'), intable % 'scaleset[0].'),
+                ('in [scaleset.docker]', table('[scaleset.docker]\n'), intable % 'scaleset[1].docker.'),
+                ('no log-file key, and the runner is not v0.9.5', bare,
+                 "the config has no log-file key, and %s is not runscaler v0.9.5's runner" %
+                 os.path.join(p.HOME, 'bin', 'runner'))):
+            with self.subTest(why):
+                r, ran = self.start(p, text)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertTrue(r.stderr.startswith('runner-start: REFUSE ' + says), r.stderr)
+                self.assertIn('03-runscaler.sh real', r.stderr)
+                self.assertEqual(ran, [], 'runscaler ran on it')
+
+    def test_control_the_readers_file_runs_on_any_runner(self):
+        """The control of the refusals: the log-file line 03 renders (its own render, and the line put into the bare
+        render by hand) runs, on a runner that is not v0.9.5's too."""
+        p, logf = self.rig()
+        bare, top, table = self.variants(p, logf)
+        for why, text in (("03's render", p.config()), ('the line, at the top', top('"%s"' % logf))):
+            with self.subTest(why):
+                r, ran = self.start(p, text)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(ran, [sha256_file(p.rpath('c.toml'))])
+
+    def test_control_no_log_file_key_runs_on_the_v0_9_5_runner(self):
+        """The decision for a config with NO log-file key: on the v0.9.5 runner (V095_SHA: here the INSTALLED
+        runner-start made to name the substitute) it runs, so the live config keeps starting until 03 renders the
+        line; the same config on any other runner is refused (test_runner_start_refuses_every_other_log_file_naming_03)."""
+        p, logf = self.rig()
+        bare, top, table = self.variants(p, logf)
+        rs = os.path.join(p.HOME, 'bin', 'runner-start')
+        with open(rs) as f:
+            t = f.read()
+        pins = re.findall(r'^V095_SHA=[0-9a-f]{64}$', t, re.M)
+        self.assertEqual(len(pins), 1, 'runner-start names the v0.9.5 runner by ONE V095_SHA line')
+        p.write(rs, t.replace(pins[0] + '\n', 'V095_SHA=%s\n' % sha256_file(os.path.join(p.HOME, 'bin', 'runner'))),
+                0o755)
+        r, ran = self.start(p, bare)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(ran, [sha256_file(p.rpath('c.toml'))])
 
 
 if __name__ == '__main__':

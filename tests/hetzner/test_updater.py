@@ -1789,8 +1789,9 @@ class ConfigRead(unittest.TestCase):
     (bin/runner-updater-lib, ru_config): every one would leave R1 or provenance reading the wrong lines."""
 
     def read(self, g, text):
+        """config_read of text, R set as the updater sets it (runscaler's folder, ~/.config/runner)."""
         p = g.p.write(g.p.path('tmp', 'config.toml'), text, 0o600)
-        return g.p.lib('config_read "$1"', p, source='runner-facts.sh')
+        return g.p.lib('R=$HOME/.config/runner; config_read "$1"', p, source='runner-facts.sh')
 
     def test_the_rules(self):
         g = Rig(self, on=None, clock=False)
@@ -1819,7 +1820,6 @@ class ConfigRead(unittest.TestCase):
                                                           % ref(OLD), 1), 'a runner-image line this does not read'),
             ('a name it cannot read', real.replace('name = "linux-ci-main"\n', 'name = "linux ci"\n'),
              'a scale set name this does not read'),
-            ('a top-level log-file', 'log-file = "/tmp/x.log"\n' + real, 'a top-level log-file key'),
             ('a log-format other than text', 'log-format = "json"\n' + real, 'log-format is not "text"'),
             # Opus r1 F2: runscaler then writes no INFO record (no job-completed: the proof of life R1 and KEEP read)
             ('log-level warn', level('warn'), 'line [0-9]+: log-level is not "info" or "debug"'),
@@ -1830,11 +1830,10 @@ class ConfigRead(unittest.TestCase):
                 r = self.read(g, text)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertRegex(r.stdout, says)
-        # the controls: 03's own render; log-format text and a log-file key inside a table; a comment
+        # the controls: 03's own render; log-format text; a comment (the log-file rule: test_the_log_file_rule)
         for why, text, sets, lines in (
                 ("03's render", real, [MAIN, SMALL], LINES),
-                ('log-format "text" and a log-file in a table', 'log-format = "text"\n' + real.replace(
-                    '[docker]\n', '[docker]\nlog-file = "x"\n'), [MAIN, SMALL], LINES),
+                ('log-format "text"', 'log-format = "text"\n' + real, [MAIN, SMALL], LINES),
                 ('a comment that names an image', real.replace('runner-image = "%s"\n' % ref(OLD), '# runner-image = '
                                                                '"%s"\n' % ref(NEW), 1), [MAIN, SMALL], {SMALL: ref(OLD)}),
                 ('log-level debug', level('debug'), [MAIN, SMALL], LINES),
@@ -1848,6 +1847,50 @@ class ConfigRead(unittest.TestCase):
                 p = g.p.path('tmp', 'config.toml')
                 self.assertEqual(head, '%d %s' % (int(os.stat(p).st_mtime), sha256_file(p)))
                 self.assertEqual(json.loads(js), {'sets': sets, 'lines': lines})
+
+    def test_the_log_file_rule(self):
+        """runscaler 0.12 bump, slice H1: from runscaler v0.10.0 a config with no log-file key has runscaler write its
+        log to ~/.local/state/runner/runner.log, and the runner.log a pass reads stays and never grows: a quiet log that
+        looks healthy. 03 renders a top-level log-file of the file the pass reads ($R/runner.log). That line, exactly,
+        is read; any other value (v0.12.0's own default among them), a relative path, an empty one (no log at all) or
+        the key inside a table REFUSE, and the line names 03-runscaler.sh real (it renders the right one). A config with
+        NO log-file key is read: it is one 03 rendered before this release, which the v0.9.5 runner logs to the
+        runner.log beside it, and runner-start runs it on no other runner (test_render.py, LogFile)."""
+        g = Rig(self, on=None, clock=False)
+        bare = re.sub(r'^log-file = .*\n', '', g.p.config(), flags=re.M)
+        logf = os.path.join(g.p.R, 'runner.log')
+        self.assertEqual(bare.count('\nlog-level = "info"\n'), 1)
+
+        def top(v):
+            return bare.replace('\nlog-level = "info"\n', '\nlog-level = "info"\nlog-file = %s\n' % v)
+
+        def table(head):
+            self.assertIn(head, bare)
+            return bare.replace(head, head + 'log-file = "%s"\n' % logf, 1)
+        other = 'line [0-9]+: log-file is not "%s"' % re.escape(logf)
+        intable = 'line [0-9]+: a log-file key in a table'
+        for why, text, says in (
+                ('a log-file elsewhere', top('"/tmp/x.log"'), other),
+                ("v0.12.0's own default", top('"%s"' % os.path.join(g.p.HOME, '.local', 'state', 'runner', 'runner.log')),
+                 other),
+                ('a relative log-file', top('"runner.log"'), other),
+                ('an empty log-file (no log at all)', top('""'), other),
+                ('a log-file in [docker]', table('[docker]\n'), intable),
+                ('a log-file in a [[scaleset]] block', table('[[scaleset]]\n'), intable),
+                ('a log-file in [scaleset.docker]', table('[scaleset.docker]\n'), intable)):
+            with self.subTest(why):
+                r = self.read(g, text)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertRegex(r.stdout, says)
+                self.assertIn('03-runscaler.sh real', r.stdout)
+        for why, text in (
+                ('the log-file line, exactly', top('"%s"' % logf)),
+                ('the log-file line with a comment after it', top('"%s"   # the file a pass reads' % logf)),
+                ('no log-file key (a config 03 rendered before this release)', bare)):
+            with self.subTest(why):
+                r = self.read(g, text)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(json.loads(r.stdout.splitlines()[1]), {'sets': [MAIN, SMALL], 'lines': LINES})
 
     def test_a_config_it_cannot_read_is_no_facts_in_a_pass(self):
         g = Rig(self, on=True)

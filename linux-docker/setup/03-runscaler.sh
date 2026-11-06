@@ -24,6 +24,11 @@
 # pool-ready, validate-class and the unit are). A validate that is not PASS: config.toml is not touched. It does not
 # start or restart runscaler (a running pool is fine: validate takes no lock). A config that registers a NEW set is
 # rendered only with the unit stopped (a crash restart must not register it before the operator's go).
+# RUNSCALER'S LOG: the render's top-level `log-file` names LOGF, RS_USER's ~/.config/runner/runner.log, built from the
+# host config's RS_USER as runner-start builds it: the runner.log the updater (runner-facts.sh's log_pos) and
+# pool-image.sh's restart-cut scan read. runscaler v0.10 and later, with no log-file key, write their log elsewhere
+# (~/.local/state/runner/runner.log), and the runner.log the readers read stays and never grows: a quiet log that looks
+# healthy. runner-start runs a config only when its log-file is LOGF, or, with no log-file key, on the v0.9.5 runner.
 # render DIGEST STAGED: renders real's sets with that image into STAGED (a .toml file in ~/.config/runner, other than
 # config.toml and config.real.toml) and validates it. It INSTALLS NOTHING and runs none of real's refusal controls: it
 # refuses when a file real installs is not, as installed, the one this release pins (each one's PIN is read from ONE
@@ -83,6 +88,7 @@ host_conf 03-runscaler.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NA
 cd ~
 B=$HOME/build; POOL=$R/pool.env
 D1=unix:///home/${RUN_USER}/run/docker.sock
+LOGF=/home/${RS_USER}/.config/runner/runner.log   # RUNSCALER'S LOG (the header): what the render's log-file names
 TGZ_SHA=f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f
 BIN_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
 KEYS="CONCURRENT CPU MEMORY MAX SMALL_CPU SMALL_MEMORY"
@@ -214,6 +220,8 @@ header() { cat <<T
 # runscaler v0.9.5 config, MODE real, rendered by 03-runscaler.sh. 0600.
 # Numbers from $src.
 log-level = "info"
+# log-file: the runner.log the updater reads; runner-start refuses any other.
+log-file = "$LOGF"
 concurrent = $N_CONCURRENT
 health-address = "127.0.0.1"
 health-port = ${RS_HEALTH_PORT}

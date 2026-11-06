@@ -387,8 +387,8 @@ S03=$B/setup/03-runscaler.sh
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
 DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=2050b8953b190ba89f8b208adab32ef0c736d8ef1206472caf1dc57bc6e9f202
-$B/bin/runner-start=698d52799fc20feff260fcec82d3aa49f66aa535547368b17d27226941306107
+PINS="$S03=209d250f4d6ee35f9c1f27a2a16892a83d0a8e3ee4bb74855d77e05f3bd3a984
+$B/bin/runner-start=67d8cba9a195da6361e630db3b395d52ea75d66499f243f102e4c4c0b5293431
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/bin/validate-class=b5127e6e18e926976b62b15f0dd0eead26085657c192ad4b111ccc2defaceda2
 $B/config/runscaler.service=1f23a5c0f78c7fa6e7c8ddf0e9092c188666729177dce19ff1a8fe149e498565"

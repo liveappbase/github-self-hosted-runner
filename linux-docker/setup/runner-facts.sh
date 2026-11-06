@@ -57,11 +57,15 @@
 #                        would read wrongly (the Studio's rules where they apply, bin/runner-updater-lib's ru_config): a
 #                        block with two names or two images, or with no name; two blocks with one name; a runner-image
 #                        line outside a [[scaleset]] block (a table after it, [scaleset.docker], ends the block); a
-#                        name or runner-image line that is not a plain "..." string; a top-level log-file key, or a
+#                        name or runner-image line that is not a plain "..." string; a top-level log-file line other
+#                        than `log-file = "R/runner.log"` (what 03 renders: a plain "..." string of the file log_pos
+#                        reads), or a log-file key in any table (each of these names `03-runscaler.sh real`), or a
 #                        log-format other than "text" (runscaler would then write no runner.log the core reads, and a
 #                        quiet log would look like a healthy one); a top-level log-level other than "info" (what 03
 #                        renders) or "debug": runscaler accepts debug, info, warn and error, and at warn or error it
-#                        writes no INFO record, so no job-completed (the proof of life R1 and KEEP read). It reads no
+#                        writes no INFO record, so no job-completed (the proof of life R1 and KEEP read). A config with
+#                        NO log-file key is read: one 03 rendered before it wrote the line, which runscaler v0.9.5 logs
+#                        to the runner.log beside it, and runner-start runs it on no other runner. It reads no
 #                        pool-size (a Tart rule).
 #   install_time SHA MTIME DIR
 #                        the INSTALL TIME of a config whose sha256 is SHA and whose mtime (whole seconds) is MTIME (PLAN
@@ -217,7 +221,7 @@ healthz_pair() {
 config_read() {
   python3 -I -c '
 import hashlib, json, os, re, stat, sys
-p = sys.argv[1]
+p, LOGF = sys.argv[1], sys.argv[2]
 
 
 def no(why):
@@ -287,9 +291,14 @@ for n, l in enumerate(text.split("\n"), 1):
         if not m:
             no("%s line %d: a scale set name this does not read ([A-Za-z0-9][A-Za-z0-9._-], at most 100)" % (p, n))
         block["name"] = m.group(1)
-    elif top and key("log-file").match(l):
-        no("%s line %d: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log "
-           "reads as a quiet log, so R1 would be blind while the facts look normal; remove the key" % (p, n))
+    elif key("log-file").match(l):
+        if not top:
+            no("%s line %d: a log-file key in a table: runscaler takes log-file at the top level only; remove it, and "
+               "run 03-runscaler.sh real, which renders the top-level line" % (p, n))
+        if not re.fullmatch(WS + "log-file" + WS + "=" + WS + "\"" + re.escape(LOGF) + "\"" + TAIL, l):
+            no("%s line %d: log-file is not \"%s\", the runner.log a pass reads: runscaler then writes its log where no "
+               "pass reads it, and runner.log reads as a quiet log, so R1 would be blind while the facts look normal; "
+               "run 03-runscaler.sh real, which renders that line" % (p, n, LOGF))
     elif top and key("log-format").match(l) and not re.fullmatch(WS + "log-format" + WS + "=" + WS + "\"text\"" + TAIL, l):
         no("%s line %d: log-format is not \"text\": runscaler then writes records the core does not read, so R1 would "
            "be blind while the facts look normal; set log-format = \"text\" or remove the line" % (p, n))
@@ -300,7 +309,7 @@ for n, l in enumerate(text.split("\n"), 1):
 end()
 print(int(st.st_mtime), hashlib.sha256(data).hexdigest())
 print(json.dumps({"sets": sets, "lines": lines}, separators=(",", ":")))
-' "$1" 2> /dev/null < /dev/null
+' "$1" "$R/runner.log" 2> /dev/null < /dev/null
 }
 
 install_time() {

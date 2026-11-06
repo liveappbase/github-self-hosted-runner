@@ -12,6 +12,13 @@
 #     spelling, decodes to a daemon socket in every job); docker.socket = D1's shared socket; docker.network = "runners";
 #     token "env:RUNNER_TOKEN_*". A key spelled twice in one table (after lowercasing) is refused: which one wins is not
 #     ours to guess;
+#   - RUNSCALER'S LOG is not the runner.log the updater and pool-image.sh read (LOGF, RS_USER's ~/.config/runner/
+#     runner.log): a top-level log-file that is any other value (a relative path or "" among them), a log-file key in
+#     any table, or NO log-file key while the runner is not runscaler v0.9.5's (V095_SHA, by sha256: the one release
+#     that then writes runner.log beside the config; v0.10 and later write ~/.local/state/runner/runner.log, and the
+#     readers' runner.log stays, a quiet log that looks healthy). Each refusal names `03-runscaler.sh real`, whose render
+#     has the right line. A config with no log-file key is the live one until 03 renders again: it keeps starting on
+#     v0.9.5 (03 real installs this script before it installs a config, and installs none on a validate that fails);
 #   - (run/validate) D1 does not answer; its `runners` network is missing; it is not the Docker version the seccomp
 #     profile was cut from; the local registry does not answer (runscaler's start pull would fail); (run only) the
 #     health port is already bound;
@@ -42,6 +49,9 @@ umask 077
 RUNNER=/home/${RS_USER}/bin/runner
 CONFIG=${RUNNER_START_CONFIG:-/home/${RS_USER}/.config/runner/config.toml}
 TOKEN_DIR=/home/${RS_USER}/.config/runner
+LOGF=/home/${RS_USER}/.config/runner/runner.log   # RUNSCALER'S LOG (the header): 03's render names this file
+# runscaler v0.9.5's runner (linux-amd64), by sha256 (RUNSCALER'S LOG): it stays when 03 pins another runscaler
+V095_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
 SOCK=/home/${RUN_USER}/run/docker.sock
 D1=unix://$SOCK
 PROFILE_DOCKER=29.9.0
@@ -56,9 +66,10 @@ case $mode in
 esac
 [ -r "$CONFIG" ] || die "no config: $CONFIG"
 case $CONFIG in *.toml) ;; *) die "the config's name must end in .toml (runscaler takes the config type from the extension): $CONFIG" ;; esac
-names=$(python3 - "$CONFIG" "$SOCK" runners 2>&1 <<'PY'
+v095=0; s=$(sha256sum < "$RUNNER" 2> /dev/null) && [ "${s%% *}" = "$V095_SHA" ] && v095=1   # RUNSCALER'S LOG (the header)
+names=$(python3 - "$CONFIG" "$SOCK" runners "$LOGF" "$v095" "$RUNNER" 2>&1 <<'PY'
 import re, sys, tomllib
-cfg, SOCK, NET = sys.argv[1:4]
+cfg, SOCK, NET, LOGF, V095, RUNNER = sys.argv[1:7]
 def low(t, path):
     if isinstance(t, dict):
         out = {}
@@ -80,13 +91,33 @@ try:
         c = low(tomllib.load(f), "")
 except (OSError, tomllib.TOMLDecodeError) as e:
     sys.exit(f"the config does not parse ({e}): {cfg}")
+# RUNSCALER'S LOG (the header): first, so a log-file key in a table is refused with this line, not the per-table one
+FIX = f"run 03-runscaler.sh real, whose render names {LOGF!r}: {cfg}"
+def no_table_log_file(t, path):
+    for k, v in t.items():
+        for i, x in enumerate(v if isinstance(v, list) else [v]):
+            if isinstance(x, dict):
+                where = f"{path}{k}[{i}]." if isinstance(v, list) else f"{path}{k}."
+                if "log-file" in x:
+                    sys.exit(f"the key {where}log-file is in a table: runscaler takes log-file at the top level only; {FIX}")
+                no_table_log_file(x, where)
+no_table_log_file(c, "")
+if "log-file" in c:
+    if c["log-file"] != LOGF:
+        sys.exit(f"log-file is {c['log-file']!r}, not the runner.log the updater reads: runscaler would log where no one "
+                 f"reads, and that runner.log would look like a quiet, healthy log; {FIX}")
+elif V095 != "1":
+    sys.exit(f"the config has no log-file key, and {RUNNER} is not runscaler v0.9.5's runner, the one release that then "
+             f"writes runner.log beside the config (a later one logs elsewhere, and the runner.log the updater reads "
+             f"would look like a quiet, healthy log); {FIX}")
 sets = c.pop("scaleset", None)
 if not isinstance(sets, list) or not sets or not all(isinstance(s, dict) for s in sets):
     sys.exit(f"the config has no [[scaleset]] table: {cfg}")
 # Only the keys 03-runscaler.sh renders, per table: anything else (shared-volume, cache-volumes, cache, …) changes
 # what a job gets and is refused, whatever runscaler would make of it.
 DOCKER_KEYS = {"socket", "dind", "network", "cpu", "memory", "pids-limit"}
-ALLOWED = {"": {"log-level", "concurrent", "health-address", "health-port", "drain-timeout", "provider", "docker"},
+ALLOWED = {"": {"log-level", "log-file", "concurrent", "health-address", "health-port", "drain-timeout", "provider",
+                "docker"},
            "docker": DOCKER_KEYS,
            "scaleset": {"url", "name", "token", "runner-group", "labels", "max-runners", "runner-image", "docker"}}
 def allowed(t, where, path):

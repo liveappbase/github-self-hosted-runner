@@ -84,7 +84,7 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/github-se
    ```
    read -rs "t?GitHub token: " && print -rn -- "$t" | ssh <RS_USER>@<host> 'umask 077 && cat > ~/.config/runner/<TOKEN_FILE>'; unset t
    ```
-9. **runscaler (RS_USER).** It must end with `03 DONE (real)`:
+9. **runscaler (RS_USER).** The config it renders names runscaler's log with a top-level `log-file` line: `runner.log` in RS_USER's `~/.config/runner`, the file the updater and `pool-image.sh` read (without that line, runscaler v0.10 and later write their log elsewhere). `runner-start` refuses a config whose `log-file` is another file or is inside a table, and a config with no `log-file` line on any runscaler but v0.9.5 (the one release that then writes `runner.log` beside the config). It must end with `03 DONE (real)`:
    ```
    ssh <RS_USER>@<host> 'bash -s -- real' < linux-docker/setup/03-runscaler.sh
    ```
@@ -225,6 +225,22 @@ This release adds the host-config key `RUNNER_VERSION`: the runner version a ful
 
 Then install this release's files as for every release ("A new runner release", its first paragraph), and do Install step 10 once, for both users: this release adds the updater, `~/bin/runner-updater`. Then do Install step 11 once, for both users: this release adds its timer (while the updater is OFF, a pass only ends a window journal a cut left and holds or clears `STOP POOL DOWN`).
 
+This release's `03-runscaler.sh real` also renders a new line into config.toml, `log-file` (Install step 9), which the config.toml of a host installed before it does not have: once this release's files are in, do "The log-file line" (below), once.
+
+## The log-file line
+
+From this release, `03-runscaler.sh real` renders a top-level `log-file` line into config.toml: the `runner.log` in RS_USER's `~/.config/runner`, the file the updater and `pool-image.sh` read. Without that line, runscaler v0.10 and later write their log elsewhere, and the old `runner.log` stays as it is: the updater would read that quiet file as a healthy log. A host installed before this release runs a config.toml without the line, and it keeps running: this release's `runner-start` starts a config with no `log-file` line on runscaler v0.9.5 (the release 03 installs, which then writes `runner.log` beside the config), and refuses it on any other runscaler. But `pool-image.sh up` changes nothing in config.toml except the image, so it never adds the line: until config.toml has it, each `pool-image.sh up` to another image stops with config.toml as it was and restarts nothing. So put the line in once, after this release's files (Install step 3 for both users), with no open release (close one first: "A new runner release", step 3, `accept` or `back`) and no window journal (Install step 3: `runner-updater status` shows none):
+
+1. Render and install it (RS_USER). It renders the image config.toml runs and pool.env's numbers, with the line, and restarts nothing. It must end with `03 DONE (real)`:
+   ```
+   ssh <RS_USER>@<host> 'bash -s -- real' < linux-docker/setup/03-runscaler.sh
+   ```
+2. Restart runscaler at a quiet time, when no job runs (the restart lets a busy runner finish its job, but cuts a runner that GitHub gave a job it has not started yet), so that runscaler runs the new config.toml, and check that both sets are ready (within a minute). Until this restart, `pool-image.sh up` refuses a config.toml installed after runscaler started:
+   ```
+   ssh <RS_USER>@<host> 'systemctl --user restart runscaler && sleep 60 && ~/bin/pool-ready <MAIN_SET> <SMALL_SET>'
+   ```
+   runscaler v0.9.5 then writes the file the line names, the same `runner.log`: it goes on growing as before.
+
 ## A host that already runs these scripts from a hand copy
 
 Until you do this, the host keeps running the files it has. The move installs the host config and this release's files, checks that the pool runs the config and image its records name, and does nothing else: it runs no 03 and restarts nothing. The scripts of this folder refuse to run without the host config, so it comes first:
@@ -251,7 +267,7 @@ Until you do this, the host keeps running the files it has. The move installs th
    ssh <RS_USER>@<host> 'bash ~/build/bin/pool-ready <MAIN_SET> <SMALL_SET>'
    ```
 
-Do not run 03-runscaler.sh by hand on the running pool: it installs config.toml again, with a new time, and then the next `pool-image.sh up` (and the `accept` of an open release) refuses until runscaler restarts. The next runner release's `up` runs 03 itself ("A new runner release", step 2): it installs this release's `runner-start`, `pool-ready`, `validate-class` and unit, renders config.toml from the host config, and restarts runscaler when the pool is idle. If a value of the host config is not the one the pool runs, that `up` stops with config.toml as it was, and nothing restarts. If a release is still open (its `up` ran, and neither its `accept` nor its `back`), close it first with one of them ("A new runner release", step 3: `accept` or `back`).
+Then do "The log-file line" (above), once: the move's config.toml has no `log-file` line, and `pool-image.sh up` stops until it has. Apart from that one run, which restarts runscaler right after it, do not run 03-runscaler.sh by hand on the running pool: it installs config.toml again, with a new time, and then the next `pool-image.sh up` (and the `accept` of an open release) refuses until runscaler restarts. The next runner release's `up` runs 03 itself ("A new runner release", step 2): it installs this release's `runner-start`, `pool-ready`, `validate-class` and unit, renders config.toml from the host config, and restarts runscaler when the pool is idle. If a value of the host config is not the one the pool runs, that `up` stops with config.toml as it was, and nothing restarts. If a release is still open (its `up` ran, and neither its `accept` nor its `back`), close it first with one of them ("A new runner release", step 3: `accept` or `back`).
 
 ## Uninstall
 
