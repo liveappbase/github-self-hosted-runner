@@ -66,9 +66,9 @@ jobs:
     # parts of S2b-3b-1 took 10.3-15.3 min of CI at 26bae3f (S2b-3c-1 B1: test_[!a-qu]*.py 13.9 and 15.3 min, though no
     # module of it changed in that round: about 1.5 min of host noise either way), so S2b-3c-1 B2a split them into
     # seven, by the first two letters of the module names; a new module is named for the part it joins. Each part's
-    # estimate after B2a (24.04, the slower image: its CI job time at 26bae3f less the modules it lost, plus each new
-    # cell's local time x 1.35, the CI/local ratio seen): [a-j] 9.6, [k-q] 9.5, rec 7.7, re[!c] 5.8, [!a-qr][!np] 9.6,
-    # un 11.0 and up 9.6 min. A part that nears 12 min gets a pattern more.
+    # estimate after B2a (24.04, the slower image: its CI job time at 26bae3f less the modules it lost, plus B2a's
+    # measured local time of each new or grown module x 1.35, the CI/local ratio seen): [a-j] 8.0, [k-q] 7.6, rec 7.7,
+    # re[!c] 5.8, [!a-qr][!np] 8.1, un 11.1 and up 8.9 min. A part that nears 12 min gets a pattern more.
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
