@@ -6,9 +6,10 @@
 # `systemctl --user daemon-reload`, then `systemctl --user enable --now runner-updater.timer`, and checks that the timer
 # is enabled and active. From then on the user manager runs ~/bin/runner-updater pass every 10 minutes (the timer
 # file's header says when, and why). It changes nothing of the updater itself: a fresh install is OFF for both users
-# (PLAN D11), and a pass while OFF measures nothing, asks the core and GitHub nothing and builds nothing; but RS_USER's
-# runs RECOVER FIRST, THE APPLY STEP and THE OUTAGE RULE first, OFF too (bin/runner-updater's header: it may end a
-# window a cut left, start runscaler and write the state, and it exits 1 while a window journal stays).
+# (PLAN D11), and a pass while OFF measures nothing and builds nothing, and the updater itself asks the core and GitHub
+# nothing; but RS_USER's runs RECOVER FIRST, THE APPLY STEP and THE OUTAGE RULE first, OFF too (bin/runner-updater's
+# header: it may end a window a cut left, start runscaler and write the state, and it exits 1 while a window journal
+# stays; RECOVER may validate a config and start runscaler, which both reach GitHub).
 # IDEMPOTENT AND CONVERGING: a file there that is already this release's (a plain file, its bytes, mode 0644) is left
 # as it is, not written again; any other (an older release's, one changed by hand, another mode, a symlink) is
 # replaced by rename. The two systemctl calls run on every run, in that order: a run cut after a write is finished by

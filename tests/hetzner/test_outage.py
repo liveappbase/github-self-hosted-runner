@@ -202,6 +202,24 @@ class Controls(unittest.TestCase):
                 pass_(self, g)
                 self.assertEqual(held(g, 'CI DISABLED'), [] if enabled else ['held'])
 
+    def test_ci_disabled_s_clear_needs_the_unit_enabled_past_its_install_boundary(self):
+        """B2a review r2, Codex F2 (B2a CLOSED): the cell that ISOLATES the `enabled` check of CI DISABLED's clear.
+        Both STOPs held (so the rule reads past its first-read shortcut), a runscaler that RUNS and started AFTER
+        config.toml's install (the install boundary passes), and a person's `disable` without --now: POOL DOWN is
+        cleared (CI is off by hand, not down) and CI DISABLED is KEPT. The control: the same unit enabled (no change of
+        process or config): both cleared."""
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                g = Rig(self)
+                self.assertGreater(g.p.unit_now()['start'], int(os.stat(g.p.rpath('config.toml')).st_mtime),
+                                   'the premise: the process started after the install')
+                put(g, stops=[stopj('CI DISABLED', 'held'), stopj('POOL DOWN', 'held')])
+                g.p.set_unit(enabled=enabled)
+                r = pass_(self, g)
+                self.assertEqual(held(g), [], r.stdout[-2500:])
+                self.assertEqual(held(g, 'CI DISABLED'), [] if enabled else ['held'], r.stdout[-2500:])
+                self.assertTrue(g.p.unit_now()['active'], 'the premise: the process still runs')
+
     def test_an_older_runscaler_that_serves_a_hand_installed_config_is_ci_up(self):
         """A person's `03-runscaler.sh real` after a pool.env change installs config.toml under the running process
         (it restarts nothing: PLAN D2): that process serves, so CI is up: no POOL DOWN is raised, and a held one is
@@ -258,6 +276,38 @@ class PureLevel(unittest.TestCase):
                         self.assertEqual(len(held(g)), n, (k, r.stdout[-2500:]))
                     self.assertIn('hook healthz-read: ' + act, events(g), 'the premise: the hook fired')
                     self.assertEqual(g.p.unit_now()['enabled'], act != 'disable')
+
+    def test_a_person_s_plain_stop_after_the_runs_pair_is_pool_down(self):
+        """B2a review r2, Codex F1 (B2a CLOSED): the DECIDING unit read agrees with RUNS (active, the same MainPID as
+        RUNS's process; else no runscaler RUNS). A person's plain `systemctl --user stop runscaler` right after RUNS's
+        last process read (the hook at the rule's third `systemctl show`: runs' second proc_now) and before the deciding
+        read: that read shows the unit enabled, inactive, pid 0. The pass holds exactly ONE POOL DOWN (a held one stays,
+        none held: one raised), and a held CI DISABLED is not cleared by the process that is gone, ON and OFF; so for an
+        independent restart there (another MainPID: a process RUNS did not prove). The controls: no stop (the same
+        process serves): a held POOL DOWN is cleared; a `disable --now` there instead: no POOL DOWN (off by hand)."""
+        for on, act, start in ((False, 'stop', 'both'), (True, 'stop', 'both'), (False, 'stop', 'ci'),
+                               (True, 'stop', 'ci'), (False, 'restart', 'both'), (False, None, 'both'),
+                               (False, 'disable', 'both')):
+            with self.subTest(on=on, act=act, start=start):
+                g = Rig(self)
+                put(g, on=on, stops=[stopj('CI DISABLED', 'held')] + ([stopj('POOL DOWN', 'held')]
+                                                                       if start == 'both' else []))
+                if act:
+                    g.p.count_shows()
+                    g.p.hooks(('systemctl:show-3', act))
+                r = pass_(self, g)
+                if act:
+                    self.assertIn('hook systemctl:show-3: ' + act, events(g), 'the premise: the hook fired')
+                down = held(g)
+                if act in ('stop', 'restart'):
+                    self.assertEqual(len(down), 1, r.stdout[-2500:])
+                    self.assertEqual(held(g, 'CI DISABLED'), ['held'], r.stdout[-2500:])
+                    self.assertEqual(g.p.unit_now()['active'], act == 'restart')
+                    if start == 'ci':
+                        self.assertIn('CI is down', down[0])
+                    continue
+                self.assertEqual(down, [], r.stdout[-2500:])
+                self.assertEqual(held(g, 'CI DISABLED'), [] if act is None else ['held'], r.stdout[-2500:])
 
     def test_a_held_pool_down_is_cleared_once_the_unit_is_not_enabled(self):
         """Opus F2: the enabled unit down: a pass holds POOL DOWN; then a person keeps CI off on purpose (`disable

@@ -38,6 +38,7 @@ import time
 import unittest
 
 from tests.hetzner.support import REPO, SLEEP_STUB, Pool, digest, healthz, needs_container, ref, run_pool, sha256_file
+from tests.hetzner.test_recover import cut
 
 UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
 LIB = os.path.join(REPO, 'linux-docker', 'setup', 'runner-facts.sh')
@@ -1134,6 +1135,38 @@ class OnOff(unittest.TestCase):
         self.assertFalse(g.state()['on'])
         self.assertFalse(os.path.lexists(WINDOW), r.stdout)
         self.assertTrue(os.path.isfile(os.path.join(WINDOWS, '20261103080000-42')))
+
+    def test_off_s_refusal_says_what_recover_did_and_never_that_nothing_changed(self):
+        """B2a review r2, Codex F3 = Opus F2 (B2a CLOSED): a switch cut after `stopped`, runner-start crash-looping, the
+        updater ON: `off` runs RECOVER, which starts runscaler (no RUNS in 10 min: `pre-close-failure`, the journal
+        open). off refuses (exit 1) and the updater stays ON, but its line never says "nothing changed": it says the
+        updater stays ON and that what RECOVER did stays. The control: a journal RECOVER cannot read (exit 6): nothing
+        started, the journal and the state as they were, and the line says nothing changed."""
+        g = cut(self, 'up', ('journal:stopped', 'crash', 'kill'))
+        os.makedirs(STATEDIR, mode=0o700, exist_ok=True)
+        g.p.write(STATE, json.dumps({'format': 1, 'on': True, 'families': {}}) + '\n', 0o600)
+        before = g.p.window()
+        r = g.p.updater('off')
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        self.assertIn('runner-updater: REFUSE a window journal stays open (%s): off never strands a window' % WINDOW,
+                      r.stdout)
+        self.assertEqual(len(g.calls('start')), 1, 'the premise: RECOVER started runscaler: ' + r.stdout[-3000:])
+        self.assertNotEqual(g.p.window(), before, 'the premise: RECOVER journaled')
+        self.assertTrue(json.loads(g.p.read(STATE))['on'])
+        refusal = r.stdout.split('runner-updater: REFUSE a window journal stays open', 1)[1]
+        self.assertNotIn('nothing changed', refusal)
+        self.assertIn('the updater stays ON', refusal)
+        self.assertIn('what RECOVER and the apply step did in this run stays', refusal)
+        # the control
+        c = Rig(self, on=True, production=False)
+        os.makedirs(WINDOWS, mode=0o700)
+        text = 'window 20261103080000-42\na line no pattern reads\n'
+        c.p.write(WINDOW, text, 0o600)
+        raw = c.raw()
+        r = c.run('off')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual((c.p.read(WINDOW), c.raw(), c.calls('start')), (text, raw, []))
+        self.assertIn('so nothing changed', r.stdout.split('runner-updater: REFUSE a window journal stays open', 1)[1])
 
     def test_on_and_off_wait_for_the_updater_lock(self):
         for cmd, was in (('on', False), ('off', True)):

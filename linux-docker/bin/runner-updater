@@ -9,9 +9,10 @@
 # release's: config/runner-updater.timer runs config/runner-updater.service, one `~/bin/runner-updater pass`, every 10
 # minutes as each user (both files' headers say when and why, and the service's TimeoutStartSec bound); Install step
 # 11, setup/04-timer.sh, installs and starts it as each user. A fresh install is OFF (D11): a pass while OFF measures
-# nothing, asks the core and GitHub nothing and builds nothing, but RS_USER's runs RECOVER FIRST, THE APPLY STEP and
-# THE OUTAGE RULE first (below: it may end a window a cut left, start runscaler and write the state, and it exits 1
-# while a window journal stays).
+# nothing and builds nothing, and the updater itself asks the core and GitHub nothing; but RS_USER's runs RECOVER
+# FIRST, THE APPLY STEP and THE OUTAGE RULE first (below: it may end a window a cut left, start runscaler and write the
+# state, and it exits 1 while a window journal stays): RECOVER may validate a config (runner-start validate checks the
+# GitHub API) and start runscaler, which both reach GitHub (B2a review r2, Opus F3).
 #
 # THIS RELEASE STARTS NO WINDOW (S2b-3c-1: every way a switch ENDS; the switch is S2b-3c-2's, the rollback B2b's).
 # RS_USER's pass, and its on and off, end a window journal a cut left open (RECOVER FIRST, below: pool-image.sh's
@@ -117,8 +118,10 @@
 #   on       on = true; RS_USER's: a journal that stays at WINDOW after RECOVER FIRST is its STOP line, exit 1, and on
 #            is as it was.
 #   off      refuses while a window journal stays at WINDOW after RECOVER FIRST (off never strands a window: D11, D-f;
-#            RECOVER never waits for idle, so a switch that waits stays open and off names it), and changes nothing;
-#            else on = false.
+#            RECOVER never waits for idle, so a switch that waits stays open and off names it): on stays as it was,
+#            and the line says "nothing changed" only when nothing did (RECOVER changed nothing by its own exit: 1, 3,
+#            4, 6, or 0 with the journal's bytes as they were; and no state write), else that what RECOVER and the
+#            apply step did stays (B2a review r2, Codex F3 = Opus F2); else on = false.
 #   pass     the timer's entry (config/runner-updater.timer). The lock held: "another run holds the updater lock",
 #            exit 0 at once. ONE CLOCK PER PASS (B2a review r1): now = the UTC clock, read ONCE, first, before RECOVER
 #            FIRST (which may wait for a drain) and THE OUTAGE RULE (its /healthz pair takes 3 s): every decision of the
@@ -126,7 +129,9 @@
 #            so none depends on how long a step before it took (core/README.md compares `now` only with an earlier
 #            `now`, never with a log time). RS_USER's: RECOVER FIRST and THE APPLY STEP, then THE OUTAGE RULE, OFF too;
 #            a journal that stays at WINDOW is then its STOP line, exit 1, and nothing else. OFF: "the updater is OFF",
-#            exit 0, no core call and no GitHub call (THE OUTAGE RULE's /healthz pair is runscaler's, on 127.0.0.1). ON:
+#            exit 0: the updater itself asks the core and GitHub nothing (THE OUTAGE RULE's /healthz pair is
+#            runscaler's, on 127.0.0.1); RECOVER FIRST, before it, may validate a config and start runscaler, which
+#            both reach GitHub. ON:
 #            the jq check, the FACTS (below) into PASSDIR, then idle.jq, r1.jq, keep.jq and status.jq with the same
 #            five inputs (state, facts, log, healthz, --arg now). The state they read is PASSDIR/state.json, a copy of
 #            the state's `core`, written back by rename after idle and after r1, so a later program reads it; only when
@@ -215,7 +220,9 @@
 #   and it ends there; else ONE runner-facts.sh `runs` of config.toml's sets, of a runscaler of ANY start (never one
 #   `active` read; its /healthz pair kept in memory), then the unit read AGAIN: that read, AFTER the RUNS check,
 #   decides (a person's `systemctl --user disable --now runscaler` during the pair is CI off by hand: B2a review r1,
-#   Codex F1). The unit enabled and no runscaler RUNS: STOP POOL DOWN in the state, its text naming the open window
+#   Codex F1), and it must agree with RUNS: active, with the MainPID of RUNS's own process, else no runscaler RUNS (a
+#   person's plain `systemctl --user stop` after RUNS's last read: B2a review r2, Codex F1). The unit enabled and no
+#   runscaler RUNS: STOP POOL DOWN in the state, its text naming the open window
 #   journal's last line and how it stays when there is one (README's section when no run of the updater can end it),
 #   else what the pass saw (the unit's state), held ONCE (a held one stays as it is: no new STOP each pass). Else (a
 #   runscaler RUNS, whenever it started, or the unit not enabled: B2a review r1, Opus F2): POOL DOWN cleared. For
@@ -361,6 +368,7 @@ umask 077
 VERSION_RE='[0-9]{1,9}[.][0-9]{1,9}[.][0-9]{1,9}'
 TERMED=   # THE TERM WINDOW's record of a TERM (do_build_pass): empty at the start of every command, never inherited
 EARLIER=  # this run ran RECOVER or wrote the state (core_nothing): empty at the start of every command, never inherited
+WROTE=    # this run wrote the state (put_state; off's refusal): empty at the start of every command, never inherited
 
 usage() { echo "runner-updater: usage: runner-updater status | on | off | pass | build VERSION${1:+ ($1)}" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage "no command"
@@ -548,7 +556,7 @@ put_state() {
   out=$(dd if=/dev/null of="$STATE.new" conv=notrunc,fsync 2>&1 < /dev/null) \
     || { rm -f -- "$STATE.new"; stop "the state cannot be synced to disk (dd: ${out%%$'\n'*}): $STATE is as it was"; }
   mv -f -- "$STATE.new" "$STATE" || { rm -f -- "$STATE.new"; stop "the state cannot be renamed into place: $STATE is as it was"; }
-  EARLIER=1   # this run wrote the state (core_nothing)
+  EARLIER=1 WROTE=1   # this run wrote the state (core_nothing; off's refusal)
 }
 # JQFILTER [JQ OPTION...]: ST changed by it, written by put_state
 change_state() {
@@ -771,6 +779,10 @@ do_off() {
   [ "$ROLE" != rs ] || recover_first
   if [ -n "$WSTOP" ] || window_open; then
     [ -z "$WSTOP" ] || echo "$WSTOP"
+    # never "nothing changed" after RECOVER or a state write acted (B2a review r2, Codex F3)
+    if [ -n "$RECOVER_ACTED$WROTE" ]; then
+      refuse "a window journal stays open ($WINDOW): off never strands a window, so the updater stays $(printf '%s\n' "$ST" | jq -r 'if .on then "ON" else "OFF" end'), and what RECOVER and the apply step did in this run stays (their lines above). Run off again once \`runner-updater status\` shows no window journal"
+    fi
     refuse "a window journal stays open ($WINDOW): off never strands a window, so nothing changed. Run off again once \`runner-updater status\` shows no window journal"
   fi
   change_state '.on = false'
@@ -786,6 +798,9 @@ W_HOW=              # with WSTOP: how the journal stays, for POOL DOWN's text (B
                     # when no run of the updater can end it, else what the next run does
 RECOVER_STARTED=0   # this run's RECOVER journaled a `starting` or `stopping` (D-g: a pass's one restart of runscaler;
                     # S2b-3c-1 B2b's rollback reads it: a pass whose RECOVER started or restarted runscaler starts none)
+RECOVER_ACTED=      # this run's RECOVER may have changed something (off's refusal, B2a review r2: Codex F3, Opus F2):
+                    # not by its own contract when it exits 1, 3, 4 or 6, nor exit 0 with the journal's bytes as they
+                    # were; 5 (open: a resumed start writes no line) and any other exit may have
 
 # RECOVER FIRST (the header): pool-image.sh's RECOVER as this run's CHILD, only when a journal is at WINDOW (it holds
 # the updater lock on fd 9, which the child inherits: THE UPDATER'S CHILD), then THE APPLY STEP. RECOVER's exits: 0 the
@@ -795,13 +810,19 @@ RECOVER_STARTED=0   # this run's RECOVER journaled a `starting` or `stopping` (D
 # A journal that stays at WINDOW (open, or one the apply step cannot read or archive) sets WSTOP: nothing else starts;
 # and W_HOW, how it stays (POOL DOWN's text names it: a promise that a run ends it only when one can)
 recover_first() {
-  local rc n0
+  local rc n0 s0
   window_open || return 0
   EARLIER=1   # RECOVER runs (core_nothing)
   n0=$(wc -l < "$WINDOW" 2> /dev/null) && [[ $n0 =~ ^[0-9]+$ ]] || n0=0
+  s0=$(sha256sum < "$WINDOW" 2> /dev/null) || s0=
   bash "$B/setup/pool-image.sh" recover --unattended < /dev/null
   rc=$?
   [ "$(tail -n +"$((n0 + 1))" -- "$WINDOW" 2> /dev/null | grep -c -E '^(starting|stopping) ')" = 0 ] || RECOVER_STARTED=1
+  case $rc in
+    1|3|4|6) ;;
+    0) [ "$(sha256sum < "$WINDOW" 2> /dev/null)" = "$s0" ] || RECOVER_ACTED=1 ;;
+    *) RECOVER_ACTED=1 ;;
+  esac
   case $rc in
     0|5) ;;
     3) return 0 ;;
@@ -1052,7 +1073,8 @@ apply_archive() {
 # THE OUTAGE RULE (the header), a PURE LEVEL each pass computes anew: ONE unit_read (when the unit is not enabled and no
 # POOL DOWN is held, nothing can change: it ends), ONE runs of any start (runner-facts.sh: never one `active` read),
 # then the unit read AGAIN, after the RUNS check: THAT read decides (a person's `disable --now` during the pair is CI
-# off by hand, never CI down). The unit enabled and no runscaler RUNS -> STOP POOL DOWN, held once (a held one stays as
+# off by hand, never CI down), and RUNS holds only when it shows the unit active with RUNS's own MainPID (a plain stop
+# after RUNS's last read). The unit enabled and no runscaler RUNS -> STOP POOL DOWN, held once (a held one stays as
 # it is); else (a runscaler RUNS, whenever it started, or the unit not enabled) POOL DOWN is cleared. CI DISABLED is
 # cleared only by the unit enabled AND a runscaler that RUNS and started after config.toml's install time (facts 4's
 # install_time, read after the RUNS check: a file installed during the pair is not the one that process runs), so a
@@ -1072,6 +1094,11 @@ outage() {
   runs 0 - $sets; ran=$?   # any start: the install time proves WHICH file a process runs, never whether CI is up
   p=$RUNS_PROC
   unit_read || { say "pass: runscaler's unit cannot be read after the RUNS check (systemctl --user show runscaler): THE OUTAGE RULE raises and clears nothing"; return 0; }
+  # the deciding read agrees with RUNS (B2a review r2, Codex F1): a runscaler that ended after RUNS's last process read
+  # (a person's plain `systemctl --user stop`) is no runscaler that RUNS
+  if [ "$ran" = 0 ] && { [ "$UNIT_ACTIVE" != active ] || [ "$UNIT_PID" != "${p% *}" ]; }; then
+    ran=1 RUNS_WHY="runscaler ($p) ended after the RUNS check"
+  fi
   if [ "$ran" = 0 ]; then
     if [ "$pd" = true ]; then
       change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "POOL DOWN")]' --arg f "$FAMILY"

@@ -445,6 +445,28 @@ class Text(unittest.TestCase):
                 for s in ('RECOVER', 'THE OUTAGE RULE'):
                     self.assertIn(s, one)
 
+    def test_no_header_says_an_off_pass_with_recover_asks_github_nothing(self):
+        """B2a review r2, Opus F3 (B2a CLOSED): RECOVER, which RS_USER's OFF pass runs first, may validate a config
+        (runner-start validate checks the GitHub API: bin/validate-class's API-ONLY) and start runscaler (which
+        connects to GitHub). So no OFF sentence of the updater's header, the timer's or 04-timer.sh's says that an OFF
+        pass makes "no GitHub call" or "asks the core and GitHub nothing": each says that the updater ITSELF asks
+        them nothing, and that RECOVER may validate a config and start runscaler, which do. The control: the matcher
+        finds the sentences of daa3ee8 (:129 and :12)."""
+        old = re.compile(r'(?i)(no GitHub call|(?<!itself )asks the core and GitHub nothing)')
+        for s in ('OFF: "the updater is OFF", exit 0, no core call and no GitHub call (THE OUTAGE RULE\'s /healthz '
+                  'pair is runscaler\'s, on 127.0.0.1).',
+                  'a pass while OFF measures nothing, asks the core and GitHub nothing and builds nothing'):   # control
+            self.assertRegex(s, old)
+        for name, text in (('bin/runner-updater', header('bin/runner-updater')),
+                           ('config/runner-updater.timer', shipped_text('runner-updater.timer')),
+                           ('setup/04-timer.sh', header('setup/04-timer.sh'))):
+            with self.subTest(name):
+                one = ' '.join(text.replace('#', ' ').split())
+                self.assertNotRegex(one, old)
+                self.assertIn('the updater itself asks the core and GitHub nothing', one)
+                self.assertIn('RECOVER may validate a config', one)
+                self.assertIn('start runscaler, which both reach GitHub', one)
+
     def test_the_updater_s_header_names_its_timer_and_the_stop_of_its_unit(self):
         h = header('bin/runner-updater')
         for s in ('config/runner-updater.timer', 'setup/04-timer.sh', 'TimeoutStartSec', 'every process of the unit',

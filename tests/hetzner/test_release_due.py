@@ -219,6 +219,32 @@ class Steps(unittest.TestCase):
         g = Due(self, age=2 * DAY)
         self.assertEqual(g.due(g.run()), SWITCH)
 
+    def test_7_its_age_is_read_at_the_pass_s_start_before_recover(self):
+        """B2a review r2, Opus F1 (B2a CLOSED; its mutant M-R, the clock read after RECOVER FIRST): DUE's boundary with
+        a window journal that RECOVER ends while the fake clock moves (`window ID`, the enabled unit serving: RECOVER's
+        own RUNS pair moves it 3 s; it closes the journal with no STOP, and the apply step only archives it). The
+        pass's ONE clock is its start, so a release 2 days - 1 s old is still younger than 2 days. The control: the
+        same journal at 2 days: would switch."""
+        wid = '20261106010000-4242'
+        for age, want in ((2 * DAY - 1, 'young'), (2 * DAY, 'switch')):
+            with self.subTest(age=age):
+                g = Due(self, age=age)
+                os.makedirs(os.path.join(Pool.STATE, 'windows'), mode=0o700, exist_ok=True)
+                g.p.write(os.path.join(Pool.STATE, 'window'), 'window %s\n' % wid, 0o600)
+                start = g.p.clock()
+                r = g.run()
+                arch = g.p.read(os.path.join(Pool.STATE, 'windows', wid))
+                self.assertIsNotNone(arch, 'the premise: RECOVER closed the journal and it is archived: '
+                                     + r.stdout[-3000:])
+                self.assertIn('\nrecover-start ', arch, 'the premise: RECOVER ran on it')
+                self.assertGreaterEqual(g.p.clock(), start + 9,
+                                        'the premise: RECOVER, THE OUTAGE RULE and the facts slept')
+                line = g.due(r)
+                if want == 'switch':
+                    self.assertEqual(line, SWITCH)
+                else:
+                    self.assertTrue(line.startswith(NOT + 'release v%s is younger than 2 days' % V), line)
+
     def test_8_a_stop_of_the_eligible_version(self):
         g = Due(self, family={'stops': [stop('check failed', V, text='FAIL x')]})
         self.held(g, 'STOP check failed (runner %s): it is of the eligible release' % V, network=True)
