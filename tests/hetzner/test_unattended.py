@@ -1555,13 +1555,20 @@ class Text(unittest.TestCase):
         for code in ('0', '1', '2', '3', '4', '5', '6'):
             self.assertRegex(h, r'#\s+%s\s' % code, 'the header names no exit code %s' % code)
 
-    def test_the_readme_says_what_the_journal_shows_and_how_back_is_used_by_hand(self):
+    def test_the_readme_says_what_the_journal_shows_and_who_runs_the_modes(self):
+        """S2b-3c-1 D-a, D-b: the modes are the updater's only (a person's rollback is `runner-updater back hz-docker`,
+        and no line gives a person `pool-image.sh back --unattended`: test_back.py, Text), RECOVER is the third, and a
+        closed journal stays at `window` until the updater's next run applies and archives it."""
         with open(README) as f:
             text = f.read()
         sec = text.split('\n## The updater\'s switch and rollback\n', 1)[1].split('\n## ', 1)[0]
         self.assertIn('~/.local/state/runner-updater/window', sec)
-        self.assertIn("ssh <RS_USER>@<host> 'bash ~/build/setup/pool-image.sh back --unattended'", sec)
-        for k in ('rename-start', 'renamed', 'stopped', 'running', 'hand-change', 'backup'):
+        self.assertNotIn("ssh <RS_USER>@<host> 'bash ~/build/setup/pool-image.sh back --unattended'", sec)
+        for s in ('runner-updater back hz-docker', 'recover --unattended', "the updater's only",
+                  'stays at `window` with the closing lines', 'until the updater\'s next run'):
+            self.assertIn(s, sec)
+        for k in ('rename-start', 'renamed', 'stopped', 'running', 'hand-change', 'backup', 'why', 'verdict',
+                  'old-version', 'target-version', 'installed', 'closed'):
             self.assertIn('`%s' % k, sec)
         self.assertIn('config.toml.backup', sec, "back's backup of the config it replaces")
 

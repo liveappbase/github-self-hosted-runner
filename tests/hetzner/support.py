@@ -932,6 +932,16 @@ def act(a):
             return
         event('kill %d' % g)
         os.killpg(g, signal.SIGKILL)
+    elif a == 'kill-updater':              # SIGKILL the runner-updater run this substitute is a child (or grandchild)
+        p = os.getppid()                   # of, and nothing else (S2b-3c-1 B2b: a kill at a boundary of the apply step)
+        while p > 1:
+            pp, cmd = ppid_cmd(p)
+            if re.search(r'/bin/runner-updater( |$)', cmd):
+                event('kill-updater %d' % p)
+                os.kill(p, signal.SIGKILL)
+                return
+            p = pp
+        event('kill-updater REFUSED: no runner-updater above %d' % os.getpid())
     elif a == 'count-shows':               # from now on the systemctl substitute counts its show reads (systemctl:show-N)
         st = load('systemd.json')
         st['shows'] = 0
@@ -1570,7 +1580,9 @@ class Pool(Sandbox):
         comment), hand-file (a person installs another file: the main set's max-runners 3 -> 2), put-prev (a person
         puts config.toml.prev back as config.toml), edit-staged, edit-rollback (back's STAGED), edit-prev
         (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
-        held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh), count-shows (as
+        held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh), kill-updater
+        (SIGKILL of the runner-updater run the hooked command is a child of: a kill at a boundary of the apply step),
+        count-shows (as
         count_shows(), from that event on), pend (at `systemctl:show-N`: that read stays pending while it names who holds
         the two locks, kills the window, and names them again: hzlib.pend). An injection, AT
         with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another

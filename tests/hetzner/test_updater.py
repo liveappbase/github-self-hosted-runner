@@ -295,6 +295,8 @@ class State(unittest.TestCase):
             ('restart.why', lambda s: s['restart'].update(why='x')),
             ('restart.from.uid', lambda s: s['restart']['from'].update(uid=0)),
             ('restart.stopped.path', lambda s: s['restart']['stopped'].update(path='x')),
+            ('families.hz-docker.connect_only.2.338.0.why', lambda s: s['families'][FAM].update(
+                connect_only={'2.338.0': {'n': 1, 'at': 1761955000, 'why': 'x'}})),
         )
         for member, change in cases:
             with self.subTest(member):
@@ -317,7 +319,8 @@ class State(unittest.TestCase):
                           'stopped': {'inode': '42', 'offset': 0, 'sha': H}},
               'families': {FAM: {'candidate': candidate(1761955000), 'previous': dict(LINES),
                                  'back_until': 1762000000, 'rejected': ['2.338.0'],
-                                 'stops': [stop('DISK', text='free disk')]}}}
+                                 'stops': [stop('DISK', text='free disk')], 'r1_since': 1761955500,
+                                 'connect_only': {'2.338.0': {'n': 1, 'at': 1761955100}}}}}
         g.put(st)
         g.ok('status')
         g.ok('on')
@@ -340,6 +343,13 @@ class State(unittest.TestCase):
                 'stopped': {'inode': '42', 'offset': 0, 'sha': H}}}),
             ('a last_window that is no window ID', {'format': 1, 'on': False, 'families': {}, 'last_window': '../x'}),
             ('a last_window that is a number', {'format': 1, 'on': False, 'families': {}, 'last_window': 20261103080000}),
+            ('an r1_since that is no epoch', {'format': 1, 'on': False, 'families': {FAM: {'r1_since': '1761955500'}}}),
+            ('a connect_only of another shape', {'format': 1, 'on': False, 'families': {FAM: {
+                'connect_only': {'2.338.0': {'n': 0, 'at': 1761955100}}}}}),
+            ('a connect_only of a key that is no version', {'format': 1, 'on': False, 'families': {FAM: {
+                'connect_only': {'latest': {'n': 1, 'at': 1761955100}}}}}),
+            ('a connect_only of the singleton shape {version, at}', {'format': 1, 'on': False, 'families': {FAM: {
+                'connect_only': {'version': '2.338.0', 'at': 1761955100}}}}),
         )
         for why, st in cases:
             with self.subTest(why):
@@ -1757,12 +1767,12 @@ class InstallTime(unittest.TestCase):
         g, opened, r = self.documented(restart=False)
         self.assertFalse(opened, 'the evidence window of candidate NEW opened on a process that runs OLD')
         self.assertNotEqual(g.out('r1')['families'][FAM]['verdict'], 'rollback')
-        self.assertNotIn('would roll back', r.stdout)
+        self.assertNotIn("R1's rollback is due", r.stdout)
 
     def test_control_a_restart_after_that_reinstall_runs_the_candidate_and_its_failures_count(self):
         g, opened, r = self.documented(restart=True)
         self.assertTrue(opened, g.out('r1'))
-        self.assertIn('runner-updater: pass: would roll back hz-docker (this release takes no action)', r.stdout)
+        self.assertIn("runner-updater: pass: R1's rollback is due for hz-docker (runner %s)" % V, r.stdout)
 
     def test_control_a_journal_with_no_renamed_line_is_no_install(self):
         g = Rig(self, on=True)
@@ -1879,12 +1889,18 @@ class Would(unittest.TestCase):
         self.assertTrue(g.out('r1')['families'][FAM]['open'], g.out('r1'))
         return g, int(time.time()) + 100
 
-    def test_three_counted_failures_on_a_set_would_roll_back(self):
+    def test_three_counted_failures_on_a_set_are_r1_s_rollback_verdict(self):
+        """R1's rollback verdict, which the pass now ACTS on (S2b-3c-1 B2b: test_verdict.py has the rollback's cells;
+        "would roll back" is gone). This candidate was set by hand, so no switch kept a config.toml.prev: the rollback's
+        precondition holds STOP ROLLBACK FAILED, and no window starts."""
         g, t = self.armed()
         g.append(failed(t) + failed(t + 10) + failed(t + 20) + scaling(t + 160) + scaling(t + 161))
         r = g.ok('pass')
         self.assertEqual(g.out('r1')['families'][FAM]['verdict'], 'rollback')
-        self.assertIn('runner-updater: pass: would roll back hz-docker (this release takes no action)', r.stdout)
+        self.assertIn("runner-updater: pass: R1's rollback is due for hz-docker (runner %s)" % V, r.stdout)
+        self.assertNotIn('would roll back', r.stdout)
+        self.assertEqual([s['stop'] for s in g.state()['families'][FAM]['stops']], ['ROLLBACK FAILED'])
+        self.assertIsNone(g.p.window())
 
     def test_control_a_proof_of_life_between_them_is_no_rollback(self):
         g, t = self.armed()
@@ -1892,7 +1908,7 @@ class Would(unittest.TestCase):
                  + scaling(t + 161))
         r = g.ok('pass')
         self.assertEqual(g.out('r1')['families'][FAM]['verdict'], 'none')
-        self.assertNotIn('would roll back', r.stdout)
+        self.assertNotIn("R1's rollback is due", r.stdout)
 
     def keep(self, records, after, slow=1):
         """KEEP's boundary against the PASS'S START (B2a review r1, ONE CLOCK PER PASS): the fake clock set to the
@@ -1991,15 +2007,17 @@ class NoAction(unittest.TestCase):
         g.put(st)
         return g
 
-    def test_a_pass_that_would_roll_back_acts_on_nothing(self):
+    def test_a_pass_with_no_journal_and_no_rollback_verdict_acts_on_nothing(self):
+        """S2b-3c-1 B2b: a pass whose R1 says rollback now ACTS (one rollback window: test_verdict.py, Real, asserts its
+        one stop and one start and nothing else); with no window journal and no rollback verdict a pass acts on
+        nothing."""
         g = self.rig()
         m = self.mark(g)
         self.assertIn('runner-updater: pass: hz-docker is not due: an open candidate', g.ok('pass').stdout)
         self.acted_on_nothing(g, m)
-        t = int(time.time()) + 100
-        g.append(failed(t) + failed(t + 10) + failed(t + 20) + scaling(t + 160) + scaling(t + 161))
+        g.append(scaling(int(time.time()) + 100) + completed(int(time.time()) + 110, 'succeeded'))
         m = self.mark(g)
-        self.assertIn('would roll back hz-docker', g.ok('pass').stdout)
+        self.assertNotIn("R1's rollback is due", g.ok('pass').stdout)
         self.acted_on_nothing(g, m)
 
     def test_control_a_planted_restart_is_seen(self):
@@ -2104,11 +2122,13 @@ class Usage(unittest.TestCase):
 
     def test_usage(self):
         g = Rig(self, on=None, clock=False, production=False)
-        for args in ((), ('report',), ('status', 'x'), ('pass', '--now')):
+        for args in ((), ('report',), ('status', 'x'), ('pass', '--now'), ('back',), ('back', 'hz-other'),
+                     ('back', FAM, 'x')):
             with self.subTest(args):
                 r = g.run(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('usage: runner-updater status | on | off | pass | build VERSION', r.stderr)
+                self.assertIn('usage: runner-updater status | on | off | pass | back hz-docker | build VERSION',
+                              r.stderr)
 
 
 # ---- the text (runs anywhere)
@@ -2195,8 +2215,10 @@ class Text(unittest.TestCase):
         self.assertNotIn('| `setup/runner-facts.sh` | RS_USER |', text)   # Opus r1 F6: both users' updater reads it
         sec = text.split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         for s in ('runner-updater status', 'runner-updater on', 'runner-updater off', 'runner-updater pass',
-                  'STOP RECOVER needed', '~/.local/state/runner-updater/state.json'):
+                  'runner-updater back hz-docker', '~/.local/state/runner-updater/state.json'):
             self.assertIn(s, sec)
+        # S2b-3c-1: the pass runs RECOVER (B2a), so its `STOP RECOVER needed (S2b-3c)` line is gone (test_back.py, Text)
+        self.assertNotIn('STOP RECOVER needed', sec)
 
     def test_every_path_to_this_release_sends_a_host_to_install_step_10(self):
         """Opus r1 F3: a host that gets this release by the upgrade notes, or moves from a hand copy, gets the updater's

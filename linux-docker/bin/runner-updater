@@ -1,7 +1,8 @@
 #!/bin/bash
-# runner-updater status | on | off | pass | build VERSION — the runner-image updater on the Linux host (PLAN D1, D2, D6,
-# D7, D11): ONE program for the host's two users, and the user it runs as decides its ROLE: RS_USER's (status, on, off,
-# pass) or RUN_USER's (status, on, off, pass, build VERSION); any other user: REFUSE (RS_USER's comes first, so a host
+# runner-updater status | on | off | pass | back hz-docker | build VERSION — the runner-image updater on the Linux host
+# (PLAN D1, D2, D6, D7, D11): ONE program for the host's two users, and the user it runs as decides its ROLE: RS_USER's
+# (status, on, off, pass, back hz-docker) or RUN_USER's (status, on, off, pass, build VERSION); any other user: REFUSE
+# (RS_USER's comes first, so a host
 # config that names one user twice runs RS_USER's). The Studio's twin is bin/runner-updater (zsh) with
 # bin/runner-updater-release; what DIFFERS from it is named below. Install: linux-docker/README.md, "The updater:
 # status, on, off, pass, build" (each user's ~/bin/runner-updater, a link to ~/build/bin/runner-updater, so it always
@@ -14,19 +15,21 @@
 # state, and it exits 1 while a window journal stays): RECOVER may validate a config (runner-start validate checks the
 # GitHub API) and start runscaler, which both reach GitHub (B2a review r2, Opus F3).
 #
-# THIS RELEASE STARTS NO WINDOW (S2b-3c-1: every way a switch ENDS; the switch is S2b-3c-2's, the rollback B2b's).
-# RS_USER's pass, and its on and off, end a window journal a cut left open (RECOVER FIRST, below: pool-image.sh's
-# RECOVER as their child may start or restart runscaler and put a rollback's backup back), apply a closed one to the
-# state (THE APPLY STEP) and archive it; a pass then holds or clears POOL DOWN (THE OUTAGE RULE), measures, asks the
-# decision core (core/README.md) and prints what it WOULD do, and which runner release it would switch to (DUE, below).
-# With no journal at WINDOW, it runs no pool-image.sh and no `systemctl --user start|stop|restart`, and changes no
-# config. RUN_USER's pass builds the image of the release DUE waits for (THE BUILD PASS, below), with 02-d1.sh, and
-# changes nothing of the pool. Each user's writes: under STATEDIR, the state (by rename), a pass's files (PASSDIR) and
-# the lock file, RS_USER's archive of a closed journal (WINDOW renamed into WINDOWS) and what its RECOVER writes
-# (pool-image.sh's header), and RUN_USER's BUILDOUT (their modes: runner-release.sh's rr_lock, THE MODES, by the
-# user's role); under runner-release.sh's RR_DIR
-# (~/.cache/liveapp-ci), the filtered CA bundle and the private copy of each build record it reads; and RUN_USER's
-# 02-d1.sh build what that writes (its header). status writes nothing.
+# THIS RELEASE STARTS NO SWITCH (S2b-3c-1: every way a switch ENDS or is UNDONE; the switch is S2b-3c-2's). Its one
+# window is a ROLLBACK: R1's rollback verdict in a pass that is ON, or a person's `back hz-docker` (THE ROLLBACK,
+# below). RS_USER's pass, its on and off, and back end a window journal a cut left open (RECOVER FIRST, below:
+# pool-image.sh's RECOVER as their child may start or restart runscaler and put a rollback's backup back), apply a
+# closed one to the state (THE APPLY STEP, with THE REJECTION) and archive it; a pass then holds or clears POOL DOWN
+# (THE OUTAGE RULE), measures, asks the decision core (core/README.md), rolls back on R1's verdict, and prints what else
+# it WOULD do (KEEP's) and which runner release it would switch to (DUE, below). With no journal at WINDOW and no
+# rollback, it runs no pool-image.sh and no `systemctl --user start|stop|restart`, and changes no config. RUN_USER's
+# pass builds the image of the release DUE waits for (THE BUILD PASS, below), with 02-d1.sh, and changes nothing of the
+# pool. Each user's writes: under STATEDIR, the state (by rename), a pass's files (PASSDIR) and the lock file, RS_USER's
+# archive of a closed journal (WINDOW renamed into WINDOWS), its REJECTED file (THE REJECTED FILE) and what its RECOVER
+# and its rollback window write (pool-image.sh's header), and RUN_USER's BUILDOUT (their modes: runner-release.sh's
+# rr_lock, THE MODES, by the user's role); under runner-release.sh's RR_DIR (~/.cache/liveapp-ci), the filtered CA
+# bundle and the private copy of each build record it reads; and RUN_USER's 02-d1.sh build what that writes (its
+# header). status writes nothing.
 #
 # THE STATE, STATE (STATEDIR/state.json): ONE JSON object per user, written by rename after a sync to disk (STATE.new,
 # `dd conv=notrunc,fsync`, then a rename over STATE; a write, sync or rename that fails is a STOP, and STATE is as it
@@ -43,7 +46,12 @@
 #                back_until  EPOCH | null: after an ACCEPT, the end of the 7 days `back` restores `previous`
 #                rejected    ["N.N.N", ...]: the versions the updater never switches it to again
 #                stops       [{family: "hz-docker", stop: NAME, version, user, detail}]: the STOPs it holds
-#                            (core/README.md, facts.stops)}}
+#                            (core/README.md, facts.stops)
+#                r1_since    EPOCH: the first pass whose R1 said rollback (THE ROLLBACK's 2 h), counted only while a
+#                            try could start (CI disabled by a person, a pending hand edit, D-g's wait and `off` remove
+#                            it); absent when R1 says other, and after a close that rolled back
+#                connect_only {VERSION: {n, at}}: the family's connect-only rollbacks of each version (n) and the
+#                            last one's `closed` (at: the 1-h retry); nothing in this release resets it}}
 #              an absent member reads as null or []. SET: a scale set name; IMAGE: a digest reference, NAME@sha256:<64
 #              hex> (what 03-runscaler.sh renders).
 #   core       the decision core's own state (the `state` idle.jq and r1.jq return) | absent: a fresh core
@@ -54,8 +62,9 @@
 #              written in the same state write, so a journal whose ID it is (a run cut after its write, before the
 #              archive) is only archived, never applied twice
 #   A MEMBER THIS RELEASE DOES NOT READ (at the top, a family other than hz-docker, in hz-docker, in its candidate, in a
-#   STOP, in the restart): every command WAITs (exit 4), names it, and writes nothing. So a later release may add one
-#   under format 1, and an older one (a rollback across it) never writes a state that drops it or hides a STOP.
+#   STOP, in a connect_only entry, in the restart): every command WAITs (exit 4), names it, and writes nothing. So a
+#   later release may add one under format 1, and an older one (a rollback across it) never writes a state that drops
+#   it or hides a STOP.
 # RUN_USER's state is its own (one record per user, and no channel from RS_USER to RUN_USER: PLAN D1), with the same
 #   format rule, REFUSE and WAIT. It goes by the build records' channel, so RS_USER's status can print it (PLAN D1,
 #   11-05): 0640, group RUN_USER, its folders open to that group for search only; RS_USER's stays 0600 in a 0700
@@ -75,9 +84,10 @@
 #   its sets are the host config's MAIN_SET and SMALL_SET; another family in the state is a member it does not read
 #   (WAIT). Two users, each with its own state, key and lock; RUN_USER builds, RS_USER switches.
 #
-# COMMANDS. on, off, pass and build hold THE UPDATER LOCK (runner-release.sh's rr_lock: RR_LOCK on fd 9, one per user)
-#   for their whole run: on, off and build wait for it (a WAIT line first); a pass only tries it. RS_USER's on, off and
-#   pass run RECOVER FIRST and THE APPLY STEP (below) right after they read the state, before ON or OFF is read.
+# COMMANDS. on, off, pass, back and build hold THE UPDATER LOCK (runner-release.sh's rr_lock: RR_LOCK on fd 9, one per
+#   user) for their whole run: on, off, back and build wait for it (a WAIT line first); a pass only tries it. RS_USER's
+#   on, off, pass and back run RECOVER FIRST and THE APPLY STEP (below) right after they read the state, before ON or
+#   OFF is read.
 #   status   no lock, and it writes no file anywhere (the core's inputs come through pipes). ONE read of STATE; the jq
 #            check (below); status.jq with facts from the state (RS_USER's: the family's candidate and back_until, the
 #            STOPs it holds; RUN_USER's: its STOPs, of hz-docker) and RS_USER's `core`. It prints ON or OFF; RS_USER's
@@ -121,7 +131,8 @@
 #            RECOVER never waits for idle, so a switch that waits stays open and off names it): on stays as it was,
 #            and the line says "nothing changed" only when nothing did (RECOVER changed nothing by its own exit: 1, 3,
 #            4, 6, or 0 with the journal's bytes as they were; and no state write), else that what RECOVER and the
-#            apply step did stays (B2a review r2, Codex F3 = Opus F2); else on = false.
+#            apply step did stays (B2a review r2, Codex F3 = Opus F2); else on = false, and the family's r1_since is
+#            removed (the Studio's do_off: time while OFF never counts against a rollback's 2 h).
 #   pass     the timer's entry (config/runner-updater.timer). The lock held: "another run holds the updater lock",
 #            exit 0 at once. ONE CLOCK PER PASS (B2a review r1): now = the UTC clock, read ONCE, first, before RECOVER
 #            FIRST (which may wait for a drain) and THE OUTAGE RULE (its /healthz pair takes 3 s): every decision of the
@@ -143,11 +154,22 @@
 #            WAIT the decision core waits ...", exit 4, and the core's own state is as it was (the `restart` member
 #            too). Each line says "the pass did nothing: STATE is as it was" only when the pass did nothing before the
 #            core either (no RECOVER ran, no state write: core_nothing); else that what it did before the core stays
-#            (B2a review r1, Codex F3: RECOVER's, the apply step's or THE OUTAGE RULE's write). Then what it WOULD
-#            do: "would roll back hz-docker" (r1's rollback), "would accept hz-docker" (keep's accept), "would hold
-#            hz-docker: STOP JOBS FAIL ON THE NEW IMAGE" or "... STOP NO EVIDENCE" (keep); then DUE's ONE line for
-#            hz-docker. Each program's output stays in PASSDIR/PROGRAM.json, the latest release's lines in
-#            PASSDIR/release.out and .err. RUN_USER's: THE BUILD PASS (below).
+#            (B2a review r1, Codex F3: RECOVER's, the apply step's or THE OUTAGE RULE's write). The core's write also
+#            keeps the family's r1_since (set by the first pass whose R1 says rollback, removed when it says other).
+#            Then what it WOULD do of KEEP (S2b-3c-2's acts): "would accept hz-docker", "would hold hz-docker: STOP JOBS
+#            FAIL ON THE NEW IMAGE" or "... STOP NO EVIDENCE"; then R1's rollback, which it DOES (THE ROLLBACK, below:
+#            at most one window; a journal it leaves open is its STOP line, exit 1, and nothing else); then
+#            CONNECT-ONLY's ONE RETRY (below); then DUE's ONE line for hz-docker. Each program's output stays in
+#            PASSDIR/PROGRAM.json, the latest release's lines in PASSDIR/release.out and .err. RUN_USER's: THE BUILD
+#            PASS (below).
+#   back hz-docker   RS_USER's only (a person's rollback, PLAN D7; THE ROLLBACK, below): it waits for the lock, runs
+#            RECOVER FIRST and THE APPLY STEP (a journal that stays: its STOP, exit 1), then refuses while OFF (the
+#            Studio's do_back), with no candidate unless before back_until ("nothing to go back to"), with the unit not
+#            enabled ("rollback pending: CI disabled by a person"), and with config.toml already on `previous`; THE
+#            ROLLBACK'S PRECONDITIONS ON THE FILES hold their STOP (exit 1); else ONE window `pool-image.sh back
+#            --unattended --why back [--old-version V]` as its child (V: the candidate's version, else RUN_USER's build
+#            record of the image config.toml names), then THE APPLY STEP. Exit 0 rolled back, 5 pending (the window's
+#            `end`: no STOP, nothing changed; the Studio's), 1 a STOP, a REFUSE or a journal left open.
 #   build VERSION   RUN_USER's only (a person's path, D7's retry of a build's `check failed`): it waits for the lock and
 #            runs 02-d1.sh build VERSION as its child (as the build pass does), while OFF too. Exit 0 of 02-d1.sh clears
 #            the `check failed` STOP of VERSION (by rename); 75 (GitHub's rate limit) is "WAIT ...", exit 4, and the
@@ -159,16 +181,17 @@
 #
 # RECOVER FIRST (S2b-3c-1 D-b (c), D-f; the Studio's run_recover): when a journal is at WINDOW (a window holds the
 #   lock for its whole run, so a run that holds it and finds one found a window a cut left open, or one closed and not
-#   archived), RS_USER's on, off and pass run `~/build/setup/pool-image.sh recover --unattended` as their CHILD (it gets
-#   the lock on fd 9: pool-image.sh's THE UPDATER'S CHILD), its output shown, then THE APPLY STEP. Its exits: 0 the
-#   journal is closed; 3 none; 4 WAIT (a person's pool-image.sh run holds that script's own lock: RECOVER read and
+#   archived), RS_USER's on, off, pass and back run `~/build/setup/pool-image.sh recover --unattended` as their CHILD
+#   (it gets the lock on fd 9: pool-image.sh's THE UPDATER'S CHILD), its output shown, then THE APPLY STEP. Its exits:
+#   0 the journal is closed; 3 none; 4 WAIT (a person's pool-image.sh run holds that script's own lock: RECOVER read and
 #   changed nothing): a line, no STOP, and a closed journal is applied all the same; 5 it stays open (RECOVER's line
 #   says why: a STOP of its own, a wait for idle, a start that did not run yet); 6 a record RECOVER cannot read or act
 #   on: a STOP that names linux-docker/README.md "An unfinished window the updater cannot end", nothing written; 1
 #   RECOVER's REFUSE; any other: a STOP that names it. A journal that stays (open, or one THE APPLY STEP cannot read or
 #   archive): its STOP or REFUSE line, exit 1, and nothing else starts (a pass: after THE OUTAGE RULE, whose POOL DOWN
 #   text says how it stays: README's section when no run of the updater can end it, else what the next run does). A
-#   pass makes at most ONE restart of runscaler (D-g): this release's only one is RECOVER's (RECOVER_STARTED).
+#   pass makes at most ONE restart of runscaler (D-g): RECOVER's, or THE ROLLBACK's window (a pass whose RECOVER
+#   started or restarted runscaler starts no rollback window: RECOVER_STARTED).
 # THE APPLY STEP (S2b-3c-1 D-b (b) and the r3 FOLD), under the lock: a journal at WINDOW whose last line is `closed E`,
 #   read ONCE, by its keys and fields, never a line's text; it reads no config.toml, no build record and no clock (the
 #   closer journaled what it installed: `installed SHA CONTENT CLASS`, pool-image.sh's THE CLOSING LINES). Its ID is
@@ -189,9 +212,8 @@
 #   - switch, pre | none: no candidate change; when its `backup` names config.toml.prev, its LAST `prev` (a line that
 #     may come twice) is `config-sha` (the backup replaced the keep) and there is no candidate: previous = null and
 #     back_until = null, and the line says the keep is gone (r1 Opus F19).
-#   - rollback, target-running | target-idle: candidate, previous and back_until = null (rolled back: target-idle is a
-#     person's `disable --now`, its TARGET runs at the person's start); THE REJECTION is B2b's (apply_rejection, its one
-#     place).
+#   - rollback, target-running | target-idle: candidate, previous, back_until and r1_since = null (rolled back:
+#     target-idle is a person's `disable --now`, its TARGET runs at the person's start), and THE REJECTION (below).
 #   - rollback, target-old (a person's `disable` without --now: an older runscaler runs the candidate's image): the
 #     candidate stays, CI DISABLED held. target-failed (RECOVER's: the rollback DECIDED as failed and its TARGET still
 #     installed): the candidate stays, ROLLBACK FAILED held, never "rolled back". pre | none: no change.
@@ -208,12 +230,47 @@
 #   rollback close that sets or clears the candidate drops JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE (they judged the
 #   candidate it replaced). Each STOP is of the switch's `version`, a rollback's `old-version` (else the candidate's),
 #   a journal with no `kind`'s of no version (null); its detail {text} (POOL DOWN's also hand: journalctl --user -u
-#   runscaler).
+#   runscaler; ROLLBACK FAILED's: README's "The rollback, and what status shows of it": HAND_OF, one copy).
+#   THE REJECTION (S2b-3c-1 D-e; apply_rejection, its one place), of a rollback's close that rolled back, by the
+#   journal's own `why`, `old-version` V, `target-version`, `verdict` and `old` lines (it reads no build record):
+#   `why r1`: V rejected (the state's `rejected` and THE REJECTED FILE), STOP ROLLED BACK of V whose detail is R1's
+#   verdict of the family {set, failures, connect_only, reason}, read from the window's verdict.json only when its
+#   sha is the journal's `verdict` (else the detail says R1's failures are not readable, and status prints that line);
+#   `why r1-connect`: the Studio's connect_only[V] = {n: n + 1, at: `closed`}: n = 1 holds ROLLED BACK with
+#   detail.connect_only true and rejects nothing (one retry after 1 h: CONNECT-ONLY's ONE RETRY), n >= 2 rejects V as
+#   r1; `why back` (a person's): V rejected only when it is newer than target-version, and no ROLLED BACK. `none` (or
+#   no N.N.N) on either side: not rejected, no connect-only rollback counted, and the line says why.
+#   THE REJECTED FILE (the r3 FOLD): ~/.local/state/runner-updater/rejected (REJECTED), 03-runscaler.sh's (one
+#   `sha256:<64 hex>` per line: 03 refuses that image in every mode): the digest of the journal's `old` image added
+#   only when absent, by a rename of a full copy written and synced first, BEFORE the ONE state write, so a run cut
+#   after it and before the state write adds nothing twice (and one cut after the state write only archives:
+#   last_window). A file it cannot read (not a plain file, a line of another shape): a STOP, nothing written.
 #   THE OWN RESTART (core/README.md :68-121; the r3 FOLD): `restart` = {from, to: `running`, stopped} only from a
 #   journal with no `recover-start` (an uninterrupted window), its own `from` (a process), `stopped` (a position) and
 #   `running`, whose start is within 20 s of its `starting` (RestartSec=30: no Restart=always retry came between),
 #   while the state holds no unconsumed `restart`; any other applied journal removes the member (a gap: the safe
 #   default).
+# THE ROLLBACK (S2b-3c-1 D-e, D-f; the Studio's pass_r1, ru_rb_window, do_back): ONE window, `~/build/setup/
+#   pool-image.sh back --unattended --why WHY ...` as the run's CHILD (it gets the lock on fd 9), no idle wait (a
+#   rollback never waits for idle: the drain lets busy runners finish), then its journal: CLOSED -> THE APPLY STEP;
+#   OPEN with no `stopping` or `starting` line (it found the enabled unit down and ended before its rename) -> RECOVER
+#   FIRST at once (RECOVER, then THE APPLY STEP: the run's one restart); OPEN after its own restart -> a STOP line, exit
+#   1, and the next run's RECOVER ends it (D-g). R1's, in a pass that is ON, after the core: r1.json's verdict
+#   `rollback` for the family, then THE ROLLBACK'S PRECONDITIONS in the Studio's order: a candidate (else a line); not
+#   in a pass whose RECOVER started or restarted runscaler (D-g: a line; no try could start); no ROLLBACK FAILED held (a
+#   line); the unit ENABLED (operator (1); else "rollback pending: CI disabled by a person", no window, no try could
+#   start; enabled and down: the window goes on, and its restart starts runscaler); THE PRECONDITIONS ON THE FILES:
+#   config.toml's family lines are the candidate's (else STOP HAND CHANGE: a pending hand edit, a person's hand switch
+#   or config.toml.prev put back; no try could start) and config.toml.prev's the state's `previous` (else STOP ROLLBACK
+#   FAILED: its target is not the config its switch kept); THE 2-H BOUND (PLAN D5): now - r1_since >= 2 h -> STOP
+#   ROLLBACK FAILED, no window. "No try could start" removes r1_since (the 2 h start at the next pass that can try).
+#   Then the window: `--why r1` (or `r1-connect` when R1's verdict is connect-class only) `--verdict PASSDIR/r1.json
+#   --old-version V` (V: the candidate's version: its lines name `old`, the first precondition). Its lines: "rolled
+#   back", "rollback pending" (the window's `end`: R1 stays armed), or its STOP. A window in this pass -> DUE says the
+#   next pass decides (one window per pass). A person's: `back hz-docker` (COMMANDS) by the same window, `--why back`.
+# CONNECT-ONLY's ONE RETRY (the Studio's pass_connect_retry), a pass that is ON, after THE ROLLBACK: a ROLLED BACK of V
+#   whose detail.connect_only is true is removed when connect_only[V].n = 1 and now - at >= 1 h: V may be due again,
+#   once (the count stays, so a second connect-only rollback rejects it).
 # THE OUTAGE RULE (S2b-3c-1 B1 DECISIONS r4 and B2a DECISIONS; operator (1): the unit enabled means CI on), RS_USER's
 #   pass, ON or OFF, after RECOVER FIRST: a PURE LEVEL, computed anew by each pass, never latched. ONE unit_read: the
 #   unit not enabled and no POOL DOWN held, nothing can change (a CI DISABLED is cleared only with the unit enabled),
@@ -241,6 +298,8 @@
 #   (asked of the core's lib/stops.jq, S::newer_proceeds, never a table here: a name it does not know does not proceed),
 #   or it is of the eligible version. It prints ONE line, the first of these that holds, in this order (what needs no
 #   network first, so a family held for a local reason asks GitHub nothing):
+#   0. a window ran in this pass (THE ROLLBACK's: one window per pass, and the pass's facts are of the pool before it):
+#      "hz-docker is not due: a window ran in this pass ...: the next pass decides";
 #   1. an open candidate: "hz-docker is not due: an open candidate (runner V): ..." (the 7 days `back` keeps `previous`
 #      after an ACCEPT are no open release: PLAN D6, AFTER ACCEPT);
 #   2. a STOP that holds whatever the release is (no version, or a newer release does not proceed alone past it), or
@@ -329,13 +388,15 @@
 #   0  done; also a pass that finds the lock held or the updater OFF, and a pass whose DUE line or build pass says why
 #      nothing is due or built (a WAIT of GitHub's, or of 02-d1.sh in a pass, too; a build CUT by a signal)
 #   1  a REFUSE (a state it does not read, a fact it cannot read, a recipe it cannot compute, off while a window journal
-#      stays, RECOVER's own REFUSE, a user other than RS_USER and RUN_USER, build as RS_USER) or a STOP (a state it
-#      cannot write, the core could not decide, a window journal that stays at WINDOW after RECOVER FIRST, a pass's
-#      build that failed: check failed); a `build VERSION` that failed
+#      stays, RECOVER's own REFUSE, a user other than RS_USER and RUN_USER, build as RS_USER, back as RUN_USER, back
+#      that has nothing to go back to, while OFF or with the unit not enabled) or a STOP (a state it cannot write, the
+#      core could not decide, a window journal that stays at WINDOW after RECOVER FIRST or after the rollback window,
+#      a pass's build that failed: check failed, back's STOP); a `build VERSION` that failed
 #   2  usage
 #   3  STOP untested jq
 #   4  WAIT: a state of another format, or with a member this release does not read; a pass, or status, whose decision
 #      core waits; a `build VERSION` whose 02-d1.sh waits (GitHub's rate limit)
+#   5  `back hz-docker` pending: the rollback window ended with no STOP (`end`), nothing changed (the Studio's)
 # Constants:
 #   PATH        its own, the system folders, set first: a caller's PATH (the watchdog's `ssh RS_USER@HOST PATH=...
 #               runner-updater status`, a timer, a terminal) changes nothing, and its #! line names /bin/bash, so no
@@ -350,7 +411,7 @@
 #               facts.json, log.txt, healthz.json, the core state copy state.json, each program's PROGRAM.json and
 #               PROGRAM.err, the latest release's release.out and release.err), WINDOW (window: pool-image.sh's open
 #               window journal), WINDOWS (windows/: its closed ones), BUILDOUT (build.out: RUN_USER's last 02-d1.sh
-#               build's output)
+#               build's output), REJECTED (rejected: THE REJECTED FILE, RS_USER's)
 #   RUN_STATE RUN_MAX  RUN_USER's STATE as RS_USER's status reads it: /home/RUN_USER plus this STATE's path in the home;
 #               at most 262144 bytes of it (a larger one is not shown)
 #   BUILDS      RUN_USER's build records (02-d1.sh's ~/run/builds): /home/RUN_USER/run/builds as RS_USER (RS_USER reads
@@ -370,13 +431,14 @@ TERMED=   # THE TERM WINDOW's record of a TERM (do_build_pass): empty at the sta
 EARLIER=  # this run ran RECOVER or wrote the state (core_nothing): empty at the start of every command, never inherited
 WROTE=    # this run wrote the state (put_state; off's refusal): empty at the start of every command, never inherited
 
-usage() { echo "runner-updater: usage: runner-updater status | on | off | pass | build VERSION${1:+ ($1)}" >&2; exit 2; }
+usage() { echo "runner-updater: usage: runner-updater status | on | off | pass | back hz-docker | build VERSION${1:+ ($1)}" >&2; exit 2; }
 [ "$#" -ge 1 ] || usage "no command"
 cmd=$1
 shift
 case $cmd in
   status|on|off|pass) [ "$#" = 0 ] || usage "$cmd takes no argument" ;;
   build) { [ "$#" = 1 ] && [[ $1 =~ ^${VERSION_RE}$ ]]; } || usage "build takes one runner version, N.N.N of 1 to 9 digits each" ;;
+  back) { [ "$#" = 1 ] && [ "$1" = hz-docker ]; } || usage "back takes the one family of this host, hz-docker" ;;
   *) usage "unknown command '$cmd'" ;;
 esac
 
@@ -410,6 +472,7 @@ if [ "$ME" = "${RS_USER}" ]; then ROLE=rs
 elif [ "$ME" = "${RUN_USER}" ]; then ROLE=run
 else refuse "run me as ${RS_USER} or ${RUN_USER}"; fi
 [ "$cmd" != build ] || [ "$ROLE" = run ] || refuse "build is a command of RUN_USER (${RUN_USER}): run it as ${RUN_USER}"
+[ "$cmd" != back ] || [ "$ROLE" = rs ] || refuse "back is a command of RS_USER (${RS_USER}): run it as ${RS_USER}"
 B=$HOME/build
 R=$HOME/.config/runner
 CFG=$R/config.toml
@@ -449,7 +512,10 @@ def family_ok: type == "object"
   and (.previous == null or (.previous | lines_ok))
   and (.back_until == null or (.back_until | epoch_ok))
   and (.rejected == null or (.rejected | type == "array" and all(.[]; version_ok)))
-  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok)));
+  and (.stops == null or (.stops | type == "array" and all(.[]; stop_ok)))
+  and (.r1_since == null or (.r1_since | epoch_ok))
+  and (.connect_only == null or (.connect_only | type == "object" and all(to_entries[]; (.key | version_ok)
+         and (.value | type == "object" and (.n | type) == "number" and .n >= 1 and .n == (.n | floor) and (.at | epoch_ok)))));
 if type == "object" and .format == 1 and (.on | type) == "boolean" and (.families | type) == "object"
    and (.families["hz-docker"] == null or (.families["hz-docker"] | family_ok))
    and (.core == null or (.core | type) == "object")
@@ -463,11 +529,14 @@ def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
 [(keys - ["format", "on", "families", "core", "restart", "last_window"])[] | shown]
 + [(.families | keys - ["hz-docker"])[] | "families.\(shown)"]
 + (if (.families["hz-docker"] | type) == "object" then .families["hz-docker"] as $h
-     | [($h | keys - ["candidate", "previous", "back_until", "rejected", "stops"])[] | "families.hz-docker.\(shown)"]
+     | [($h | keys - ["candidate", "previous", "back_until", "rejected", "stops", "r1_since", "connect_only"])[]
+        | "families.hz-docker.\(shown)"]
        + (if ($h.candidate | type) == "object" then [($h.candidate | keys - ["version", "lines", "closed_at"])[]
             | "families.hz-docker.candidate.\(shown)"] else [] end)
        + [($h.stops // []) | to_entries[] | .key as $i | .value | (keys - ["family", "stop", "version", "user", "detail"])[]
             | "families.hz-docker.stops[\($i)].\(shown)"]
+       + [($h.connect_only // {}) | to_entries[] | .key as $v | .value | (keys - ["n", "at"])[]
+            | "families.hz-docker.connect_only.\($v).\(shown)"]
    else [] end)
 + (if (.restart | type) == "object" then .restart as $r
      | [($r | keys - ["from", "to", "stopped"])[] | "restart.\(shown)"]
@@ -761,6 +830,10 @@ status_own() {   # [MORE]: jq_check's
     stop "core could not decide (status): exit $rc: ${out%%$'\n'*}"
   fi
   printf '%s\n' "$out" | jq -r --arg pre "" "$STATUS_LINES"
+  # a ROLLED BACK whose R1 verdict copy was not readable (THE REJECTION): status.jq alone prints "0 counted failures"
+  [ "$ROLE" != rs ] || printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '(.families[$f].stops // [])[]
+      | select(.stop == "ROLLED BACK" and ((.detail.failures | type) != "array"))
+      | "runner-updater: status: STOP ROLLED BACK (runner \(.version // "none")): \(.detail.text // "R1'"'"'s failures are not readable") (the counted failures the line above names are not R1'"'"'s count)"' 2> /dev/null
   [ "$(printf '%s\n' "$out" | jq -r '.verdict')" != wait ] \
     || wait4 "the decision core waits ($(printf '%s\n' "$out" | waits_why status)): status decides nothing, and it writes nothing"
   exit 0
@@ -785,7 +858,9 @@ do_off() {
     fi
     refuse "a window journal stays open ($WINDOW): off never strands a window, so nothing changed. Run off again once \`runner-updater status\` shows no window journal"
   fi
-  change_state '.on = false'
+  # time while OFF never counts against a rollback's 2 h (the Studio's do_off): r1_since goes
+  change_state '.on = false | if (.families[$f] | type) == "object" then .families[$f] |= del(.r1_since) else . end' \
+    --arg f "$FAMILY"
   say "off: the updater is OFF"
   exit 0
 }
@@ -850,7 +925,8 @@ recover_first() {
 apply_read() {
   local text l k v n=0
   AJ_ID= AJ_KIND= AJ_VERSION= AJ_OLD= AJ_CSHA= AJ_T= AJ_TN=0 AJ_BACKUP= AJ_PREV= AJ_INST= AJ_RS=0 AJ_RSTART=0 AJ_FROM=
-  AJ_STOPPED= AJ_STARTING= AJ_RUNNING= AJ_RUNN=0 AJ_SE=0 AJ_WHY= AJ_OLDV= AJ_CLOSED= AJ_STOPS=()
+  AJ_STOPPED= AJ_STARTING= AJ_RUNNING= AJ_RUNN=0 AJ_SE=0 AJ_WHY= AJ_OLDV= AJ_TV= AJ_VERDICT= AJ_END= AJ_CLOSED=
+  AJ_STOPS=()
   { [ -f "$WINDOW" ] && [ ! -L "$WINDOW" ] && [ -r "$WINDOW" ]; } || { REPLY="it is not a readable plain file"; return 2; }
   text=$(cat -- "$WINDOW" && echo .) || { REPLY="it cannot be read"; return 2; }
   text=${text%.}
@@ -878,6 +954,7 @@ apply_read() {
       starting) AJ_STARTING=$v ;;
       running) AJ_RUNNING=$v AJ_RUNN=$n ;;
       stop|end) [ "$AJ_SE" != 0 ] || AJ_SE=$n
+                [ "$k" != end ] || AJ_END=$v
                 if [ "$k" = stop ]; then
                   [[ ${v%%: *} =~ ^(check\ failed|DISK|untested\ jq|HAND\ CHANGE|ROLLBACK\ FAILED|POOL\ DOWN|CI\ DISABLED|NO\ IDLE)$ ]] && [[ $v == *': '* ]] \
                     || { REPLY="line $n: a STOP this release does not know"; return 2; }
@@ -885,6 +962,8 @@ apply_read() {
                 fi ;;
       why) [ -n "$AJ_WHY" ] || AJ_WHY=$v ;;
       old-version) [ -n "$AJ_OLDV" ] || AJ_OLDV=$v ;;
+      target-version) [ -n "$AJ_TV" ] || AJ_TV=$v ;;
+      verdict) [ -n "$AJ_VERDICT" ] || AJ_VERDICT=$v ;;
       closed) AJ_CLOSED=$v ;;
     esac
   done
@@ -896,7 +975,7 @@ apply_read() {
 # A_WHAT its line); 1 + REPLY: a closed journal it cannot read. CAND: the state's candidate (JSON or null)
 close_rule() {
   local cand=$1 sv= hold= htext= s fp fs si so sh e tp ts
-  A_CAND=keep A_PREVOP=keep A_LINES='{}' A_DROP=false A_RS=null A_WHAT= A_NOTE=
+  A_CAND=keep A_PREVOP=keep A_LINES='{}' A_DROP=false A_RS=null A_WHAT= A_NOTE= A_SV=
   [[ $AJ_KIND =~ ^(switch|rollback)$ ]] || { REPLY="its kind is not switch or rollback"; return 1; }
   if [ -n "$AJ_INST" ]; then
     [[ $AJ_INST =~ ^([0-9a-f]{64}|none)\ ([0-9a-f]{64}|none)\ (target-running|target-idle|target-old|target-failed|pre|other|none)$ ]] \
@@ -919,6 +998,7 @@ close_rule() {
   if [ "$AJ_KIND" = switch ]; then [[ $AJ_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && sv=$AJ_VERSION
   elif [[ $AJ_OLDV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then sv=$AJ_OLDV
   else sv=$(printf '%s\n' "$cand" | jq -r '.version // empty' 2> /dev/null); fi
+  A_SV=$sv
   if [ -z "$AJ_T" ]; then
     A_WHAT="no target line (the window's shortcut): no candidate change, only its STOPs"
   elif [ "$AJ_KIND" = switch ]; then
@@ -973,16 +1053,22 @@ close_rule() {
   fi
   return 0
 }
+# THE HAND LINES of the STOPs this updater writes (status.jq prints detail.hand as "Next, by hand: ..."; one copy:
+# THE STOP RULE's and THE ROLLBACK's STOPs): POOL DOWN's journalctl; ROLLBACK FAILED's README section (the rollback
+# as a person sees it; S2b-3c-1 B2b)
+HAND_OF='def hand_of($n): if $n == "POOL DOWN" then {hand: "journalctl --user -u runscaler"}
+  elif $n == "ROLLBACK FAILED" then {hand: "read linux-docker/README.md, \"The rollback, and what status shows of it\""}
+  else {} end;'
 # THE STOP RULE (the header) of the journal read (AJ_STOPS) -> A_NEW: each name held once (its last line), but DISK,
 # untested jq and NO IDLE; HOLD (a name the close rule holds, or "") with HTEXT when the journal has none of it; each of
 # VERSION ("": null). 1 + REPLY: jq could not read them
 stop_rule() {
-  A_NEW=$(jq -n -c --arg f "$FAMILY" --arg v "$1" --arg hold "$2" --arg htext "$3" '
+  A_NEW=$(jq -n -c --arg f "$FAMILY" --arg v "$1" --arg hold "$2" --arg htext "$3" "$HAND_OF"'
     [$ARGS.positional[] | capture("^(?<n>[^:]+): (?<t>.*)$"; "s") | select(.n != "DISK" and .n != "untested jq" and .n != "NO IDLE")]
     | reduce .[] as $s ({}; .[$s.n] = $s.t)
     | if $hold != "" and has($hold) == false then .[$hold] = $htext else . end
     | [to_entries[] | {family: $f, stop: .key, version: (if $v == "" then null else $v end), user: null,
-                       detail: ({text: .value} + (if .key == "POOL DOWN" then {hand: "journalctl --user -u runscaler"} else {} end))}]' \
+                       detail: ({text: .value} + hand_of(.key))}]' \
     --args "${AJ_STOPS[@]}" 2> /dev/null) && [ -n "$A_NEW" ] || { REPLY="jq could not read its STOP lines"; return 1; }
 }
 # THE APPLY STEP's decision of the journal read (AJ_*), CAND the state's candidate: 0 and A_* (THE CLOSE RULE; or, for
@@ -1001,11 +1087,96 @@ target_json() {
   jq -n -c '[$ARGS.positional[] | capture("^(?<k>[A-Za-z0-9][A-Za-z0-9._-]{0,99})=(?<v>[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64})$")
             // error("no SET=IMAGE")] | map({(.k): .v}) | add' --args $1 2> /dev/null
 }
-# THE REJECTION (S2b-3c-1 D-e) is B2b's, and THIS is its one place: a rollback's close that rolled back (CLASS
-# target-running or target-idle) rejects by the journal's `why`, `old-version`, `target-version` and `verdict` (a
-# legacy one with no `why`: why back, old-version none), its rejected file written BEFORE the state write. B2a's:
-# nothing is rejected: REPLY = the jq the ONE state write runs after THE CLOSE RULE ('.'), and no file is written
-apply_rejection() { REPLY=.; }
+# THE REJECTION (the header; S2b-3c-1 D-e, B2b), its ONE place: a rollback's close that rolled back (A_CAND clear:
+# CLASS target-running or target-idle) decides by the journal's `why`, `old-version` (V), `target-version`, `verdict`
+# and `old` lines (a legacy one with no `why`: why back, old-version none): R_V the version the ONE state write rejects
+# ("" none), R_DIG the digest of `old` that REJECTED gets first (rejected_add, BEFORE the state write), R_CO the version
+# whose connect-only rollback it counts, R_LINES its lines; a ROLLED BACK (r1, r1-connect) goes into A_NEW (THE STOP
+# RULE: it replaces a held one by name). 1 + REPLY: a closed journal it cannot read
+apply_rejection() {
+  local why=$AJ_WHY v=$AJ_OLDV n rb
+  R_V= R_DIG= R_CO= R_LINES=()
+  [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || v=
+  case $why in
+    r1|r1-connect)
+      verdict_detail "$why"
+      rb=$(jq -n -c --arg f "$FAMILY" --arg v "${v:-$A_SV}" --argjson d "$REPLY" \
+             '{family: $f, stop: "ROLLED BACK", version: (if $v == "" then null else $v end), user: null, detail: $d}') \
+        && A_NEW=$(printf '%s\n' "$A_NEW" | jq -c --argjson rb "$rb" '[.[] | select(.stop != "ROLLED BACK")] + [$rb]') \
+        && [ -n "$A_NEW" ] || { REPLY="jq could not make its ROLLED BACK"; return 1; }
+      if [ -z "$v" ]; then
+        R_LINES+=("nothing is rejected, and no connect-only rollback is counted: old-version ${AJ_OLDV:-missing} (the journal names no version to reject)")
+      elif [ "$why" = r1 ]; then R_V=$v
+      else
+        R_CO=$v
+        n=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" --arg v "$v" '(.families[$f].connect_only[$v].n // 0) + 1') \
+          && [[ $n =~ ^[0-9]+$ ]] || { REPLY="jq could not read its connect-only count"; return 1; }
+        if [ "$n" -ge 2 ]; then R_V=$v R_LINES+=("this is connect-only rollback number $n of runner $v: it rejects it")
+        else R_LINES+=("runner $v is not rejected: its first connect-only rollback (one retry after 1 h comes first; a second rollback rejects it)"); fi
+      fi ;;
+    back)   # a person's (or a legacy journal's): only a version newer than the one it restores
+      if [ -z "$v" ] || [[ ! $AJ_TV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        R_LINES+=("nothing is rejected: a person's back with old-version ${AJ_OLDV:-none} and target-version ${AJ_TV:-none} (a version that is none is no comparison)")
+      elif newer "$v" "$AJ_TV"; then R_V=$v
+      else R_LINES+=("runner $v is not rejected: a person's back rejects only a version newer than the one it restores (target-version $AJ_TV)"); fi ;;
+    *) REPLY="its why line is not r1, r1-connect or back"; return 1 ;;
+  esac
+  if [ -n "$R_V" ]; then
+    [[ $AJ_OLD =~ @(sha256:[0-9a-f]{64})$ ]] || { REPLY="its old line names no image digest to reject"; return 1; }
+    R_DIG=${BASH_REMATCH[1]}
+    R_LINES+=("rejected runner $R_V for $FAMILY (why $why): the digest of the image it left, $R_DIG, is in $REJECTED")
+  fi
+  return 0
+}
+# WHY -> REPLY: the ROLLED BACK's detail: R1's verdict of the family {set, failures, connect_only, reason} from the
+# window's own copy (WINDOWS/ID.d/verdict.json) when its sha is the journal's `verdict`, else a text that says R1's
+# failures are not readable (status prints it: status.jq alone would print "0 counted failures"); connect_only is the
+# journal's `why` (r1-connect), so the 1-h retry of a first one is the pass's to make
+verdict_detail() {
+  local f="$WINDOWS/$AJ_ID.d/verdict.json" text= s why= co=false d=
+  [ "$1" != r1-connect ] || co=true
+  if [[ ! $AJ_VERDICT =~ ^[0-9a-f]{64}$ ]]; then why="the journal names no verdict (verdict ${AJ_VERDICT:-missing})"
+  elif ! { [ -f "$f" ] && [ ! -L "$f" ] && text=$(cat -- "$f" 2> /dev/null && echo .); }; then why="its copy $f cannot be read"
+  else
+    text=${text%.} s=$(printf '%s' "$text" | sha256sum) s=${s%% *}
+    if [ "$s" != "$AJ_VERDICT" ]; then
+      why="its copy $f is not the one the journal names (sha256 ${s:0:12}..., the journal's ${AJ_VERDICT:0:12}...)"
+    elif ! d=$(printf '%s' "$text" | jq -c --arg f "$FAMILY" --argjson co "$co" '.families[$f]
+                | if type == "object" and (.failures | type) == "array" then {set, failures, connect_only: $co, reason}
+                  else error("no R1 verdict") end' 2> /dev/null) || [ -z "$d" ]; then
+      why="its copy $f holds no R1 verdict of $FAMILY"
+    fi
+  fi
+  if [ -z "$why" ]; then REPLY=$d; return 0; fi
+  REPLY=$(jq -n -c --arg t "R1's failures are not readable: $why; the rollback was R1's (why $1)" --argjson co "$co" \
+            '{text: $t, connect_only: $co}')
+}
+# THE REJECTED FILE (the header; the r3 FOLD): REJECTED, 03-runscaler.sh's (one `sha256:<64 hex>` per line). DIGEST
+# is added only when absent, by a rename of a full copy written and synced first; 0 (REPLY: added | there); 1 + REPLY:
+# a file it cannot read or write (a line of another shape: 03 then refuses every mode), and nothing is written
+REJECTED=$STATEDIR/rejected
+rejected_add() {
+  local text= l there= out
+  if [ -e "$REJECTED" ] || [ -L "$REJECTED" ]; then
+    { [ -f "$REJECTED" ] && [ ! -L "$REJECTED" ] && [ -r "$REJECTED" ]; } || { REPLY="$REJECTED is not a readable plain file"; return 1; }
+    text=$(cat -- "$REJECTED" && echo .) || { REPLY="$REJECTED cannot be read"; return 1; }
+    text=${text%.}
+    if [ -n "$text" ]; then
+      while IFS= read -r l; do
+        [[ $l =~ ^sha256:[0-9a-f]{64}$ ]] || { REPLY="$REJECTED holds a line that is not sha256:<64 hex>"; return 1; }
+        [ "$l" != "$1" ] || there=1
+      done <<< "${text%$'\n'}"
+    fi
+  fi
+  if [ -n "$there" ]; then REPLY=there; return 0; fi
+  rm -f -- "$REJECTED.new" 2> /dev/null
+  { { [ -z "$text" ] || printf '%s\n' "${text%$'\n'}"; printf '%s\n' "$1"; } > "$REJECTED.new"; } 2> /dev/null \
+    && chmod 600 -- "$REJECTED.new" 2> /dev/null \
+    && out=$(dd if=/dev/null of="$REJECTED.new" conv=notrunc,fsync 2>&1 < /dev/null) \
+    && mv -f -- "$REJECTED.new" "$REJECTED" \
+    || { rm -f -- "$REJECTED.new" 2> /dev/null; REPLY="$REJECTED.new cannot be written, synced or renamed into place"; return 1; }
+  REPLY=added
+}
 
 # THE APPLY STEP (the header): under the lock, a CLOSED journal at WINDOW -> THE CLOSE RULE -> ONE state write that
 # also sets `last_window` = its ID -> the archive (a rename to WINDOWS/ID); a journal whose ID is `last_window` is only
@@ -1016,14 +1187,17 @@ APPLY_JQ='.last_window = $id
   | .families[$f] = ((.families[$f] // {})
       | if $cand == "set" then .candidate = {version: $v, lines: $tl, closed_at: $closed}
           | (if $prevop == "old" then .previous = ($tl | with_entries(.value = $old)) | .back_until = null else . end)
-        elif $cand == "clear" then .candidate = null | .previous = null | .back_until = null
+        elif $cand == "clear" then .candidate = null | .previous = null | .back_until = null | del(.r1_since)
         elif $prevop == "null" then .previous = null | .back_until = null
         else . end
       | .stops = ([(.stops // [])[] | .stop as $s | select(([$new[] | .stop] | index($s)) == null)
-                   | select(($drop | not) or ($s != "JOBS FAIL ON THE NEW IMAGE" and $s != "NO EVIDENCE"))] + $new))
+                   | select(($drop | not) or ($s != "JOBS FAIL ON THE NEW IMAGE" and $s != "NO EVIDENCE"))] + $new)
+      | if $rej != "" then .rejected = (((.rejected // []) + [$rej]) | unique) else . end
+      | if $co != "" then .connect_only[$co] = {n: ((.connect_only[$co].n // 0) + 1), at: $closed} else . end)
   | if $rs == null then del(.restart) else .restart = $rs end'
 apply_step() {
-  local cand
+  local cand l
+  A_DONE= A_CAND=   # A_DONE: this call wrote the journal's state (the rollback's result reads it, with A_CAND)
   window_open || return 0
   apply_read
   case $? in
@@ -1043,15 +1217,24 @@ apply_step() {
        apply_archive; return 0 ;;
     *) apply_cannot "$REPLY"; return 0 ;;
   esac
-  REPLY=.
-  if [ "$AJ_KIND" = rollback ] && [ "$A_CAND" = clear ]; then apply_rejection "$AJ_WHY" "$AJ_OLDV"; fi
-  change_state "$APPLY_JQ | $REPLY" --arg id "$AJ_ID" --arg f "$FAMILY" --arg cand "$A_CAND" --arg prevop "$A_PREVOP" \
+  R_V= R_DIG= R_CO= R_LINES=()
+  if [ "$AJ_KIND" = rollback ] && [ "$A_CAND" = clear ]; then   # THE REJECTION, its file BEFORE the state write
+    apply_rejection || { apply_cannot "$REPLY"; return 0; }
+    if [ -n "$R_DIG" ]; then rejected_add "$R_DIG" || { apply_unrejected "$REPLY"; return 0; }; fi
+  fi
+  change_state "$APPLY_JQ" --arg id "$AJ_ID" --arg f "$FAMILY" --arg cand "$A_CAND" --arg prevop "$A_PREVOP" \
     --arg v "$AJ_VERSION" --arg old "$AJ_OLD" --argjson tl "$A_LINES" --argjson closed "$AJ_CLOSED" \
-    --argjson new "$A_NEW" --argjson drop "$A_DROP" --argjson rs "$A_RS"
+    --argjson new "$A_NEW" --argjson drop "$A_DROP" --argjson rs "$A_RS" --arg rej "$R_V" --arg co "$R_CO"
+  A_DONE=1
   say "apply: the window journal $AJ_ID (${AJ_KIND:-no kind}, $A_CLASS) is applied: $A_WHAT$A_NOTE"
-  printf '%s\n' "$A_NEW" | jq -r '.[] | "runner-updater: apply: it holds STOP \(.stop): \(.detail.text)"'
+  for l in "${R_LINES[@]}"; do say "apply: $l"; done
+  printf '%s\n' "$A_NEW" | jq -r '.[] | "runner-updater: apply: it holds STOP \(.stop): \(.detail.text // .detail.reason // "R1'"'"'s verdict (status names its counted failures)")"'
   [ "$A_RS" = null ] || say "apply: its own restart of runscaler goes to the core once (the state's restart)"
   apply_archive
+}
+apply_unrejected() {   # WHY: the rejected file cannot be read or written (rejected_add): WSTOP, W_HOW, nothing written
+  WSTOP="runner-updater: STOP the window journal $WINDOW is closed, but its rejection cannot be written ($1): nothing is written, and nothing else starts. $REJECTED must hold one sha256:<64 hex> per line (03-runscaler.sh refuses every mode until it does): fix it by hand, and the next run applies the journal ($README_SECTION)"
+  W_HOW="it is closed, but its rejection cannot be written ($1): the next run tries again once $REJECTED can be read"
 }
 apply_cannot() {   # WHY: a closed journal the apply step cannot read: WSTOP and W_HOW, nothing written
   WSTOP="runner-updater: STOP the window journal $WINDOW is closed, but the apply step cannot read it ($1): $README_SECTION; nothing is written, and nothing else starts"
@@ -1146,6 +1329,141 @@ install_of() {
   [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { echo none; return 0; }
   i=$(install_time "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$WINDOWS"); i=${i%% *}
   [[ $i =~ ^[0-9]+$ ]] && echo "$i" || echo none
+}
+
+# ---- THE ROLLBACK (the header): R1's in a pass, a person's `back hz-docker`; both by THE ROLLBACK'S PRECONDITIONS
+RB_SAY=pass      # the lines' prefix: "pass" (R1's) or "back hz-docker" (a person's)
+RB_WINDOW=       # a rollback window began in this run (one window per pass: DUE's line says the next pass decides)
+RB_RESULT=       # the rollback's end: rolled (rolled back), pending (`end`, no STOP), stop (a STOP), open, none
+
+# FILE -> "SET=IMAGE SET=IMAGE" (the family's two sets, by name), the lines config_read reads; 1 when it cannot
+family_lines() {
+  local cr
+  cr=$(config_read "$1" 2> /dev/null) || return 1
+  printf '%s\n' "${cr#*$'\n'}" | jq -r --arg m "$MAIN_SET" --arg s "$SMALL_SET" \
+    '.lines | to_entries | map(select(.key == $m or .key == $s)) | sort_by(.key) | map("\(.key)=\(.value)") | join(" ")' 2> /dev/null
+}
+# a state family's lines member (candidate.lines, previous) -> the same form; "" none
+STATE_LINES='def flines: if type == "object" then to_entries | sort_by(.key) | map("\(.key)=\(.value)") | join(" ") else "" end;'
+# NAME VERSION TEXT: a STOP the rollback holds in the state (one of a name: it replaces a held one), and its line
+rb_hold() {
+  change_state "$HAND_OF"'.families[$f] = ((.families[$f] // {}) | .stops = ([(.stops // [])[] | select(.stop != $n)]
+      + [{family: $f, stop: $n, version: (if $v == "" then null else $v end), user: null, detail: ({text: $t} + hand_of($n))}]))' \
+    --arg f "$FAMILY" --arg n "$1" --arg v "$2" --arg t "${3:0:900}"
+  say "$RB_SAY: STOP $1: $3"
+}
+# no try could start (a person's: CI disabled, a pending hand edit; D-g's wait): r1_since removed (the Studio's
+# pass_r1), so the 2 h start at the next pass that can try
+rb_nocount() {
+  [ "$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '.families[$f] | has("r1_since")' 2> /dev/null)" = true ] || return 0
+  change_state '.families[$f] |= del(.r1_since)' --arg f "$FAMILY"
+}
+# THE ROLLBACK'S PRECONDITIONS ON THE FILES (the r3 FOLD; the Studio's ru_rb_window): VERSION CLINES (the candidate's
+# version and lines, "" when it has none): config.toml's family lines are the candidate's (else a pending hand edit:
+# STOP HAND CHANGE, and no try could start: this also covers config.toml = config.toml.prev), and config.toml.prev's
+# are the state's `previous` (else the rollback's target is not the config its switch kept: STOP ROLLBACK FAILED). 0, or
+# 1 with the STOP held and its line printed
+rb_files() {
+  local cl pl prev
+  cl=$(family_lines "$CFG") && [ -n "$cl" ] || cl="no readable family lines"
+  if [ -n "$2" ] && [ "$cl" != "$2" ]; then
+    rb_nocount
+    rb_hold "HAND CHANGE" "$1" "a pending hand edit: config.toml names $cl for $FAMILY, not its candidate's lines ($2): a rollback would replace that file unseen, so no rollback window starts; put the candidate's config back (or check the file), and the next pass tries again"
+    return 1
+  fi
+  prev=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" "$STATE_LINES"' .families[$f].previous | flines' 2> /dev/null)
+  pl=$(family_lines "$KEEPP") && [ -n "$pl" ] || pl="no readable family lines"
+  if [ -z "$prev" ] || [ "$pl" != "$prev" ]; then
+    rb_hold "ROLLBACK FAILED" "$1" "config.toml.prev names $pl for $FAMILY, not the state's previous image (${prev:-none}): the rollback's target is not the config its switch kept, so no rollback window starts"
+    return 1
+  fi
+}
+# WHY OLDV MODE...: `pool-image.sh back --unattended --why WHY [--verdict FILE] [--old-version OLDV]` as this run's
+# CHILD (fd 9, the updater lock, inherited: THE UPDATER'S CHILD), no idle wait; then its journal: CLOSED -> THE APPLY
+# STEP; OPEN with no `stopping` or `starting` line (the child restarted nothing: it found the enabled unit down and
+# ended before its rename) -> RECOVER FIRST now (RECOVER, then the apply step: the run's one restart, D-g); OPEN after
+# its own restart -> WSTOP, the next run's RECOVER (a pass makes at most ONE restart of runscaler). RB_RESULT says which
+rb_child() {
+  local why=$1 oldv=$2 verdict=${3-} rc
+  RB_RESULT=none
+  say "$RB_SAY: the rollback window: pool-image.sh back --unattended --why $why (its lines follow)"
+  bash "$B/setup/pool-image.sh" back --unattended --why "$why" ${verdict:+--verdict "$verdict"} ${oldv:+--old-version "$oldv"} < /dev/null
+  rc=$?
+  if ! window_open; then say "$RB_SAY: the rollback window kept no journal (pool-image.sh exit $rc, its lines above): nothing changed"; return 0; fi
+  RB_WINDOW=1
+  if [[ $(tail -c 64 -- "$WINDOW" 2> /dev/null; echo .) =~ (^|$'\n')closed\ [0-9]+$'\n'\.$ ]]; then apply_step
+  elif [ "$(grep -c -E '^(stopping|starting) ' -- "$WINDOW" 2> /dev/null)" = 0 ]; then recover_first
+  else
+    WSTOP="runner-updater: STOP the window journal $WINDOW stays open (the rollback window's line above says why): it restarted runscaler, so the next run's RECOVER ends it (a pass makes at most one restart of runscaler), and nothing else starts"
+    W_HOW="the rollback window restarted runscaler and left it open, and the next run's RECOVER ends it"
+  fi
+  if [ -n "$WSTOP" ]; then RB_RESULT=open
+  elif [ "$A_DONE" = 1 ] && [ "$A_CAND" = clear ]; then RB_RESULT=rolled
+  elif [ "$A_DONE" = 1 ] && [ "$A_NEW" = '[]' ]; then RB_RESULT=pending
+  else RB_RESULT=stop; fi
+}
+# the rollback's TARGET, as the journal's `target` line names it (AJ_T): its images, for the lines
+rb_target() { printf '%s\n' "$AJ_T" | tr ' ' '\n' | sed 's/^[^=]*=//' | sort -u | paste -sd ' ' -; }
+
+# R1'S ROLLBACK in a pass (the header, THE ROLLBACK), ON: NOW. r1's verdict of the family (this pass's r1.json) ->
+# THE ROLLBACK'S PRECONDITIONS in the Studio's order -> the child -> its line
+pass_rollback() {
+  local now=$1 v cand cv cl since why
+  v=$(jq -c --arg f "$FAMILY" '(.families[$f] // {}) | select(.verdict == "rollback") | {set, failures, connect_only, reason}' \
+        "$PASSDIR/r1.json" 2> /dev/null) || v=
+  [ -n "$v" ] || return 0
+  cand=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" "$STATE_LINES"' .families[$f].candidate // empty
+           | "\(.version) \(.lines | flines)"' 2> /dev/null)
+  if [ -z "$cand" ]; then say "pass: R1 says rollback for $FAMILY, but it has no candidate: no rollback"; return 0; fi
+  cv=${cand%% *} cl=${cand#* }
+  say "pass: R1's rollback is due for $FAMILY (runner $cv): $(printf '%s\n' "$v" | jq -r '"set \(.set), \(.failures | length) counted failure\(if (.failures | length) == 1 then "" else "s" end)\(if .connect_only == true then ", connect-class only" else "" end)"')"
+  if [ "$RECOVER_STARTED" = 1 ]; then   # D-g: one restart per pass
+    rb_nocount
+    say "pass: R1's rollback of $FAMILY waits: this pass's RECOVER started runscaler (a pass makes at most one restart of it), so no rollback window starts now; the next pass starts it, and its 2 h start then"
+    return 0
+  fi
+  if printf '%s\n' "$ST" | jq -e --arg f "$FAMILY" 'any((.families[$f].stops // [])[]; .stop == "ROLLBACK FAILED")' > /dev/null 2>&1; then
+    say "pass: R1's rollback of $FAMILY is due, but ROLLBACK FAILED holds it: no rollback window (\`runner-updater status\` names its next step)"
+    return 0
+  fi
+  if ! unit_read; then say "pass: rollback pending: runscaler's unit cannot be read (systemctl --user show runscaler): no rollback window; the next pass tries again"; return 0; fi
+  if [ "$UNIT_FILE" != enabled ]; then
+    rb_nocount
+    say "pass: rollback pending: CI disabled by a person (runscaler's unit is $UNIT_FILE): no rollback window; R1's verdict stays, and its 2 h start when a person enables the unit again (systemctl --user enable --now runscaler)"
+    return 0
+  fi
+  rb_files "$cv" "$cl" || return 0
+  since=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '.families[$f].r1_since // empty')
+  [[ $since =~ ^[0-9]+$ ]] && [ "$since" -le "$now" ] || since=$now
+  if [ "$((now - since))" -ge 7200 ]; then   # THE 2-H BOUND (PLAN D5): tries since r1_since that did not roll back
+    rb_hold "ROLLBACK FAILED" "$cv" "R1's rollback of $FAMILY (runner $cv) was tried since $(date -u -d "@$since" '+%Y-%m-%d %H:%M UTC') (the first pass that could start a try), and no try rolled it back in 2 h: no more tries"
+    return 0
+  fi
+  why=r1; [ "$(printf '%s\n' "$v" | jq -r '.connect_only')" != true ] || why=r1-connect
+  rb_child "$why" "$cv" "$PASSDIR/r1.json"
+  case $RB_RESULT in
+    rolled) say "pass: rolled back $FAMILY: it runs $(rb_target) again (the window journal $AJ_ID)" ;;
+    pending) say "pass: rollback pending: ${AJ_END:-the window ended with no STOP}; R1 stays armed, and the next pass tries again (until $(date -u -d "@$((since + 7200))" '+%Y-%m-%d %H:%M UTC'))" ;;
+    stop) say "pass: the rollback window held a STOP (its lines above): R1 stays armed" ;;
+  esac
+}
+
+# CONNECT-ONLY's ONE RETRY (the Studio's pass_connect_retry; D-e): a pass that is ON removes the ROLLED BACK of V
+# that a first connect-only rollback holds (detail.connect_only) when the state counts exactly one (connect_only[V].n
+# = 1) and it is 1 h old or more by the pass's clock: V may be due again, once; the count stays, so the next one rejects
+CO_RETRY='def co_retry($c; $now): .stop == "ROLLED BACK" and .detail.connect_only == true and (.version | type) == "string"
+  and ($c[.version].n // 0) == 1 and $now - ($c[.version].at // $now) >= 3600;'
+connect_retry() {
+  local out l
+  out=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" --argjson now "$1" "$CO_RETRY"' (.families[$f] // {})
+          | (.connect_only // {}) as $c | (.stops // [])[] | select(co_retry($c; $now)) | .version' 2> /dev/null) \
+    || { say "pass: jq could not read the connect-only rollbacks"; return 0; }
+  [ -n "$out" ] || return 0
+  change_state "$CO_RETRY"' .families[$f] |= ((.connect_only // {}) as $c | .stops = [(.stops // [])[] | select(co_retry($c; $now) | not)])' \
+    --arg f "$FAMILY" --argjson now "$1"
+  for l in $out; do
+    say "pass: $FAMILY: its connect-only rollback of runner $l was 1 h ago or more: the one retry of $l may start (a second rollback rejects it)"
+  done
 }
 
 # ---- the pass
@@ -1249,11 +1567,10 @@ run_core() {
   done
 }
 
-# what this pass WOULD do (the header: pass): it does none of it. The switch, or why not, is DUE's line (below)
+# what this pass WOULD do of KEEP's verdicts (the header: pass): it does none of them (S2b-3c-2's). R1's rollback it
+# does (pass_rollback); the switch, or why not, is DUE's line (below)
 would_do() {
   local d=$PASSDIR
-  jq -r '(.families // {}) | to_entries[] | select(.value.verdict == "rollback")
-         | "runner-updater: pass: would roll back \(.key) (this release takes no action)"' "$d/r1.json"
   jq -r '(.families // {}) | to_entries[] | .key as $f | .value.verdict
          | if . == "accept" then "runner-updater: pass: would accept \($f) (this release takes no action)"
            elif . == "jobs-fail" then "runner-updater: pass: would hold \($f): STOP JOBS FAIL ON THE NEW IMAGE (this release takes no action)"
@@ -1317,6 +1634,8 @@ latest() {
 due() {
   local now=$1 d=$PASSDIR v rec a b dg base cur brec rc
   dnot() { say "pass: $FAMILY is not due: $1"; }
+  # 0. a window ran in this pass (its facts are of the pool before it; one window per pass)
+  [ -z "$RB_WINDOW" ] || { dnot "a window ran in this pass (one window per pass, and this pass's facts are of the pool before it): the next pass decides"; return 0; }
   # 1. an open candidate (a `previous` kept until back_until is none: PLAN D6, AFTER ACCEPT)
   v=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '.families[$f].candidate.version // empty')
   [ -z "$v" ] || { dnot "an open candidate (runner $v): one open release per family"; return 0; }
@@ -1385,13 +1704,64 @@ do_pass() {
   rm -f -- "$PASSDIR"/facts.json "$PASSDIR"/log.txt "$PASSDIR"/healthz.json "$PASSDIR"/{idle,r1,keep,status}.json \
     "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err
   printf '%s\n' "$ST" | jq -c '.core // empty' > "$PASSDIR/state.json" || refuse "cannot copy the core's state into $PASSDIR"
-  say "pass: one pass at $(date -u -d "@$now" '+%Y-%m-%d %H:%M:%S UTC') ($now); it takes no action"
+  say "pass: one pass at $(date -u -d "@$now" '+%Y-%m-%d %H:%M:%S UTC') ($now): it acts on R1's rollback verdict only (KEEP's and DUE's lines say what else was decided)"
   collect || refuse "no facts: $REPLY"
   run_core "$now"
-  change_state '.core = $c[0] | del(.restart)' --slurpfile c "$PASSDIR/state.json"   # the restart: handed over once
+  # the core's state; the restart handed over once (removed); r1_since (the Studio's): the first pass whose R1 said
+  # rollback keeps its clock, and a family whose R1 says anything else has none
+  change_state '.core = $c[0] | del(.restart)
+      | if (.families[$f] | type) != "object" then .
+        elif (($r1[0].families // {})[$f].verdict // "") == "rollback" then .families[$f].r1_since //= $now
+        else .families[$f] |= del(.r1_since) end' \
+    --slurpfile c "$PASSDIR/state.json" --slurpfile r1 "$PASSDIR/r1.json" --argjson now "$now" --arg f "$FAMILY"
   would_do
+  pass_rollback "$now"          # R1's rollback (THE ROLLBACK): at most one window
+  [ -z "$WSTOP" ] || { echo "$WSTOP"; exit 1; }
+  connect_retry "$now"
   due "$now"
   exit 0
+}
+
+# ---- back hz-docker (the header, THE ROLLBACK): a person's rollback window, under the lock
+do_back() {
+  local now cand cv cl bu pl img v
+  now=$(date +%s)
+  [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
+  load_state
+  RB_SAY="back $FAMILY"
+  recover_first; [ -z "$WSTOP" ] || { echo "$WSTOP"; exit 1; }
+  [ "$(printf '%s\n' "$ST" | jq -r '.on')" = true ] \
+    || refuse "the updater is OFF: back runs only while it is ON (\`runner-updater on\`); nothing changed"
+  cand=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" "$STATE_LINES"' .families[$f].candidate // empty
+           | "\(.version) \(.lines | flines)"' 2> /dev/null)
+  cv=${cand%% *} cl=${cand#* }
+  bu=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '.families[$f].back_until // empty' 2> /dev/null)
+  if [ -z "$cand" ] && { [[ ! $bu =~ ^[0-9]+$ ]] || [ "$now" -ge "$bu" ]; }; then
+    refuse "back $FAMILY: nothing to go back to: it has no candidate, and its previous image is kept for \`back\` only until 7 days after an accept (back_until: $([[ $bu =~ ^[0-9]+$ ]] && date -u -d "@$bu" '+%Y-%m-%d %H:%M UTC' || echo none)); nothing changed"
+  fi
+  unit_read || refuse "back $FAMILY: runscaler's unit cannot be read (systemctl --user show runscaler): no rollback window; nothing changed"
+  [ "$UNIT_FILE" = enabled ] \
+    || refuse "back $FAMILY: rollback pending: CI disabled by a person (runscaler's unit is $UNIT_FILE): back starts no window; enable it first (systemctl --user enable --now runscaler); nothing changed"
+  if [ -z "$cand" ]; then
+    cv= cl=
+    pl=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" "$STATE_LINES"' .families[$f].previous | flines' 2> /dev/null)
+    [ -z "$pl" ] || [ "$(family_lines "$CFG")" != "$pl" ] \
+      || refuse "back $FAMILY runs $(printf '%s\n' "$pl" | tr ' ' '\n' | sed 's/^[^=]*=//' | sort -u | paste -sd ' ' -) already: nothing to go back to; nothing changed"
+  fi
+  rb_files "$cv" "$cl" || exit 1
+  # the version it leaves: the candidate's; with none, RUN_USER's ONE build record of the image config.toml names
+  v=$cv
+  if [ -z "$v" ] && img=$(family_lines "$CFG") && [[ $img =~ @(sha256:[0-9a-f]{64}) ]] && rr_record_of "$BUILDS" "${BASH_REMATCH[1]}"; then
+    v=$RR_REC_VERSION
+  fi
+  rb_child back "$v"
+  case $RB_RESULT in
+    rolled) say "back $FAMILY: rolled back: it runs $(rb_target) again (the window journal $AJ_ID)"; exit 0 ;;
+    pending) say "back $FAMILY: rollback pending: ${AJ_END:-the window ended with no STOP}; nothing changed: run it again later"; exit 5 ;;
+    open) echo "$WSTOP"; exit 1 ;;
+    stop) say "back $FAMILY: the rollback window held a STOP (its lines above): nothing was rolled back"; exit 1 ;;
+    *) exit 1 ;;
+  esac
 }
 
 # ---- RUN_USER: THE BUILD PASS, build VERSION (the header)
@@ -1528,5 +1898,6 @@ rr_lock "$ROLE" || refuse "cannot take the updater lock $RR_LOCK (runner-release
 case $cmd in
   on) do_on ;;
   off) do_off ;;
+  back) do_back ;;
   build) do_build "$1" ;;
 esac

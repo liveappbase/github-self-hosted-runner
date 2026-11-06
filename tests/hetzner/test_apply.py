@@ -249,7 +249,8 @@ class TheCloseRule(unittest.TestCase):
                     self.assertEqual((f['candidate'], f['previous'], f['back_until']), (None, None, None))
                     self.assertEqual(a.held(), [], 'a target close drops JOBS FAIL and NO EVIDENCE')
                     self.assertIn('rolled back', a.r.stdout)
-                    self.assertEqual(f.get('rejected', []), [], "the rejection is B2b's")
+                    # its rejection (B2b: test_reject.py): `why back`, old-version V newer than target-version 2.338.0
+                    self.assertEqual(f.get('rejected', []), [V])
                     continue
                 self.assertEqual((f['candidate'], f['previous']), (C, PREV))
                 self.assertNotIn('rolled back', a.r.stdout)
