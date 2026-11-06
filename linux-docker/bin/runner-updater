@@ -11,12 +11,17 @@
 # 11, setup/04-timer.sh, installs and starts it as each user. A fresh install is OFF (D11): a pass while OFF ends at
 # once.
 #
-# THIS RELEASE SWITCHES NOTHING. RS_USER's pass measures, asks the decision core (core/README.md) and prints what it
-# WOULD do, and which runner release it would switch to (DUE, below): it runs no pool-image.sh and no `systemctl --user
-# start|stop|restart`, and changes no config. RUN_USER's pass builds the image of the release DUE waits for (THE BUILD
-# PASS, below), with 02-d1.sh, and changes nothing of the pool. Each user's writes: under STATEDIR, the state (by
-# rename), a pass's files (PASSDIR) and the lock file, and RUN_USER's BUILDOUT (their modes: runner-release.sh's
-# rr_lock, THE MODES, by the user's role); under runner-release.sh's RR_DIR
+# THIS RELEASE STARTS NO WINDOW (S2b-3c-1: every way a switch ENDS; the switch is S2b-3c-2's, the rollback B2b's).
+# RS_USER's pass, and its on and off, end a window journal a cut left open (RECOVER FIRST, below: pool-image.sh's
+# RECOVER as their child may start or restart runscaler and put a rollback's backup back), apply a closed one to the
+# state (THE APPLY STEP) and archive it; a pass then holds or clears POOL DOWN (THE OUTAGE RULE), measures, asks the
+# decision core (core/README.md) and prints what it WOULD do, and which runner release it would switch to (DUE, below).
+# With no journal at WINDOW, it runs no pool-image.sh and no `systemctl --user start|stop|restart`, and changes no
+# config. RUN_USER's pass builds the image of the release DUE waits for (THE BUILD PASS, below), with 02-d1.sh, and
+# changes nothing of the pool. Each user's writes: under STATEDIR, the state (by rename), a pass's files (PASSDIR) and
+# the lock file, RS_USER's archive of a closed journal (WINDOW renamed into WINDOWS) and what its RECOVER writes
+# (pool-image.sh's header), and RUN_USER's BUILDOUT (their modes: runner-release.sh's rr_lock, THE MODES, by the
+# user's role); under runner-release.sh's RR_DIR
 # (~/.cache/liveapp-ci), the filtered CA bundle and the private copy of each build record it reads; and RUN_USER's
 # 02-d1.sh build what that writes (its header). status writes nothing.
 #
@@ -40,8 +45,11 @@
 #              hex> (what 03-runscaler.sh renders).
 #   core       the decision core's own state (the `state` idle.jq and r1.jq return) | absent: a fresh core
 #   restart    {from: {pid, start}, to: {pid, start}, stopped: {inode: "N", offset: N, sha}} | absent: the updater's own
-#              restart of runscaler (a later release's window writes it), handed to the core ONCE as facts.restart and
-#              then removed
+#              restart of runscaler (THE APPLY STEP writes it from a window journal: THE OWN RESTART), handed to the
+#              core ONCE as facts.restart and then removed
+#   last_window "YYYYmmddHHMMSS-PID" | absent: the ID of the last window journal THE APPLY STEP applied (S2b-3c-1 D-b):
+#              written in the same state write, so a journal whose ID it is (a run cut after its write, before the
+#              archive) is only archived, never applied twice
 #   A MEMBER THIS RELEASE DOES NOT READ (at the top, a family other than hz-docker, in hz-docker, in its candidate, in a
 #   STOP, in the restart): every command WAITs (exit 4), names it, and writes nothing. So a later release may add one
 #   under format 1, and an older one (a rollback across it) never writes a state that drops it or hides a STOP.
@@ -65,16 +73,21 @@
 #   (WAIT). Two users, each with its own state, key and lock; RUN_USER builds, RS_USER switches.
 #
 # COMMANDS. on, off, pass and build hold THE UPDATER LOCK (runner-release.sh's rr_lock: RR_LOCK on fd 9, one per user)
-#   for their whole run: on, off and build wait for it (a WAIT line first); a pass only tries it.
+#   for their whole run: on, off and build wait for it (a WAIT line first); a pass only tries it. RS_USER's on, off and
+#   pass run RECOVER FIRST and THE APPLY STEP (below) right after they read the state, before ON or OFF is read.
 #   status   no lock, and it writes no file anywhere (the core's inputs come through pipes). ONE read of STATE; the jq
 #            check (below); status.jq with facts from the state (RS_USER's: the family's candidate and back_until, the
 #            STOPs it holds; RUN_USER's: its STOPs, of hz-docker) and RS_USER's `core`. It prints ON or OFF; RS_USER's
-#            also the family's candidate (or "no candidate"), back_until and rejected versions, and an open window
-#            journal; then status.jq's verdict and lines (RUN_USER's `check failed` line names `runner-updater build V`
-#            as RUN_USER, its retry: D7); per STOP its D7 properties (`known false` and "unknown" for a STOP this core
-#            does not know: never guessed). status.jq's answer is checked as a pass checks it (`decided`): a `wait` is
-#            its lines, then "runner-updater: WAIT the decision core waits ...", exit 4; another answer is
-#            "runner-updater: STOP core could not decide (status)", exit 1.
+#            also the family's candidate (or "no candidate"), back_until and rejected versions, and which of three a
+#            journal at WINDOW is (status_window: open, with its last `stop` line and whether a runscaler RUNS, by
+#            runner-facts.sh's runs with its /healthz pair kept in memory; closed and not applied; applied and not
+#            archived, its ID the state's last_window); then status.jq's verdict and lines, on the core's state with no
+#            entry of a family that has no candidate (STATUS AFTER A ROLLBACK, the r3 FOLD: a departed candidate's R1
+#            and KEEP evidence is no current work; the state is not edited) (RUN_USER's `check failed` line names
+#            `runner-updater build V` as RUN_USER, its retry: D7); per STOP its D7 properties (`known false` and
+#            "unknown" for a STOP this core does not know: never guessed). status.jq's answer is checked as a pass
+#            checks it (`decided`): a `wait` is its lines, then "runner-updater: WAIT the decision core waits ...",
+#            exit 4; another answer is "runner-updater: STOP core could not decide (status)", exit 1.
 #            RS_USER's status then prints RUN_USER's record (PLAN D7: both users' records), after ALL of its own lines,
 #            whatever they end with (its own lines run in a subshell: a WAIT or REFUSE on its own state, a core that
 #            could not decide or waits, a clock it cannot read; do_status), and then exits with its own code
@@ -94,12 +107,15 @@
 #            state) is followed by ONE such line. Its exit code is RS_USER's own:
 #            nothing of RUN_USER's record changes it, as no STOP of RS_USER's own does (status reports; the watchdog
 #            reads only the lines). A host config whose RUN_USER is RS_USER has one record: none is printed twice.
-#   on       on = true.
-#   off      refuses while WINDOW is open (off never strands a window: D11), and changes nothing; else on = false.
+#   on       on = true; RS_USER's: a journal that stays at WINDOW after RECOVER FIRST is its STOP line, exit 1, and on
+#            is as it was.
+#   off      refuses while a window journal stays at WINDOW after RECOVER FIRST (off never strands a window: D11, D-f;
+#            RECOVER never waits for idle, so a switch that waits stays open and off names it), and changes nothing;
+#            else on = false.
 #   pass     the timer's entry (config/runner-updater.timer). The lock held: "another run holds the updater lock",
-#            exit 0 at once. OFF: "the updater is OFF", exit 0, no core call and no network. RS_USER's: an open window
-#            journal (WINDOW): "STOP RECOVER needed (S2b-3c)", exit 1, and nothing else (a window holds the lock for its
-#            whole run, so a pass that holds the lock and finds one found an interrupted window). ON: the jq check, now
+#            exit 0 at once. RS_USER's: RECOVER FIRST and THE APPLY STEP, then THE OUTAGE RULE, OFF too; a journal that
+#            stays at WINDOW is then its STOP line, exit 1, and nothing else. OFF: "the updater is OFF", exit 0, no core
+#            call and no network. ON: the jq check, now
 #            = the UTC clock, the FACTS (below) into PASSDIR, then idle.jq, r1.jq, keep.jq and status.jq with the same
 #            five inputs (state, facts, log, healthz, --arg now). The state they read is PASSDIR/state.json, a copy of
 #            the state's `core`, written back by rename after idle and after r1, so a later program reads it; only when
@@ -122,6 +138,70 @@
 #   "STOP untested jq" and exit 3: no core program runs (status, and a pass that is ON, of either user: RUN_USER's pass
 #   reads its STOPs with the core's lib/stops.jq; an OFF pass ends before it). `build VERSION` runs no core program.
 #
+# RECOVER FIRST (S2b-3c-1 D-b (c), D-f; the Studio's run_recover): when a journal is at WINDOW (a window holds the
+#   lock for its whole run, so a run that holds it and finds one found a window a cut left open, or one closed and not
+#   archived), RS_USER's on, off and pass run `~/build/setup/pool-image.sh recover --unattended` as their CHILD (it gets
+#   the lock on fd 9: pool-image.sh's THE UPDATER'S CHILD), its output shown, then THE APPLY STEP. Its exits: 0 the
+#   journal is closed; 3 none; 4 WAIT (a person's pool-image.sh run holds that script's own lock: RECOVER read and
+#   changed nothing): a line, no STOP, and a closed journal is applied all the same; 5 it stays open (RECOVER's line
+#   says why: a STOP of its own, a wait for idle, a start that did not run yet); 6 a record RECOVER cannot read or act
+#   on: a STOP that names linux-docker/README.md "An unfinished window the updater cannot end", nothing written; 1
+#   RECOVER's REFUSE; any other: a STOP that names it. A journal that stays (open, or one THE APPLY STEP cannot read or
+#   archive): its STOP or REFUSE line, exit 1, and nothing else starts (a pass: after THE OUTAGE RULE). A pass makes at
+#   most ONE restart of runscaler (D-g): this release's only one is RECOVER's (RECOVER_STARTED).
+# THE APPLY STEP (S2b-3c-1 D-b (b) and the r3 FOLD), under the lock: a journal at WINDOW whose last line is `closed E`,
+#   read ONCE, by its keys and fields, never a line's text; it reads no config.toml, no build record and no clock (the
+#   closer journaled what it installed: `installed SHA CONTENT CLASS`, pool-image.sh's THE CLOSING LINES). Its ID is
+#   the state's last_window: it is only archived; a journal with no `kind` line (cut right after its first): only
+#   archived. Else THE CLOSE RULE, then ONE state write (load_state's jq: an untested jq does not stop it) that also
+#   sets last_window, then the archive: WINDOW renamed to WINDOWS/ID (one that is there already: a STOP). A closed
+#   journal it cannot read (no `window ID` first line, a line that is not KEY VALUE, a STOP name the window's grammar
+#   has not, an `installed` line of another shape, a CLASS its kind has not, a needed line missing): a STOP that names
+#   README's section, nothing written. A closed journal in WINDOWS is never applied.
+#   THE CLOSE RULE, by the kind and the CLASS (T: the window's first `target` line, its lines {SET: IMAGE}):
+#   - no `target` line (the shortcuts: `up` already names and runs the image, `back` already is the backup): only its
+#     STOPs.
+#   - switch, target-running | target-idle | target-old: candidate = {version, lines: T's, closed_at: `closed`}; when
+#     its `backup` names config.toml.prev: previous = `old` on T's sets and back_until = null (a backup in the window's
+#     own folder, 3c-2's --keep-prev, leaves both). POOL DOWN too (PLAN D6 :354).
+#   - switch, pre | none: no candidate change; when its `backup` names config.toml.prev, its LAST `prev` (a line that
+#     may come twice) is `config-sha` (the backup replaced the keep) and there is no candidate: previous = null and
+#     back_until = null, and the line says the keep is gone (r1 Opus F19).
+#   - rollback, target-running | target-idle: candidate, previous and back_until = null (rolled back: target-idle is a
+#     person's `disable --now`, its TARGET runs at the person's start); THE REJECTION is B2b's (apply_rejection, its one
+#     place).
+#   - rollback, target-old (a person's `disable` without --now: an older runscaler runs the candidate's image): the
+#     candidate stays, CI DISABLED held. target-failed (RECOVER's: the rollback DECIDED as failed and its TARGET still
+#     installed): the candidate stays, ROLLBACK FAILED held, never "rolled back". pre | none: no change.
+#   - other (a person's file the closer found): no candidate (a switch's is not set, a rollback's stays), HAND CHANGE
+#     held.
+#   - a switch's target-failed: a CLASS its kind has not (a STOP, above).
+#   A close's STOP the journal has no line of gets a fixed text. LEGACY JOURNALS (the r3 FOLD; a journal an earlier
+#   release closed, cut before its rename, has no `installed` line): its CLASS from its own lines: `running` after its
+#   `target`: target-running; a `stop` or `end` before any `rename-start`: pre; anything else: a STOP (above). A
+#   rollback with no `why`: a person's back, old-version none (nothing rejected), and its line says so.
+#   THE STOP RULE (the Studio's, runner-updater-window :127-139): the journal's `stop` lines, each NAME held once (its
+#   last line of that name), but DISK, untested jq and NO IDLE (the pass checks the first two again; NO IDLE's restart
+#   came); each replaces the family's held STOP of its name, and the family's other STOPs stay, but a switch or
+#   rollback close that sets or clears the candidate drops JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE (they judged the
+#   candidate it replaced). Each STOP is of the switch's `version`, a rollback's `old-version` (else the candidate's);
+#   its detail {text} (POOL DOWN's also hand: journalctl --user -u runscaler).
+#   THE OWN RESTART (core/README.md :68-121; the r3 FOLD): `restart` = {from, to: `running`, stopped} only from a
+#   journal with no `recover-start` (an uninterrupted window), its own `from` (a process), `stopped` (a position) and
+#   `running`, whose start is within 20 s of its `starting` (RestartSec=30: no Restart=always retry came between),
+#   while the state holds no unconsumed `restart`; any other applied journal removes the member (a gap: the safe
+#   default).
+# THE OUTAGE RULE (S2b-3c-1 B1 DECISIONS r4; operator (1): the unit enabled means CI on), RS_USER's pass, ON or OFF,
+#   after RECOVER FIRST: LEVEL-TRIGGERED, never latched. ONE unit_read; with the unit enabled, or a POOL DOWN held, ONE
+#   runner-facts.sh `runs` of config.toml's sets (never one `active` read; its /healthz pair kept in memory): no
+#   runscaler RUNS, whenever it started, and the unit enabled: STOP POOL DOWN in the state, its text naming the open
+#   window journal's last line when there is one, else what the pass saw (the unit's state), held ONCE (a held one
+#   stays as it is: no new STOP each pass); a runscaler that RUNS and started after config.toml's install time (facts
+#   4's install_time) clears POOL DOWN, and CI DISABLED too when the unit is enabled. CHOICE (B2a): a runscaler that
+#   started at or before that install and RUNS is CI up (a person's `03-runscaler.sh real` after a pool.env change
+#   restarts nothing: PLAN D2), so it raises nothing, and it clears nothing either. The unit not enabled: no POOL DOWN
+#   (a person's: CI DISABLED's rule). A unit it cannot read: nothing raised or cleared. It never fails the pass. A
+#   journal's CI-down words are text for the person, never the guarantee: this rule is.
 # DUE (RS_USER's pass, after the core: which release hz-docker would switch to; the Studio's rl_pass, adapted).
 #   hz-docker is due when the eligible release is newer than its current version, it has no open candidate and no STOP
 #   holds it. A STOP of its list holds it when it names no version, or a newer release does not proceed alone past it
@@ -214,9 +294,10 @@
 # Exit codes:
 #   0  done; also a pass that finds the lock held or the updater OFF, and a pass whose DUE line or build pass says why
 #      nothing is due or built (a WAIT of GitHub's, or of 02-d1.sh in a pass, too; a build CUT by a signal)
-#   1  a REFUSE (a state it does not read, a fact it cannot read, a recipe it cannot compute, off while a window is
-#      open, a user other than RS_USER and RUN_USER, build as RS_USER) or a STOP (a state it cannot write, the core
-#      could not decide, RECOVER needed, a pass's build that failed: check failed); a `build VERSION` that failed
+#   1  a REFUSE (a state it does not read, a fact it cannot read, a recipe it cannot compute, off while a window journal
+#      stays, RECOVER's own REFUSE, a user other than RS_USER and RUN_USER, build as RS_USER) or a STOP (a state it
+#      cannot write, the core could not decide, a window journal that stays at WINDOW after RECOVER FIRST, a pass's
+#      build that failed: check failed); a `build VERSION` that failed
 #   2  usage
 #   3  STOP untested jq
 #   4  WAIT: a state of another format, or with a member this release does not read; a pass, or status, whose decision
@@ -337,12 +418,13 @@ if type == "object" and .format == 1 and (.on | type) == "boolean" and (.familie
    and (.families["hz-docker"] == null or (.families["hz-docker"] | family_ok))
    and (.core == null or (.core | type) == "object")
    and (.restart == null or (.restart | type == "object" and (.from | proc_ok) and (.to | proc_ok) and (.stopped | position_ok)))
+   and (.last_window == null or (.last_window | type == "string" and test("^[0-9]{14}-[0-9]+$")))
 then . else error("not a state of format 1") end'
 # the members of a checked state that this release does not read, at each level it reads ("" when none); a name that
 # is not plain is shown as JSON (no raw newline reaches the WAIT line)
 MEMBERS='
 def shown: if test("^[A-Za-z_][A-Za-z0-9_-]{0,40}$") then . else tojson end;
-[(keys - ["format", "on", "families", "core", "restart"])[] | shown]
+[(keys - ["format", "on", "families", "core", "restart", "last_window"])[] | shown]
 + [(.families | keys - ["hz-docker"])[] | "families.\(shown)"]
 + (if (.families["hz-docker"] | type) == "object" then .families["hz-docker"] as $h
      | [($h | keys - ["candidate", "previous", "back_until", "rejected", "stops"])[] | "families.hz-docker.\(shown)"]
@@ -576,13 +658,45 @@ do_status() {
   fi
   status_own
 }
+# A JOURNAL AT WINDOW, as status names it (the header: status; D-g): ONE read of it, no lock, no write. Open (its last
+# line is not `closed`): its last `stop` line (NO IDLE with its hand line, as it is journaled), and whether a runscaler
+# RUNS (runner-facts.sh's runs, the /healthz pair kept in memory: no file); closed and not applied; applied and not
+# archived (its ID is the state's last_window)
+status_window() {
+  local text id lw st sets cr s
+  window_open || return 0
+  text=$(cat -- "$WINDOW" 2> /dev/null && echo .); text=${text%.}
+  id=${text%%$'\n'*}; id=${id#window }
+  if [[ $text =~ (^|$'\n')closed\ [0-9]{1,12}$'\n'$ ]]; then
+    lw=$(printf '%s\n' "$ST" | jq -r '.last_window // empty')
+    if [ -n "$lw" ] && [ "$id" = "$lw" ]; then
+      say "status: a window journal is applied and not archived: $WINDOW (the next pass, on or off archives it)"
+    else say "status: a window journal is closed and not applied: $WINDOW (the next pass, on or off applies it)"; fi
+    return 0
+  fi
+  say "status: a window journal is open: $WINDOW (a window that runs holds the updater lock; when none does, the next pass's RECOVER ends it)"
+  st=$(printf '%s' "$text" | grep '^stop ' | tail -n 1)
+  if [ -n "$st" ]; then st=${st#stop }; say "status: the window journal's last STOP: ${st//[[:cntrl:]]/?}"
+  else say "status: the window journal holds no STOP"; fi
+  sets="${MAIN_SET} ${SMALL_SET}"
+  if cr=$(config_read "$CFG") && s=$(printf '%s\n' "${cr#*$'\n'}" | jq -r '.sets | join(" ")' 2> /dev/null) && [ -n "$s" ]; then
+    sets=$s
+  fi
+  # shellcheck disable=SC2086
+  if runs 0 - $sets; then say "status: runscaler RUNS (pid ${RUNS_PROC% *}, started ${RUNS_PROC#* })"
+  else say "status: no runscaler RUNS: $RUNS_WHY"; fi
+}
 status_own() {   # [MORE]: jq_check's
   local now core facts out rc
   load_state
   jq_check "${1-}"
   now=$(date +%s)
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
-  core=$(printf '%s\n' "$ST" | jq -c '.core // empty') && facts=$(printf '%s\n' "$ST" | status_facts "$ROLE") \
+  # the core's state as status.jq reads it: with no line of a family that has no candidate (a departed candidate's R1
+  # and KEEP evidence is no current work: STATUS AFTER A ROLLBACK); the core's own state is not edited
+  core=$(printf '%s\n' "$ST" | jq -c --arg f "$FAMILY" '(.families[$f].candidate // null) as $c | .core // empty
+          | if $c == null and (.families | type) == "object" then del(.families[$f]) else . end') \
+    && facts=$(printf '%s\n' "$ST" | status_facts "$ROLE") \
     || refuse "jq could not build the facts of the state"
   say "status: the updater is $(printf '%s\n' "$ST" | jq -r 'if .on then "ON" else "OFF" end')"
   [ "$ROLE" != rs ] || printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" 'def utc: strftime("%Y-%m-%d %H:%M UTC");
@@ -594,7 +708,7 @@ status_own() {   # [MORE]: jq_check's
        + "; " + (if $h.back_until == null then "back: none" else "back until \($h.back_until | utc)" end)
        + "; rejected: " + (if ($h.rejected // []) == [] then "none" else ($h.rejected | join(", ")) end))' \
     || refuse "jq could not print the state"
-  [ "$ROLE" != rs ] || ! window_open || say "status: a window journal is open: $WINDOW (its run holds the updater lock; when no run does, RECOVER (S2b-3c) ends it)"
+  [ "$ROLE" != rs ] || status_window
   out=$(status_jq "$core" "$facts" "$now")
   rc=$?
   if [ "$rc" != 0 ] || ! printf '%s\n' "$out" | decided status; then
@@ -609,25 +723,318 @@ status_own() {   # [MORE]: jq_check's
 # ---- on, off (D11), under the lock
 do_on() {
   load_state
+  [ "$ROLE" != rs ] || { recover_first; [ -z "$WSTOP" ] || { echo "$WSTOP"; exit 1; }; }
   change_state '.on = true'
   say "on: the updater is ON"
   exit 0
 }
 do_off() {
-  ! window_open || refuse "a window is open ($WINDOW): off never strands a window, so nothing changed. Run off again when the window has ended"
   load_state
+  [ "$ROLE" != rs ] || recover_first
+  if [ -n "$WSTOP" ] || window_open; then
+    [ -z "$WSTOP" ] || echo "$WSTOP"
+    refuse "a window journal stays open ($WINDOW): off never strands a window, so nothing changed. Run off again once \`runner-updater status\` shows no window journal"
+  fi
   change_state '.on = false'
   say "off: the updater is OFF"
   exit 0
 }
 
-# ---- the pass
-# an open window journal that no run of this release started: STOP, exit 1, nothing starts (RECOVER is S2b-3c's)
-recover_needed() {
+# ---- RECOVER FIRST, THE APPLY STEP, THE OUTAGE RULE (RS_USER's; the header)
+KEEPP=$R/config.toml.prev   # a switch's backup when it replaces the keep (pool-image.sh's KEEPP)
+README_SECTION='linux-docker/README.md "An unfinished window the updater cannot end"'
+WSTOP=              # the STOP or REFUSE line a run ends with (a pass: after THE OUTAGE RULE): the journal stays
+RECOVER_STARTED=0   # this run's RECOVER journaled a `starting` or `stopping` (D-g: a pass's one restart of runscaler;
+                    # S2b-3c-1 B2b's rollback reads it: a pass whose RECOVER started or restarted runscaler starts none)
+
+# RECOVER FIRST (the header): pool-image.sh's RECOVER as this run's CHILD, only when a journal is at WINDOW (it holds
+# the updater lock on fd 9, which the child inherits: THE UPDATER'S CHILD), then THE APPLY STEP. RECOVER's exits: 0 the
+# journal is closed: applied; 3 none there; 4 WAIT (a person's pool-image.sh run holds that script's own lock: it read
+# and changed nothing): a line, no STOP, and a closed journal is applied all the same; 5 it stays open (its line says
+# why); 6 one it cannot read or act on: README's section, nothing written; 1 a REFUSE; any other: a STOP that names it.
+# A journal that stays at WINDOW (open, or one the apply step cannot read or archive) sets WSTOP: nothing else starts
+recover_first() {
+  local rc n0
   window_open || return 0
-  echo "runner-updater: STOP RECOVER needed (S2b-3c): the window journal $WINDOW is open and no run holds the updater lock (an interrupted window): nothing starts until RECOVER ends it"
-  exit 1
+  n0=$(wc -l < "$WINDOW" 2> /dev/null) && [[ $n0 =~ ^[0-9]+$ ]] || n0=0
+  bash "$B/setup/pool-image.sh" recover --unattended < /dev/null
+  rc=$?
+  [ "$(tail -n +"$((n0 + 1))" -- "$WINDOW" 2> /dev/null | grep -c -E '^(starting|stopping) ')" = 0 ] || RECOVER_STARTED=1
+  case $rc in
+    0|5) ;;
+    3) return 0 ;;
+    4) say "RECOVER waits: another pool-image.sh run (a person's) holds its own lock, so RECOVER read and changed nothing; the next run tries it again" ;;
+    6) WSTOP="runner-updater: STOP RECOVER cannot read or act on the window journal $WINDOW (its line above says why): $README_SECTION; nothing is written, and nothing else starts"
+       return 0 ;;
+    1) WSTOP="runner-updater: REFUSE RECOVER did not run (pool-image.sh recover --unattended, exit 1: its line above says why): the window journal $WINDOW is as it was, and nothing else starts"
+       return 0 ;;
+    *) WSTOP="runner-updater: STOP RECOVER exited $rc (pool-image.sh recover --unattended; its lines above): the window journal $WINDOW is as RECOVER left it, and nothing else starts"
+       return 0 ;;
+  esac
+  apply_step
+  if [ -z "$WSTOP" ] && window_open; then
+    WSTOP="runner-updater: STOP the window journal $WINDOW stays open (RECOVER's line above says why): the next run's RECOVER tries again, and nothing else starts"
+  fi
 }
+
+# THE APPLY STEP's reader: the journal at WINDOW read ONCE, by its keys and fields (never a line's text: a `stop`
+# line's NAME is its field, its TEXT is kept as it is). 0 and AJ_*: closed (its last line, a whole one, `closed E`); 1:
+# open (RECOVER's); 2 + REPLY: a closed journal it cannot read
+apply_read() {
+  local text l k v n=0
+  AJ_ID= AJ_KIND= AJ_VERSION= AJ_OLD= AJ_CSHA= AJ_T= AJ_TN=0 AJ_BACKUP= AJ_PREV= AJ_INST= AJ_RS=0 AJ_RSTART=0 AJ_FROM=
+  AJ_STOPPED= AJ_STARTING= AJ_RUNNING= AJ_RUNN=0 AJ_SE=0 AJ_WHY= AJ_OLDV= AJ_CLOSED= AJ_STOPS=()
+  { [ -f "$WINDOW" ] && [ ! -L "$WINDOW" ] && [ -r "$WINDOW" ]; } || { REPLY="it is not a readable plain file"; return 2; }
+  text=$(cat -- "$WINDOW" && echo .) || { REPLY="it cannot be read"; return 2; }
+  text=${text%.}
+  [[ $text =~ (^|$'\n')closed\ [0-9]{1,12}$'\n'$ ]] || return 1
+  mapfile -t AJ_L <<< "${text%$'\n'}"
+  for l in "${AJ_L[@]}"; do
+    n=$((n + 1))
+    [[ $l =~ ^([a-z][a-z-]{0,30})\ (.*)$ ]] || { REPLY="line $n is not 'KEY VALUE'"; return 2; }
+    k=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
+    case $k in
+      window) [ "$n" = 1 ] && [[ $v =~ ^[0-9]{14}-[0-9]+$ ]] || { REPLY="line $n is no first line \`window ID\`"; return 2; }
+              AJ_ID=$v ;;
+      kind) [ -n "$AJ_KIND" ] || AJ_KIND=$v ;;
+      version) [ -n "$AJ_VERSION" ] || AJ_VERSION=$v ;;
+      old) [ -n "$AJ_OLD" ] || AJ_OLD=$v ;;
+      config-sha) [ -n "$AJ_CSHA" ] || AJ_CSHA=$v ;;
+      target) [ -n "$AJ_T" ] || { AJ_T=$v AJ_TN=$n; } ;;   # the window's first: the TARGET
+      backup) [ -n "$AJ_BACKUP" ] || AJ_BACKUP=$v ;;
+      prev) AJ_PREV=$v ;;                                    # the LAST counts (RECOVER's close writes it again)
+      installed) AJ_INST=$v ;;
+      rename-start) [ "$AJ_RS" != 0 ] || AJ_RS=$n ;;
+      recover-start) AJ_RSTART=1 ;;
+      from) AJ_FROM=$v ;;
+      stopped) AJ_STOPPED=$v ;;
+      starting) AJ_STARTING=$v ;;
+      running) AJ_RUNNING=$v AJ_RUNN=$n ;;
+      stop|end) [ "$AJ_SE" != 0 ] || AJ_SE=$n
+                if [ "$k" = stop ]; then
+                  [[ ${v%%: *} =~ ^(check\ failed|DISK|untested\ jq|HAND\ CHANGE|ROLLBACK\ FAILED|POOL\ DOWN|CI\ DISABLED|NO\ IDLE)$ ]] && [[ $v == *': '* ]] \
+                    || { REPLY="line $n: a STOP this release does not know"; return 2; }
+                  AJ_STOPS+=("$v")
+                fi ;;
+      why) [ -n "$AJ_WHY" ] || AJ_WHY=$v ;;
+      old-version) [ -n "$AJ_OLDV" ] || AJ_OLDV=$v ;;
+      closed) AJ_CLOSED=$v ;;
+    esac
+  done
+  [ -n "$AJ_ID" ] || { REPLY="its first line is not \`window ID\`"; return 2; }
+}
+
+# THE CLOSE RULE (the header) of the journal read (AJ_*): 0 and what the ONE state write does (A_CAND set | clear |
+# keep, A_PREVOP old | null | keep, A_LINES, A_DROP, A_NEW the STOPs it holds, A_RS the `restart` member or null,
+# A_WHAT its line); 1 + REPLY: a closed journal it cannot read. CAND: the state's candidate (JSON or null)
+close_rule() {
+  local cand=$1 sv= hold= htext= s fp fs si so sh e tp ts
+  A_CAND=keep A_PREVOP=keep A_LINES='{}' A_DROP=false A_RS=null A_WHAT= A_NOTE=
+  [[ $AJ_KIND =~ ^(switch|rollback)$ ]] || { REPLY="its kind is not switch or rollback"; return 1; }
+  if [ -n "$AJ_INST" ]; then
+    [[ $AJ_INST =~ ^([0-9a-f]{64}|none)\ ([0-9a-f]{64}|none)\ (target-running|target-idle|target-old|target-failed|pre|other|none)$ ]] \
+      || { REPLY="its installed line is not 'SHA CONTENT CLASS'"; return 1; }
+    A_CLASS=${BASH_REMATCH[3]}
+  elif [ -z "$AJ_T" ] || { [ "$AJ_RUNN" != 0 ] && [ "$AJ_RUNN" -gt "$AJ_TN" ]; }; then
+    A_CLASS=target-running A_NOTE=" (a journal of an earlier release, with no installed line: \`running\` after its target)"
+    [ -n "$AJ_T" ] || A_CLASS=pre A_NOTE=" (a journal of an earlier release, with no installed line)"
+  elif [ "$AJ_SE" != 0 ] && { [ "$AJ_RS" = 0 ] || [ "$AJ_SE" -lt "$AJ_RS" ]; }; then
+    A_CLASS=pre A_NOTE=" (a journal of an earlier release, with no installed line: a STOP or an end before its rename)"
+  else
+    REPLY="it has no installed line (a journal of an earlier release), and no line of it says what it installed"
+    return 1
+  fi
+  if [ "$AJ_KIND" = rollback ] && [ -z "$AJ_WHY" ]; then
+    AJ_WHY=back AJ_OLDV=none
+    A_NOTE="$A_NOTE (a rollback with no \`why\`: a person's back, old-version none: nothing rejected)"
+  fi
+  # the version its STOPs are of: a switch's `version`; a rollback's `old-version`, else the candidate's
+  if [ "$AJ_KIND" = switch ]; then [[ $AJ_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && sv=$AJ_VERSION
+  elif [[ $AJ_OLDV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then sv=$AJ_OLDV
+  else sv=$(printf '%s\n' "$cand" | jq -r '.version // empty' 2> /dev/null); fi
+  if [ -z "$AJ_T" ]; then
+    A_WHAT="no target line (the window's shortcut): no candidate change, only its STOPs"
+  elif [ "$AJ_KIND" = switch ]; then
+    case $A_CLASS in
+      target-running|target-idle|target-old)
+        [ -n "$sv" ] || { REPLY="a switch's close of CLASS $A_CLASS with no version line"; return 1; }
+        A_LINES=$(target_json "$AJ_T") || { REPLY="its target line is not SET=IMAGE ..."; return 1; }
+        A_CAND=set A_DROP=true
+        if [ "$AJ_BACKUP" = "$KEEPP" ]; then
+          [[ $AJ_OLD =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64}$ ]] || { REPLY="its old line is no image"; return 1; }
+          A_PREVOP=old
+        fi
+        A_WHAT="the candidate is runner $AJ_VERSION, its TARGET's lines (switched at $AJ_CLOSED)" ;;
+      pre|none)
+        if [ "$AJ_BACKUP" = "$KEEPP" ] && [ -n "$AJ_CSHA" ] && [ "$AJ_PREV" = "$AJ_CSHA" ] && [ "$cand" = null ]; then
+          A_PREVOP=null
+          A_WHAT="no candidate change; its backup replaced config.toml.prev, so the keep of an earlier switch is gone: no previous image, no back_until"
+        else A_WHAT="no candidate change"; fi ;;
+      other) A_WHAT="config.toml is a file the window did not write: no candidate"
+             hold="HAND CHANGE" htext="config.toml is a file the window $AJ_ID did not write: check it" ;;
+      *) REPLY="a switch's close of CLASS $A_CLASS, a class only a rollback has"; return 1 ;;
+    esac
+  else
+    case $A_CLASS in
+      target-running|target-idle)
+        A_CAND=clear A_DROP=true
+        A_WHAT="rolled back: no candidate, no previous image, no back_until (its TARGET installed, $A_CLASS)" ;;
+      target-old) A_WHAT="the candidate stays: its TARGET is installed, but a runscaler that started before its install runs the image before"
+                  hold="CI DISABLED" htext="the rollback's TARGET is installed, but a runscaler that started before its install still runs the image of the candidate (the window $AJ_ID): CI is disabled by a person" ;;
+      target-failed) A_WHAT="the candidate stays: the rollback failed, and its TARGET is installed"
+                     hold="ROLLBACK FAILED" htext="the rollback's TARGET is installed and the rollback failed (the window $AJ_ID): the candidate stays" ;;
+      pre|none) A_WHAT="no candidate change, nothing rejected" ;;
+      other) A_WHAT="config.toml is a file the window did not write: the candidate stays"
+             hold="HAND CHANGE" htext="config.toml is a file the window $AJ_ID did not write: check it" ;;
+    esac
+  fi
+  # THE STOP RULE: the journal's STOPs, each name held once (its last line), but DISK, untested jq and NO IDLE; a
+  # name the close rule holds and the journal has none of gets its fixed text
+  A_NEW=$(jq -n -c --arg f "$FAMILY" --arg v "$sv" --arg hold "$hold" --arg htext "$htext" '
+    [$ARGS.positional[] | capture("^(?<n>[^:]+): (?<t>.*)$"; "s") | select(.n != "DISK" and .n != "untested jq" and .n != "NO IDLE")]
+    | reduce .[] as $s ({}; .[$s.n] = $s.t)
+    | if $hold != "" and has($hold) == false then .[$hold] = $htext else . end
+    | [to_entries[] | {family: $f, stop: .key, version: (if $v == "" then null else $v end), user: null,
+                       detail: ({text: .value} + (if .key == "POOL DOWN" then {hand: "journalctl --user -u runscaler"} else {} end))}]' \
+    --args "${AJ_STOPS[@]}" 2> /dev/null) && [ -n "$A_NEW" ] || { REPLY="jq could not read its STOP lines"; return 1; }
+  # THE OWN RESTART: only an uninterrupted window's own (no `recover-start`), its `running` started within 20 s of its
+  # `starting` (RestartSec=30: no Restart=always retry came between), and no unconsumed `restart` in the state
+  if [ "$AJ_RSTART" = 0 ] && [[ $AJ_FROM =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+    fp=${BASH_REMATCH[1]} fs=${BASH_REMATCH[2]}
+    if [[ $AJ_STOPPED =~ ^([0-9]+)\ ([0-9]+)\ ([0-9a-f]{64})$ ]]; then
+      si=${BASH_REMATCH[1]} so=${BASH_REMATCH[2]} sh=${BASH_REMATCH[3]}
+      if [[ $AJ_STARTING =~ ^([0-9]{1,12})$ ]] && e=${BASH_REMATCH[1]} && [[ $AJ_RUNNING =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+        tp=${BASH_REMATCH[1]} ts=${BASH_REMATCH[2]}
+        if [ "$fp" -ge 1 ] && [ "$tp" -ge 1 ] && [ "$ts" -ge "$e" ] && [ "$((ts - e))" -le 20 ] \
+          && [ "$(printf '%s\n' "$ST" | jq -r 'has("restart")')" = false ]; then
+          A_RS="{\"from\":{\"pid\":$fp,\"start\":$fs},\"to\":{\"pid\":$tp,\"start\":$ts},\"stopped\":{\"inode\":\"$si\",\"offset\":$so,\"sha\":\"$sh\"}}"
+        fi
+      fi
+    fi
+  fi
+  return 0
+}
+# "SET=IMAGE SET=IMAGE" (a `target` line's value) -> {SET: IMAGE, ...}; 1 when a part is no SET=IMAGE
+target_json() {
+  jq -n -c '[$ARGS.positional[] | capture("^(?<k>[A-Za-z0-9][A-Za-z0-9._-]{0,99})=(?<v>[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[0-9a-f]{64})$")
+            // error("no SET=IMAGE")] | map({(.k): .v}) | add' --args $1 2> /dev/null
+}
+# THE REJECTION (S2b-3c-1 D-e) is B2b's, and THIS is its one place: a rollback's close that rolled back (CLASS
+# target-running or target-idle) rejects by the journal's `why`, `old-version`, `target-version` and `verdict` (a
+# legacy one with no `why`: why back, old-version none), its rejected file written BEFORE the state write. B2a's:
+# nothing is rejected: REPLY = the jq the ONE state write runs after THE CLOSE RULE ('.'), and no file is written
+apply_rejection() { REPLY=.; }
+
+# THE APPLY STEP (the header): under the lock, a CLOSED journal at WINDOW -> THE CLOSE RULE -> ONE state write that
+# also sets `last_window` = its ID -> the archive (a rename to WINDOWS/ID); a journal whose ID is `last_window` is only
+# archived, one with no kind (cut right after its first line) too. It reads no config.toml, no build record and no
+# clock. A closed journal it cannot read, or cannot archive: WSTOP, nothing written
+APPLY_JQ='.last_window = $id
+  | .families[$f] = ((.families[$f] // {})
+      | if $cand == "set" then .candidate = {version: $v, lines: $tl, closed_at: $closed}
+          | (if $prevop == "old" then .previous = ($tl | with_entries(.value = $old)) | .back_until = null else . end)
+        elif $cand == "clear" then .candidate = null | .previous = null | .back_until = null
+        elif $prevop == "null" then .previous = null | .back_until = null
+        else . end
+      | .stops = ([(.stops // [])[] | .stop as $s | select(([$new[] | .stop] | index($s)) == null)
+                   | select(($drop | not) or ($s != "JOBS FAIL ON THE NEW IMAGE" and $s != "NO EVIDENCE"))] + $new))
+  | if $rs == null then del(.restart) else .restart = $rs end'
+apply_step() {
+  local cand
+  window_open || return 0
+  apply_read
+  case $? in
+    0) ;;
+    1) return 0 ;;
+    *) WSTOP="runner-updater: STOP the window journal $WINDOW is closed, but the apply step cannot read it ($REPLY): $README_SECTION; nothing is written, and nothing else starts"
+       return 0 ;;
+  esac
+  if [ "$AJ_ID" = "$(printf '%s\n' "$ST" | jq -r '.last_window // empty')" ]; then
+    say "apply: the window journal $AJ_ID was applied already (the state's last_window): it is only archived"
+    apply_archive; return 0
+  fi
+  if [ -z "$AJ_KIND" ]; then
+    say "apply: the window journal $AJ_ID names no kind (a window cut right after its first line): it changed nothing, and it is only archived"
+    apply_archive; return 0
+  fi
+  cand=$(printf '%s\n' "$ST" | jq -c --arg f "$FAMILY" '.families[$f].candidate // null')
+  close_rule "$cand" \
+    || { WSTOP="runner-updater: STOP the window journal $WINDOW is closed, but the apply step cannot read it ($REPLY): $README_SECTION; nothing is written, and nothing else starts"
+         return 0; }
+  REPLY=.
+  if [ "$AJ_KIND" = rollback ] && [ "$A_CAND" = clear ]; then apply_rejection "$AJ_WHY" "$AJ_OLDV"; fi
+  change_state "$APPLY_JQ | $REPLY" --arg id "$AJ_ID" --arg f "$FAMILY" --arg cand "$A_CAND" --arg prevop "$A_PREVOP" \
+    --arg v "$AJ_VERSION" --arg old "$AJ_OLD" --argjson tl "$A_LINES" --argjson closed "$AJ_CLOSED" \
+    --argjson new "$A_NEW" --argjson drop "$A_DROP" --argjson rs "$A_RS"
+  say "apply: the window journal $AJ_ID ($AJ_KIND, $A_CLASS) is applied: $A_WHAT$A_NOTE"
+  printf '%s\n' "$A_NEW" | jq -r '.[] | "runner-updater: apply: it holds STOP \(.stop): \(.detail.text)"'
+  [ "$A_RS" = null ] || say "apply: its own restart of runscaler goes to the core once (the state's restart)"
+  apply_archive
+}
+apply_archive() {
+  if [ -e "$WINDOWS/$AJ_ID" ] || [ -L "$WINDOWS/$AJ_ID" ]; then
+    WSTOP="runner-updater: STOP the window journal $WINDOW cannot be archived: $WINDOWS/$AJ_ID is there already: $README_SECTION; nothing else starts"
+    return 0
+  fi
+  install -d -m 700 "$WINDOWS" 2> /dev/null && mv -T -- "$WINDOW" "$WINDOWS/$AJ_ID" \
+    || { WSTOP="runner-updater: STOP the window journal $WINDOW cannot be renamed to $WINDOWS/$AJ_ID: it stays, and the next run archives it (the state's last_window names it); nothing else starts"
+         return 0; }
+  say "apply: the window journal is archived: $WINDOWS/$AJ_ID"
+}
+
+# THE OUTAGE RULE (the header): ONE unit_read and, when it can change anything, ONE runs (runner-facts.sh: never one
+# `active` read). Raised: the unit enabled and no runscaler RUNS (whenever it started) -> STOP POOL DOWN, held once (a
+# held one stays as it is). Cleared: a runscaler that RUNS and started after config.toml's install time (facts 4's
+# install_time) clears POOL DOWN, and CI DISABLED too with the unit enabled. A unit it cannot read raises and clears
+# nothing. It never fails the pass
+outage() {
+  local held pd cd cr head js s sets="${MAIN_SET} ${SMALL_SET}" inst=none p text last
+  unit_read || { say "pass: runscaler's unit cannot be read (systemctl --user show runscaler): THE OUTAGE RULE raises and clears nothing"; return 0; }
+  held=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '[(.families[$f].stops // [])[] | .stop] as $s
+           | "\($s | index("POOL DOWN") != null) \($s | index("CI DISABLED") != null)"') || held="false false"
+  pd=${held% *} cd=${held#* }
+  [ "$UNIT_FILE" = enabled ] || [ "$pd" = true ] || return 0
+  if cr=$(config_read "$CFG"); then
+    head=${cr%%$'\n'*} js=${cr#*$'\n'}
+    if [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]]; then
+      inst=$(install_time "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$WINDOWS"); inst=${inst%% *}
+      [[ $inst =~ ^[0-9]+$ ]] || inst=none
+    fi
+    s=$(printf '%s\n' "$js" | jq -r '.sets | join(" ")' 2> /dev/null) && [ -n "$s" ] && sets=$s
+  fi
+  # shellcheck disable=SC2086
+  if runs 0 - $sets; then
+    p=$RUNS_PROC
+    if [ "$inst" != none ] && [ "${p#* }" -gt "$inst" ]; then
+      if [ "$pd" = true ]; then
+        change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "POOL DOWN")]' --arg f "$FAMILY"
+        say "pass: STOP POOL DOWN is cleared: runscaler RUNS (pid ${p% *}, started ${p#* }, after config.toml's install at $inst)"
+      fi
+      if [ "$cd" = true ] && [ "$UNIT_FILE" = enabled ]; then
+        change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "CI DISABLED")]' --arg f "$FAMILY"
+        say "pass: STOP CI DISABLED is cleared: runscaler's unit is enabled and runscaler RUNS (pid ${p% *}, started after config.toml's install)"
+      fi
+    elif [ "$pd" = true ]; then
+      say "pass: STOP POOL DOWN stays: a runscaler RUNS (pid ${p% *}), but it started at or before config.toml's install ($inst): only one that started after it clears POOL DOWN"
+    fi
+    return 0
+  fi
+  [ "$UNIT_FILE" = enabled ] || return 0
+  if [ "$pd" = true ]; then say "pass: STOP POOL DOWN held: no runscaler RUNS ($RUNS_WHY)"; return 0; fi
+  if window_open; then
+    last=$(tail -n 1 -- "$WINDOW" 2> /dev/null); last=${last//[[:cntrl:]]/?}
+    text="runscaler's unit is enabled (CI on), and no runscaler RUNS ($RUNS_WHY): CI is down. The window journal $WINDOW is open (the next run's RECOVER ends it); its last line: ${last:0:300}"
+  else
+    text="runscaler's unit is enabled (CI on), and no runscaler RUNS (systemd: $UNIT_ACTIVE, pid $UNIT_PID; $RUNS_WHY): CI is down. Read journalctl --user -u runscaler, fix what it names, then systemctl --user restart runscaler; the updater's next pass sees it run"
+  fi
+  text=${text//[[:cntrl:]]/?}
+  change_state '.families[$f] = ((.families[$f] // {}) | .stops = ((.stops // []) + [{family: $f, stop: "POOL DOWN",
+                  version: null, user: null, detail: {text: $t, hand: "journalctl --user -u runscaler"}}]))' \
+    --arg f "$FAMILY" --arg t "${text:0:900}"
+  say "pass: STOP POOL DOWN: $text"
+}
+
+# ---- the pass
 
 pj() { if [ "$1" = none ]; then echo null; else echo "{\"pid\":${1% *},\"start\":${1#* }}"; fi; }   # "PID START" | none
 
@@ -842,8 +1249,10 @@ baseline_next() {
 do_pass() {
   local now
   load_state
+  recover_first   # RECOVER FIRST and THE APPLY STEP, before ON/OFF is read (OFF too)
+  outage          # THE OUTAGE RULE: every pass, ON or OFF, after them
+  [ -z "$WSTOP" ] || { echo "$WSTOP"; exit 1; }
   [ "$(printf '%s\n' "$ST" | jq -r '.on')" = true ] || { say "pass: the updater is OFF: nothing to do"; exit 0; }
-  recover_needed
   jq_check
   now=$(date +%s)
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"

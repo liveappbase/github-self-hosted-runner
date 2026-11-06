@@ -24,7 +24,8 @@
 #                        its answer is not one this reads (an ActiveState of another word, no MainPID, no UnitFileState)
 #   runs AFTER FILE SET...
 #                        THE RUNS RULE (S2b-3c-1 r3 FOLD, Opus r3 F1): runscaler RUNS when its /healthz answers and
-#                        lists every SET on two reads 3 s apart (healthz_pair, into FILE, which it empties first), and
+#                        lists every SET on two reads 3 s apart (healthz_pair, into FILE, which it empties first; FILE
+#                        `-`: the reads kept in memory, no file: the updater's status and its OUTAGE RULE), and
 #                        proc_now gives the same "PID START" before and after those reads, with START after AFTER (an
 #                        epoch: the install time). Never one `active` read: runscaler.service is Type=simple with
 #                        Restart=always, so a runner-start that refuses is `active` for a second of each 31, a fresh
@@ -47,7 +48,7 @@
 #                        rc 1 when runner.log cannot be read (none, not a regular file, a short read)
 #   tested_jq            `jq --version` is a core row of CORE/TESTED_JQ (the core's own list); JQV = what it printed
 #   healthz_pair FILE    runscaler's /healthz (127.0.0.1:RS_HEALTH_PORT) read twice, 3 s apart, each answer appended to
-#                        FILE as one line; a read with no answer adds nothing. The pause is BETWEEN the reads: what
+#                        FILE as one line (FILE `-`: printed); a read with no answer adds nothing. The pause is BETWEEN the reads: what
 #                        follows the second read follows it at once (the window's rename and restart)
 #   config_read FILE     FILE read through ONE open: a first line "MTIME SHA" (its mtime in whole seconds and the
 #                        sha256 of the bytes read, so both are of the version parsed), then one JSON line {"sets": [SET,
@@ -97,18 +98,19 @@ unit_read() {
 }
 
 runs() {
-  local a=${1-} f=${2-} p q
+  local a=${1-} f=${2-} p q pair
   shift 2
   RUNS_PROC= RUNS_WHY=
   [[ $a =~ ^[0-9]+$ ]] && [ "$#" -ge 1 ] || { RUNS_WHY="runs: no install time or no set"; return 1; }
   p=$(proc_now)
   [ "$p" != none ] || { RUNS_WHY="no runscaler process runs (systemd: not active)"; return 1; }
   [ "${p#* }" -gt "$a" ] || { RUNS_WHY="runscaler ($p) started at or before $a, the install"; return 1; }
-  : > "$f" || { RUNS_WHY="cannot write $f"; return 1; }
-  healthz_pair "$f"
-  python3 -I -c '
+  if [ "$f" = - ]; then pair=$(healthz_pair -)
+  else : > "$f" || { RUNS_WHY="cannot write $f"; return 1; }; healthz_pair "$f"; pair=; fi
+  printf '%s' "$pair" | python3 -I -c '
 import json, sys
-lines = open(sys.argv[1], "rb").read().decode("utf-8", "replace").splitlines()
+data = sys.stdin.buffer.read() if sys.argv[1] == "-" else open(sys.argv[1], "rb").read()
+lines = data.decode("utf-8", "replace").splitlines()
 want = set(sys.argv[2:])
 def lists(l):
     try:
@@ -116,7 +118,7 @@ def lists(l):
         return want <= {s.get("name") for s in (h.get("scale_sets") or []) if isinstance(s, dict)}
     except (ValueError, AttributeError):
         return False
-sys.exit(0 if len(lines) == 2 and all(lists(l) for l in lines) else 1)' "$f" "$@" < /dev/null \
+sys.exit(0 if len(lines) == 2 and all(lists(l) for l in lines) else 1)' "$f" "$@" \
     || { RUNS_WHY="runscaler's /healthz did not list every set ($*) on two reads 3 s apart"; return 1; }
   q=$(proc_now)
   [ "$q" = "$p" ] || { RUNS_WHY="runscaler changed during the /healthz reads ($p, then $q)"; return 1; }
@@ -207,7 +209,8 @@ healthz_pair() {
   local i j
   for i in 1 2; do
     [ "$i" = 1 ] || sleep 3
-    j=$(curl -fs -m 5 "http://127.0.0.1:${RS_HEALTH_PORT}/healthz" < /dev/null) && printf '%s\n' "$j" >> "$1"
+    j=$(curl -fs -m 5 "http://127.0.0.1:${RS_HEALTH_PORT}/healthz" < /dev/null) || continue
+    if [ "$1" = - ]; then printf '%s\n' "$j"; else printf '%s\n' "$j" >> "$1"; fi
   done
 }
 

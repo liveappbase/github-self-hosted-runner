@@ -1662,12 +1662,20 @@ class Pool(Sandbox):
         return None if t is None else t.splitlines()
 
     def archive(self):
-        """What the updater's apply step does last (S2b-3c-1 D-b (b); its builder B2 makes the real one): the CLOSED
-        window journal renamed to windows/ID. A cell calls it where the updater's apply step would have run."""
+        """The updater's APPLY STEP (S2b-3c-1 D-b (b), B2a): a CLOSED window journal applied to the updater's state by
+        its own lines, then archived to windows/ID, by the real program: `runner-updater on` when the state is ON, else
+        `off` (each runs RECOVER, which leaves a closed journal as it is, then the apply step; the state's `on` stays as
+        it was; neither reads the unit or /healthz, so a cell's systemctl and curl logs get nothing). A cell calls it
+        where the updater's next run would apply the journal."""
         lines = self.window()
         if not lines or not lines[-1].startswith('closed ') or not lines[0].startswith('window '):
             raise AssertionError('archive: no closed window journal: %r' % (lines,))
-        os.rename(os.path.join(self.STATE, 'window'), os.path.join(self.STATE, 'windows', lines[0].split(' ', 1)[1]))
+        st = self.read(os.path.join(self.STATE, 'state.json'))
+        r = self.updater('on' if st is not None and json.loads(st).get('on') is True else 'off')
+        wid = lines[0].split(' ', 1)[1]
+        if r.returncode != 0 or self.window() is not None or not os.path.isfile(os.path.join(self.STATE, 'windows', wid)):
+            raise AssertionError('archive: the apply step did not apply and archive %s (exit %d): %s'
+                                 % (wid, r.returncode, r.stdout[-3000:] + r.stderr))
 
     def short_timeout(self, scale=40):
         """From now on `timeout` is TIMEOUT_STUB: it logs its argv (timeouts()) and runs the real timeout with each

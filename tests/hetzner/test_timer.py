@@ -87,8 +87,12 @@ class Units(unittest.TestCase):
         s, t = unit(shipped(NAMES[0])), unit(shipped(NAMES[1]))
         self.assertEqual(keys(s), SCHEMA[NAMES[0]])
         self.assertEqual(keys(t), SCHEMA[NAMES[1]])
+        # S2b-3c-1 D-g: 2 h, one file for both users: RS_USER's longest pass (RECOVER's drain 4260 s, its start 600 s
+        # and 3 validate tries of 130 + 20 s: about 5310 s) fits, and RUN_USER's hanging build is cut every 2 h
         self.assertEqual((s['Service']['Type'], s['Service']['ExecStart'], s['Service']['TimeoutStartSec']),
-                         ('oneshot', '%h/bin/runner-updater pass', '1h'))
+                         ('oneshot', '%h/bin/runner-updater pass', '2h'))
+        svc = shipped_text(NAMES[0])
+        self.assertIn('5310', svc, 'the service comment does not say what the 2 h bound holds')
         self.assertEqual((t['Timer']['OnBootSec'], t['Timer']['OnUnitActiveSec'], t['Install']['WantedBy']),
                          ('10min', '10min', 'timers.target'))
 
