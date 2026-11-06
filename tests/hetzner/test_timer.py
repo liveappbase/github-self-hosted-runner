@@ -11,7 +11,9 @@ users, and linux-docker/setup/04-timer.sh, the install step each user runs (linu
   nothing written; so is a user other than RS_USER and RUN_USER, and a missing ~/bin/runner-updater.
 - A pass started as the timer starts it (the installed ExecStart, %h expanded; cwd the user's home, as systemd starts a
   user service with no WorkingDirectory=, and / too: it needs no cwd; systemd's minimal environment, no terminal) runs,
-  and while OFF (a fresh install, D11) it ends at once with exit 0 and writes no state.
+  and while OFF (a fresh install, D11; no window journal and no enabled unit: RECOVER does not run, and THE OUTAGE RULE
+  only reads the unit) it ends with exit 0 and writes no state; no header says an OFF pass "ends at once" (B2a review
+  r1: RS_USER's runs RECOVER, the apply step and THE OUTAGE RULE first).
 
 The unit-file cells read text and run anywhere; the others run the REAL 04-timer.sh and runner-updater in a throwaway
 container (tests/hetzner/support.py: Pool), with systemctl and loginctl substitutes (TIMER_SYSTEMCTL, LOGINCTL) over the
@@ -425,6 +427,23 @@ class Text(unittest.TestCase):
         row = [l for l in text.splitlines() if l.startswith('| `config/` |')]
         self.assertEqual(len(row), 1)
         self.assertIn('runner-updater', row[0])
+
+    def test_no_header_says_an_off_pass_ends_at_once(self):
+        """B2a review r1, Opus F3 and Codex F3: RS_USER's pass while OFF runs RECOVER FIRST, THE APPLY STEP and THE
+        OUTAGE RULE (it may end a window a cut left, start runscaler and write the state, and it exits 1 while a
+        journal stays), so neither the updater's header nor the timer's nor 04-timer.sh's says that an OFF pass "ends
+        at once", that the timer "starts nothing" until `on`, or that "nothing acts while OFF"; each names what it runs.
+        The control: the matcher finds the sentence they held at 771ab99."""
+        old = re.compile(r'(?i)(while (the updater is )?OFF ends at once|timer starts nothing|nothing acts while OFF)')
+        self.assertRegex('A fresh install is OFF (D11): a pass while OFF ends at once.', old)   # the control
+        for name, text in (('bin/runner-updater', header('bin/runner-updater')),
+                           ('config/runner-updater.timer', shipped_text('runner-updater.timer')),
+                           ('setup/04-timer.sh', header('setup/04-timer.sh'))):
+            with self.subTest(name):
+                one = ' '.join(text.replace('#', ' ').split())
+                self.assertNotRegex(one, old)
+                for s in ('RECOVER', 'THE OUTAGE RULE'):
+                    self.assertIn(s, one)
 
     def test_the_updater_s_header_names_its_timer_and_the_stop_of_its_unit(self):
         h = header('bin/runner-updater')

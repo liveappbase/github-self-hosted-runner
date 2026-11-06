@@ -1,10 +1,12 @@
 """linux-docker/bin/runner-updater's OUTAGE RULE (S2b-3c-1 B1 DECISIONS r4; B2a item 4; operator (1): the unit enabled
 means CI on, "else a STOP that says CI is down"): on EVERY pass of RS_USER, ON or OFF, after RECOVER and the apply step,
-ONE read of the unit and ONE runner-facts.sh `runs` (never one `active` read): the unit enabled and no runscaler RUNS
--> STOP POOL DOWN in the state, held once (no new STOP each pass), its text naming the open window journal's last line
-when there is one, else what the pass saw; a pass that sees RUNS since config.toml's install clears it, and a held CI
-DISABLED too when the unit is enabled. It is level-triggered: what a journal line said is text for the person, never
-the guarantee. (Named for its CI part, test_[k-q]*.py: .github/workflows/release-check.yml.)
+a PURE LEVEL computed anew by each pass (B2a DECISIONS, review r1: Opus F2, Codex F1) from ONE runner-facts.sh `runs`
+(never one `active` read) and the read of the unit AFTER it: the unit enabled and no runscaler RUNS (whenever it
+started) -> STOP POOL DOWN in the state, held once (no new STOP each pass), its text naming the open window journal's
+last line when there is one, else what the pass saw; else (a runscaler RUNS, whenever it started, or the unit not
+enabled) -> POOL DOWN cleared; the unit enabled and a runscaler that RUNS (whenever it started) clear a held CI DISABLED
+too. What a journal line said is text for the person, never the guarantee. (Named for its CI part, test_[k-q]*.py:
+.github/workflows/release-check.yml.)
 
 - Every way CI is down: an open journal with the enabled unit down (RECOVER exit 5: Codex r4 F1's input, a switch's
   comment-edited TARGET that does not validate, with its RECOVER cut between `hand-change` and its STOP; Codex r4 F3's
@@ -13,7 +15,12 @@ the guarantee. (Named for its CI part, test_[k-q]*.py: .github/workflows/release
 - The controls: runscaler RUNS -> no POOL DOWN, and a held one cleared; the unit not enabled -> no POOL DOWN (CI
   DISABLED's rule: a person's); a crash loop (active for 1 s of each 31) never clears it, a pass at every phase
   (Opus r3 F1); a CI DISABLED is cleared only with the unit enabled; a runscaler older than a hand-installed config.toml
-  that serves is CI up: no POOL DOWN is raised (and a held one stays: it is not RUNS since the install).
+  that serves is CI up: no POOL DOWN is raised, and a held one is cleared (B2a DECISIONS: the install boundary proves
+  which file a process runs, never whether CI is up).
+- The pure level (B2a review r1): a person's `disable --now` during the RUNS pair raises nothing (the unit read after
+  it decides); a held POOL DOWN is cleared once the unit is not enabled, ON and OFF; CI DISABLED is cleared by a
+  runscaler that started before config.toml's install too. POOL DOWN's text says a run ends the journal only when one
+  can: a journal no run of the updater ends names README's section (Opus F4).
 Every cell runs the real scripts (support.Pool, a throwaway container, a fake clock) and the updater as RS_USER; no
 cell asserts a time it waited.
 """
@@ -22,12 +29,14 @@ import os
 import unittest
 
 from tests.hetzner.support import Pool, needs_container
+from tests.hetzner.test_apply import README_LINE, lines_of
 from tests.hetzner.test_recover import Rec, cut
 from tests.hetzner.test_unattended import NONAPI, Rig, keys
 
 STATEDIR = Pool.STATE
 STATE = os.path.join(STATEDIR, 'state.json')
 WINDOW = os.path.join(STATEDIR, 'window')
+WINDOWS = os.path.join(STATEDIR, 'windows')
 FAM = 'hz-docker'
 
 
@@ -101,6 +110,10 @@ class EveryWayCiIsDown(unittest.TestCase):
                     continue
                 self.assertEqual(len(down), 1, r.stdout[-3000:])
                 self.assertIn('CI is down', down[0])
+                # B2a review r1, Opus F4's control: a journal RECOVER keeps open (it waits for idle) is one the next
+                # run's RECOVER tries again: no README section
+                self.assertIn("the next run's RECOVER tries again", down[0])
+                self.assertNotIn(README_LINE, down[0])
 
     def test_up_exiting_3_on_an_enabled_unit_that_is_down(self):
         """START STATE not met (the unit enabled, stopped by a person's plain `systemctl --user stop`): `up
@@ -189,15 +202,13 @@ class Controls(unittest.TestCase):
 
     def test_an_older_runscaler_that_serves_a_hand_installed_config_is_ci_up(self):
         """A person's `03-runscaler.sh real` after a pool.env change installs config.toml under the running process
-        (it restarts nothing: PLAN D2): that process serves, so CI is up: no POOL DOWN is raised. A held one stays (it
-        is cleared only by a runscaler that started after config.toml's install). The control: the same with no
-        runscaler: POOL DOWN."""
+        (it restarts nothing: PLAN D2): that process serves, so CI is up: no POOL DOWN is raised, and a held one is
+        cleared (B2a DECISIONS, review r1: a runscaler that RUNS clears it whenever it started; the build's "a held one
+        stays" was the known gap). The control: the same with no runscaler: POOL DOWN."""
         for runs in (True, False):
             with self.subTest(runs=runs):
                 g = Rig(self)
-                cfg = g.p.rpath('config.toml')
-                g.p.write(cfg, g.p.config().replace('max-runners = 3\n', 'max-runners = 2\n', 1), 0o600)
-                os.utime(cfg, (g.p.clock() + 5, g.p.clock() + 5))
+                hand_install(g)
                 if not runs:
                     g.p.set_unit(active=False)
                 put(g)
@@ -205,8 +216,104 @@ class Controls(unittest.TestCase):
                 self.assertEqual(len(held(g)), 0 if runs else 1)
                 if runs:
                     put(g, stops=[stopj('POOL DOWN', 'held')])
+                    r = pass_(self, g)
+                    self.assertEqual(held(g), [], r.stdout[-2000:])
+                    self.assertIn('STOP POOL DOWN is cleared', r.stdout)
+
+
+def hand_install(g):
+    """config.toml installed by hand (one number changed) 5 s after the process that runs started: that process is
+    older than the install."""
+    cfg = g.p.rpath('config.toml')
+    g.p.write(cfg, g.p.config().replace('max-runners = 3\n', 'max-runners = 2\n', 1), 0o600)
+    os.utime(cfg, (g.p.clock() + 5, g.p.clock() + 5))
+    g.t.assertGreater(int(os.stat(cfg).st_mtime), g.p.unit_now()['start'], 'the premise: the process is older')
+
+
+def events(g):
+    return g.p.read(g.p.path('logs', 'events.log')) or ''
+
+
+@needs_container
+class PureLevel(unittest.TestCase):
+    """B2a DECISIONS (review r1: Opus F2, Codex F1): each pass computes THE OUTAGE RULE anew, from the unit read AFTER
+    the RUNS check: enabled and no runscaler RUNS (any start) -> POOL DOWN held, once; else (a runscaler RUNS, any
+    start, or the unit not enabled) -> POOL DOWN cleared. The unit enabled and a runscaler that RUNS (any start) clear
+    CI DISABLED."""
+
+    def test_a_person_s_disable_now_during_the_runs_pair_is_no_pool_down(self):
+        """Codex F1: the unit enabled and serving, no STOP; a person's `systemctl --user disable --now runscaler`
+        right after the pair's first /healthz answer: RUNS fails, but CI is off by hand: no POOL DOWN, ON and OFF, on
+        that pass and the next. The control: a crash there with the unit enabled: ONE POOL DOWN, over two passes."""
+        for on in (False, True):
+            for act, n in (('disable', 0), ('crash', 1)):
+                with self.subTest(on=on, act=act):
+                    g = Rig(self)
+                    put(g, on=on)
+                    g.p.hooks(('healthz-read', act))
+                    for k in (1, 2):
+                        r = pass_(self, g)
+                        self.assertEqual(len(held(g)), n, (k, r.stdout[-2500:]))
+                    self.assertIn('hook healthz-read: ' + act, events(g), 'the premise: the hook fired')
+                    self.assertEqual(g.p.unit_now()['enabled'], act != 'disable')
+
+    def test_a_held_pool_down_is_cleared_once_the_unit_is_not_enabled(self):
+        """Opus F2: the enabled unit down: a pass holds POOL DOWN; then a person keeps CI off on purpose (`disable
+        --now`, operator (1)): the next pass clears it, ON and OFF. The control: the unit still enabled and down: the
+        one POOL DOWN stays."""
+        for on in (False, True):
+            for disable in (True, False):
+                with self.subTest(on=on, disable=disable):
+                    g = Rig(self)
+                    put(g, on=on)
+                    g.p.set_unit(active=False)
                     pass_(self, g)
-                    self.assertEqual(held(g), ['held'])
+                    self.assertEqual(len(held(g)), 1, 'the premise: a POOL DOWN held')
+                    if disable:
+                        g.p.set_unit(enabled=False)
+                    r = pass_(self, g)
+                    self.assertEqual(len(held(g)), 0 if disable else 1, r.stdout[-2500:])
+                    if disable:
+                        self.assertIn('STOP POOL DOWN is cleared', r.stdout)
+
+    def test_ci_disabled_is_cleared_by_a_runscaler_that_runs_whenever_it_started(self):
+        """B2a DECISIONS (review r1): CI DISABLED clears on the unit enabled and a runscaler that RUNS, any start; Opus
+        F6's input: one that started before config.toml's install (a hand install under it), POOL DOWN held too (so the
+        rule reads the RUNS pair). The control: the same with the unit not enabled (a person's `disable` without
+        --now, the old runscaler still running): CI DISABLED stays; POOL DOWN, a level, is cleared."""
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                g = Rig(self)
+                hand_install(g)
+                put(g, stops=[stopj('CI DISABLED', 'held'), stopj('POOL DOWN', 'held')])
+                g.p.set_unit(enabled=enabled)
+                r = pass_(self, g)
+                self.assertEqual(held(g, 'CI DISABLED'), [] if enabled else ['held'], r.stdout[-2500:])
+                self.assertEqual(held(g), [], r.stdout[-2500:])
+
+    def test_pool_down_s_text_names_readme_when_no_run_ends_the_journal(self):
+        """Opus F4 (B2a review r1): POOL DOWN's text promises that a run ends the window journal only when one can: a
+        journal RECOVER cannot read (exit 6), and a closed one the apply step cannot read (a switch closed
+        target-failed, a class only a rollback has), name README's section "An unfinished window the updater cannot
+        end", never "RECOVER ends it". The control: a journal RECOVER keeps open (EveryWayCiIsDown, the older
+        runscaler's crash): the next run's RECOVER tries again, no README section."""
+        wid = '20261106010000-4242'
+        for what, text in (('RECOVER cannot read it', 'window %s\na line no pattern reads\n' % wid),
+                           ('the apply step cannot read it', ''.join(l + '\n' for l in lines_of('switch',
+                                                                                              'target-failed')))):
+            with self.subTest(what):
+                g = Rig(self)
+                put(g)
+                os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+                g.p.write(WINDOW, text, 0o600)
+                g.p.set_unit(active=False)
+                r = pass_(self, g, rc=1)
+                self.assertIn(README_LINE, r.stdout)       # the premise: the pass's own STOP names it
+                down = held(g)
+                self.assertEqual(len(down), 1, r.stdout[-2500:])
+                self.assertIn(README_LINE, down[0])
+                self.assertNotIn('ends it', down[0])
+                self.assertEqual(g.p.read(WINDOW), text, 'the journal changed')
 
 
 if __name__ == '__main__':

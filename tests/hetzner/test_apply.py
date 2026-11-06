@@ -10,8 +10,9 @@ state write that also sets `last_window`), then archives it to windows/ID. (Name
   its backup is config.toml.prev), pre/none change nothing (a backup that replaced the keep: previous and back_until
   gone), other holds HAND CHANGE; a rollback's target-running/target-idle clears candidate, previous and back_until (its
   rejection: B2b's hook), target-old keeps the candidate (CI DISABLED), target-failed keeps it (ROLLBACK FAILED, never
-  "rolled back"), pre/none change nothing, other keeps it (HAND CHANGE). No `target` line: only its STOPs. A journal cut
-  right after `window`: archived only. A CLASS its kind does not have: STOP, nothing written.
+  "rolled back"), pre/none change nothing, other keeps it (HAND CHANGE). No `target` line: only its STOPs. A journal
+  with no `kind` (cut right after `window`): its `stop` lines held by THE STOP RULE, no candidate change (B2a review r1,
+  Opus F1); with no `stop` line, archived only. A CLASS its kind does not have: STOP, nothing written.
 - LEGACY journals (r3 FOLD, Codex r3 F2, Opus r3 F10): no `installed` line: `running` after its `target` is
   target-running, a `stop`/`end` before any `rename-start` is pre, anything else a STOP; a rollback with no `why` is a
   person's back with old-version none (the line says so). A closed journal already in windows/ is never applied.
@@ -285,6 +286,37 @@ class TheCloseRule(unittest.TestCase):
         self.assertNotIn('last_window', st)
         self.assertEqual(json.loads(before)['families'], st['families'])
         a.archived(lines)
+
+    def test_a_journal_with_no_kind_holds_its_stops(self):
+        """B2a review r1, Opus F1 (B2a DECISIONS): a window cut right after its first line, `window ID`, the unit not
+        enabled: RECOVER closes it with `stop CI DISABLED`. The apply step holds that STOP by THE STOP RULE (version
+        null), changes no candidate and keeps the family's other STOPs (no candidate change drops none), sets
+        last_window (a cut after this write applies nothing twice), and archives it; so for a planted closed one with a
+        `stop` line. The control: the same journal with no `stop` line: archived, and the state as it was."""
+        head, tail = ['window ' + WID, 'recover-start %d' % T0], ['installed none none none', 'closed %d' % T0]
+        for what, lines, name in (('RECOVER closes it', ['window ' + WID], 'CI DISABLED'),
+                                  ('a planted stop line', head + ['stop HAND CHANGE: planted'] + tail, 'HAND CHANGE'),
+                                  ('no stop line', head + tail, None)):
+            with self.subTest(what):
+                a = A(self, fam={'candidate': C, 'stops': [stopj('NO EVIDENCE')]})
+                before = a.state()
+                a.plant(lines)
+                a.run('off')
+                self.assertFalse(os.path.lexists(WINDOW), 'the journal is still at WINDOW')
+                arch = a.p.read(os.path.join(WINDOWS, WID))
+                st = a.state()
+                if name is None:
+                    self.assertEqual(st, before, 'a journal with no kind and no stop line changed the state')
+                    self.assertEqual(arch, ''.join(l + '\n' for l in lines))
+                    continue
+                self.assertIn('\nstop %s: ' % name, arch, 'the premise: the journal holds the STOP')
+                f = st['families'][FAM]
+                self.assertEqual(f['candidate'], C)
+                self.assertEqual(sorted(s['stop'] for s in f['stops']), sorted(['NO EVIDENCE', name]), self.id())
+                s = [x for x in f['stops'] if x['stop'] == name][0]
+                self.assertIsNone(s['version'])
+                self.assertEqual(s['detail']['text'], arch.split('\nstop %s: ' % name, 1)[1].split('\n', 1)[0])
+                self.assertEqual(st.get('last_window'), WID)
 
     def test_a_class_its_kind_does_not_have_is_a_stop_and_nothing_is_written(self):
         """A switch with target-failed (RECOVER's class of a DECIDED rollback only). The control: a rollback's."""

@@ -7,17 +7,19 @@ the measuring helpers it shares with pool-image.sh (PLAN D1, D6, D7, D11; core/R
   a sync, and a sync that fails is a STOP with the state as it was.
 - status: no lock, no write anywhere, ONE read; status.jq's answer checked as a pass checks it: a `wait` is its lines,
   then WAIT (exit 4), another answer is a STOP; a journal at WINDOW named as one of three (open, with its last STOP and
-  whether runscaler RUNS; closed and not applied; applied and not archived); no R1/KEEP line of a family with no
-  candidate (S2b-3c-1 B2a); on and off wait for the updater lock; off refuses only while a window journal stays open
-  after RECOVER.
+  whether runscaler RUNS; closed and not applied; applied and not archived), and a journal no run of the updater ends
+  with README's section (B2a review r1); no R1/KEEP line of a family with no candidate (S2b-3c-1 B2a); on and off wait
+  for the updater lock; off refuses only while a window journal stays open after RECOVER.
 - pass: it only TRIES the lock; RECOVER, the apply step (test_apply.py) and THE OUTAGE RULE (test_outage.py) come
   first, OFF too; OFF then ends it; a journal RECOVER cannot read is a STOP and nothing else; an
   untested jq is exit 3; the facts (host "hz"), in the Studio's order: proc before, the log position (one open of
   runner.log, and the text since the core state's boundary through it), proc after, the config (installed: the
   `renamed` epoch of the newest closed window journal that installed config.toml's sha, else its mtime), the family
   hz-docker of the host config's sets, the state's candidate, back_until, STOPs and restart, the /healthz pair; idle,
-  r1, keep, status; the core state written back only when all four decided; then what it WOULD do, and DUE's one line
-  for hz-docker (S2b-3b-2: its steps are test_release_due.py's; RUN_USER's role is test_updater_build.py's).
+  r1, keep, status; the core state written back only when all four decided (and a core that decides nothing after the
+  pass's earlier write never says the pass did nothing: B2a review r1); then what it WOULD do, and DUE's one line for
+  hz-docker (S2b-3b-2: its steps are test_release_due.py's; RUN_USER's role is test_updater_build.py's). A pass reads
+  its clock ONCE, first: KEEP's deadline is tested against the pass's start, on a slow host too (B2a review r1).
 - With no window journal it acts on nothing: no systemctl start, stop or restart, no pool-image.sh or 02-d1.sh, no
   change to config.toml or to pool-image.sh's files (RECOVER, which may act, runs only on a journal at WINDOW).
 
@@ -35,7 +37,7 @@ import subprocess
 import time
 import unittest
 
-from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, ref, run_pool, sha256_file
+from tests.hetzner.support import REPO, SLEEP_STUB, Pool, digest, healthz, needs_container, ref, run_pool, sha256_file
 
 UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
 LIB = os.path.join(REPO, 'linux-docker', 'setup', 'runner-facts.sh')
@@ -53,8 +55,9 @@ LOCK = os.path.join(STATEDIR, 'lock')
 WINDOW = os.path.join(STATEDIR, 'window')
 WINDOWS = os.path.join(STATEDIR, 'windows')
 H = 'ab' * 32
-OUTAGE = 3          # THE OUTAGE RULE's reads of the unit in a pass (S2b-3c-1 B2a): unit_read, then runs' two proc_now
-OUTAGE_PAUSE = 3    # ... and its /healthz pair's pause, 3 s of the fake clock, before the core's clock is read
+OUTAGE = 4          # THE OUTAGE RULE's reads of the unit in a pass with the unit enabled (S2b-3c-1 B2a, its review r1):
+                    # unit_read, runs' two proc_now, then the unit read again (the deciding read, after the RUNS check)
+README_LINE = 'An unfinished window the updater cannot end'   # README's section for a journal no run ends
 DUE = r'(?m)^runner-updater: pass: (hz-docker is not due: |would switch hz-docker to )'   # DUE's one line
 # runscaler's own records (the real log's text format; the set names are host.conf.example's)
 REAL = ('2026-10-25 20:04:01 INFO linux-ci-main: Scaling up runner currentCount=0 desiredCount=1\n'
@@ -381,8 +384,8 @@ class Status(unittest.TestCase):
 
     def test_a_window_journal_is_named_as_one_of_three(self):
         """D-g, r2 Codex F16 (S2b-3c-1 B2a item 5): status says which of three a journal at WINDOW is, by its last line
-        and the state's `last_window`, with no lock and no write: open (the next pass's RECOVER ends it), closed and not
-        applied, applied and not archived. The control: no journal: no window line."""
+        and the state's `last_window`, with no lock and no write: open (the next pass's RECOVER tries to end it), closed
+        and not applied, applied and not archived. The control: no journal: no window line."""
         wid = '20261103080000-42'
         for what, text, last in (('open', 'window %s\nkind switch\n' % wid, None),
                                  ('closed and not applied', 'window %s\ninstalled none none none\nclosed 1\n' % wid,
@@ -516,6 +519,34 @@ class WindowStatus(unittest.TestCase):
                     self.assertIn('runner-updater: status: runscaler RUNS (pid ', r.stdout)
                 else:
                     self.assertIn('runner-updater: status: no runscaler RUNS', r.stdout)
+
+    def test_a_journal_no_run_ends_is_named_with_readme_s_section(self):
+        """B2a review r1, Opus F4: status promises that a run ends a journal only when one can. A closed journal the
+        apply step cannot read (a switch closed target-failed, a class only a rollback has: status reads it with the
+        apply step's own reader, and writes nothing): README's section "An unfinished window the updater cannot end",
+        never "applies it". An open journal RECOVER cannot read (exit 6): never "RECOVER ends it", and README's section
+        is named. The control: a closed journal the apply step reads: "closed and not applied ... applies it", no
+        README section."""
+        wid = '20261103080000-42'
+        sw = ('window %s\nkind switch\nversion %s\ntarget %s=%s %s=%s\ninstalled %s %s %%s\nclosed 1\n'
+              % (wid, V, MAIN, ref(NEW), SMALL, ref(NEW), H, H))
+        for what, text in (('closed, a class its kind has not', sw % 'target-failed'),
+                           ('open, a line RECOVER cannot read', 'window %s\na line no pattern reads\n' % wid),
+                           ('closed and readable', sw % 'target-running')):
+            with self.subTest(what):
+                g = Rig(self, on=False, production=False)
+                g.p.write(WINDOW, text, 0o600)
+                before = tree(g.p.root)
+                r = g.ok('status')
+                self.assertEqual(sorted(k for k, v in tree(g.p.root).items() if before.get(k) != v), [], 'status wrote')
+                if what == 'closed and readable':
+                    self.assertIn('runner-updater: status: a window journal is closed and not applied: %s (the next '
+                                  'pass, on or off applies it)' % WINDOW, r.stdout)
+                    self.assertNotIn(README_LINE, r.stdout)
+                    continue
+                self.assertIn(README_LINE, r.stdout)
+                self.assertNotIn('applies it', r.stdout)
+                self.assertNotIn('RECOVER ends it', r.stdout)
 
     def test_status_after_a_rollback_shows_no_departed_candidate_s_verdict(self):
         """OFF after an applied rollback (no candidate), the core's state still holding R1's verdict for the family:
@@ -1256,6 +1287,58 @@ class Pass(unittest.TestCase):
         self.assertEqual(g.state()['restart'], rs)
         self.assertNotIn('would', r.stdout)
 
+    def test_a_core_that_decides_nothing_after_an_earlier_write_never_says_the_pass_did_nothing(self):
+        """B2a review r1, Codex F3 (the lines :1106, :1111, :1116 at 771ab99): THE OUTAGE RULE wrote POOL DOWN (the
+        enabled unit down) before the core; then the core decides nothing: it cannot decide (exit 1), it waits (exit
+        4), or its output has no state (exit 1). Its line must not say that the pass did nothing or that the state is
+        as it was: the core's own state is unchanged, and what the pass did before it stays. The controls (no earlier
+        change: the lines as they were): test_the_core_state_is_written_only_when_all_four_decided and
+        test_a_core_that_waits_decides_nothing_and_the_state_stays_byte_for_byte."""
+        for how, rc in (('cannot decide', 1), ('waits', 4), ('no state', 1)):
+            with self.subTest(how):
+                g = Rig(self, on=True)
+                if how == 'waits':
+                    g.put({'format': 1, 'on': True, 'families': {}, 'core': {'format': 2}})
+                elif how == 'cannot decide':
+                    g.plant('core/idle.jq', 'error("planted")\n')
+                else:
+                    g.plant('core/idle.jq', '{verdict: "idle", reason: "planted", lines: []}\n')
+                core = g.state().get('core')
+                g.p.set_unit(active=False)
+                r = g.run('pass')
+                self.assertEqual(r.returncode, rc, r.stdout[-3000:] + r.stderr)
+                self.assertIn('runner-updater: pass: STOP POOL DOWN: ', r.stdout)      # the premise: the earlier write
+                self.assertNotIn('the pass did nothing', r.stdout)
+                self.assertNotIn('%s is as it was' % STATE, r.stdout)
+                self.assertIn('what this pass did before the core stays', r.stdout)
+                st = g.state()
+                self.assertEqual(st.get('core'), core)
+                self.assertEqual([s['stop'] for s in st['families'][FAM]['stops']], ['POOL DOWN'])
+                self.assertNotIn('would', r.stdout)
+
+    def test_a_core_that_decides_nothing_after_recover_acted_never_says_the_pass_did_nothing(self):
+        """The same class with no state write: a window cut right after its first line, the enabled unit down: RECOVER
+        starts runscaler and closes the journal with no `stop` line (the apply step only archives it: no write); then
+        the core cannot decide. Its line must not say the pass did nothing: the state is as it was, byte for byte, but
+        runscaler was started and the journal archived."""
+        wid = '20261106010000-4242'
+        g = Rig(self, on=True)
+        os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+        g.p.write(WINDOW, 'window %s\n' % wid, 0o600)
+        g.p.set_unit(active=False)
+        g.plant('core/idle.jq', 'error("planted")\n')
+        before = g.raw()
+        r = g.run('pass')
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        arch = g.p.read(os.path.join(WINDOWS, wid))
+        self.assertIsNotNone(arch, 'the premise: the journal is archived: ' + r.stdout[-3000:])
+        self.assertNotIn('\nstop ', '\n' + arch, 'the premise: no stop line')
+        self.assertEqual(len(g.calls('start')), 1, 'the premise: RECOVER started runscaler')
+        self.assertEqual(g.raw(), before, 'the premise: no state write')
+        self.assertIn('runner-updater: core could not decide (idle)', r.stdout)
+        self.assertNotIn('the pass did nothing', r.stdout)
+        self.assertIn('what this pass did before the core stays', r.stdout)
+
     def test_control_a_core_of_format_1_decides_and_hands_the_restart_over_once(self):
         g, rs = self.with_core({'format': 1})
         r = g.ok('pass')
@@ -1778,12 +1861,22 @@ class Would(unittest.TestCase):
         self.assertEqual(g.out('r1')['families'][FAM]['verdict'], 'none')
         self.assertNotIn('would roll back', r.stdout)
 
-    def keep(self, records, after):
+    def keep(self, records, after, slow=1):
+        """KEEP's boundary against the PASS'S START (B2a review r1, ONE CLOCK PER PASS): the fake clock set to the
+        window's `since` + AFTER right before the pass, which reads its clock ONCE, first, so every decision of it
+        (KEEP's deadline here) uses that value, however long its earlier steps (RECOVER, THE OUTAGE RULE's 3 s pair)
+        take. SLOW: each `sleep` of the pass moves the fake clock SLOW times its argument (a slow host)."""
         g, t = self.armed()
         since = g.out('r1')['families'][FAM]['since']
         g.append(records(t))
-        g.p.clock(now=since + after - OUTAGE_PAUSE)   # the core's clock is read after THE OUTAGE RULE's pair
+        if slow != 1:
+            old = "c['now'] += float(a[0])"
+            self.assertEqual(SLEEP_STUB.count(old), 1)
+            g.p.write(g.p.path('stubs', 'sleep'), SLEEP_STUB.replace(old, "c['now'] += %d * float(a[0])" % slow)
+                      .replace('@SB@', repr(g.p.root)), 0o755)
+        g.p.clock(now=since + after)
         r = g.ok('pass')
+        self.assertGreaterEqual(g.p.clock(), since + after + 3 * slow, 'the premise: the pass slept (its RUNS pair)')
         return g, r
 
     def test_72_h_after_the_window_opened_with_a_success_it_would_accept(self):
@@ -1792,9 +1885,13 @@ class Would(unittest.TestCase):
         self.assertIn('runner-updater: pass: would accept hz-docker (this release takes no action)', r.stdout)
 
     def test_control_a_second_before_72_h_it_observes(self):
-        g, r = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600 - 1)
-        self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'observe')
-        self.assertNotIn('would accept', r.stdout)
+        """Its margin is the pass's own start (a second before the deadline, a fixed reference the pass reads first),
+        and a slow host's longer steps before the core do not cross it (Codex F2: vary the preceding delay)."""
+        for slow in (1, 100):
+            with self.subTest(slow=slow):
+                g, r = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600 - 1, slow=slow)
+                self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'observe')
+                self.assertNotIn('would accept', r.stdout)
 
     def test_72_h_with_completions_none_succeeded_would_hold_jobs_fail(self):
         g, r = self.keep(lambda t: completed(t, 'failed') + scaling(t + 1), 72 * 3600)
