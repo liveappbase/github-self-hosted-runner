@@ -4,8 +4,9 @@ a PURE LEVEL computed anew by each pass (B2a DECISIONS, review r1: Opus F2, Code
 (never one `active` read) and the read of the unit AFTER it: the unit enabled and no runscaler RUNS (whenever it
 started) -> STOP POOL DOWN in the state, held once (no new STOP each pass), its text naming the open window journal's
 last line when there is one, else what the pass saw; else (a runscaler RUNS, whenever it started, or the unit not
-enabled) -> POOL DOWN cleared; the unit enabled and a runscaler that RUNS (whenever it started) clear a held CI DISABLED
-too. What a journal line said is text for the person, never the guarantee. (Named for its CI part, test_[k-q]*.py:
+enabled) -> POOL DOWN cleared; the unit enabled and a runscaler that RUNS and started after config.toml's install
+clear a held CI DISABLED too (the plan's CORRECTION: it is a rollback's only line that its TARGET does not run yet).
+What a journal line said is text for the person, never the guarantee. (Named for its CI part, test_[k-q]*.py:
 .github/workflows/release-check.yml.)
 
 - Every way CI is down: an open journal with the enabled unit down (RECOVER exit 5: Codex r4 F1's input, a switch's
@@ -18,9 +19,10 @@ too. What a journal line said is text for the person, never the guarantee. (Name
   that serves is CI up: no POOL DOWN is raised, and a held one is cleared (B2a DECISIONS: the install boundary proves
   which file a process runs, never whether CI is up).
 - The pure level (B2a review r1): a person's `disable --now` during the RUNS pair raises nothing (the unit read after
-  it decides); a held POOL DOWN is cleared once the unit is not enabled, ON and OFF; CI DISABLED is cleared by a
-  runscaler that started before config.toml's install too. POOL DOWN's text says a run ends the journal only when one
-  can: a journal no run of the updater ends names README's section (Opus F4).
+  it decides); a held POOL DOWN is cleared once the unit is not enabled, ON and OFF; CI DISABLED is NOT cleared by a
+  runscaler that started at or before config.toml's install (a target-old rollback, then a person's `enable` without
+  --now). POOL DOWN's text says a run ends the journal only when one can: a journal no run of the updater ends names
+  README's section (Opus F4).
 Every cell runs the real scripts (support.Pool, a throwaway container, a fake clock) and the updater as RS_USER; no
 cell asserts a time it waited.
 """
@@ -29,7 +31,7 @@ import os
 import unittest
 
 from tests.hetzner.support import Pool, needs_container
-from tests.hetzner.test_apply import README_LINE, lines_of
+from tests.hetzner.test_apply import README_LINE, C, lines_of
 from tests.hetzner.test_recover import Rec, cut
 from tests.hetzner.test_unattended import NONAPI, Rig, keys
 
@@ -238,8 +240,8 @@ def events(g):
 class PureLevel(unittest.TestCase):
     """B2a DECISIONS (review r1: Opus F2, Codex F1): each pass computes THE OUTAGE RULE anew, from the unit read AFTER
     the RUNS check: enabled and no runscaler RUNS (any start) -> POOL DOWN held, once; else (a runscaler RUNS, any
-    start, or the unit not enabled) -> POOL DOWN cleared. The unit enabled and a runscaler that RUNS (any start) clear
-    CI DISABLED."""
+    start, or the unit not enabled) -> POOL DOWN cleared. The unit enabled and a runscaler that RUNS and started after
+    config.toml's install clear CI DISABLED (the plan's CORRECTION)."""
 
     def test_a_person_s_disable_now_during_the_runs_pair_is_no_pool_down(self):
         """Codex F1: the unit enabled and serving, no STOP; a person's `systemctl --user disable --now runscaler`
@@ -276,19 +278,47 @@ class PureLevel(unittest.TestCase):
                     if disable:
                         self.assertIn('STOP POOL DOWN is cleared', r.stdout)
 
-    def test_ci_disabled_is_cleared_by_a_runscaler_that_runs_whenever_it_started(self):
-        """B2a DECISIONS (review r1): CI DISABLED clears on the unit enabled and a runscaler that RUNS, any start; Opus
-        F6's input: one that started before config.toml's install (a hand install under it), POOL DOWN held too (so the
-        rule reads the RUNS pair). The control: the same with the unit not enabled (a person's `disable` without
-        --now, the old runscaler still running): CI DISABLED stays; POOL DOWN, a level, is cleared."""
-        for enabled in (True, False):
-            with self.subTest(enabled=enabled):
+    def test_ci_disabled_is_cleared_only_by_a_runscaler_that_started_after_the_install(self):
+        """The plan's CORRECTION (after B2a fix round 1; Opus r1 F6): CI DISABLED is cleared only by the unit enabled
+        AND a runscaler that RUNS and started after config.toml's install (its install time read after the RUNS check:
+        the safe direction). A rollback closed `target-old` (a person's `disable` without --now: the older runscaler
+        serves the candidate's image) holds CI DISABLED as the only line that says its TARGET does not run yet; a
+        person's `enable` without --now must not clear it. So for an older runscaler with POOL DOWN held too (POOL DOWN,
+        a level of any start, is cleared), and for a hand install of config.toml during the RUNS pair. The controls:
+        enabled and a runscaler that started after the install: both cleared; not enabled: CI DISABLED stays."""
+        for what in ('target-old, then enable', 'an older runscaler', 'a hand install during the pair',
+                     'a runscaler after the install', 'not enabled'):
+            with self.subTest(what):
                 g = Rig(self)
-                hand_install(g)
+                if what == 'target-old, then enable':
+                    hand_install(g)
+                    put(g)
+                    g.p.write(STATE, json.dumps({'format': 1, 'on': False, 'families': {FAM: {'candidate': C}}}) + '\n',
+                              0o600)
+                    os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+                    g.p.write(WINDOW, ''.join(l + '\n' for l in lines_of('rollback', 'target-old', stops=(
+                        ('CI DISABLED', 'a runscaler that started before its install runs the image before'),))), 0o600)
+                    g.p.set_unit(enabled=False)                       # `disable` without --now: the old one runs
+                    pass_(self, g)
+                    self.assertIsNone(g.p.window(), 'the premise: the journal is applied and archived')
+                    self.assertEqual(len(held(g, 'CI DISABLED')), 1, 'the premise: target-old holds CI DISABLED')
+                    self.assertEqual(json.loads(g.p.read(STATE))['families'][FAM]['candidate'], C)
+                    g.p.set_unit(enabled=True)                        # a person's `enable` without --now
+                    before = held(g, 'CI DISABLED')
+                    r = pass_(self, g)
+                    self.assertEqual(held(g, 'CI DISABLED'), before, r.stdout[-2500:])
+                    continue
+                if what in ('an older runscaler', 'not enabled'):
+                    hand_install(g)
+                if what == 'a hand install during the pair':
+                    g.p.hooks(('healthz-read', 'hand-file'))
                 put(g, stops=[stopj('CI DISABLED', 'held'), stopj('POOL DOWN', 'held')])
-                g.p.set_unit(enabled=enabled)
+                g.p.set_unit(enabled=what != 'not enabled')
                 r = pass_(self, g)
-                self.assertEqual(held(g, 'CI DISABLED'), [] if enabled else ['held'], r.stdout[-2500:])
+                if what == 'a hand install during the pair':
+                    self.assertIn('hand install hand-file', events(g), 'the premise: the hook fired')
+                self.assertEqual(held(g, 'CI DISABLED'), [] if what == 'a runscaler after the install' else ['held'],
+                                 r.stdout[-2500:])
                 self.assertEqual(held(g), [], r.stdout[-2500:])
 
     def test_pool_down_s_text_names_readme_when_no_run_ends_the_journal(self):

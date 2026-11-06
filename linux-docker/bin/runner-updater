@@ -218,12 +218,16 @@
 #   Codex F1). The unit enabled and no runscaler RUNS: STOP POOL DOWN in the state, its text naming the open window
 #   journal's last line and how it stays when there is one (README's section when no run of the updater can end it),
 #   else what the pass saw (the unit's state), held ONCE (a held one stays as it is: no new STOP each pass). Else (a
-#   runscaler RUNS, whenever it started, or the unit not enabled: B2a review r1, Opus F2): POOL DOWN cleared. The unit
-#   enabled and a runscaler that RUNS, whenever it started: CI DISABLED cleared too. The install time proves WHICH file
-#   a process runs (a close's CLASS), never whether CI is up (B2a DECISIONS): a runscaler older than config.toml's
-#   install that serves (a person's `03-runscaler.sh real` after a pool.env change restarts nothing: PLAN D2) is CI up.
-#   A unit it cannot read, at either read: nothing raised or cleared. It never fails the pass. A journal's CI-down words
-#   are text for the person, never the guarantee: this rule is.
+#   runscaler RUNS, whenever it started, or the unit not enabled: B2a review r1, Opus F2): POOL DOWN cleared. For
+#   POOL DOWN the install time proves only WHICH file a process runs (a close's CLASS), never whether CI is up (B2a
+#   DECISIONS): a runscaler older than config.toml's install that serves (a person's `03-runscaler.sh real` after a
+#   pool.env change restarts nothing: PLAN D2) is CI up. CI DISABLED is cleared ONLY by the unit enabled AND a runscaler
+#   that RUNS and started after config.toml's install time (facts 4's install_time, read after the RUNS check: the safe
+#   direction) (the plan's CORRECTION, Opus r1 F6): a rollback closed target-old (a person's `disable` without --now,
+#   the older runscaler serving the candidate's image) holds it as its only line that its TARGET does not run yet, and
+#   a person's `enable` without --now does not clear it. A unit it cannot read, at either read: nothing raised or
+#   cleared. It never fails the pass. A journal's CI-down words are text for the person, never the guarantee: this rule
+#   is.
 # DUE (RS_USER's pass, after the core: which release hz-docker would switch to; the Studio's rl_pass, adapted).
 #   hz-docker is due when the eligible release is newer than its current version, it has no open candidate and no STOP
 #   holds it. A STOP of its list holds it when it names no version, or a newer release does not proceed alone past it
@@ -1049,11 +1053,13 @@ apply_archive() {
 # POOL DOWN is held, nothing can change: it ends), ONE runs of any start (runner-facts.sh: never one `active` read),
 # then the unit read AGAIN, after the RUNS check: THAT read decides (a person's `disable --now` during the pair is CI
 # off by hand, never CI down). The unit enabled and no runscaler RUNS -> STOP POOL DOWN, held once (a held one stays as
-# it is); else (a runscaler RUNS, whenever it started, or the unit not enabled) POOL DOWN is cleared; the unit enabled
-# and a runscaler that RUNS clear CI DISABLED too. A unit it cannot read raises and clears nothing. It never fails the
-# pass
+# it is); else (a runscaler RUNS, whenever it started, or the unit not enabled) POOL DOWN is cleared. CI DISABLED is
+# cleared only by the unit enabled AND a runscaler that RUNS and started after config.toml's install time (facts 4's
+# install_time, read after the RUNS check: a file installed during the pair is not the one that process runs), so a
+# rollback closed target-old keeps it until its TARGET runs (the plan's CORRECTION). A unit it cannot read raises and
+# clears nothing. It never fails the pass
 outage() {
-  local held pd cd cr s sets="${MAIN_SET} ${SMALL_SET}" ran p text last
+  local held pd cd cr s sets="${MAIN_SET} ${SMALL_SET}" ran p text last inst
   unit_read || { say "pass: runscaler's unit cannot be read (systemctl --user show runscaler): THE OUTAGE RULE raises and clears nothing"; return 0; }
   held=$(printf '%s\n' "$ST" | jq -r --arg f "$FAMILY" '[(.families[$f].stops // [])[] | .stop] as $s
            | "\($s | index("POOL DOWN") != null) \($s | index("CI DISABLED") != null)"') || held="false false"
@@ -1072,8 +1078,13 @@ outage() {
       say "pass: STOP POOL DOWN is cleared: runscaler RUNS (pid ${p% *}, started ${p#* })"
     fi
     if [ "$cd" = true ] && [ "$UNIT_FILE" = enabled ]; then
-      change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "CI DISABLED")]' --arg f "$FAMILY"
-      say "pass: STOP CI DISABLED is cleared: runscaler's unit is enabled and runscaler RUNS (pid ${p% *}, started ${p#* })"
+      inst=$(install_of "$CFG")
+      if [ "$inst" != none ] && [ "${p#* }" -gt "$inst" ]; then
+        change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "CI DISABLED")]' --arg f "$FAMILY"
+        say "pass: STOP CI DISABLED is cleared: runscaler's unit is enabled and runscaler RUNS (pid ${p% *}, started ${p#* }, after config.toml's install at $inst)"
+      else
+        say "pass: STOP CI DISABLED stays: a runscaler RUNS (pid ${p% *}, started ${p#* }), but not one that started after config.toml's install ($inst): it may run the file before (a rollback's TARGET that does not run yet)"
+      fi
     fi
     return 0
   fi
@@ -1097,6 +1108,17 @@ outage() {
                   version: null, user: null, detail: {text: $t, hand: "journalctl --user -u runscaler"}}]))' \
     --arg f "$FAMILY" --arg t "${text:0:900}"
   say "pass: STOP POOL DOWN: $text"
+}
+
+# FILE -> config.toml's install time (facts 4's: runner-facts.sh's install_time of FILE's sha and mtime), or none when
+# it cannot be read
+install_of() {
+  local cr head i
+  cr=$(config_read "$1") || { echo none; return 0; }
+  head=${cr%%$'\n'*}
+  [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { echo none; return 0; }
+  i=$(install_time "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$WINDOWS"); i=${i%% *}
+  [[ $i =~ ^[0-9]+$ ]] && echo "$i" || echo none
 }
 
 # ---- the pass
