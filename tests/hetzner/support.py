@@ -932,8 +932,99 @@ def act(a):
             return
         event('kill %d' % g)
         os.killpg(g, signal.SIGKILL)
+    elif a == 'count-shows':               # from now on the systemctl substitute counts its show reads (systemctl:show-N)
+        st = load('systemd.json')
+        st['shows'] = 0
+        save('systemd.json', st)
+    elif a == 'pend':                      # (at systemctl:show-N) a read of the unit that is still pending: pend()
+        pend()
     else:
         event('hook action UNKNOWN: ' + a)
+
+
+# THE TWO LOCKS of the unattended modes: pool-image.sh's own (fd 8) and the updater lock (fd 9)
+LOCKS = (('fd8-lock', os.path.join(os.environ.get('HOME', '/nonexistent'), '.config', 'runner', 'pool-image.lock')),
+         ('fd9-lock', os.path.join(os.environ.get('HOME', '/nonexistent'), '.local', 'state', 'runner-updater', 'lock')))
+
+
+def holds(pid):
+    """'fd8-lock=B fd9-lock=B': has process PID a descriptor open on each lock file?"""
+    links = set()
+    try:
+        for fd in os.listdir('/proc/%d/fd' % pid):
+            try:
+                links.add(os.readlink('/proc/%d/fd/%s' % (pid, fd)))
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return ' '.join('%s=%s' % (n, os.path.realpath(p) in links) for n, p in LOCKS)
+
+
+def ppid_cmd(pid):
+    """(its parent's pid, its command line) of process PID."""
+    with open('/proc/%d/stat' % pid) as f:
+        pp = int(f.read().rsplit(')', 1)[1].split()[1])
+    with open('/proc/%d/cmdline' % pid, 'rb') as f:
+        return pp, f.read().replace(b'\0', b' ').decode('utf-8', 'replace').strip()
+
+
+def gone(pid):
+    """PID ended (a zombie has closed all its files)."""
+    try:
+        with open('/proc/%d/stat' % pid) as f:
+            return f.read().rsplit(')', 1)[1].split()[0] == 'Z'
+    except OSError:
+        return True
+
+
+def locks_now():
+    """'fd8-lock=FREE|held fd9-lock=FREE|held': can a NEW open of each lock take it now (another holder's view)?"""
+    out = []
+    for n, p in LOCKS:
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            out.append(n + '=FREE')
+        except BlockingIOError:
+            out.append(n + '=held')
+        finally:
+            os.close(fd)
+    return ' '.join(out)
+
+
+def window_cmd(cmd):
+    """A command line of the window: `bash .../pool-image.sh ...` (its subshells, forks of it, show the same)."""
+    return re.match(r'bash \S*/pool-image\.sh ', cmd) is not None
+
+
+def pend():
+    """A read of runscaler's unit (this systemctl substitute) that is still pending, while the window waits for it: the
+    events name what each process up to the window holds (this read; each shell of the window between it and the
+    window, a fork of the window with its command line; the window, the first of them whose parent is not) and whether
+    the locks are held; then the window (and its parent, when that is the cells' lock holder: a bash that took the
+    lock; never the cell's own process) is killed, and once it has ended, whether the locks are held again: only the
+    read's own process tree is left of the window, so a lock still held is held by it."""
+    win = ppid_cmd(os.getpid())[0]
+    shells = []
+    while window_cmd(ppid_cmd(ppid_cmd(win)[0])[1]):
+        shells.append(win)
+        win = ppid_cmd(win)[0]
+    par, win_cmd = ppid_cmd(win)
+    par_cmd = ppid_cmd(par)[1]
+    event('pend read %d %s' % (os.getpid(), holds(os.getpid())))
+    for s in shells:
+        event('pend shell %d %s' % (s, holds(s)))
+    event('pend window %d %s window=%s cmd=%s' % (win, holds(win), window_cmd(win_cmd), win_cmd[:200]))
+    event('pend before the kill: ' + locks_now())
+    kill = [win] + ([par] if 'flock -n 9' in par_cmd else [])
+    for p in kill:
+        os.kill(p, signal.SIGKILL)
+    t = time.time()
+    while not all(gone(p) for p in kill) and time.time() < t + 30:   # a bound on a hang, never a time a cell asserts
+        time.sleep(0.02)
+    event('pend killed %s, ended: %s' % (' '.join(map(str, kill)), all(gone(p) for p in kill)))
+    event('pend after the kill: ' + locks_now())
 '''
 
 SYSTEMCTL_STUB = r'''#!/usr/bin/python3 -I
@@ -1479,7 +1570,9 @@ class Pool(Sandbox):
         comment), hand-file (a person installs another file: the main set's max-runners 3 -> 2), put-prev (a person
         puts config.toml.prev back as config.toml), edit-staged, edit-rollback (back's STAGED), edit-prev
         (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
-        held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh). An injection, AT
+        held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh), count-shows (as
+        count_shows(), from that event on), pend (at `systemctl:show-N`: that read stays pending while it names who holds
+        the two locks, kills the window, and names them again: hzlib.pend). An injection, AT
         with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another
         file NAME fails). `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))

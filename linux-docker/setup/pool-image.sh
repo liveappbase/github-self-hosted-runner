@@ -118,7 +118,10 @@
 #   (review r1, opus F3 and codex F8): `timeout` holds fd 9 to pass it to 03, so a killed window's try holds the
 #   updater lock until the try ends, at most 130 s (the 120 s bound and its 10 s KILL); the updater's passes meanwhile
 #   find the lock held. Every systemctl call of the unattended modes closes fd 8 and fd 9 (`8>&- 9>&-`): a stop client
-#   that outlives a killed window (a drain, up to TimeoutStopSec) holds neither lock.
+#   that outlives a killed window (a drain, up to TimeoutStopSec) holds neither lock. Nor does a shell that waits for a
+#   read of the unit (S2b-3c-1 B2a; review r4 of B1, codex F4): each `$(systemctl ...)` read closes both first in its
+#   command substitution, and proc_now, unit_read and start_of close both in a subshell that runs them (runner-facts.sh,
+#   NO SHELL THAT WAITS FOR A READ HOLDS A LOCK): a window killed while a read is pending leaves both locks free.
 # THE ORDER OF CHECK AND STEP: each check of a file comes AFTER the journal line of the step it guards and right before
 #   that step, and a copy is checked after it is made. A failed check before `rename-start` closes the journal (STOP);
 #   after it, the journal closes only when config.toml is provably the window's own pre-window file (just checked),
@@ -156,8 +159,12 @@
 #   output's path, once per file; a config.toml that cannot be read: STOP POOL DOWN, once. THE CI-DOWN WORDS ARE TRUE
 #   WHEN WRITTEN (review r3, codex F2): the sentence goes in only when ONE unit_read right then finds the unit enabled
 #   and down (inactive or failed, or activating with no process), never from the unit as it was when the window began;
-#   the journal stays open as before either way. A step that FAILED (a journal write, a copy, a touch, a rename, a
-#   systemctl call) writes no such line (ufail; RECOVER's: the line printed): the next pass tries that step again.
+#   the journal stays open as before either way; and a STOP POOL DOWN of a file that does not validate is written only
+#   when a RUNS read right before it still finds no runscaler that RUNS (review r4 of B1, opus F1: the read that routed
+#   there came before the validate). ITS ADVICE WORKS WHILE IT IS OPEN (review r4 of B1, opus F2): a line in an open
+#   journal names no `03-runscaler.sh` step (03 refuses while a window journal is there), only hand steps and
+#   runner-start validate. A step that FAILED (a journal write, a copy, a touch, a rename, a systemctl call) writes no
+#   such line (ufail; RECOVER's: the line printed): the next pass tries that step again.
 # RECOVER, `recover --unattended` (S2b-3c-1 D-c, D-d and its r3 FOLD; PLAN D1, D5 RECOVER): it ends a window journal a
 #   cut left OPEN (the window's own process is gone: the updater's lock, which a window holds for its whole run, is the
 #   updater's, who runs RECOVER as its child), and leaves it CLOSED at WINDOW with THE CLOSING LINES for the updater's
@@ -416,12 +423,13 @@ holds_pool() {   # holds_pool FILE: does this config carry pool.env's numbers, t
     && [ "$(sed -n 's/^max-runners = //p' "$1" | paste -sd ' ' -)" = "$max 1" ]
 }
 start_of() {   # runscaler's last start, in epoch seconds (systemd's own number: no date parsing)
-  local a; a=$(systemctl --user show runscaler -p ActiveEnterTimestamp --value --timestamp=unix 2> /dev/null 8>&- 9>&-); a=${a#@}
+  local a; [ "$BASHPID" = "$$" ] || exec 8>&- 9>&-   # no shell that waits for a read holds a lock (runner-facts.sh)
+  a=$(exec 8>&- 9>&-; systemctl --user show runscaler -p ActiveEnterTimestamp --value --timestamp=unix 2> /dev/null); a=${a#@}
   [[ $a =~ ^[0-9]+$ ]] && echo "$a"
 }
 started_after() {   # runscaler is active and started after config.toml was installed: it runs this config.toml
   local a
-  [ "$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)" = active ] && a=$(start_of) && [ "$a" -gt "$(stat -c %Y "$CFG")" ]
+  [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && a=$(start_of) && [ "$a" -gt "$(stat -c %Y "$CFG")" ]
 }
 ready() { "$HOME/bin/pool-ready" $SETS; }
 # counts MODE: the two expected sets' COUNTS on two reads of /healthz 3 s apart — never READY (a rollback with GitHub
@@ -663,7 +671,7 @@ urestart() {   # THE RESTART (the header): returns when the new process RUNS; el
   ujs stopped "$p"
   # the unit must still be ENABLED (D-h; changed-lines Opus r2 F4): a person's `systemctl --user disable --now
   # runscaler` during the window gets no start
-  if [ "$(systemctl --user is-enabled runscaler 2> /dev/null < /dev/null 8>&- 9>&-)" != enabled ]; then
+  if [ "$(exec 8>&- 9>&-; systemctl --user is-enabled runscaler 2> /dev/null < /dev/null)" != enabled ]; then
     utarget "after the drain, the unit not enabled" "nothing was started"
     ucidisabled "a person disabled runscaler during this window (systemctl --user is-enabled: not enabled), after its install: config.toml is the TARGET ($(image_of "$CFG")), validated, and runs when a person starts runscaler again: systemctl --user enable --now runscaler. Nothing was started"
   fi
@@ -740,7 +748,7 @@ un_up() {
     1) ustop "check failed" "the registry does not serve $cur, the image the pool runs now: its rollback could not start a runner" ;;
     *) ustop "check failed" "the registry ($REG) does not answer, so it cannot be checked that it still serves $cur, the image the pool runs now (the rollback's)" ;;
   esac
-  { [ "$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)" = active ] && [ "$(systemctl --user is-enabled runscaler 2> /dev/null 8>&- 9>&-)" = enabled ]; } \
+  { [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && [ "$(exec 8>&- 9>&-; systemctl --user is-enabled runscaler 2> /dev/null)" = enabled ]; } \
     || unot "START STATE: runscaler is not active and enabled"
   started_after || unot "START STATE: config.toml was installed after runscaler started, so it is not proven to be the config that runs"
   ujs start-state "$(date +%s)"   # config-sha runs: RECOVER may start it with no validate (the header)
@@ -1147,7 +1155,7 @@ rc_target() {   # SHA LINES: RECOVER's own TARGET (D1): `recover-target`, once p
   # why (once: its line), the journal open
   [ "$RT_SHA" = "$1" ] && return 0
   [[ "$1 $2" =~ ^$RC_H\ $RC_TL$ ]] || {
-    rc_once "HAND CHANGE" "config.toml (sha256 ${1:0:12}…) names runner images that are no digest reference of the local registry (localhost:${REGISTRY_PORT}/${IMAGE_NAME}@sha256:…), " "so RECOVER cannot journal what it would start ($2): nothing is started, CI is down. Put a config with digest images in place (03-runscaler.sh real renders one); the updater's next pass sees it"
+    rc_once "HAND CHANGE" "config.toml (sha256 ${1:0:12}…) names runner images that are no digest reference of the local registry (localhost:${REGISTRY_PORT}/${IMAGE_NAME}@sha256:…), " "so RECOVER cannot journal what it would start ($2): nothing is started, CI is down. By hand, put a config with digest images in place (the one from before this window is one) and check it: RUNNER_START_CONFIG=FILE ~/bin/runner-start validate; the updater's next pass sees it"
     rc_open "config.toml's runner images are no digest references: RECOVER starts nothing on it"
   }
   ujs recover-target "$1 $2"; RT_SHA=$1
@@ -1163,18 +1171,23 @@ rc_vproof() {   # WHAT (pre | other): THE START's sha (the read: NOW_SHA) proven
       rc_handstop "$NOW_SHA" "config.toml (sha256 ${NOW_SHA:0:12}…) is no file of this window's and its copy's validate is $VCLS: nothing is started"
       rc_vdown "a file this window did not write"
     else rc_vdown "the config from before this window, which no journal line proves ran"; fi
+    [ "$RC_VUP" = 0 ] || rc_open "config.toml's copy validates $VCLS and no line proves it ran: nothing is started; a runscaler runs again (pid ${RUNS_PROC% *}), so no STOP POOL DOWN, and the next pass sees it"
     rc_open "config.toml's copy validates $VCLS and no line proves it ran: nothing is started, CI is down (STOP POOL DOWN)"
   fi
   rc_target "$VSHA" "$VLINES"
 }
 rc_vdown() {   # WHAT: A STOP THAT LEAVES CI DOWN SAYS SO (review r3, opus F2): config.toml (NOW_SHA), WHAT, does not
   # validate and no runscaler runs (rc_vproof's callers): `stop POOL DOWN` that says CI is down and why (the validate's
-  # class, its whole output), ONCE per file (keyed on the STOP line itself, by its sha)
-  rc_once "POOL DOWN" "runscaler is down, and config.toml (sha256 ${NOW_SHA:0:12}…), $1, does not validate" " ($VCLS; its whole output: $VOUT): nothing is started, CI is down. Fix it, or put a config that validates in place (03-runscaler.sh real); the updater's next pass validates it again"
+  # class, its whole output), ONCE per file (keyed on the STOP line itself, by its sha). TRUE WHEN WRITTEN (review r4,
+  # opus F1, codex F2): the RUNS read that routed here came before the validate, minutes before: it is read again right
+  # before the line, and a runscaler that RUNS now (one that came back by itself) gets none (RC_VUP=1)
+  RC_VUP=0
+  if rc_runs_any; then RC_VUP=1; return 0; fi
+  rc_once "POOL DOWN" "runscaler is down, and config.toml (sha256 ${NOW_SHA:0:12}…), $1, does not validate" " ($VCLS; its whole output: $VOUT): nothing is started, CI is down. Fix it by hand, or put a config that validates in place by hand and check it: RUNNER_START_CONFIG=FILE ~/bin/runner-start validate; the updater's next pass validates it again"
 }
 rc_unread() {   # config.toml cannot be read and no runscaler runs: `stop POOL DOWN` that says CI is down, once (its line),
   # the journal open (the next pass reads it again)
-  rc_once "POOL DOWN" "config.toml cannot be read, and runscaler is down" ": nothing is started, CI is down. Put a config that validates in place (03-runscaler.sh real); the updater's next pass sees it"
+  rc_once "POOL DOWN" "config.toml cannot be read, and runscaler is down" ": nothing is started, CI is down. By hand, put a config that validates in place and check it: RUNNER_START_CONFIG=FILE ~/bin/runner-start validate; the updater's next pass sees it"
   rc_open "config.toml cannot be read, and runscaler is down: CI is down (STOP POOL DOWN)"
 }
 rc_stop_unit() {   # the unit stopped (`systemctl --user stop` also ends a drain in progress or an auto-restart wait),
