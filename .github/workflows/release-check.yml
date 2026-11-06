@@ -62,16 +62,20 @@ jobs:
     # In parts, each a -p pattern of unittest discover (tests/core/test_workflow.py: together they run every module of
     # tests/hetzner exactly once). In one job per image, tests/hetzner took 1028 and 1105 s in CI at 243 cells (run
     # 41815113783), its rows 20 and 21 min of 30. Each part is a job of its own: its cells share nothing with another
-    # part's (a Pool cell needs /home/root to itself, so two modules in one container cannot run at once). At 251 cells
-    # the parts took 201-223, 173-194, 222-236 and 167-169 s in local containers of both images (S2b-3b-1), and CI
-    # took about 1.35 times a local run: the slowest part is about 6 min. A part that nears 15 min gets a pattern more.
+    # part's (a Pool cell needs /home/root to itself, so two modules in one container cannot run at once). The four
+    # parts of S2b-3b-1 took 10.3-15.3 min of CI at 26bae3f (S2b-3c-1 B1: test_[!a-qu]*.py 13.9 and 15.3 min, though no
+    # module of it changed in that round: about 1.5 min of host noise either way), so S2b-3c-1 B2a split them into
+    # seven, by the first two letters of the module names; a new module is named for the part it joins. Each part's
+    # estimate after B2a (24.04, the slower image: its CI job time at 26bae3f less the modules it lost, plus each new
+    # cell's local time x 1.35, the CI/local ratio seen): [a-j] 9.6, [k-q] 9.5, rec 7.7, re[!c] 5.8, [!a-qr][!np] 9.6,
+    # un 11.0 and up 9.6 min. A part that nears 12 min gets a pattern more.
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         image: ["ubuntu:26.04", "ubuntu:24.04"]
-        part: ["test_[a-q]*.py", "test_[!a-qu]*.py", "test_un*.py", "test_u[!n]*.py"]
+        part: ["test_[a-j]*.py", "test_[k-q]*.py", "test_rec*.py", "test_re[!c]*.py", "test_[!a-qr][!np]*.py", "test_un*.py", "test_up*.py"]
     steps:
       - name: git, python3, the image's own jq package, and curl and openssl (tests/hetzner)
         run: |
