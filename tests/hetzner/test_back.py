@@ -3,7 +3,7 @@ the updater lock (it waits), RECOVER first (B2a's rule for every lock-taking com
 (the Studio's do_back), with a candidate (before ACCEPT) or before back_until (after ACCEPT), `pool-image.sh back
 --unattended --why back [--old-version V]` as its CHILD, then the apply step; else REFUSE "nothing to go back to".
 The unit not enabled: REFUSE with the line "rollback pending: CI disabled by a person". Exit 0 rolled back, 5 pending
-(the window's `end`: no STOP, nothing changed), 1 a STOP or a REFUSE, 2 usage. (Named for its CI part, test_[a-j]*.py:
+(the window's `end`: no STOP), 1 a STOP or a REFUSE, 2 usage. (Named for its CI part, test_[a-j]*.py:
 .github/workflows/release-check.yml.)
 
 - It rejects the version it leaves only when that is newer than the restored image's (the apply step's `why back`), and
@@ -13,6 +13,10 @@ The unit not enabled: REFUSE with the line "rollback pending: CI disabled by a p
   CHANGE, the Studio's ru_rb_hand), config.toml.prev's the state's `previous`; a config.toml that already is `previous`
   is nothing to go back to.
 - Its validate is bounded with no timer around it (r3 Opus F15): a try that hangs is cut (UNKNOWN: pending, exit 5).
+- B2b review r1: THE OUTAGE RULE runs after its RECOVER FIRST and its window (Codex F3: a window whose start fails holds
+  POOL DOWN); its last line says "nothing changed" only when nothing did (Opus F2, off's rule); the README's Install
+  step 3 runs this release's updater before step 9 (Codex F4), and no README sentence says an OFF pass asks GitHub
+  nothing (Opus F3).
 Every cell runs the real scripts (support.Pool, a throwaway container, a fake clock) and the updater as RS_USER.
 """
 import os
@@ -20,7 +24,7 @@ import re
 import unittest
 
 from tests.hetzner.support import REPO, digest, needs_container, ref
-from tests.hetzner.test_unattended import alive, value
+from tests.hetzner.test_unattended import PASS, UNKNOWN, alive, keys, value
 from tests.hetzner.test_updater import FAM, MAIN, OLD, SMALL, V, WINDOW, WINDOWS
 from tests.hetzner.test_verdict import PREV, REJECTED, Armed
 
@@ -221,6 +225,76 @@ class RecoverFirst(unittest.TestCase):
                 self.assertEqual(b.fam()['candidate']['version'], V)
 
 
+def pool_down(b):
+    """The detail texts of the family's held POOL DOWN STOPs."""
+    return [(x.get('detail') or {}).get('text', '') for x in b.fam().get('stops', []) if x['stop'] == 'POOL DOWN']
+
+
+def last(r):
+    return [l for l in r.stdout.splitlines() if l.startswith('runner-updater: ')][-1]
+
+
+@needs_container
+class OutageAndWords(unittest.TestCase):
+    def test_back_whose_start_fails_holds_pool_down_naming_its_journal(self):
+        """B2b review r1, Codex F3 for `back hz-docker` too: its window stops runscaler, and its start crash-loops
+        (`pre-close-failure`, the journal open, exit 1): THE OUTAGE RULE runs after it: POOL DOWN held once, naming the
+        open journal; the window's one stop and one start. The control: OFF with the enabled unit down and no journal:
+        back ran neither RECOVER nor a window, so it holds nothing and writes nothing (POOL DOWN is the next pass's)."""
+        b = B(self)
+        b.p.hooks(('journal:starting', 'crash'))
+        r = b.back(1)
+        self.assertEqual(keys(b.p.window())[-1], 'pre-close-failure', b.p.window())
+        down = pool_down(b)
+        self.assertEqual(len(down), 1, r.stdout[-3000:])
+        for s in ('CI is down', WINDOW, 'pre-close-failure'):
+            self.assertIn(s, down[0])
+        self.assertEqual((len(b.since('stop')), len(b.since('start')), b.since('restart')), (1, 1, []))
+        c = B(self)                                                                     # the control
+        st = c.state()
+        st['on'] = False
+        c.put(st)
+        c.p.set_unit(active=False)
+        before = c.raw()
+        r = c.back(1)
+        self.assertEqual(c.raw(), before)
+        self.assertIn('nothing changed', last(r))
+
+    def test_back_never_says_nothing_changed_after_recover_acted(self):
+        """Opus F2 (B2a's rule for `off`, now for `back`): (off) the updater OFF, a window journal cut right after its
+        first line, the enabled unit down: RECOVER FIRST starts runscaler, then back refuses (OFF, exit 1); (pending)
+        ON, the enabled unit down, the window's validate UNKNOWN: its journal stays open, RECOVER right after it starts
+        runscaler, exit 5. Neither last line says "nothing changed", nor that CI is down; each says what RECOVER did
+        stays. The controls: OFF with no journal (exit 1), and ON with the unit serving and the validate UNKNOWN (exit
+        5, no start): "nothing changed"."""
+        for what, acted in (('off', True), ('pending', True), ('off', False), ('pending', False)):
+            with self.subTest(what=what, acted=acted):
+                b = B(self)
+                if what == 'off':
+                    st = b.state()
+                    st['on'] = False
+                    b.put(st)
+                    if acted:
+                        os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+                        b.p.write(WINDOW, 'window 20261106010000-4242\n', 0o600)
+                else:
+                    b.p.runner = {'seq': [UNKNOWN, PASS]}
+                if acted:
+                    b.p.set_unit(active=False)
+                b.mark()
+                r = b.back(1 if what == 'off' else 5)
+                self.assertEqual(len(b.since('start')), 1 if acted else 0, 'the premise: RECOVER started runscaler')
+                self.assertEqual(b.since('stop'), [])
+                line = last(r)
+                if acted:
+                    self.assertTrue(b.p.unit_now()['active'], 'the premise: runscaler runs')
+                    self.assertNotIn('nothing changed', line)
+                    self.assertNotIn('CI is down', line)
+                    self.assertIn('what RECOVER', line)
+                else:
+                    self.assertIn('nothing changed', line)
+
+
 # ---- the README (B2b item 4; runs anywhere)
 
 def readme():
@@ -254,18 +328,72 @@ class Text(unittest.TestCase):
         self.assertIn('`back --unattended`', text)                                     # the control
         self.assertIn("runner-updater back hz-docker", section(text, "The updater's switch and rollback"))
 
-    def test_install_step_3_begins_with_status_and_ends_a_window_journal_first(self):
+    def test_install_step_3_begins_with_status_and_ends_a_window_journal_before_step_9(self):
         """D-f (r2 Opus F8, Codex F2; r3 Opus F16): the update steps (Install step 3) begin with RS_USER's
-        `runner-updater status`; a window journal is ended first (a pass runs RECOVER first), and one that an updater
-        too old to end it shows is no reason to wait: this release's first pass ends it. The control: the step's tar
-        line still follows."""
-        step3 = section(readme(), 'Install').split('\n3. ', 1)[1].split('\n4. ', 1)[0]
+        `runner-updater status`; a window journal is ended first (a pass runs RECOVER first). B2b review r1, Codex F4:
+        one that an updater too old to end it shows is ended by THIS release's updater, which the step runs as RS_USER
+        right after RS_USER's copy (`status`, then `pass`), and the steps go on only once `status` shows no window
+        journal, since step 9's `03-runscaler.sh real` refuses while one is there; one it cannot end goes to "An
+        unfinished window the updater cannot end". No sentence promises that a first pass ends it with no step that runs
+        one. The control: a host with no journal goes on at once ("With no `window journal` line, go on"), before the
+        tar line, as before."""
+        text = readme()
+        install = section(text, 'Install')
+        step3 = install.split('\n3. ', 1)[1].split('\n4. ', 1)[0]
+        flat = one(step3)
         status = step3.find("ssh <RS_USER>@<host> '~/bin/runner-updater status'")
         tar = step3.find('COPYFILE_DISABLE=1 tar')
+        after = step3.find("ssh <RS_USER>@<host> '~/bin/runner-updater pass; ~/bin/runner-updater status'")
         self.assertGreaterEqual(status, 0, step3)
         self.assertGreater(tar, status, 'the status line comes after the files')
-        for s in ('end it first', '~/bin/runner-updater pass', 'install this release anyway', 'its first pass ends it'):
-            self.assertIn(s, one(step3))
+        self.assertGreater(after, tar, "no line runs this release's pass after the files")
+        self.assertIn('With no `window journal` line, go on.', one(step3[:tar]))      # the control
+        tail = one(step3[tar:])
+        for s in ("this release's updater as RS_USER", 'only once `status` shows no `window journal` line',
+                  '`03-runscaler.sh real` (step 9) refuses while a window journal is there',
+                  'An unfinished window the updater cannot end'):
+            self.assertIn(s, tail)
+        self.assertNotIn('its first pass ends it', flat)
+        self.assertIn("ssh <RS_USER>@<host> 'bash -s -- real' < linux-docker/setup/03-runscaler.sh",
+                      install.split('\n9. ', 1)[1].split('\n10. ', 1)[0])
+
+    def test_no_readme_sentence_says_an_off_pass_asks_github_nothing(self):
+        """B2b review r1, Opus F3 (B2a review r2 Opus F3's class, in the README): no sentence says a pass while OFF (or
+        the updater) asks GitHub nothing unless it says that the updater ITSELF does (RECOVER may validate a config and
+        start runscaler, which reach GitHub): test_timer's matcher, over the whole README. The control: the matcher
+        finds 67449a0's sentence."""
+        old = re.compile(r'(?i)(no GitHub call|(?<!itself )asks (the core and )?GitHub nothing)')
+        self.assertRegex('While the updater is OFF the pass ends there, and asks GitHub nothing.', old)   # control
+        self.assertNotRegex(one(readme()), old)
+
+    def test_no_text_says_back_changed_nothing_whatever_its_recover_did(self):
+        """B2b review r1, Opus F2, Codex F5: the README's `back hz-docker` bullet and the program's header (its
+        COMMANDS entry and exit 5) never say that a refused or pending back changed nothing whatever its RECOVER first
+        did: each says the line names what the run changed. The control: the matcher finds 67449a0's four sentences."""
+        old = re.compile(r'(?i)(refuses, and changes nothing|UNKNOWN: nothing changed|no STOP, nothing changed|'
+                         r'\(`end`\), nothing changed)')
+        for s in ('It refuses, and changes nothing, while the updater is OFF',
+                  '5 pending (its validate was UNKNOWN: nothing changed, run it again later)',
+                  "`end`: no STOP, nothing changed; the Studio's", '(`end`), nothing changed (the Studio'):
+            self.assertRegex(s, old)                                                     # the control
+        with open(UPD) as f:
+            header = one(''.join(l[1:] for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines(True)
+                                 if l.startswith('#')))
+        self.assertNotRegex(header, old)
+        self.assertNotRegex(one(readme()), old)
+
+    def test_no_readme_sentence_says_a_pass_whose_core_waits_changes_nothing(self):
+        """B2b review r1 (Codex F5's class: B2a's core_nothing, in the README): a pass whose decision core waits ran
+        RECOVER, the apply step and THE OUTAGE RULE before it asked the core, so the README says that the core's own
+        state stays and what the pass did before stays, never that it changes nothing. The control: the matcher finds
+        67449a0's sentence."""
+        old = re.compile(r'(?i)whose decision core waits[^.]*?changes nothing')
+        self.assertRegex('A pass or `status` whose decision core waits (the core\'s own state, kept in the state '
+                         'file, is of a format it does not read) prints `WAIT` (exit 4) too, `status` after its lines, '
+                         'and changes nothing.', old)                                     # the control
+        text = one(readme())
+        self.assertNotRegex(text, old)
+        self.assertIn('what it did before it asked the core', text)
 
     def test_the_readme_says_what_a_pass_while_off_does_and_its_2_hour_bound(self):
         """B2a's README sentences (build3c1-B2a.log :148-168, fix3c1-B2a-1.log :136-146): no sentence says a pass

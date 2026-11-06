@@ -1224,7 +1224,8 @@ class Pass(unittest.TestCase):
     def test_a_window_journal_recover_cannot_read_is_a_stop_and_nothing_else(self):
         """S2b-3c-1 B2a item 3: "STOP RECOVER needed (S2b-3c)" is gone: a pass runs RECOVER as its child. A journal it
         cannot read (exit 6): its STOP names README's section, nothing is written, no core program runs (THE OUTAGE
-        RULE still reads the unit). The control: a journal RECOVER closes is archived, and the pass goes on."""
+        RULE still reads the unit, and D-g reads runscaler's process before and after RECOVER: three reads, B2b fix
+        round 1). The control: a journal RECOVER closes is archived, and the pass goes on."""
         g = Rig(self, on=True, production=False)
         os.makedirs(WINDOWS, mode=0o700)          # a window journal is there only after pool-image.sh made windows/
         g.p.write(WINDOW, 'window 20261103080000-42\na line no pattern reads\n', 0o600)
@@ -1234,7 +1235,7 @@ class Pass(unittest.TestCase):
         self.assertNotIn('RECOVER needed', r.stdout)
         self.assertIn('runner-updater: STOP RECOVER cannot read or act on the window journal %s' % WINDOW, r.stdout)
         self.assertIn('An unfinished window the updater cannot end', r.stdout)
-        nothing_ran(self, g, r, shows=1)
+        nothing_ran(self, g, r, shows=3)
         self.assertEqual(g.raw(), before)
         g.p.write(WINDOW, 'window 20261103080000-42\n', 0o600)    # the control
         r = g.run('pass')
@@ -2179,7 +2180,8 @@ class Text(unittest.TestCase):
     def test_the_header_and_the_readme_say_status_waits_when_the_core_waits(self):
         """Opus r2 F1 (S2b-3a): the header's `status` and the README's updater section say that status WAITs (exit 4)
         after its lines when the decision core waits, and STOPs on an answer the core does not give. Control: they
-        still say it for a pass."""
+        still say it for a pass. (B2b fix round 1: the README's sentence no longer says such a pass changes nothing:
+        it ran RECOVER, the apply step and THE OUTAGE RULE before the core.)"""
         with open(UPD) as f:
             h = ' '.join(l.lstrip('#').strip() for l in f.read().split('\nset -uo pipefail\n', 1)[0].splitlines())
         st = h.split('status   no lock,', 1)[1].split(' on       on = true.', 1)[0]
@@ -2190,9 +2192,10 @@ class Text(unittest.TestCase):
         with open(README) as f:
             sec = f.read().split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         self.assertIn('A pass or `status` whose decision core waits (the core\'s own state, kept in the state file, is '
-                      'of a format it does not read) prints `WAIT` (exit 4) too, `status` after its lines, and changes '
-                      'nothing. An answer of the core that is not one of its own is `STOP core could not decide` (exit '
-                      '1).', sec)
+                      'of a format it does not read) prints `WAIT` (exit 4) too, `status` after its lines: `status` '
+                      'writes nothing, and a pass keeps the core\'s own state as it was, while what it did before it '
+                      'asked the core (RECOVER, the apply step, `STOP POOL DOWN`) stays. An answer of the core that is '
+                      'not one of its own is `STOP core could not decide` (exit 1).', sec)
 
     def test_one_copy_of_the_verdicts_the_updater_takes(self):
         """Opus r2 F1 (S2b-3a): a pass and status take ONE set of verdicts per program, decided()'s. (status's own lines

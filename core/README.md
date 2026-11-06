@@ -42,7 +42,9 @@ Output: ONE JSON object on stdout:
 
 `verdict`, `reason` and `lines` are always there; `lines` are status text, one line each. `families` (r1, keep):
 the verdict per family. `state` (idle, r1): the new state; the glue writes it back by rename, and a later program of
-the same pass reads it. rc != 0 = the core could not decide: the glue does nothing this pass and says so in status.
+the same pass reads it. rc != 0 = the core could not decide: the glue acts on none of this pass's verdicts and says so
+in status; what it did before it asked the core (a glue may first end a window a cut left, and hold or clear a STOP
+of its own, such as the Linux host's POOL DOWN) stays.
 
 A state whose `format` is not 1 (a newer or older updater wrote it): verdict `wait`, one status line, the state
 returned unchanged, rc 0.

@@ -117,8 +117,10 @@ class Real(unittest.TestCase):
         shape: `running`, then `closed`) is applied by the next pass (candidate V, previous OLD) and its evidence
         window opens; three counted failures: the next pass's real R1 says rollback, and the pass starts ONE window as
         its child: rolled back to OLD, V rejected (NEW's digest in the rejected file), STOP ROLLED BACK of V with R1's
-        own failures, the verdict (PASSDIR/r1.json) copied into the window's folder by its sha; no "would roll back".
-        The next pass starts none (the candidate is gone)."""
+        own failures, the verdict (PASSDIR/r1.json) copied into the window's folder by its sha; no "would roll back";
+        every systemctl call of that pass that is not a read (show, is-active, is-enabled) is the window's one stop and
+        one start (B2b review r1, Codex F6: no disable, enable or other unit change). The next pass starts none (the
+        candidate is gone)."""
         g = Rig(self, on=True)
         g.p.curl['served'] = [OLD, NEW]
         up = g.p.unattended('up', '--unattended', V, NEW)
@@ -153,9 +155,10 @@ class Real(unittest.TestCase):
         self.assertEqual(rb['version'], V)
         self.assertEqual(len(rb['detail']['failures']), 3)
         self.assertEqual(rb['detail']['set'], MAIN)
-        sys_ = [l.split(' ')[1] for l in g.p.lines('systemctl')[n_sys:]
-                if l.split(' ')[1] in ('stop', 'start', 'restart')]
-        self.assertEqual(sys_, ['stop', 'start'], 'the window restarts runscaler once, and nothing else does')
+        sys_ = [l for l in g.p.lines('systemctl')[n_sys:]
+                if l.split(' ')[1] not in ('show', 'is-active', 'is-enabled')]
+        self.assertEqual(sys_, ['--user stop runscaler', '--user start runscaler'],
+                         'the window restarts runscaler once, and nothing else changes the unit')
         self.assertIn(DUE_LINE, r.stdout)
         n_sys = len(g.p.lines('systemctl'))
         r = g.ok('pass')
@@ -429,7 +432,10 @@ class TheChildsJournal(unittest.TestCase):
     def test_open_after_its_own_restart_waits_for_the_next_pass(self):
         """D-g: the child's restart (its `starting`) runs a runscaler that crash-loops: no RUNS in 10 min,
         `pre-close-failure`, the journal open (exit 1). The pass runs no RECOVER on it (that would restart runscaler a
-        second time): its STOP line, exit 1, the window's one stop and one start. The next pass's RECOVER ends it."""
+        second time): its STOP line, exit 1, the window's one stop and one start. The next pass's RECOVER ends it (B2b
+        review r1, Opus F4: runner-start serves again by then): its `pre-close-failure` DECIDED the rollback as failed,
+        so THE RESTORE puts the backup (OLD's config) back and starts runscaler on it; the apply step keeps the
+        candidate V, rejects nothing and holds ROLLBACK FAILED; the journal archived, and no new window in that pass."""
         a = Armed(self)
         a.p.hooks(('journal:starting', 'crash'))
         r = a.run('pass')
@@ -441,6 +447,21 @@ class TheChildsJournal(unittest.TestCase):
         self.assertEqual((len(a.since('stop')), len(a.since('start')), a.since('restart')), (1, 1, []))
         self.assertIn('runner-updater: STOP the window journal %s stays open' % WINDOW, r.stdout)
         self.assertNotIn(DUE_LINE, r.stdout)
+        wid = value(lines, 'window')
+        a.p.hooks()
+        a.p.set_unit(runner='serves')
+        a.mark()
+        r = a.ok('pass')
+        self.assertIsNone(a.p.window(), r.stdout[-3000:])
+        ws = a.p.closed()
+        self.assertEqual([w for w, _ in ws], [wid], 'a new window started: ' + r.stdout[-3000:])
+        self.assertIn('restore', keys(ws[0][1]))
+        self.assertEqual(a.p.images(), [ref(OLD)] * 2)
+        self.assertTrue(a.p.unit_now()['active'])
+        f = a.fam()
+        self.assertEqual(((f.get('candidate') or {}).get('version'), f.get('rejected', [])), (V, []))
+        self.assertIn('ROLLBACK FAILED', a.held())
+        self.assertIsNone(a.p.read(REJECTED))
 
 
 if __name__ == '__main__':
