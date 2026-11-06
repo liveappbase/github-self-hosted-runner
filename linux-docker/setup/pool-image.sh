@@ -20,14 +20,22 @@
 # up:   refuses unless pool.env holds the numbers config.toml runs (03 renders from pool.env, so others would go live
 #       with the image) and the record's image's runner is VERSION; keeps the rollback; 03 real DIGEST (the same sets and
 #       numbers, the record's image: it installs with the pool running and restarts nothing; if it fails, config.toml is
-#       unchanged); if config.toml then differs from the rollback in more than the image, the rollback goes back with
-#       config.toml's old mtime and nothing restarts. config.toml already on the record's image with a restart pending (a
-#       run cut off before its restart, or a bare 03 run) restarts only when the rollback was kept while the running
-#       process ran.
-# back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes and the
-#       registry still serves the old digest (runscaler pulls it at every runner start, so a dead registry stops both
-#       images alike). `03 real` with no digest renders the image config.toml runs NOW, so a later 03 (a change of the
-#       numbers) keeps the old image; only an `up` puts a new one in.
+#       unchanged); if config.toml then differs from the rollback in more than the image (THE LOG-FILE LINE aside), the
+#       rollback goes back with config.toml's old mtime and nothing restarts. config.toml already on the record's image
+#       with a restart pending (a run cut off before its restart, or a bare 03 run) restarts only when the rollback was
+#       kept while the running process ran.
+# back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes (THE
+#       LOG-FILE LINE aside) and the registry still serves the old digest (runscaler pulls it at every runner start, so a
+#       dead registry stops both images alike). `03 real` with no digest renders the image config.toml runs NOW, so a
+#       later 03 (a change of the numbers) keeps the old image; only an `up` puts a new one in.
+# THE LOG-FILE LINE (runscaler 0.12 bump, slice H1, review r1): "differs in more than the image" (same_but_image, the
+#       ONE function of every caller: up and back here, the unattended up's D3 and back's check) has one exception.
+#       03's render has two lines that a config.toml rendered before that release has not, right after its log-level
+#       line: LOGC, its comment, and LOGK, `log-file = "R/runner.log"` (tests/hetzner/test_render.py binds both to 03's
+#       header). A newer config B that is the older one A (the one that runs, or the kept rollback) plus EXACTLY those
+#       two lines, each once, in that place, differs in the image alone too, but only when A has no line that names
+#       log-file at all. So the next up (a person's, or the updater's switch) adds the line with all of its checks and
+#       its idle restart, and a back puts the config kept before it back: no hand step (README, "The log-file line").
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
 # Then, up and back: the restart. restart() re-reads the start time just before it restarts, so it never restarts a
@@ -80,12 +88,12 @@
 #   DIGEST STAGED` (STAGED = ~/.config/runner/config.staged.toml; 03 refuses a rejected digest), up to 3 tries 20 s
 #   apart, each a VALIDATE TRY: exit 0 (PASS) ends them, exit 4 (API-ONLY) tries again and after the third counts as
 #   PASS, anything else (a cut try: UNKNOWN) is STOP check failed, nothing installed; then D3: STAGED names DIGEST and
-#   differs from config.toml in its runner-image lines alone. (2) THE IDLE PAIR: two /healthz reads 3 s apart, decided
-#   by ~/build/core/idle.jq over every set config.toml names and every set the reads list (no state: no set is
-#   excused, the updater keeps the 24 h); a core that fails or answers no idle/not-idle: `end`. Not idle: STAGED
-#   removed, config.toml unchanged, the journal removed, exit 3. (3) At once: THE BACKUP to config.toml.prev (the
-#   rollback; STAGED must still be the one 03 printed first, else STOP check failed and config.toml.prev stays as it
-#   was), then THE RENAME and THE RESTART, below, unconditionally (no idle check again).
+#   differs from config.toml in its runner-image lines alone (THE LOG-FILE LINE aside). (2) THE IDLE PAIR: two /healthz
+#   reads 3 s apart, decided by ~/build/core/idle.jq over every set config.toml names and every set the reads list (no
+#   state: no set is excused, the updater keeps the 24 h); a core that fails or answers no idle/not-idle: `end`. Not
+#   idle: STAGED removed, config.toml unchanged, the journal removed, exit 3. (3) At once: THE BACKUP to
+#   config.toml.prev (the rollback; STAGED must still be the one 03 printed first, else STOP check failed and
+#   config.toml.prev stays as it was), then THE RENAME and THE RESTART, below, unconditionally (no idle check again).
 # back --unattended: the rollback to config.toml.prev, the backup of the switch it undoes. First, before any effect
 #   (D-e): `why`, `verdict` (--verdict FILE copied to windows/ID.d/verdict.json, journaled by its sha256; none),
 #   `old-version` (--old-version, else none: the version this rollback leaves, the updater's to name) and
@@ -103,8 +111,9 @@
 #   since its install): done, `running`, no restart, else `end`; a start or a drain in progress: `end`. No backup, one
 #   that does
 #   not name ONE image, a config.toml that does not, one that differs from config.toml in more than its runner-image
-#   lines, or one whose image the registry does not serve: STOP ROLLBACK FAILED. PRE-VALIDATE of a copy (STAGED =
-#   ~/.config/runner/config.rollback.toml, its lines checked once it is made) by the ONE VALIDATE RULE
+#   lines (THE LOG-FILE LINE aside), or one whose image the registry does not serve: STOP ROLLBACK FAILED.
+#   PRE-VALIDATE of a copy (STAGED = ~/.config/runner/config.rollback.toml, its lines checked once it is made) by the
+#   ONE VALIDATE RULE
 #   (~/bin/runner-start validate, stdout and stderr, ~/bin/validate-class), up to 3 tries 20 s apart, each a VALIDATE
 #   TRY: PASS ends them, API-ONLY after the third counts as PASS, NON-API is STOP ROLLBACK FAILED and UNKNOWN (a cut try
 #   too) is `end` (no STOP: the updater tries again), both before any restart. No idle wait: then THE BACKUP of the
@@ -410,8 +419,17 @@ pulls() {   # pulls IMAGE: 0 = the local registry serves this digest; 1 = it ans
     "$REG/v2/${IMAGE_NAME}/manifests/${1#*@}"
   case $? in 0) return 0 ;; 22) return 1 ;; *) return 2 ;; esac
 }
-same_but_image() {   # same_but_image A B: the two configs differ in their runner-image lines alone
-  cmp -s <(grep -v '^runner-image = ' "$1") <(grep -v '^runner-image = ' "$2")
+# THE LOG-FILE LINE (the header): the two lines 03's render has right after its log-level line, as it renders them
+LOGC='# log-file: the runner.log the updater reads; runner-start refuses any other.'
+LOGK="log-file = \"$R/runner.log\""   # 03's `log-file = "$LOGF"`: RS_USER's ~/.config/runner/runner.log
+same_but_image() {   # same_but_image A B (A the older config): they differ in their runner-image lines alone, or by
+  # THE LOG-FILE LINE too (the header)
+  cmp -s <(grep -v '^runner-image = ' "$1") <(grep -v '^runner-image = ' "$2") && return 0
+  # A names no log-file at all (grep's 1: no line, and A was read), and B is A plus LOGC and LOGK, each once, right
+  # after A's first log-level line
+  grep -q -i -F -e log-file -- "$1" 2> /dev/null; [ $? = 1 ] || return 1
+  cmp -s <(grep -v '^runner-image = ' "$1" | LOGC=$LOGC LOGK=$LOGK awk '{ print }
+    /^log-level = / && !n++ { print ENVIRON["LOGC"]; print ENVIRON["LOGK"] }') <(grep -v '^runner-image = ' "$2")
 }
 pv() { sed -n "s/^$1=\([0-9][0-9]*\)$/\1/p" "$POOL" 2> /dev/null; }   # one number from pool.env (twice = no match below)
 holds_pool() {   # holds_pool FILE: does this config carry pool.env's numbers, the ones 03 renders?
