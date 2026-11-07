@@ -19,7 +19,14 @@
 - BACK'S PAIR GUARD (R-4's belt): a person's `back` refuses, before any put, a kept config.toml.pre-image with no
   log-file key while ~/bin/runner is not the way-back runscaler (03's WAYBACK_BIN_SHA): runner-start would refuse that
   pair at the restart, and CI would be down. On the way-back runscaler, or with a kept config that has the key, it
-  rolls back as before.
+  rolls back as before. Each cell that claims a pair starts, or not, runs the INSTALLED runner-start's guard on it
+  (test_render.guard: the systemctl substitute runs no runner-start; H2a review r1, Opus F3).
+- THE ONE DOOR, over the tree (R-8; slice H2b-1): the programs of linux-docker/ write ~/bin/runner only by 03's two
+  renames of ~/bin/runner.new (a fresh host's, and the stage of `pool-image.sh runscaler`), and runner.new only by 03's
+  one install of a checked `runner`. THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
+  ~/bin/runner.new, and its log-file guard hashes that file; `validate` takes no other argument; `run` (with any
+  argument, or any env var) and `delete` exec ~/bin/runner and hash it. A fresh host's 03 real that ends between the
+  install into runner.new and its rename leaves neither name (H2a review r1, Opus F4: the trap's cleanup).
 The Text cells run anywhere; the others run the real scripts (pin lines rewritten) in a container (support.Pool). The
 pool's PINNED runscaler is Pool's substitute (03's BIN_SHA rewritten to it); the WAY-BACK one is test_render.way_back's
 (the same program, other bytes; 03's WAYBACK_BIN_SHA and runner-start's V095_SHA rewritten to it). An UNKNOWN one is
@@ -30,9 +37,10 @@ import re
 import unittest
 
 from tests.hetzner.support import REPO, Pool, digest, needs_container, ref, sha256_file
-from tests.hetzner.test_render import UPNEW, UPV, Before, assignment, way_back
+from tests.hetzner.test_render import UPNEW, UPV, Before, assignment, guard, starts, way_back, without_log_file
 
 S03 = os.path.join(REPO, 'linux-docker', 'setup', '03-runscaler.sh')
+PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
 V2, X = digest(12), digest(20)
 RUNSCALERS = (('PINNED', '0.12.0'),
@@ -117,6 +125,84 @@ class Pins(unittest.TestCase):
             self.assertIn(w, sec)
 
 
+def code_lines(path):
+    """(line number, line) of each line of a program that is not a whole-line comment."""
+    with open(path, errors='replace') as f:
+        return [(i, l.rstrip('\n')) for i, l in enumerate(f, 1) if not l.lstrip().startswith('#')]
+
+
+BIN = r'(?:bin/runner|\$RB|\$NEWBIN|\$RUNNER)(?![-_A-Za-z.])'   # ~/bin/runner (or runner.new), by any name a program uses
+WRITE = re.compile(r'(?:^\s*|[;&|({]\s*)(?:mv|cp|install|ln|tar|dd|tee|rsync|curl)\b[^;&|]*' + BIN
+                   + r'|>>?\s*"?' + BIN)
+
+
+class Census(unittest.TestCase):
+    def test_only_03_s_two_renames_write_bin_runner(self):
+        """R-8: every program of linux-docker/ (not the README): a command (mv, cp, install, ln, tar, dd, tee, rsync,
+        curl) whose arguments name ~/bin/runner or runner.new (bin/runner, $RB, $NEWBIN, runner-start's $RUNNER; not
+        runner-start or runner-updater), or a redirection into one, is one of 03's three: the install of a checked
+        `runner` into ~/bin/runner.new (one function, for a fresh host and for the stage), and the two renames of
+        runner.new over ~/bin/runner (a fresh host's at once, the stage's after config.toml). The build log has the git
+        grep of the same census. 3c0e0aa has the fresh host's two lines only (its install names $BIN_SHA)."""
+        found = []
+        root = os.path.join(REPO, 'linux-docker')
+        for d, _, names in os.walk(root):
+            for n in sorted(names):
+                f = os.path.join(d, n)
+                if n.endswith('.md'):
+                    continue
+                for i, l in code_lines(f):
+                    if WRITE.search(l):
+                        found.append((os.path.relpath(f, root), l.strip()))
+        s03 = 'setup/03-runscaler.sh'
+        want = [(s03, 'install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN"'),
+                (s03, 'mv -f "$NEWBIN" "$RB"; NEWBIN='), (s03, 'mv -f "$NEWBIN" "$RB"; NEWBIN=')]
+        self.assertEqual(sorted(found), sorted(want))
+
+    def test_the_h2_7_texts_say_what_03_s_header_says(self):
+        """H2a review r1, Opus F1: 03 real --image-only refuses a drifted render after its validate and before it
+        installs config.real.toml or config.toml, by which time it HAS installed this release's runner-start,
+        pool-ready, validate-class and the unit (NoExposure measures it). No H2-7 text says "before it installs anything";
+        README sends a pool.env mismatch to up's own check (holds_pool, before 03 runs)."""
+        def between(path, a, b):
+            with open(path) as f:
+                text = f.read()
+            self.assertEqual(text.count(a), 1, (path, a))
+            return text.split(a, 1)[1].split(b, 1)[0]
+        texts = (between(PIMG, '\n# up:   refuses', '\n# back: '),
+                 between(S03, '\n# NO EXPOSURE BEFORE THE COMPARE', "\n# RUNSCALER'S LOG"),
+                 between(S03, '\nif [ -n "$ONLY" ]; then', '\n'),
+                 readme().split('\n## The log-file line\n', 1)[1].split('\n## ', 1)[0],
+                 between(os.path.abspath(__file__), '\nclass NoExposure(', '\n    def test_control_a_bare_03'))
+        for text in texts:   # the H2-7 texts (the stage's own compare does come before anything is installed)
+            self.assertNotIn('before it installs ' + 'anything', text)
+            self.assertNotIn('before anything ' + 'is installed', text)
+        with open(PIMG) as f:   # the header's lines joined
+            self.assertIn('before it installs config.real.toml or config.toml (this release\'s runner-start, '
+                          'pool-ready, validate-class and the unit are installed by then', re.sub(r'\n#\s+', ' ', f.read()))
+        sec = readme().split('\n## The log-file line\n', 1)[1].split('\n## ', 1)[0]
+        for w in ('`up` itself stops before it runs 03', 'before it installs config.real.toml or config.toml',
+                  'this release\'s `runner-start`'):
+            self.assertIn(w, sec)
+
+    def test_no_text_says_render_needs_the_pinned_runscaler(self):
+        """H2a review r1, Opus F2: render takes the pinned or the way-back runscaler, so no text says that runscaler,
+        or its binary, is (or goes by) the pinned BIN_SHA alone (the pattern below); the control: 03's ONE DOOR
+        paragraph names both BIN_SHA and WAYBACK_BIN_SHA."""
+        pat = re.compile(r"runscaler('s binary)? (is|by) BIN_SHA")
+        for d in (os.path.join(REPO, 'linux-docker'), os.path.join(REPO, 'tests', 'hetzner')):
+            for dd, _, names in os.walk(d):
+                for n in names:
+                    if n.endswith(('.py', '.sh', '.md')) or '.' not in n:
+                        with open(os.path.join(dd, n), errors='replace') as f:
+                            hits = [l for l in f if pat.search(l) and 'pat = re.compile' not in l]
+                        self.assertEqual(hits, [], n)
+        with open(S03) as f:
+            head = f.read().split('\n# ONE DOOR ', 1)[1].split('\n# NO EXPOSURE', 1)[0]
+        self.assertIn('BIN_SHA', head.replace('WAYBACK_BIN_SHA', ''))
+        self.assertIn('WAYBACK_BIN_SHA', head)
+
+
 @needs_container
 class Door(unittest.TestCase):
     def test_a_fresh_host_s_03_real_installs_the_pinned_runscaler_by_a_rename(self):
@@ -133,6 +219,21 @@ class Door(unittest.TestCase):
         self.assertEqual(os.stat(rb).st_mode & 0o777, 0o755)
         self.assertFalse(os.path.lexists(rb + '.new'))
         self.assertIn('mv runner', p.events())
+
+    def test_a_fresh_host_s_03_real_that_ends_before_the_rename_leaves_neither_name(self):
+        """H2a review r1, Opus F4: a fresh host's 03 real that ends after the install into ~/bin/runner.new and before
+        its rename (runner.new's bytes change before its second sha check: a hook) exits 1 and leaves no ~/bin/runner
+        and no ~/bin/runner.new (the trap removes the runner.new this run made). The control: the cell above (the
+        rename logged, nothing left). The trap mutant leaves runner.new."""
+        p = Pool(self)
+        p.image_ref(V2)
+        p.hooks(('install-done:runner.new', 'taint-runner-new'))
+        r = p.s03('real')
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        self.assertIn('tainted runner.new', p.events())
+        self.assertIn('FAIL sha256 %s' % os.path.join(p.HOME, 'bin', 'runner.new'), r.stdout)
+        for n in ('runner', 'runner.new'):
+            self.assertFalse(os.path.lexists(os.path.join(p.HOME, 'bin', n)), n)
 
     def test_a_host_with_a_runscaler_keeps_it(self):
         """M-1: a re-run of `03 real` on a host whose ~/bin/runner is the pinned runscaler, or the way-back one, leaves
@@ -206,7 +307,8 @@ class NoExposure(unittest.TestCase):
     def test_a_drifted_host_value_refuses_inside_03_and_config_toml_never_moves(self):
         """H2-7: the host config's MAIN_LABEL is not the one the pool runs. A person's `up` runs `03 real DIGEST
         --image-only`, which refuses after its validate (the render differs from config.toml in more than the image)
-        and before it installs anything: no rename onto config.toml or config.real.toml at any point (the mv
+        and before it installs config.real.toml or config.toml (it has installed this release's runner-start by then:
+        its mtime moved, its bytes the pinned ones): no rename onto config.toml or config.real.toml at any point (the mv
         substitute's log), each one's sha256, mtime and inode as they were, nothing restarted. b2eb739 installed the
         render and then put the rollback back (a new inode, and the drifted values on disk in between)."""
         g = Before(self)
@@ -219,6 +321,8 @@ class NoExposure(unittest.TestCase):
             s = os.stat(f)
             return sha256_file(f), s.st_mtime_ns, s.st_ino
         before = {n: st(n) for n in ('config.toml', 'config.real.toml')}
+        rs = os.path.join(p.HOME, 'bin', 'runner-start')
+        rs0 = os.stat(rs).st_mtime_ns
         r = p.pool('up', UPV)
         self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
         self.assertIn('VALIDATE PASS', r.stdout)
@@ -229,6 +333,9 @@ class NoExposure(unittest.TestCase):
         self.assertEqual(moved, [])
         self.assertIn('mv config.toml.pre-image', p.events(), 'the cell saw the renames (its control)')
         self.assertEqual(g.restarts(), [])
+        # what the texts say (H2a review r1, Opus F1): by its refusal 03 has installed this release's runner-start
+        self.assertNotEqual(os.stat(rs).st_mtime_ns, rs0)
+        self.assertEqual(sha256_file(rs), sha256_file(os.path.join(p.build, 'bin', 'runner-start')))
 
     def test_control_a_bare_03_real_installs_what_it_renders(self):
         """H2-7's other side: a bare `03 real` (Install step 9, a change of pool.env's numbers or of the host config)
@@ -255,6 +362,10 @@ class Belt(unittest.TestCase):
         self.assertIn('the way-back runscaler', r.stdout)
         self.assertEqual(files(g.p), before)
         self.assertEqual(g.restarts(), [])
+        # the belt's premise, by the INSTALLED guard: that pair (the pinned substitute, the kept config) is refused
+        rg, ran = guard(g.p, g.p.rpath('config.toml.pre-image'))
+        self.assertIn('runner-start: REFUSE the config has no log-file key', rg.stderr)
+        self.assertEqual(ran, [])
 
     def test_control_on_the_way_back_runscaler_it_rolls_back(self):
         """The belt's control: the same back on the way-back runscaler (v0.9.5, which runs a config with no line) puts
@@ -266,6 +377,7 @@ class Belt(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertEqual(g.p.config(), g.pre)
         self.assertEqual(g.p.unit_now()['restarts'], 1)
+        starts(self, g.p)    # the INSTALLED guard starts that pair (v0.9.5, the config with no line)
 
     def test_control_a_rollback_with_the_key_rolls_back_on_any_runscaler(self):
         """The belt's other control: a kept config WITH the log-file key (03's render of the old image) goes back on
@@ -277,6 +389,78 @@ class Belt(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertEqual(g.p.config(), g.h1)
         self.assertEqual(g.p.unit_now()['restarts'], 1)
+        starts(self, g.p)
+
+
+@needs_container
+class Selector(unittest.TestCase):
+    """R-2: ~/bin/runner is the pinned substitute (not v0.9.5's), ~/bin/runner.new the way-back one (runner-start's
+    V095_SHA, as installed). A config with no log-file key tells which file the guard hashed: on v0.9.5's it runs, on
+    any other it is refused. runscaler's log names the file that ran (support.POOL_RUNNER's exe)."""
+
+    def rig(self):
+        p = Pool(self)
+        p.production(V2)
+        s = way_back(self, p, install=False)
+        with open(os.path.join(p.HOME, 'bin', 'runner'), 'rb') as f:
+            wb = f.read() + b'# the way-back runscaler of the cell: the same program, other bytes\n'
+        new = os.path.join(p.HOME, 'bin', 'runner.new')
+        with open(new, 'wb') as f:
+            f.write(wb)
+        os.chmod(new, 0o755)
+        self.assertEqual(sha256_file(new), s)
+        bare = p.write(p.rpath('bare.toml'), without_log_file(p.config()), 0o600)
+        return p, bare
+
+    def start(self, p, cfg, *args, env=None):
+        p.write(p.path('logs', 'runner.log'), '')
+        r = p.run([os.path.join(p.HOME, 'bin', 'runner-start')] + list(args),
+                  env=dict(p.env(), RUNNER_START_CONFIG=cfg, **(env or {})))
+        return r, [c['exe'] for c in p.calls('runner')]
+
+    def test_validate_staged_validates_with_runner_new_and_hashes_it(self):
+        """`validate --staged` hashes ~/bin/runner.new (v0.9.5's here: the config with no key passes the guard) and
+        execs it; `validate` alone hashes ~/bin/runner (not v0.9.5's: refused) and execs nothing. b2eb739's and
+        3c0e0aa's runner-start ignore the selector (Opus r3 F2, measured)."""
+        p, bare = self.rig()
+        r, ran = self.start(p, bare, 'validate', '--staged')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(ran, [os.path.join(p.HOME, 'bin', 'runner.new')])
+        r, ran = self.start(p, bare, 'validate')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('the config has no log-file key, and %s is not' % os.path.join(p.HOME, 'bin', 'runner'),
+                      r.stderr)
+        self.assertEqual(ran, [])
+
+    def test_validate_takes_no_other_argument(self):
+        """The selector names the staged file and no other path: any other argument of validate is a usage refusal
+        that runs nothing."""
+        p, bare = self.rig()
+        for args in (('validate', p.rpath('x')), ('validate', '--staged', 'x'), ('validate', '--runner')):
+            with self.subTest(args=args):
+                r, ran = self.start(p, p.rpath('config.toml'), *args)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('runner-start: REFUSE usage', r.stderr)
+                self.assertEqual(ran, [])
+
+    def test_run_with_any_argument_execs_bin_runner_and_hashes_it(self):
+        """`run` with the selector (or any argument, or an env var naming another runner) execs ~/bin/runner, and its
+        v0.9.5 rule hashes ~/bin/runner: the config with no key is refused (~/bin/runner is not v0.9.5's), the config
+        with the line runs on ~/bin/runner."""
+        p, bare = self.rig()
+        cfg = p.rpath('config.toml')
+        for args, env in ((('run', '--staged'), None), (('run', 'x', 'y'), None),
+                          (('run',), {'RUNNER': os.path.join(p.HOME, 'bin', 'runner.new'),
+                                      'RUNNER_START_RUNNER': os.path.join(p.HOME, 'bin', 'runner.new')})):
+            with self.subTest(args=args, env=bool(env)):
+                r, ran = self.start(p, cfg, *args, env=env)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(ran, [os.path.join(p.HOME, 'bin', 'runner')])
+                r, ran = self.start(p, bare, *args, env=env)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('the config has no log-file key, and %s is not' % os.path.join(p.HOME, 'bin', 'runner'),
+                              r.stderr)
+                self.assertEqual(ran, [])
 
 
 if __name__ == '__main__':

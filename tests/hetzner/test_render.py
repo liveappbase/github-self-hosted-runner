@@ -11,7 +11,8 @@ D5; the changed-lines list, items 30-33 and 41).
   ~/.config/runner) and validates it; it installs nothing (no binary, no unit, no daemon-reload, no config.toml), runs none
   of real's refusal controls, and refuses a set list other than config.toml's (an image switch never changes one). It
   refuses when a file 03 installs, as installed, is not the one this release pins: each one's PIN is read from ONE copy,
-  pool-image.sh's PINS (~/build/setup/pool-image.sh), and runscaler's binary is BIN_SHA.
+  pool-image.sh's PINS (~/build/setup/pool-image.sh), and runscaler's binary is one of the two THE RUNSCALERS names
+  (BIN_SHA, the pinned v0.12.0, or WAYBACK_BIN_SHA, the way back: test_one_door).
 - The validate (`runner-start validate`, stdout AND stderr: runner-start's REFUSE lines are on stderr) is classified by
   the ONE VALIDATE RULE (linux-docker/bin/validate-class, installed and pinned as runner-start is). render: PASS exits 0,
   API-ONLY exits 4 with STAGED kept (the window's tries decide), anything else exits 1 with nothing staged. real installs
@@ -434,7 +435,9 @@ class Render(unittest.TestCase):
                      ('render', X, R + '/sub/x.toml'), ('render', ref(X), g.staged), ('real', 'x'), ('real', X, 'x'),
                      ('probe', X), ('upgrade',), ('probe',), ('c1',), ('real', '--image-only'),
                      ('real', X, '--image'), ('real', X, '--image-only', '--image-only'),
-                     ('render', X, g.staged, '--image-only')):
+                     ('render', X, g.staged, '--image-only'), ('stage',), ('stage', '0.12.0'),
+                     ('stage', '0.12.0', 'all'), ('stage', '0.12', 'content'), ('stage', '0.12.0', 'bytes', 'x'),
+                     ('stage', X, 'content')):
             with self.subTest(args=args):
                 before = g.p.snapshot()
                 g.p.write(g.p.path('logs', 'docker.log'), '')
@@ -750,13 +753,35 @@ def older(text):
 WAYBACK_MARK = b'# the way-back runscaler of the cell: the same program, other bytes\n'
 
 
+def guard(p, path=None):
+    """THE INSTALLED GUARD: ~/bin/runner-start validate (the one installed now, its own V095_SHA and ~/bin/runner) of a
+    .toml copy of PATH (default config.toml), as the unit's start would check that pair: (its result, [the
+    runscaler validates it ran: {exe, sha, config}]). support.py's systemctl substitute does not run runner-start, so a
+    cell that claims a pair starts runs this."""
+    path = path or p.rpath('config.toml')
+    cfg = p.write(p.rpath('guard.toml'), p.read(path), 0o600)
+    p.write(p.path('logs', 'runner.log'), '')
+    r = p.run([os.path.join(p.HOME, 'bin', 'runner-start'), 'validate'], env=dict(p.env(), RUNNER_START_CONFIG=cfg))
+    ran = [c for c in p.calls('runner') if c['argv'][:1] == ['validate']]
+    os.remove(cfg)
+    return r, ran
+
+
+def starts(test, p, path=None):
+    """The installed guard passes the pair (~/bin/runner, PATH): no REFUSE, and runscaler's validate ran, by
+    ~/bin/runner."""
+    r, ran = guard(p, path)
+    test.assertNotIn('runner-start: REFUSE', r.stderr, 'the installed guard refuses the pair')
+    test.assertEqual([c['exe'] for c in ran], [os.path.join(p.HOME, 'bin', 'runner')], r.stdout + r.stderr)
+
+
 def way_back(test, p, install=True):
     """THE WAY-BACK RUNSCALER of a Pool (03's WAYBACK_BIN_SHA and runner-start's V095_SHA: v0.9.5 on a host) as a
     substitute of its own: the pinned substitute (the `runner` of ~/build/dl's tarball, Pool's) with WAYBACK_MARK added,
     the same program with other bytes. 03's WAYBACK_BIN_SHA line (when 03 has one; test_one_door's Pins requires it
     once) and runner-start's V095_SHA line, in ~/build and in the installed ~/bin/runner-start, name its sha256, and
-    pool-image.sh's PINS follow (Pool.rewrite_pins). INSTALL: it is ~/bin/runner (0755), the runscaler the host runs.
-    Returns its sha256."""
+    pool-image.sh's PINS follow (Pool.rewrite_pins). INSTALL: it is ~/bin/runner (0755), the runscaler the host runs
+    (and the one the running process runs, when one runs: Pool.ran). Returns its sha256."""
     with tarfile.open(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz')) as t:
         wb = t.extractfile('runner').read() + WAYBACK_MARK
     s = hashlib.sha256(wb).hexdigest()
@@ -779,6 +804,8 @@ def way_back(test, p, install=True):
             f.write(wb)
         os.chmod(rb + '.cell', 0o755)
         os.replace(rb + '.cell', rb)
+        if p.unit_now().get('active'):
+            p.ran()    # the process that runs is that runscaler (THE RUNNING BINARY: support.Pool.ran)
     return s
 
 
@@ -924,6 +951,7 @@ class LogFileUp(unittest.TestCase):
         self.assertIn('POOL IMAGE DONE (back): %s' % ref(UPOLD), r.stdout)
         self.assertEqual(g.p.config(), g.pre)
         self.assertEqual(g.p.unit_now()['restarts'], 1)
+        starts(self, g.p)    # the pair it claims: the way-back runscaler and the config with no line
 
     def test_back_unattended_to_the_config_kept_before_the_line_is_accepted(self):
         """After the updater's switch: its rollback validates the copy of config.toml.prev (no line: runner-start starts
@@ -1088,6 +1116,7 @@ class LogFileUp(unittest.TestCase):
                 self.assertIn('POOL IMAGE DONE (back): %s' % ref(UPOLD), r.stdout)
                 self.assertEqual(g.p.config(), a)
                 self.assertEqual(g.p.unit_now()['restarts'], 1)
+                starts(self, g.p)    # the pair it claims (the way-back runscaler, the kept config)
 
     def test_control_any_other_log_file_difference_refuses(self):
         """The controls of the KEY line once, in the render's place, A with no log-file key (and of comments are not

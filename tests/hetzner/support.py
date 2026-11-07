@@ -459,6 +459,10 @@ class Sandbox:
              'RR_DL=@GH@/actions/runner/releases/download\n'),
             ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n')],
     }
+    # Pin lines rewritten only when the copy has them (once; twice fails): pool-image.sh's PROCFS, THE RUNNING BINARY's
+    # process table (runscaler 0.12 bump, slice H2b-1, the plan's R-6), here the cell's own (SB/proc/PID/exe, which
+    # hzlib's start writes). test_the_runscaler_step's Text cell requires the line once in the shipped script.
+    OPTIONAL_REWRITES = {'setup/pool-image.sh': [('PROCFS=/proc\n', 'PROCFS=@ROOT@/proc\n')]}
     LEFT_OUT = {'setup/01-users.sh': ('/etc/liveapp-ci',),
                 'setup/02-d1.sh': ('/etc/liveapp-ci',), 'bin/runner-start': ('/etc/liveapp-ci',),
                 'setup/03-runscaler.sh': ('/etc/liveapp-ci',), 'setup/pool-image.sh': ('/etc/liveapp-ci',),
@@ -466,7 +470,7 @@ class Sandbox:
                 'bin/pool-ready': ('/etc/liveapp-ci',), 'bin/runner-updater': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
     # The original lines a copy may differ in (pin_lines_only): the rewrites above, and the pins Pool rewrites
-    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA)=.*|PATH=/usr/bin:/bin:/usr/sbin:/sbin'
+    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA|PROCFS)=.*|PATH=/usr/bin:/bin:/usr/sbin:/sbin'
                           r'|PINS="\$S03=[0-9a-f]{64}'
                           r'|\$B/[A-Za-z0-9._/-]+=[0-9a-f]{64}"?')
 
@@ -505,6 +509,10 @@ class Sandbox:
                 if text.count(old) != 1:
                     raise AssertionError('%s: the pin line %r is in it %d times, want 1' % (rel, old, text.count(old)))
                 text = text.replace(old, new.replace('@ROOT@', self.root).replace('@GH@', self.gh.base))
+            for old, new in self.OPTIONAL_REWRITES.get(rel, ()):
+                if text.count(old) > 1:
+                    raise AssertionError('%s: the pin line %r is in it %d times, want 1 or none' % (rel, old, text.count(old)))
+                text = text.replace(old, new.replace('@ROOT@', self.root))
             for h in self.LEFT_OUT[rel]:
                 if h in text:
                     raise AssertionError('%s: the copy still names %s: %r' % (
@@ -665,7 +673,9 @@ POOL_RUNNER = r'''#!/usr/bin/python3 -I
 # control fails runscaler's own check; with {"hang": true} it ignores SIGTERM, writes its pid to logs/hang.pid and
 # waits (at most 60 s of the real clock: a validate that hangs); `run` prints the UTC offset its clock reads. Logs argv,
 # the names of the token variables it got (never a value), the config's sha256, and fd9: whether it has a file
-# descriptor 9 open (the updater lock must never reach it) (see tests/hetzner/support.py, Pool).
+# descriptor 9 open (the updater lock must never reach it), and WHICH FILE RAN: exe (the path it was run by, argv[0])
+# and sha (that file's sha256: two substitutes of other bytes tell each other apart) (see tests/hetzner/support.py,
+# Pool).
 import hashlib, json, os, signal, subprocess, sys, time
 SB = @SB@
 a = sys.argv[1:]
@@ -678,7 +688,8 @@ except OSError:
 with open(SB + '/logs/runner.log', 'a') as f:
     f.write(json.dumps({'argv': a, 'tokens': sorted(k for k in os.environ if k.startswith('RUNNER_TOKEN_')),
                         'config': hashlib.sha256(open(conf, 'rb').read()).hexdigest() if conf else None,
-                        'fd9': fd9}) + '\n')
+                        'fd9': fd9, 'exe': sys.argv[0],
+                        'sha': hashlib.sha256(open(sys.argv[0], 'rb').read()).hexdigest()}) + '\n')
 
 
 def say(text, rc):
@@ -717,9 +728,10 @@ say('runner stub: no answer for: %s\n' % ' '.join(a), 99)
 
 HZLIB = r'''# hzlib: shared by the pool cells' substitutes (tests/hetzner/support.py, Pool): the clock, runscaler's process
 # (systemd.json, and the lines it writes to runscaler's log), and the cell's hooks (hooks.json)
-import fcntl, json, os, re, signal, time
+import fcntl, hashlib, json, os, re, signal, subprocess, time
 SB = @SB@
 LOG =os.path.join(os.environ.get('HOME', '/nonexistent'), '.config', 'runner', 'runner.log')
+RB = os.path.join(os.environ.get('HOME', '/nonexistent'), 'bin', 'runner')
 
 
 def load(name, default=None):
@@ -774,10 +786,31 @@ def take(at):
     return False
 
 
+def ran(pid):
+    """THE RUNNING BINARY (pool-image.sh's running_sha reads PROCFS/PID/exe): process PID runs the bytes ~/bin/runner
+    has NOW, kept as SB/proc/PID/exe (as /proc keeps a binary renamed over since: "(deleted)"); none when there is no
+    ~/bin/runner. Event `exe PID SHA12` (or `exe PID none`)."""
+    d = os.path.join(SB, 'proc', str(pid))
+    os.makedirs(d, exist_ok=True)
+    try:
+        with open(RB, 'rb') as f:
+            b = f.read()
+    except OSError:
+        if os.path.lexists(os.path.join(d, 'exe')):
+            os.remove(os.path.join(d, 'exe'))
+        event('exe %d none' % pid)
+        return
+    with open(os.path.join(d, 'exe.new'), 'wb') as f:
+        f.write(b)
+    os.replace(os.path.join(d, 'exe.new'), os.path.join(d, 'exe'))
+    event('exe %d %s' % (pid, hashlib.sha256(b).hexdigest()[:12]))
+
+
 def start(st):
     st['next_pid'] = st.get('next_pid', 100) + 1
     st.update(active=True, pid=st['next_pid'], start=now(), failed=False)
     event('process %d started %d' % (st['pid'], st['start']))
+    ran(st['pid'])
     runlog('runscaler started pid=%d' % st['pid'])
 
 
@@ -956,6 +989,17 @@ def act(a):
         save('systemd.json', st)
     elif a == 'pend':                      # (at systemctl:show-N) a read of the unit that is still pending: pend()
         pend()
+    elif a == 'taint-runner-new':          # ~/bin/runner.new's bytes change (a fault between two sha checks of it)
+        with open(RB + '.new', 'ab') as f:
+            f.write(b'# tainted\n')
+        event('tainted runner.new')
+    elif a == 'updater-pass':              # the updater's pass runs NOW (its timer's: RS_USER's ~/build/bin/runner-updater
+        n = len([e for e in os.listdir(os.path.join(SB, 'logs')) if e.startswith('updater-pass-')]) + 1   # pass), in
+        r = subprocess.run([os.path.join(os.environ['HOME'], 'build', 'bin', 'runner-updater'), 'pass'],  # the state of
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)       # this moment
+        with open(os.path.join(SB, 'logs', 'updater-pass-%d.txt' % n), 'w') as f:
+            f.write(r.stdout + r.stderr)
+        event('updater-pass %d rc %d' % (n, r.returncode))
     else:
         event('hook action UNKNOWN: ' + a)
 
@@ -1235,6 +1279,23 @@ hzlib.fire('mv:' + dest)
 r = subprocess.run(['/usr/bin/mv'] + a)
 if r.returncode == 0:
     hzlib.fire('mv-done:' + dest)
+sys.exit(r.returncode)
+'''
+
+INSTALL_STUB = r'''#!/usr/bin/python3 -I
+# install, for the pool cells with hooks: the hooks of "install:NAME" (NAME: the destination's base name, the last
+# argument), the real install, then the hooks of "install-done:NAME" (logged as the event "install NAME")
+import os, subprocess, sys
+SB = @SB@
+sys.path.insert(0, SB + '/stubs')
+import hzlib
+a = sys.argv[1:]
+dest = os.path.basename(a[-1]) if a else ''
+hzlib.event('install ' + dest)
+hzlib.fire('install:' + dest)
+r = subprocess.run(['/usr/bin/install'] + a)
+if r.returncode == 0:
+    hzlib.fire('install-done:' + dest)
 sys.exit(r.returncode)
 '''
 
@@ -1561,9 +1622,34 @@ class Pool(Sandbox):
         while int(time.time()) <= m:     # the start comes after the install's second, and is never in the future:
             time.sleep(0.05)              # wait for the clock (a state), never for a set time
         self.set_unit(active=True, enabled=True, start=int(time.time()), pid=100)
+        self.ran(100)
         self.write(self.rpath('runner.log'), '%s INFO runscaler started pid=100\n' % time.strftime(
             '%Y-%m-%d %H:%M:%S', time.gmtime()), 0o600)
         return r
+
+    def ran(self, pid=None):
+        """THE RUNNING BINARY (hzlib.ran): process PID (default: the unit's MainPID now) runs ~/bin/runner's bytes as
+        they are now: the cell's /proc/PID/exe (pool-image.sh's PROCFS, rewritten). A start of the systemctl substitute
+        records its own."""
+        pid = self.unit_now()['pid'] if pid is None else pid
+        d = self.path('proc', str(pid))
+        os.makedirs(d, exist_ok=True)
+        shutil.copyfile(os.path.join(self.HOME, 'bin', 'runner'), os.path.join(d, 'exe'))
+
+    def exe(self, pid=None):
+        """The sha256 of the bytes process PID (default: the unit's MainPID now) runs, or None."""
+        pid = self.unit_now()['pid'] if pid is None else pid
+        p = self.path('proc', str(pid), 'exe')
+        return sha256_file(p) if os.path.exists(p) else None
+
+    def updater_passes(self):
+        """[(rc, output)] of each `updater-pass` hook action, in order."""
+        out = []
+        for e in self.events():
+            m = re.fullmatch(r'updater-pass ([0-9]+) rc ([0-9]+)', e)
+            if m:
+                out.append((int(m.group(2)), self.read(self.path('logs', 'updater-pass-%s.txt' % m.group(1)))))
+        return out
 
     # ---- the unattended cells (pool-image.sh up --unattended / back --unattended)
 
@@ -1579,6 +1665,7 @@ class Pool(Sandbox):
     def hooks(self, *hooks):
         """The cell's hooks, each (AT, ACTION, ...): AT `journal:KEY` (after that journal line is synced), `mv:NAME`
         or `mv-done:NAME` (around a rename onto NAME), `touch:NAME` or `touch-done:NAME` (around a touch of NAME),
+        `install:NAME` or `install-done:NAME` (around an install onto NAME),
         `systemctl:stop-done` / `:start-done`, `systemctl:stop-begin` (a stop with a drain: the stop job started, its
         client waits; a start or restart there cancels that stop job: the job merge), `systemctl:start-begin` /
         `:restart-begin` (the start job queued: a person's `stop` there cancels it), `healthz-read` (after a /healthz read is answered); ACTION restart (an independent restart),
@@ -1592,7 +1679,8 @@ class Pool(Sandbox):
         (SIGKILL of the runner-updater run the hooked command is a child of: a kill at a boundary of the apply step),
         count-shows (as
         count_shows(), from that event on), pend (at `systemctl:show-N`: that read stays pending while it names who holds
-        the two locks, kills the window, and names them again: hzlib.pend). An injection, AT
+        the two locks, kills the window, and names them again: hzlib.pend), taint-runner-new (~/bin/runner.new's bytes
+        change), updater-pass (the updater's `pass` runs at that moment: updater_passes()). An injection, AT
         with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another
         file NAME fails). `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
@@ -1600,6 +1688,7 @@ class Pool(Sandbox):
         self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)
         self.write(self.path('stubs', 'mv'), MV_STUB.replace('@SB@', sb), 0o755)
         self.write(self.path('stubs', 'touch'), TOUCH_STUB.replace('@SB@', sb), 0o755)
+        self.write(self.path('stubs', 'install'), INSTALL_STUB.replace('@SB@', sb), 0o755)
 
     def disk(self, size_k, avail_k):
         """`df -Pk` answers this size and free space (KiB)."""

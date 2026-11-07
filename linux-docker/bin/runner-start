@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# runner-start run|validate|delete NAME — the one way runscaler starts on the Linux CI host (Linux only: GNU stat, ss).
-# The systemd user unit runscaler.service of RS_USER runs `runner-start run`. RUNNER_START_CONFIG picks another config.
+# runner-start run|validate [--staged]|delete NAME — the one way runscaler starts on the Linux CI host (Linux only: GNU
+# stat, ss). The systemd user unit runscaler.service of RS_USER runs `runner-start run`. RUNNER_START_CONFIG picks
+# another config. THE STAGED SELECTOR (runscaler 0.12 bump, slice H2b-1; the H2 plan's R-2): `validate --staged`
+# validates with ~/bin/runner.new, the runscaler `pool-image.sh runscaler` (03's stage) has extracted and not yet
+# installed, and its log-file guard below hashes that file: the file it then runs. It is the one selector and names
+# that one file; validate takes no other argument (REFUSE, usage). `run` and `delete` take none: they run, and hash,
+# ~/bin/runner whatever else they are given (an argument or an env var).
 # REFUSES, and never starts runscaler, when:
 #   - the host config (HOST_CONF, below) is absent, not root's, or lacks a key this script reads;
 #   - the config's file name does not end in .toml (viper reads the type from the extension);
@@ -46,7 +51,7 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
 }
 host_conf runner-start RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT
 umask 077
-RUNNER=/home/${RS_USER}/bin/runner
+RUNNER=/home/${RS_USER}/bin/runner   # the file the guard hashes and exec runs: ~/bin/runner, or runner.new (--staged)
 CONFIG=${RUNNER_START_CONFIG:-/home/${RS_USER}/.config/runner/config.toml}
 TOKEN_DIR=/home/${RS_USER}/.config/runner
 LOGF=/home/${RS_USER}/.config/runner/runner.log   # RUNSCALER'S LOG (the header): 03's render names this file
@@ -60,9 +65,10 @@ REGISTRY=http://127.0.0.1:${REGISTRY_PORT}/v2/
 die() { echo "runner-start: REFUSE $*" >&2; exit 1; }
 mode=${1-}
 case $mode in
-  run|validate) args=("$mode") ;;
+  run) args=(run) ;;
+  validate) case $#:${2-} in 1:) ;; 2:--staged) RUNNER=$RUNNER.new ;; *) die "usage: runner-start run|validate [--staged]|delete NAME" ;; esac; args=(validate) ;;
   delete) [ -n "${2-}" ] || die "usage: runner-start delete NAME"; args=(scaleset delete "$2") ;;
-  *) die "usage: runner-start run|validate|delete NAME" ;;
+  *) die "usage: runner-start run|validate [--staged]|delete NAME" ;;
 esac
 [ -r "$CONFIG" ] || die "no config: $CONFIG"
 case $CONFIG in *.toml) ;; *) die "the config's name must end in .toml (runscaler takes the config type from the extension): $CONFIG" ;; esac

@@ -6,6 +6,8 @@
 #   accept: the same line with `accept` — ends the release once a job passed on the new image: the kept rollback is
 #           removed, so the NEXT release's `up` keeps this config. Until then an `up` to another image refuses. It
 #           closes the release whose image config.toml RUNS, whatever build records there are by then.
+#   runscaler [VERSION]: the same line with `runscaler` — THE RUNSCALER STEP (below): runscaler v0.12.0, the one this
+#           release pins, into ~/bin/runner, at a quiet time; with VERSION 0.9.5, the way back.
 # THE BUILD RECORD (02-d1.sh's header gives its form): `up VERSION` reads RUN_USER's ~/run/builds/<VERSION>-<RECIPE>,
 # RECIPE being 02-d1.sh's recipe of this release's image/ (this ~/build/image/: the same release's files as RUN_USER's
 # ~/build), ONCE: a private copy, parsed by one exact pattern of 02-d1.sh's four lines, never sourced. The recipe and
@@ -21,9 +23,11 @@
 #       numbers config.toml runs (03 renders from pool.env, so others would go live with the image) and the record's
 #       image's runner is VERSION; keeps the rollback; `03 real DIGEST --image-only` (the same sets and numbers, the
 #       record's image: it installs with the pool running and restarts nothing; with --image-only 03 itself refuses,
-#       after its validate and before it installs anything, a render that differs from config.toml in more than the
-#       image (THE CONFIG COMPARE): a drifted host value never reaches config.toml; if 03 fails, config.toml is
-#       unchanged); if config.toml then differs from the rollback in more than the image (THE CONFIG COMPARE), the
+#       after its validate and before it installs config.real.toml or config.toml (this release's runner-start,
+#       pool-ready, validate-class and the unit are installed by then: each starts with either runscaler), a render
+#       that differs from config.toml in more than the image (THE CONFIG COMPARE): a drifted host value never reaches
+#       config.toml; if 03 fails, config.toml is unchanged); if config.toml then differs from the rollback in more
+#       than the image (THE CONFIG COMPARE), the
 #       rollback goes back with config.toml's old mtime and nothing restarts. config.toml already on the record's image
 #       with a restart pending (a run cut off before its restart, or a bare 03 run) restarts only when the rollback was
 #       kept while the running process ran.
@@ -33,7 +37,8 @@
 #       later 03 (a change of the numbers) keeps the old image; only an `up` puts a new one in. BACK'S PAIR GUARD
 #       (runscaler 0.12 bump, slice H2a; the H2 plan's R-4): a rollback with no log-file key runs only on the way-back
 #       runscaler (v0.9.5: 03's WAYBACK_BIN_SHA, runner-start's V095_SHA), so on any other ~/bin/runner `back` refuses
-#       it before any put (runner-start would refuse that pair at the restart: CI down).
+#       it before any put (runner-start would refuse that pair at the restart: CI down). A belt: THE RUNSCALER STEP
+#       refuses while a release is open and removes the rollback of one a back closed, so its steps make no such pair.
 # THE CONFIG COMPARE (runscaler 0.12 bump, slices H1 and H2a): "differs in more than the image" is runner-release.sh's
 #       rr_same_but_image, ONE copy for every caller (up and back here, the unattended up's D3 and back's check, and
 #       03's `real --image-only`): comment lines are not content, and THE LOG-FILE LINE, 03's top-level log-file KEY
@@ -45,13 +50,40 @@
 #       two runscalers this release knows (THE RUNSCALERS: BIN_SHA, the pinned v0.12.0, and WAYBACK_BIN_SHA, v0.9.5),
 #       which this script reads from $S03 as data (pin03; PINS checks $S03 first); `up` refuses before anything else
 #       when ~/bin/runner is neither, naming `pool-image.sh runscaler`, the one step that changes it.
+# THE RUNSCALER STEP, `runscaler [VERSION]` (runscaler 0.12 bump, slice H2b-1; the H2 plan's M-3, R-1 to R-6): the one
+#       door that changes ~/bin/runner on a host that has one. VERSION: 03's PINNED (the default) or WAYBACK (THE
+#       RUNSCALERS, read from $S03 as data: ver03, pin03); any other refuses. It keeps nothing (no rollback, no accept):
+#       the way back is this step with the way-back version, after its download. In order, each refusing with nothing
+#       changed and naming its fix: (a) PINS; VERSION; no updater window journal; no open image release: a
+#       config.toml.pre-image that is config.toml byte for byte is one a `back` closed (removed once every check has
+#       passed, and said so: a later `back` cannot put it under another runscaler), any other refuses ("accept, or
+#       back"); the unit enabled; the unit active and runscaler started after config.toml was installed (it runs
+#       config.toml: the stage compares with it), or active with config.toml installed after its start (a pending
+#       config: only this step's own render, byte for byte, goes on, and goes live with this restart: R-1, a run of this
+#       step cut before its restart, or a bare 03 real of the same values), or down (inactive, failed, activating: R-3,
+#       its restart starts it with no idle wait); VERSION's download by its sha256 (dl_of, 03's own rule). The
+#       installed binary may be any: this step is the fix the other doors name. (b) DONE ALREADY: runscaler active,
+#       started after config.toml's install, its process running VERSION's binary, ~/bin/runner VERSION's, config.toml
+#       with THE LOG-FILE LINE: no stage and no restart, but READY, the running binary and the restart-cut scan below
+#       (exit 0 only when READY). (c)+(d) `03-runscaler.sh stage VERSION content|bytes` (03's header, THE STAGE): its
+#       compare before anything is installed, this release's runner-start (and the rest, by their PINS), VERSION's
+#       runner as ~/bin/runner.new, its validate by that staged binary, then config.toml (only when it differs), THEN
+#       the rename over ~/bin/runner. (e) THE RESTART below, whose two shortcuts ("runscaler started after config.toml
+#       was installed") hold here only when THE RUNNING BINARY is VERSION's too (a crash restart between 03's two
+#       renames runs the old binary on the new config: restart again); READY; the running binary VERSION's (else a FAIL
+#       naming journalctl); the restart-cut scan. (f) NEXT: the way back's two lines, or the way forward's. A cut at any
+#       point leaves a pair runner-start starts (03's header), and the same line again finishes it.
+# THE RUNNING BINARY (the H2 plan's R-6): running_sha, ONE function: systemd's MainPID of runscaler, then the sha256 of
+#       PROCFS/<pid>/exe (/proc: the binary that process runs, read through /proc also when ~/bin/runner was renamed over
+#       since and it shows "(deleted)"). The cells' copy names their own process table (PROCFS, a pin line).
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
-# Then, up and back: the restart. restart() re-reads the start time just before it restarts, so it never restarts a
-# process that already runs this config.toml. If runscaler already started after config.toml was installed, no
-# restart; else wait up to 10 min for both sets to be quiet (no runner, no job), then up to 60 min more for a moment
-# with no runner in its idle phase, then restart (SIGTERM = drain: a running job finishes first, up to 70 min) -> READY
-# within 10 min -> name any job a restart cut.
+# Then, up, back and runscaler: the restart. restart() re-reads the start time just before it restarts, so it never
+# restarts a process that already runs this config.toml (and, in THE RUNSCALER STEP, VERSION's binary: runs_this). If
+# runscaler already runs it, no restart; a unit that is down is started at once; else wait up to 10 min for both sets
+# to be quiet (no runner, no job), then up to 60 min more for a moment with no runner in its idle phase, then restart
+# (SIGTERM = drain: a running job finishes first, up to 70 min) -> READY within 10 min -> name any job a restart cut
+# (the runner.log records since config.toml's install, each with its log time: one an earlier run named reads as old).
 # PINS: what 03 runs, and what it installs from ~/build before it validates, by sha256. tools/release-check refuses a
 # pinned file that changed without its PIN.
 #
@@ -372,8 +404,8 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
 host_conf pool-image.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME MAIN_SET SMALL_SET
-MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV=
-usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept   (a person's)"
+MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED=
+usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept | runscaler [VERSION]   (a person's)"
   echo "       pool-image.sh up --unattended RUNNER_VERSION DIGEST"
   echo "                   | back --unattended --why r1|r1-connect|back [--verdict FILE] [--old-version VERSION]"
   echo "                   | recover --unattended"
@@ -381,7 +413,8 @@ usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | b
 case $MODE:$# in
   up:2) VERSION=$2 ;;
   up:4) [ "$2" = --unattended ] || usage; UN=1 VERSION=$3 DIGEST=$4; [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage ;;
-  back:1|accept:1) ;;
+  back:1|accept:1|runscaler:1) ;;
+  runscaler:2) RSV=$2; [[ $RSV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage ;;
   back:*) [ "$2" = --unattended ] || usage; UN=1; shift 2
     while [ "$#" -gt 0 ]; do   # each option once, each with its value
       case $1:$# in
@@ -401,12 +434,14 @@ esac
 R=$HOME/.config/runner; CFG=$R/config.toml; KEEPC=$R/config.toml.pre-image; POOL=$R/pool.env; LOCK=$R/pool-image.lock
 BUILDS=/home/${RUN_USER}/run/builds; REG=http://127.0.0.1:${REGISTRY_PORT}; D1=unix:///home/${RUN_USER}/run/docker.sock; B=$HOME/build
 S03=$B/setup/03-runscaler.sh
+# THE RUNNING BINARY (the header): the process table whose <pid>/exe is the binary a process runs
+PROCFS=/proc
 # The unattended modes' files (the header): the window journal, the closed ones, the rollback, the decision core
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
 DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=3b507dac0b5da502b78ac7719334c9bfc0f1dfce456296ad84a815773984898a
-$B/bin/runner-start=67d8cba9a195da6361e630db3b395d52ea75d66499f243f102e4c4c0b5293431
+PINS="$S03=7722523217b86c8b5cb9683e2cd0103f9092b76682a4f877aac5046d94ffe375
+$B/bin/runner-start=c3ea9dc7fce283128a6fc2e908397c89290086b17e816c10a2aece075a717b1e
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/bin/validate-class=b5127e6e18e926976b62b15f0dd0eead26085657c192ad4b111ccc2defaceda2
 $B/config/runscaler.service=1f23a5c0f78c7fa6e7c8ddf0e9092c188666729177dce19ff1a8fe149e498565"
@@ -433,6 +468,29 @@ pin03() {   # NAME: 03's pin line NAME=<64 hex> (ONE DOOR, the header), read fro
   [[ $v =~ ^[0-9a-f]{64}$ ]] && echo "$v"
 }
 runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner's
+ver03() {   # NAME: 03's version line NAME=N.N.N (THE RUNSCALERS), read from $S03 as data; rc 1 unless it is there once
+  local v; v=$(sed -n "s/^$1=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\$/\1/p" "$S03" 2> /dev/null)
+  [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$v"
+}
+dl_of() {   # dl_of VERSION: its download (THE RUNSCALERS, ONE DOOR): the pinned one's is Install step 4's file
+  if [ "$1" = "$PINNED" ]; then echo "$B/dl/runner-linux-amd64.tar.gz"; else echo "$B/dl/runner-v$1-linux-amd64.tar.gz"; fi
+}
+running_sha() {   # THE RUNNING BINARY (the header): the sha256 of the binary runscaler's process runs; rc 1 when no
+  # process runs or its binary cannot be read
+  local pid s
+  pid=$(exec 8>&- 9>&-; systemctl --user show runscaler -p MainPID --value 2> /dev/null)
+  [[ $pid =~ ^[1-9][0-9]*$ ]] || return 1
+  s=$(sha256sum < "$PROCFS/$pid/exe" 2> /dev/null) || return 1
+  s=${s%% *}; [[ $s =~ ^[0-9a-f]{64}$ ]] && echo "$s"
+}
+rs_name() {   # SHA: which runscaler a binary of that sha256 is (THE RUNSCALERS), for a person's line
+  case ${1-} in
+    "$(pin03 BIN_SHA)") echo "runscaler v$(ver03 PINNED)" ;;
+    "$(pin03 WAYBACK_BIN_SHA)") echo "runscaler v$(ver03 WAYBACK)" ;;
+    none|'') echo "none" ;;
+    *) echo "a runscaler this release does not know (sha256 ${1:0:12})" ;;
+  esac
+}
 pv() { sed -n "s/^$1=\([0-9][0-9]*\)$/\1/p" "$POOL" 2> /dev/null; }   # one number from pool.env (twice = no match below)
 holds_pool() {   # holds_pool FILE: does this config carry pool.env's numbers, the ones 03 renders?
   local c cpu mem max scpu smem
@@ -450,6 +508,11 @@ start_of() {   # runscaler's last start, in epoch seconds (systemd's own number:
 started_after() {   # runscaler is active and started after config.toml was installed: it runs this config.toml
   local a
   [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && a=$(start_of) && [ "$a" -gt "$(stat -c %Y "$CFG")" ]
+}
+runs_this() {   # the restart's two shortcuts: runscaler runs this config.toml (started_after) and, in THE RUNSCALER
+  # STEP, the binary of its VERSION too (THE RUNNING BINARY: a process older than the binary's rename runs the old one)
+  started_after || return 1
+  [ "$MODE" != runscaler ] || [ "$(running_sha)" = "$WANT" ]
 }
 ready() { "$HOME/bin/pool-ready" $SETS; }
 # counts MODE: the two expected sets' COUNTS on two reads of /healthz 3 s apart — never READY (a rollback with GitHub
@@ -483,12 +546,15 @@ sys.exit(0 if all(n in sets and calm(sets[n]) for n in want) else 1)' "$1" "$SET
 # the start just before it restarts.
 restart() {
   while [ "$(date +%s)" -le "$(stat -c %Y "$CFG")" ]; do sleep 0.2; done
-  if started_after; then ok "runscaler already started after config.toml was installed: no second restart"; return 0; fi
+  if runs_this; then ok "runscaler already started after config.toml was installed: no second restart"; return 0; fi
   systemctl --user restart runscaler 9>&-   # fd 8 kept: a drain that outlives this run holds ONE RUN AT A TIME's lock
 }
 again() {
-  if [ "$MODE" = up ]; then echo "Run pool-image.sh up again once that is fixed, or pool-image.sh back to go back"
-  else echo "Run pool-image.sh back again once that is fixed"; fi
+  case $MODE in
+    up) echo "Run pool-image.sh up again once that is fixed, or pool-image.sh back to go back" ;;
+    back) echo "Run pool-image.sh back again once that is fixed" ;;
+    *) echo "Run pool-image.sh runscaler $RSV again once that is fixed, or go the way back (README \"runscaler: the release this one pins, and the way back\")" ;;
+  esac
 }
 
 pins_bad() {   # the first file PINS names whose sha256 is not its PIN (rc 0), or rc 1 when every one is the reviewed copy
@@ -1542,6 +1608,55 @@ if [ "$MODE" = accept ]; then
   exit 0
 fi
 
+if [ "$MODE" = runscaler ]; then   # THE RUNSCALER STEP (the header)
+  # (a) THE PRECONDITIONS, each refusing with nothing changed
+  p=$(pins_bad) && die "$p is not the reviewed copy (sha256): install this release's files first (README Install step 3); nothing changed"
+  { pin=$(pin03 BIN_SHA) && wb=$(pin03 WAYBACK_BIN_SHA) && ptgz=$(pin03 TGZ_SHA) && wtgz=$(pin03 WAYBACK_TGZ_SHA) \
+      && PINNED=$(ver03 PINNED) && WAYBACK=$(ver03 WAYBACK); } \
+    || die "$S03 does not name its two runscalers (THE RUNSCALERS) once each: nothing changed"
+  RSV=${RSV:-$PINNED}
+  case $RSV in
+    "$PINNED") WANT=$pin TGZ=$ptgz ;;
+    "$WAYBACK") WANT=$wb TGZ=$wtgz ;;
+    *) die "runscaler v$RSV is not one this release knows: v$PINNED (the one it pins: pool-image.sh runscaler) or v$WAYBACK (the way back: pool-image.sh runscaler $WAYBACK); nothing changed" ;;
+  esac
+  { [ ! -e "$J" ] && [ ! -L "$J" ]; } || die "the updater's window journal $J is there (a switch or a rollback it has not ended or applied): run ~/bin/runner-updater pass, then ~/bin/runner-updater status, until it shows no window journal (README Install step 3); nothing changed"
+  rmkeep=0
+  if [ -e "$KEEPC" ] || [ -L "$KEEPC" ]; then
+    cmp -s -- "$KEEPC" "$CFG" || die "an image release is open: $KEEPC, the rollback an up kept, is not config.toml. Close it first: pool-image.sh accept (its image works) or pool-image.sh back; nothing changed"
+    rmkeep=1
+  fi
+  en=$(systemctl --user is-enabled runscaler 2> /dev/null 8>&- 9>&-)
+  [ "$en" = enabled ] || die "runscaler's unit is ${en:-not readable}, not enabled (CI off by a person): enable it first (systemctl --user enable --now runscaler), then run this again; nothing changed"
+  st=$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)
+  case $st in
+    active) if started_after; then rule=content; else rule=bytes; fi ;;
+    inactive|failed|activating) rule=content ;;
+    *) die "runscaler's unit is ${st:-not readable} (a stop or a start in progress): run this again once it ended; nothing changed" ;;
+  esac
+  dl=$(dl_of "$RSV")
+  got=$(sha256sum < "$dl" 2> /dev/null) || got=
+  [ "${got%% *}" = "$TGZ" ] || die "$dl is not runscaler v$RSV's download (no such file, or its sha256 ${got:0:12} is not 03's): download it as RS_USER: mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/${dl##*/} https://github.com/ysya/runscaler/releases/download/v$RSV/runner-linux-amd64.tar.gz ; nothing changed"
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (is this release's linux-docker/ ~/build?): nothing changed"
+  if [ "$rmkeep" = 1 ]; then
+    rm -f -- "$KEEPC" || die "could not remove $KEEPC: nothing else changed"
+    ok "removed $KEEPC: it was config.toml byte for byte, the kept config of an image release a back closed"
+  fi
+  rs=$(runner_sha) || rs=none
+  # (b) DONE ALREADY
+  if [ "$st" = active ] && started_after && [ "$(running_sha)" = "$WANT" ] && [ "$rs" = "$WANT" ] \
+      && [ "$(grep -c -x -F -- "$RR_LOGK" "$CFG")" = 1 ]; then
+    DONE=1
+    ok "DONE ALREADY: $HOME/bin/runner is runscaler v$RSV, its process runs config.toml, which has the log-file line: no stage, no restart"
+  else
+    # (c)+(d) THE STAGE, in 03
+    echo; echo "== 03-runscaler.sh stage $RSV $rule ($HOME/bin/runner is $(rs_name "$rs"); the unit $st)"
+    bash "$S03" stage "$RSV" "$rule" < /dev/null || die "03 stage failed (its FAIL line above): nothing restarted; $HOME/bin/runner is $(rs_name "$(runner_sha || echo none)"). $(again)"
+    [ "$(runner_sha)" = "$WANT" ] || die "03 said DONE, but $HOME/bin/runner is not runscaler v$RSV: read it; nothing restarted"
+  fi
+fi
+
 if [ "$MODE" = up ]; then
   # Only `up` reads a build record: `back` and `accept` work from what runs and what was kept.
   p=$(pins_bad) && die "$p is not the reviewed copy (sha256): nothing changed"
@@ -1602,7 +1717,7 @@ if [ "$MODE" = up ]; then
       rr_same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image: nothing restarted. Compare $KEEPC with $CFG"
     fi
   fi
-else
+elif [ "$MODE" = back ]; then
   [ -e "$KEEPC" ] || die "no $KEEPC: there is no open release to roll back (accept removed it, or up never ran); nothing changed"
   old=$(image_of "$KEEPC") || die "$KEEPC does not name ONE runner image for both sets: read it; nothing changed"
   # THE CONFIG COMPARE and BACK'S PAIR GUARD (the header): runner-release.sh's
@@ -1612,7 +1727,7 @@ else
   if rr_logfile_free "$kc"; then
     wb=$(pin03 WAYBACK_BIN_SHA) || wb="unread (03 names no WAYBACK_BIN_SHA)"
     rs=$(runner_sha) || rs=none
-    [ "$rs" = "$wb" ] || die "the rollback $KEEPC has no log-file key, and $HOME/bin/runner (sha256 ${rs:0:12}) is not the way-back runscaler (v0.9.5, 03-runscaler.sh's WAYBACK_BIN_SHA), the one that runs such a config: runner-start would refuse it at the restart, and CI would be down. The steps of this release do not make this pair (pool-image.sh runscaler refuses while a rollback is kept): read $HOME/bin/runner and $KEEPC. To keep the image config.toml runs, run pool-image.sh accept; nothing changed"
+    [ "$rs" = "$wb" ] || die "the rollback $KEEPC has no log-file key, and $HOME/bin/runner (sha256 ${rs:0:12}) is not the way-back runscaler (v0.9.5, 03-runscaler.sh's WAYBACK_BIN_SHA), the one that runs such a config: runner-start would refuse it at the restart, and CI would be down. The steps of this release do not make this pair (pool-image.sh runscaler refuses while a release is open, and removes the rollback of one a back closed): read $HOME/bin/runner and $KEEPC. To keep the image config.toml runs, run pool-image.sh accept; nothing changed"
   fi
   if cmp -s "$KEEPC" "$CFG"; then
     ok "config.toml already is the rollback ($old)"
@@ -1629,11 +1744,14 @@ else
 fi
 ok "config.toml runs $(image_of "$CFG") (sha256 $(sha256sum "$CFG" | cut -c1-12))"
 
+case $MODE in up|back) holds="config.toml runs the $MODE image" ;; *) holds="$HOME/bin/runner is runscaler v$RSV" ;; esac
 echo; echo "== restart"
-if started_after; then
-  ok "runscaler started after config.toml was installed ($(systemctl --user show runscaler -p ActiveEnterTimestamp --value 8>&- 9>&-)): it runs this image, no restart"
+if [ "$DONE" = 1 ]; then
+  ok "no restart (DONE ALREADY)"
+elif runs_this; then
+  ok "runscaler started after config.toml was installed ($(systemctl --user show runscaler -p ActiveEnterTimestamp --value 8>&- 9>&-)): it runs this image$([ "$MODE" != runscaler ] || echo " and runscaler v$RSV"), no restart"
 elif [ "$(systemctl --user is-active runscaler 8>&- 9>&-)" != active ]; then
-  restart || die "systemctl --user restart runscaler failed: read journalctl --user -u runscaler. config.toml runs the $MODE image. $(again)"
+  restart || die "systemctl --user restart runscaler failed: read journalctl --user -u runscaler. $holds. $(again)"
 else
   quiet=0; for _ in $(seq 1 40); do counts quiet && { quiet=1; break; }; sleep 15; done
   if [ "$quiet" = 0 ]; then
@@ -1641,18 +1759,34 @@ else
     calm=0; for _ in $(seq 1 240); do counts noidle && { calm=1; break; }; sleep 15; done
     [ "$calm" = 1 ] || echo "WAIT no moment without a runner in its idle phase came in 60 min: restarting anyway — a job this cuts is named at the end"
   fi
-  restart || die "systemctl --user restart runscaler failed: read journalctl --user -u runscaler. config.toml runs the $MODE image. $(again)"
+  restart || die "systemctl --user restart runscaler failed: read journalctl --user -u runscaler. $holds. $(again)"
 fi
 for _ in $(seq 1 40); do out=$(ready 2>&1) && break; sleep 15; done
 printf '%s\n' "$out"
-[ "$(systemctl --user is-active runscaler 8>&- 9>&-)" = active ] && [ "$(systemctl --user is-enabled runscaler 8>&- 9>&-)" = enabled ] || die "runscaler is not active and enabled: read journalctl --user -u runscaler. config.toml runs the $MODE image. $(again)"
-ready > /dev/null || die "the pool is not READY 10 min after the restart: read journalctl --user -u runscaler. config.toml runs the $MODE image. $(again)"
+[ "$(systemctl --user is-active runscaler 8>&- 9>&-)" = active ] && [ "$(systemctl --user is-enabled runscaler 8>&- 9>&-)" = enabled ] || die "runscaler is not active and enabled: read journalctl --user -u runscaler. $holds. $(again)"
+ready > /dev/null || die "the pool is not READY after 10 min: read journalctl --user -u runscaler. $holds. $(again)"
+if [ "$MODE" = runscaler ]; then   # THE RUNNING BINARY (the header)
+  rsn=$(running_sha) || rsn=none
+  [ "$rsn" = "$WANT" ] || die "the runscaler that runs is not v$RSV: its process runs $(rs_name "$rsn"): read journalctl --user -u runscaler. $holds. $(again)"
+  ok "the runscaler that runs is v$RSV (its process's binary, sha256 ${WANT:0:12})"
+fi
 # A JOB A RESTART CUT: the OLD process logs it while a busy runner drains (its listener stays up — minutes before the
 # restart returns), the NEW one as it starts — either way AFTER this config.toml was installed, which is where the scan
 # starts (so a re-run after an ssh drop still finds it). Each name carries its log time: a repeat on a later re-run
 # reads as old.
 inst=$(date -u -d "@$(stat -c %Y "$CFG")" +'%Y-%m-%d %H:%M:%S')
 cut=$(awk -v s="$inst" '($1 " " $2) >= s && /Job started for unknown runner/ { r = $0; sub(/.*runnerName=/, "", r); print $1 " " $2 " " r }' "$R/runner.log" 2> /dev/null | sort -u | paste -sd ',' -)
-[ -z "$cut" ] || echo "WARN a restart since this config was installed cut a job on [$cut] (log time, runner): find it on GitHub (it ends 'lost communication' after 10 min) and re-run it, unless it already was"
+[ -z "$cut" ] || echo "WARN a restart since this config was installed ($inst UTC) cut a job on [$cut] (log time, runner): find it on GitHub (it ends 'lost communication' after 10 min) and re-run it, unless it already was"
+if [ "$MODE" = runscaler ]; then
+  echo "POOL RUNSCALER DONE: runscaler v$RSV runs ($HOME/bin/runner and the process, sha256 ${WANT:0:12}), on config.toml with the log-file line"
+  if [ "$RSV" = "$PINNED" ]; then
+    echo "NEXT the check the next day (README \"runscaler: the release this one pins, and the way back\"). The way back, if it does not serve: its download, then this step with its version (as RS_USER):"
+    echo "  mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/$(basename "$(dl_of "$WAYBACK")") https://github.com/ysya/runscaler/releases/download/v$WAYBACK/runner-linux-amd64.tar.gz"
+    echo "  pool-image.sh runscaler $WAYBACK"
+  else
+    echo "NEXT the way forward again, from Install step 4's download: pool-image.sh runscaler"
+  fi
+  exit 0
+fi
 echo "POOL IMAGE DONE ($MODE): $(image_of "$CFG")"
 [ "$MODE" = back ] || echo "NEXT READY says nothing about the image (no runner has started from it yet): watch the first job on it, then run pool-image.sh accept (it works) or pool-image.sh back (it does not)"

@@ -56,11 +56,12 @@
 #                           regular file only: a FIFO (with a writer or none), a symlink, a device or a folder under the
 #                           name is none, at once. 0, or 1 and RR_WHY: there is none; it is not a plain file; it cannot
 #                           be read
-# THE CONFIG COMPARE (runscaler 0.12 bump, slice H2a: the H2 plan's H2-2', R-8): ONE copy of how two runscaler configs
-# of this host are compared, read by pool-image.sh (its five callers: a person's up after its 03, the pending-restart
-# up, a person's back, the unattended up's D3 and back --unattended's check of its copy) and by 03-runscaler.sh (`real
-# DIGEST --image-only`, a person's up: H2-7). COMMENTS ARE NOT CONTENT, so a render whose comment lines changed (03's
-# header names the runscaler release) is the same config; a VALUE is content, an inline comment after one too:
+# THE CONFIG COMPARE (runscaler 0.12 bump, slices H2a and H2b-1: the H2 plan's H2-2', R-8, M-3): ONE copy of how two
+# runscaler configs of this host are compared, read by pool-image.sh (its five callers: a person's up after its 03, the
+# pending-restart up, a person's back, the unattended up's D3 and back --unattended's check of its copy) and by
+# 03-runscaler.sh (`real DIGEST --image-only`, a person's up: H2-7; `stage`, `pool-image.sh runscaler`'s, with the image
+# lines as content: rr_same_config). COMMENTS ARE NOT CONTENT, so a render whose comment lines changed (03's header
+# names the runscaler release) is the same config; a VALUE is content, an inline comment after one too:
 #   rr_content FILE         the CONTENT of FILE (PLAN D1, the closing lines'): its lines whose first non-blank character
 #                           is not `#` and that are not blank ([[:blank:]]: space and tab), each with its newline, on
 #                           stdout; 1 when FILE cannot be read
@@ -74,6 +75,9 @@
 #                           render has, once, right after A's first `log-level = ` line (THE LOG-FILE LINE: so the next
 #                           up of a host whose config is older than that line adds it); else 1 (a value, an inline
 #                           comment, another log-file value, the line twice or in another place). It prints nothing.
+#   rr_same_config A B      the same with the `runner-image = ` lines kept as content: they must be equal too (the
+#                           runscaler step changes the binary and THE LOG-FILE LINE, never the image). Both are
+#                           rr_same_ keep|drop A B, the one construction.
 #   RR_LOGK                 that line: `log-file = "$HOME/.config/runner/runner.log"`, the runner.log beside the config
 #                           (03's `log-file = "$LOGF"`: on a host, RS_USER's HOME is /home/RS_USER)
 #
@@ -369,16 +373,26 @@ except (UnicodeDecodeError, tomllib.TOMLDecodeError):
 sys.exit(1 if any(not re.fullmatch(r"[A-Za-z0-9_-]+", k) or "log-file" in k.lower() for k in keys(c)) else 0)' \
     <<< "${1-}" 2> /dev/null
 }
-rr_same_but_image() {   # rr_same_but_image A B: THE CONFIG COMPARE (the header): 0 the same but the image, or B is A
-  # with THE LOG-FILE LINE added; else 1
+rr_same_() {   # rr_same_ keep|drop A B: THE CONFIG COMPARE (the header), its one construction: 0 the same (less the
+  # `runner-image = ` lines with drop), or B is A with THE LOG-FILE LINE added; else 1
   local ca cb na nb
-  ca=$(rr_content "${1-}") && cb=$(rr_content "${2-}") || return 1
-  na=$(printf '%s\n' "$ca" | grep -v '^runner-image = ') || :
-  nb=$(printf '%s\n' "$cb" | grep -v '^runner-image = ') || :
+  ca=$(rr_content "${2-}") && cb=$(rr_content "${3-}") || return 1
+  case ${1-} in
+    keep) na=$ca nb=$cb ;;
+    drop) na=$(printf '%s\n' "$ca" | grep -v '^runner-image = ') || :
+          nb=$(printf '%s\n' "$cb" | grep -v '^runner-image = ') || : ;;
+    *) return 1 ;;
+  esac
   [ "$na" = "$nb" ] && return 0
   rr_logfile_free "$ca" || return 1
   na=$(printf '%s\n' "$na" | RR_K=$RR_LOGK awk '{ print } /^log-level = / && !n++ { print ENVIRON["RR_K"] }') || return 1
   [ "$na" = "$nb" ]
+}
+rr_same_but_image() {   # rr_same_but_image A B: the same but the image (THE CONFIG COMPARE)
+  rr_same_ drop "$@"
+}
+rr_same_config() {   # rr_same_config A B: the same, the image lines too (THE CONFIG COMPARE)
+  rr_same_ keep "$@"
 }
 
 rr_read() {   # rr_read FILE MAX: ANOTHER USER'S FILE (the header), at most MAX bytes of it on stdout; 1 + RR_WHY
