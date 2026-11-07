@@ -279,7 +279,7 @@ class TestTheBoundCountsOnlyTimeATryCouldStart(unittest.TestCase):
         self.assertEqual(family(w)['r1_since'], t)
         w.validate('pass')
         cand_cfg = w.config_now()
-        w.sb.write(w.r.config, config((('mac-a', 'liveapp-mac-golden-20261011'),)))   # a hand edit, pending
+        w.r.write_config(config((('mac-a', 'liveapp-mac-golden-20261011'),)))   # a hand edit, pending
         res = pass_(w, t + 10 * MIN)
         self.assertEqual(res.returncode, 1, res.stdout)
         self.assertIn('runner-updater: STOP HAND CHANGE: a pending hand edit', res.stdout)
@@ -508,7 +508,7 @@ class TestDueSwitches(unittest.TestCase):
             ('RL_CURL=/usr/bin/curl', 'RL_CURL=' + w.sb.path('tools-gh2', 'curl')),
             ('RL_SRC=/etc/ssl/cert.pem', 'RL_SRC=' + w.sb.path('ca', 'cert.pem')),
             ("RL_RECIPE=(mac-golden '", "RL_RECIPE=(fx '%s' mac-golden '" % RL_FILES)])
-        w.sb.write(w.r.config, config((('mac-a', OLD), ('mac-b', 'liveapp-mac-golden-20260902'))))
+        w.r.write_config(config((('mac-a', OLD), ('mac-b', 'liveapp-mac-golden-20260902'))))
         os.utime(w.r.config, (INSTALLED, INSTALLED))
         w.r.set_curl(json.dumps(healthz('mac-a', 'mac-b')))   # the idle pair reads every set of the config
         s = w.u.get()

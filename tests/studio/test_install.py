@@ -31,7 +31,7 @@ import subprocess
 import unittest
 
 from tests.studio.support import REPO, Sandbox
-from tests.studio.test_runner_updater import read_text, the_jq
+from tests.studio.test_runner_updater import HOST_RUNLOG, read_text, the_jq
 from tests.studio.test_runner_updater_state import state
 
 UID = os.getuid()
@@ -153,6 +153,12 @@ class Inst:
         shutil.copy(os.path.join(REPO, 'VERSION'), rel)
         for d in ('core', 'config'):
             shutil.copytree(os.path.join(REPO, d), os.path.join(rel, d))
+        # config.toml.example's log-file pin names the host's runner.log: in the release tree it names the sandbox's,
+        # as the scripts' host prefixes do (the installed updater reads runner.log beside the sandbox's config)
+        ex = os.path.join(rel, 'config', 'config.toml.example')
+        text = read_text(ex)
+        with open(ex, 'w') as f:
+            f.write(text.replace(HOST_RUNLOG, os.path.join(self.confdir, 'runner.log')))
         os.makedirs(os.path.join(rel, 'setup'))
         for f in ('02-wall.sh', 'downloads.manifest'):   # data: install reads them, never runs them
             shutil.copy(os.path.join(REPO, 'setup', f), os.path.join(rel, 'setup', f))
@@ -282,6 +288,15 @@ class TestFreshInstall(unittest.TestCase):
         self.assertIn('install: ROOT LINE   not needed', res.stdout)
         # the lock: the runner lock by the rig's lockf, on the sandbox's lock file
         self.assertEqual(h.sb.calls('lockf')[0][:4], ['-k', '-t', '0', h.lock])
+
+    def test_a_fresh_config_has_the_log_file_pin_once(self):
+        # install's two sed rules (cpu, memory) keep config.toml.example's log-file line, the file the updater reads
+        h = Inst(self)
+        h.install()
+        pins = [l for l in read_text(h.config).splitlines() if l.lstrip().startswith('log-file')]
+        self.assertEqual(len(pins), 1, pins)
+        # the example's line (its host path is the sandbox's here: Inst.unpack; the literal: TestThePin)
+        self.assertTrue(pins[0].startswith('log-file = "%s"' % os.path.join(h.confdir, 'runner.log')), pins)
 
     def test_a_second_run_reloads_nothing_and_changes_nothing(self):
         h = Inst(self)

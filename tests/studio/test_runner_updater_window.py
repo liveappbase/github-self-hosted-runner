@@ -1059,11 +1059,14 @@ class TestRecoverNeeded(unittest.TestCase):
 
     def test_an_open_journal_comes_before_every_other_refusal(self):
         # RECOVER first: a config the window would refuse is read only after it
-        w = Win(self, cfg=config(top='log-file = "/elsewhere.log"\n'))
+        c = config()
+        pin = next(l for l in c.splitlines(True) if l.startswith('log-file = '))
+        w = Win(self, cfg=c.replace(pin, 'log-file = "/elsewhere.log"\n'))
         w.sb.write(w.u.window, 'window 20261101080000-1\nfamily %s\n' % FAM, 0o600)
         res = w.run()
         self.assertEqual(res.returncode, 1, res.stdout)
-        self.assertLess(res.stdout.index('runner-updater: recover: '), res.stdout.index('a top-level log-file key'))
+        self.assertLess(res.stdout.index('runner-updater: recover: '),
+                        res.stdout.index('a top-level log-file line that is not'))
 
     WINDOW_CALL = ('WINDOW=%(w)s WINDOWS=%(ws)s CONFIG=%(c)s\nsource %(win)s || exit 8\n'
                    'ru_window mac-golden %(v)s %(sha)s idle 0 pass\nprint -r -- "rc $?"\n'

@@ -83,7 +83,9 @@ def assert_closed(test, w):
 
 
 def assert_runs(test, w, config):
-    """CI runs CONFIG: FLAG present, and the last runner-enable was on it"""
+    """CI runs CONFIG (its log-file pin on the rig's runner.log: Rig.pin): FLAG present, and the last runner-enable
+    was on it"""
+    config = w.r.pin(config)
     test.assertTrue(os.path.exists(w.r.flag))
     test.assertEqual(w.config_now(), config)
     test.assertEqual(w.enables()[-1][2], sha(config))
@@ -172,7 +174,7 @@ class TestStep1FlagPresent(unittest.TestCase):
         w = killed(self, 'enable-done')
         cut(w)
         text = w.config_now().replace(out_name().encode(), IMG2.encode())
-        w.sb.write(w.r.config, text.decode())
+        w.r.write_config(text.decode())
         res = recover(w, ok=1)
         self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
         self.assertIsNone(w.family()['candidate'])
@@ -402,7 +404,7 @@ class TestStep3Delete(unittest.TestCase):
             f.write('# a note\n')
         text = w.config_now().decode().replace('# a note\n', '[[scaleset]]\nname = "mac-z"\nrunner-image = "%s"\n'
                                                % out_name())
-        w.sb.write(w.r.config, text)
+        w.r.write_config(text)
         recover(w, ok=1)
         self.assertTrue(os.path.exists(os.path.join(w.vms, out_name())))
         self.assertNotIn('delete', w.keys())
@@ -434,7 +436,7 @@ class TestStep4Config(unittest.TestCase):
     def test_another_config_that_validates_is_left_and_enabled(self):
         w = killed(self, 'build-start')
         found = w.pre + b'# a hand edit\n'
-        w.sb.write(w.r.config, found.decode())
+        w.r.write_config(found.decode())
         res = recover(w, ok=1)
         assert_runs(self, w, found)
         self.assertIn('validate hand 1 PASS', w.journal())
@@ -445,7 +447,7 @@ class TestStep4Config(unittest.TestCase):
     def test_another_config_that_fails_validate_gets_no_ci(self):
         w = killed(self, 'build-start')
         found = w.pre + b'# a hand edit\n'
-        w.sb.write(w.r.config, found.decode())
+        w.r.write_config(found.decode())
         n = int(read_text(os.path.join(w.scn, 'validate.n')))
         w.validate('refuse', call=n + 1)
         res = recover(w, ok=1)
@@ -635,7 +637,7 @@ class TestCutJournalStepRan(unittest.TestCase):
         w = Win(self)
         w.validate('refuse', call=3)                             # after the edit: the backup goes back
         killed(self, 'restore', w)
-        w.sb.write(w.r.config, w.pre.decode())                   # the backup went back
+        w.r.write_config(w.pre.decode())                   # the backup went back
         self.assertEqual(cut(w), 'restore')
         recover(w, ok=1)
         assert_closed(self, w)
@@ -777,7 +779,7 @@ class TestRecoverDecidesOnce(unittest.TestCase):
         # pass validates the file again; it does, and CI goes on the file once it validates
         w = self.lost_disable_start('switch')
         found = w.pre + b'# a hand edit\n'
-        w.sb.write(w.r.config, found.decode())
+        w.r.write_config(found.decode())
         n = int(read_text(os.path.join(w.scn, 'validate.n')))
         w.validate('refuse', call=n + 1)
         res = recover(w, ok=1)
@@ -860,7 +862,7 @@ class TestStep1ComparesTheContent(unittest.TestCase):
         w = killed(self, 'enable-done')
         new = b'# a note\n\n   # an indented note\n' + w.config_now() + b'\n\t\n# the last line, with no newline'
         self.assertEqual(content_sha(new), content_sha(w.config_now()))
-        w.sb.write(w.r.config, new.decode())
+        w.r.write_config(new.decode())
         res = recover(w, ok=0)
         self.assertNotIn('HAND CHANGE', res.stdout)
         assert_closed(self, w)
@@ -875,7 +877,7 @@ class TestStep1ComparesTheContent(unittest.TestCase):
                 w = killed(self, 'enable-done')
                 text = w.config_now()
                 self.assertEqual(text.count(old), 1, what)
-                w.sb.write(w.r.config, text.replace(old, new).decode())
+                w.r.write_config(text.replace(old, new).decode())
                 res = recover(w, ok=1)
                 self.assertIn('runner-updater: STOP HAND CHANGE: ', res.stdout)
                 assert_closed(self, w)
@@ -893,7 +895,7 @@ class TestStep1ComparesTheContent(unittest.TestCase):
                 lines[i] = ' '.join(lines[i].split()[:3])        # `installed EPOCH SHA`: an older window's line
                 with open(w.u.window, 'w') as f:
                     f.write(''.join(l + '\n' for l in lines))
-                w.sb.write(w.r.config, (w.config_now() + edit).decode())
+                w.r.write_config((w.config_now() + edit).decode())
                 res = recover(w, ok=rc)
                 assert_closed(self, w)
                 if edit:

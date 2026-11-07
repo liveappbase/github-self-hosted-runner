@@ -1,7 +1,9 @@
 """bin/runner-updater report and its facts collector, bin/runner-updater-lib (the updater's OBSERVE slice: no action).
 
 A Rig copies both files into a sandbox with every path constant rewritten (RUNNER, CONFIG and with it runner.log beside
-it, STATEDIR, FAMILIES, PS, CURL, CORE; JQ is the jq under test, $JQ or /usr/bin/jq). Stubs stand in for ps (it prints
+it, STATEDIR, FAMILIES, PS, CURL, CORE; JQ is the jq under test, $JQ or /usr/bin/jq). Its config is
+config/config.toml.example's, with the example's log-file pin on the sandbox's runner.log (Rig.pin: every config a rig
+writes and every text a cell compares with it). Stubs stand in for ps (it prints
 a scenario, and may append to the log as it is called, which places a write before or after the capture) and curl (the
 /healthz reads). The core programs are the real ones. The log text is runscaler's own format: fixtures/updater/
 studio-cut.log is cut from a real Studio log with every host value replaced, and the failure records are runscaler's
@@ -30,6 +32,9 @@ HEALTHZ = {'status': 'ok', 'version': '0.9.5', 'uptime': '1h0m0s',
            'scale_sets': [{'name': 'mac-a', 'ready': True, 'idle': 0, 'busy': 0,
                            'metrics': {'jobs_started': 0, 'jobs_completed': 0, 'desired_runners': 0}}]}
 ACTIONS = ('runner-disable', 'runner-enable', 'golden-build', 'golden-gate', 'tart', 'launchctl', 'kill')
+# config.toml.example's log-file pin names the host's runner.log: each config a rig writes and each text it compares
+# with one names the rig's runner.log in its place (Rig.pin)
+HOST_RUNLOG = '/Users/ci/.config/runner/runner.log'
 
 
 def the_jq():
@@ -138,13 +143,29 @@ class Rig:
         sb.copy_script('bin/tls-excluded-lib', [])
         self.release = sb.copy_script('bin/runner-updater-release', [('RL_CURL=/usr/bin/curl', 'RL_CURL=' + sb.stub(
             'curl', 'exit 7', folder=sb.mkdir('tools-gh'), log=sb.path('logs', 'gh-curl.log')))])
-        sb.write(self.config, cfg if cfg is not None else config())
+        self.write_config(cfg if cfg is not None else config())
         os.utime(self.config, (INSTALLED, INSTALLED))
         if families is not None:
             sb.write(self.families, families)
         self.set_ps([proc_line(*P)])
         self.set_curl(json.dumps(HEALTHZ))
         self.write_log(fixture('studio-cut.log'))
+
+    def pin(self, text):
+        """TEXT (a config, str or bytes) with config.toml.example's log-file pin, HOST_RUNLOG, on this rig's runner.log:
+        the copies read RUNLOG, runner.log beside the sandbox's config. A text without it (one the rig wrote or read
+        back) is as it was"""
+        if isinstance(text, bytes):
+            return text.replace(HOST_RUNLOG.encode(), self.runlog.encode())
+        return text.replace(HOST_RUNLOG, self.runlog)
+
+    def write_config(self, text):
+        """the rig's config.toml = pin(TEXT). Every write of it goes through here; no line of it but a comment may
+        name /Users/ci/ (a host path the copies would read)"""
+        text = self.pin(text)
+        host = [l for l in text.splitlines() if '/Users/ci/' in l and not l.lstrip().startswith('#')]
+        self.test.assertEqual(host, [], 'a line of the rig config names a host path')
+        self.sb.write(self.config, text)
 
     def copy(self, name, extra_rewrites=()):
         """one more copy of runner-updater, beside the lib, with the rig's rewrites and then EXTRA_REWRITES"""
@@ -627,22 +648,22 @@ class TestConfig(unittest.TestCase):
 
     def test_a_block_with_two_names(self):
         self.refused(config().replace('name = "mac-a"\n', 'name = "mac-a"\nname = "mac-b"\n'),
-                     ' line 40: a [[scaleset]] block has two names')
+                     ' line 41: a [[scaleset]] block has two names')
 
     def test_a_block_with_two_images(self):
         self.refused(config().replace('disable-update = false\n', 'disable-update = false\nrunner-image = "%s"\n' % IMG2),
-                     ' line 47: a [[scaleset]] block has two runner-image lines')
+                     ' line 48: a [[scaleset]] block has two runner-image lines')
 
     def test_an_image_line_at_the_top(self):
         self.refused(config(top='runner-image = "%s"\n' % IMG), ' line 5: a runner-image line outside a [[scaleset]] block')
 
     def test_an_image_line_in_another_table(self):
         self.refused(config().replace('[tart]\n', '[tart]\nrunner-image = "%s"\n' % IMG),
-                     ' line 12: a runner-image line outside a [[scaleset]] block')
+                     ' line 13: a runner-image line outside a [[scaleset]] block')
 
     def test_an_image_line_after_a_block_in_another_table(self):
         self.refused(config() + '[docker]\nrunner-image = "%s"\n' % IMG,
-                     ' line 48: a runner-image line outside a [[scaleset]] block')
+                     ' line 49: a runner-image line outside a [[scaleset]] block')
 
     def test_a_block_with_no_name(self):
         self.refused(config().replace('name = "mac-a"\n', ''), ': a [[scaleset]] block has no name')
@@ -654,7 +675,7 @@ class TestConfig(unittest.TestCase):
         for line in ("runner-image = 'x'", 'runner-image = "a\\"b"', '"runner-image" = "x"', 'runner-image = ""'):
             with self.subTest(line):
                 self.refused(config().replace('runner-image = "%s"' % IMG, line),
-                             ' line 45: a runner-image line this does not read (a plain "..." string)')
+                             ' line 46: a runner-image line this does not read (a plain "..." string)')
 
 
 class TestFamilies(unittest.TestCase):

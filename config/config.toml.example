@@ -2,6 +2,7 @@
 # (0600) from this example ONLY when there is none, and sets cpu and memory below from this Mac. Then fill each
 # [[scaleset]] (README: "Configure the scale sets"). Top-level keys must stay ABOVE the first [table].
 log-level = "info"
+log-file = "/Users/ci/.config/runner/runner.log"   # keep it: the updater reads exactly this file; without it runscaler 0.10+ writes elsewhere
 concurrent = 2                    # Apple allows 2 macOS VMs per host
 health-address = "127.0.0.1"
 drain-timeout = "60m"

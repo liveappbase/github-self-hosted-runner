@@ -6,7 +6,8 @@ usage).
 The fixtures in fixtures/validate/ are real outputs of the pinned runscaler v0.9.5 (darwin-arm64), made by the LIVE
 cell below with no network: api-only-real.txt (the GitHub API part fails: the proxy refuses) and non-api-real.txt (the
 same config with `runner-image = ""`). The config they ran on is config/config.toml.example with neutral names; the
-cleaning step replaces only the refusing proxy's port. The live cell runs when RUNSCALER_TARBALL names the release
+cell now also puts the example's log-file pin on the sandbox's runner.log (the committed fixtures predate that line).
+The cleaning step replaces only the refusing proxy's port. The live cell runs when RUNSCALER_TARBALL names the release
 tarball (runner-darwin-arm64.tar.gz; its sha256 must be setup/downloads.manifest's), else it skips and says so. With
 RUNSCALER_FIXTURE_OUT=DIR it also writes its two cleaned outputs into DIR, to re-make the fixtures.
 """
@@ -232,7 +233,10 @@ class TestLiveBinary(unittest.TestCase):
             text = f.read()
         for old, new in (('https://github.com/OWNER/REPO', 'https://github.com/example-org/example'),
                          ('"mac-ci-REPO"', '"mac-ci-example"'),
-                         ('runner-image = "liveapp-mac-golden-YYYYMMDD"', image_line)):
+                         ('runner-image = "liveapp-mac-golden-YYYYMMDD"', image_line),
+                         # the example's log-file pin, on the sandbox's runner.log
+                         ('log-file = "/Users/ci/.config/runner/runner.log"',
+                          'log-file = "%s"' % os.path.join(cfgdir, 'runner.log'))):
             self.assertIn(old, text)
             text = text.replace(old, new)
         config = sb.write(os.path.join(cfgdir, 'config.toml'), text, 0o600)

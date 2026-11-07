@@ -4,8 +4,10 @@
 # nothing. The format it writes is the decision core's contract: core/README.md ("The call", "facts (format 1)").
 #
 # The caller sets, before it calls a function of it (bin/runner-updater's header has the values):
-#   RUNNER CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP (ru_collect), DD (ru_write), PROTECTED WINDOW (ru_protect), and
-#   exports TZ=UTC and LC_ALL=C (ps prints its start times in TZ; this file reads them back in the same zone).
+#   RUNNER CONFIG RUNLOG FAMILIES JQ PS CURL HEALTHZ_GAP (ru_collect; RUNLOG also ru_config, which compares the
+#   config's log-file line with it: set -u, so a caller without it fails loud), DD (ru_write), PROTECTED WINDOW
+#   (ru_protect), and exports TZ=UTC and LC_ALL=C (ps prints its start times in TZ; this file reads them back in the
+#   same zone).
 #
 # ru_collect PASSDIR STATEFILE OBSERVEFILE NOW [HELD] — ONE pass's facts. It writes, into PASSDIR:
 #   facts.json    format 1, exactly as core/README.md says; host "studio"; restart and stops: HELD's (report: null
@@ -56,12 +58,15 @@
 #      health-address and health-port (above the first table); each [[scaleset]] block's `name` and its non-comment
 #      `runner-image` line, both plain "..." strings. lines = {SET: IMAGE} for each block with an image; sets = every
 #      block's name. No facts on: a block with two names or two images, or with no name; two blocks with one name; a
-#      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read; a top-level
-#      log-file key (runscaler then writes elsewhere, or nowhere, and runner.log reads as a quiet log); a top-level
-#      log-format that is not exactly `log-format = "text"` (the core reads only the text format); a top-level
-#      log-level that is not exactly `log-level = "info"` or `"debug"` (at warn or error runscaler writes no INFO
-#      record: no job-completed record, the proof of life R1 and KEEP read). Each of the last three would leave R1
-#      blind while the facts look normal. pool-size: ONE spelling is read, `pool-size = N` in the
+#      runner-image line outside a [[scaleset]] block; a name or runner-image line it cannot read; THE PIN: no
+#      top-level log-file line (runscaler 0.10.0 and later then write their log in ~/Library/Logs/runner/), a top-level
+#      log-file line that is not exactly `log-file = "RUNLOG"` (another file, or none: a spelling it does not read is
+#      such a line too), or a second one: RUNLOG would read as a quiet log (it is always RUNLOG, the caller's, never
+#      ${CONFIG:h}: the window reads its backups with CONFIG set to them); a top-level log-format that is not exactly
+#      `log-format = "text"` (the core reads only the text format); a top-level log-level that is not exactly
+#      `log-level = "info"` or `"debug"` (at warn or error runscaler writes no INFO record: no job-completed record, the
+#      proof of life R1 and KEEP read). Each of the last three would leave R1 blind while the facts look normal.
+#      pool-size: ONE spelling is read, `pool-size = N` in the
 #      top-level [tart] table, once (none: runscaler's default, 0); any other line whose KEY names pool-size (a scale
 #      set's tart.pool-size, a [scaleset.tart] table, a dotted or quoted key, a key of an inline table, a value that is
 #      not a number) is one it does not read (ru_pool_key: the text in a string value, such as a URL, or in a comment
@@ -260,7 +265,7 @@ ru_pool_key() {
 ru_config() {
   typeset -gA ru_lines
   typeset -ga ru_sets
-  local text l n=0 top=1 inblock=0 intart=0 bname= bimage= ws='[[:space:]]*' tail='[[:space:]]*(#.*)?$'
+  local text l n=0 top=1 inblock=0 intart=0 logf=0 bname= bimage= ws='[[:space:]]*' tail='[[:space:]]*(#.*)?$'
   typeset -A s1 s2
   ru_lines=() ru_sets=() ru_haddr= ru_hport= ru_installed= ru_tart_pool= ru_pool_bad=
   [[ -f $CONFIG && -r $CONFIG ]] || { REPLY="no readable config $CONFIG"; return 1 }
@@ -306,9 +311,14 @@ ru_config() {
       [[ $l =~ "^${ws}name${ws}=${ws}\"([A-Za-z0-9][A-Za-z0-9._-]{0,99})\"${tail}" && $l == "$MATCH" ]] \
         || { REPLY="$CONFIG line $n: a scale set name this does not read ([A-Za-z0-9][A-Za-z0-9._-], at most 100)"; return 1 }
       bname=$match[1]
-    elif (( top )) && [[ $l =~ "^${ws}[\"']?log-file[\"']?${ws}[.=]" ]]; then
-      REPLY="$CONFIG line $n: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside the config reads as a quiet, continuous log, so R1 would be blind while the facts look normal; remove the key"
-      return 1
+    elif (( top )) && [[ $l =~ "^${ws}[\"']?log-file[\"']?${ws}[.=]" ]]; then   # THE PIN: exactly `log-file = "RUNLOG"`, once
+      (( ! logf )) || { REPLY="$CONFIG line $n: a second top-level log-file line: keep one, log-file = \"$RUNLOG\""; return 1 }
+      if [[ $l =~ "^${ws}log-file${ws}=${ws}\"([^\"\\\\[:cntrl:]]+)\"${tail}" && $l == "$MATCH" && $match[1] == "$RUNLOG" ]]; then
+        logf=1
+      else
+        REPLY="$CONFIG line $n: a top-level log-file line that is not log-file = \"$RUNLOG\": runscaler then writes its log elsewhere, or nowhere, and $RUNLOG reads as a quiet, continuous log, so R1 would be blind while the facts look normal; with CI disabled, set log-file = \"$RUNLOG\" (what config/config.toml.example sets), then runner-enable"
+        return 1
+      fi
     elif (( top )) && [[ $l =~ "^${ws}[\"']?log-format[\"']?${ws}[.=]" ]]; then
       [[ $l =~ "^${ws}log-format${ws}=${ws}\"text\"${tail}" && $l == "$MATCH" ]] || {
         REPLY="$CONFIG line $n: log-format is not \"text\": runscaler then writes records that the core's log reader ignores, so R1 would be blind while the facts look normal; set log-format = \"text\" or remove the line"
@@ -330,6 +340,10 @@ ru_config() {
     fi
   done
   ru_endblock || return 1
+  (( logf )) || {
+    REPLY="$CONFIG: no top-level log-file line: runscaler 0.10.0 and later then write their log in ~/Library/Logs/runner/, and $RUNLOG reads as a quiet, continuous log, so R1 would be blind while the facts look normal; with CI disabled, add log-file = \"$RUNLOG\" above the first table (what config/config.toml.example sets), then runner-enable (README \"Update\", step 2)"
+    return 1
+  }
   return 0
 }
 

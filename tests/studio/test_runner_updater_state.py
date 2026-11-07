@@ -7,11 +7,14 @@ import calendar
 import contextlib
 import json
 import os
+import re
 import subprocess
 import time
 import unittest
 
-from tests.studio.test_runner_updater import IMG, IMG2, P, Rig, config, core_calls, fixture, read_text, the_jq
+from tests.studio.support import REPO
+from tests.studio.test_runner_updater import (HOST_RUNLOG, IMG, IMG2, INSTALLED, P, Rig, config, core_calls, fixture,
+                                              read_text, the_jq)
 
 SYSTEM = '/usr/bin:/bin:/usr/sbin:/sbin'
 V0, V1, V2 = '2.338.2', '2.338.9', '2.339.0'
@@ -1228,7 +1231,7 @@ class TestNoActionAnyPath(unittest.TestCase):
         # the config by a builtin or by mv is seen, though it starts no denied program
         r, err = self.a_pass(self.BESIDE)
         self.assertEqual(sorted(os.listdir(r.cfgdir)), ['config.toml', 'runner.log'])
-        self.assertEqual(read_text(r.config), config())
+        self.assertEqual(read_text(r.config), r.pin(config()))
         self.assertEqual(err.count(': operation not permitted: %s/planted\n' % r.cfgdir), 2, err)
         self.assertEqual(err.count('mv: rename %s to %s/moved: Operation not permitted\n' % (r.config, r.cfgdir)), 2, err)
 
@@ -1409,14 +1412,17 @@ class TestPass(unittest.TestCase):
         self.assertNotIn('accepted', res.stdout)
 
     def test_a_config_whose_log_the_core_cannot_read_is_no_facts_in_a_pass_too(self):
-        for top, why in (('log-format = "json"\n', LOG_FORMAT), ('log-file = "/x.log"\n', LOG_FILE),
-                         ('log-level = "warn"\n', LOG_LEVEL % 5)):
-            with self.subTest(top=top):
-                r, u = self.rig(on_state(), cfg=config(top=top))
+        for how, cfg, why in (('log-format', config(top='log-format = "json"\n'), LOG_FORMAT),
+                              ('no pin', no_pin(config()), NONE),
+                              ('another log-file', pin_as(config(), 'log-file = "/x.log"'), OTHER),
+                              ('log-level', config(top='log-level = "warn"\n'), LOG_LEVEL % 5)):
+            with self.subTest(how=how):
+                r, u = self.rig(on_state(), cfg=cfg)
                 raw = u.raw()
                 res = r.cmd('pass', ok=False)
                 self.assertEqual(res.returncode, 1, res.stdout)
-                self.assertIn('runner-updater: REFUSE no facts: %s%s\n' % (r.config, why), res.stdout)
+                self.assertIn('runner-updater: REFUSE no facts: %s%s\n' % (r.config, why % {'runlog': r.runlog, 'n': 5}),
+                              res.stdout)
                 self.assertEqual(core_calls(r), [])
                 self.assertEqual(u.raw(), raw)
 
@@ -1466,8 +1472,16 @@ class TestPass(unittest.TestCase):
         self.assertEqual(r.cmd('pass').stdout, 'runner-updater: pass: the updater is OFF: nothing to do\n')
 
 
-LOG_FILE = (' line 5: a top-level log-file key: runscaler then writes its log elsewhere or nowhere, and runner.log beside '
-            'the config reads as a quiet, continuous log, so R1 would be blind while the facts look normal; remove the key')
+# the log-file guard (PLAN r3.1 D1, the strict guard): exactly `log-file = "RUNLOG"` at the top, once (each text takes
+# runlog, and n the line)
+BLIND = '%(runlog)s reads as a quiet, continuous log, so R1 would be blind while the facts look normal'
+NONE = (': no top-level log-file line: runscaler 0.10.0 and later then write their log in ~/Library/Logs/runner/, and '
+        + BLIND + '; with CI disabled, add log-file = "%(runlog)s" above the first table (what config/config.toml.example '
+        'sets), then runner-enable (README "Update", step 2)')
+OTHER = (' line %(n)d: a top-level log-file line that is not log-file = "%(runlog)s": runscaler then writes its log '
+         'elsewhere, or nowhere, and ' + BLIND + '; with CI disabled, set log-file = "%(runlog)s" (what '
+         'config/config.toml.example sets), then runner-enable')
+TWO = ' line %(n)d: a second top-level log-file line: keep one, log-file = "%(runlog)s"'
 LOG_FORMAT = (' line 5: log-format is not "text": runscaler then writes records that the core\'s log reader ignores, so R1 '
               'would be blind while the facts look normal; set log-format = "text" or remove the line')
 
@@ -1476,9 +1490,29 @@ LOG_LEVEL = (' line %d: log-level is not "info" or "debug": runscaler then write
              '(what config/config.toml.example sets) or remove the line')
 
 
+def ex_pin(c):
+    """the example's log-file pin line in the config text C (line 5 of config()), with its newline"""
+    ls = [l for l in c.splitlines(True) if l.startswith('log-file')]
+    assert len(ls) == 1, ls
+    return ls[0]
+
+
+def no_pin(c):
+    return c.replace(ex_pin(c), '')
+
+
+def pin_as(c, line):
+    """C with the pin line replaced by LINE"""
+    return c.replace(ex_pin(c), line + '\n')
+
+
 class TestLogKeys(unittest.TestCase):
-    """A config whose log the core cannot read is no facts (S3b-1 review r1 P3-1): a top-level log-file key (runscaler
-    then writes elsewhere, or nowhere with ""), or a log-format other than "text" (json records the core ignores)."""
+    """A config whose log the core cannot read is no facts (S3b-1 review r1 P3-1). THE PIN (runscaler v0.9.5 ->
+    v0.12.0, PLAN r3.1 D1, the strict guard): the config must have exactly one top-level log-file line, and it must be
+    `log-file = "RUNLOG"`, the file the updater reads (runner.log beside the config). runscaler 0.10.0 and later write
+    their log in ~/Library/Logs/runner/ when there is no such line, and any other line names another file, or none;
+    runner.log then reads as a quiet, continuous log: R1 blind. A config with none, another one, or two is no facts. And
+    a log-format other than "text" (json records the core ignores), a log-level that writes no INFO record."""
 
     def refused(self, top, why):
         r = Rig(self, cfg=config(top=top))
@@ -1489,11 +1523,54 @@ class TestLogKeys(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(r.pass_dir, 'idle.json')))
         return r
 
-    def test_a_top_level_log_file_is_refused(self):
-        for line in ('log-file = "/var/log/runscaler.log"', 'log-file = ""', '"log-file" = "x"', "log-file='x'",
-                     'log-file.x = 1'):
+    def rig(self, make):
+        """a rig whose config is MAKE(rig) (a text that can name the rig's own paths)"""
+        r = Rig(self)
+        r.write_config(make(r))
+        os.utime(r.config, (INSTALLED, INSTALLED))
+        return r
+
+    def refused_pin(self, make, why, n=5):
+        r = self.rig(make)
+        res = r.report(ok=False)
+        self.assertEqual(res.returncode, 1, res.stdout)
+        self.assertIn('runner-updater: REFUSE no facts: %s%s\n' % (r.config, why % {'runlog': r.runlog, 'n': n}),
+                      res.stdout)
+        self.assertFalse(os.path.exists(os.path.join(r.pass_dir, 'facts.json')))
+        self.assertFalse(os.path.exists(os.path.join(r.pass_dir, 'idle.json')))
+
+    def test_the_pin_is_read(self):
+        for how, make in (('the example', lambda r: config()),
+                          ('a comment of its own', lambda r: pin_as(config(), 'log-file = "%s"   # a note' % r.runlog)),
+                          ('spaces', lambda r: pin_as(config(), 'log-file   =   "%s"' % r.runlog))):
+            with self.subTest(how=how):
+                r = self.rig(make)
+                self.assertEqual(sum(l.startswith('log-file') for l in read_text(r.config).splitlines()), 1)
+                r.report()
+                self.assertEqual(r.facts()['format'], 1)
+
+    def test_a_config_with_no_log_file_line_is_refused(self):
+        for how, make in (('the pin removed', lambda r: no_pin(config())),
+                          ('the pin only in [tart]',
+                           lambda r: no_pin(config()).replace('[tart]\n', '[tart]\n' + ex_pin(config())))):
+            with self.subTest(how=how):
+                self.refused_pin(make, NONE)
+
+    def test_a_log_file_line_that_is_not_the_pin_is_refused(self):
+        for line in ('log-file = "/var/log/runscaler.log"', 'log-file = ""', 'log-file = "%(runlog)s.1"',
+                     'log-file = "%(cfgdir)s/../config/runner.log"',   # the same file, another spelling
+                     '"log-file" = "%(runlog)s"', "log-file = '%(runlog)s'", 'log-file.x = 1',
+                     'log-file = "%(runlog)s" x'):
             with self.subTest(line=line):
-                self.refused(line + '\n', LOG_FILE)
+                self.refused_pin(lambda r: pin_as(config(), line % {'runlog': r.runlog, 'cfgdir': r.cfgdir}), OTHER)
+
+    def test_a_second_log_file_line_is_refused(self):
+        self.refused_pin(lambda r: config().replace(ex_pin(config()), ex_pin(config()) * 2), TWO, n=6)
+
+    def test_control_a_log_file_key_in_a_table_beside_the_pin(self):
+        r = self.rig(lambda r: config().replace('[tart]\n', '[tart]\nlog-file = "x"\n'))
+        r.report()
+        self.assertEqual(r.facts()['format'], 1)
 
     def test_a_log_format_other_than_text_is_refused(self):
         for line in ('log-format = "json"', 'log-format = ""', "log-format = 'text'", '"log-format" = "text"',
@@ -1520,13 +1597,33 @@ class TestLogKeys(unittest.TestCase):
                 r.report()
                 self.assertEqual(r.facts()['format'], 1)
 
-    def test_control_log_format_text_and_a_log_file_key_in_a_table(self):
-        for cfg in (config(top='log-format = "text"\n'), config(top='log-format = "text"   # the default\n'),
-                    config().replace('[tart]\n', '[tart]\nlog-file = "x"\n')):
+    def test_control_log_format_text(self):
+        for cfg in (config(top='log-format = "text"\n'), config(top='log-format = "text"   # the default\n')):
             with self.subTest(cfg=cfg[:200]):
                 r = Rig(self, cfg=cfg)
                 r.report()
                 self.assertEqual(r.facts()['format'], 1)
+
+
+class TestThePin(unittest.TestCase):
+    """config/config.toml.example pins the file the updater reads, in the files as they are (no copy): exactly one line
+    that starts with log-file, above its first table, and it is `log-file = "D/runner.log"` (a trailing comment
+    allowed), D the folder of bin/runner-updater's CONFIG= literal, and bin/runner-updater sets
+    RUNLOG=${CONFIG:h}/runner.log. HOST_RUNLOG, the path the rigs map (Rig.pin), is that file."""
+
+    def test_the_example_pins_the_file_the_updater_reads(self):
+        up = read_text(os.path.join(REPO, 'bin', 'runner-updater')).splitlines()
+        cfg = [l for l in up if l.startswith('CONFIG=')]
+        self.assertEqual(len(cfg), 1, cfg)
+        d = os.path.dirname(cfg[0][len('CONFIG='):])
+        self.assertIn('RUNLOG=${CONFIG:h}/runner.log', up)
+        ex = read_text(os.path.join(REPO, 'config', 'config.toml.example')).splitlines()
+        first = next(i for i, l in enumerate(ex) if l.lstrip().startswith('['))
+        pins = [(i, l) for i, l in enumerate(ex) if l.lstrip().startswith('log-file')]
+        self.assertEqual(len(pins), 1, pins)
+        self.assertLess(pins[0][0], first)
+        self.assertRegex(pins[0][1], r'^log-file = "%s/runner\.log"([ \t]+#.*)?$' % re.escape(d))
+        self.assertEqual(HOST_RUNLOG, d + '/runner.log')
 
 
 WHY_POOL = ("the updater's rules for a Tart set (R1, NOT SERVING) assume no warm pool, as config.toml.example sets it")
@@ -1564,6 +1661,14 @@ class TestWarmPool(unittest.TestCase):
         u = Paths(r)
         raw = u.put(dict(on_state(), on=False))
         return r, u, raw, r.cmd('on', ok=False)
+
+    def test_on_refuses_a_config_without_the_pin(self):
+        # the log-file guard (TestLogKeys) in `on`, with this class's `on`: the state stays OFF, byte-equal
+        r, u, raw, res = self.on(no_pin(config()))
+        self.assertEqual((res.returncode, res.stdout), (1, 'runner-updater: REFUSE on: %s%s: the updater is as it was\n'
+                                                       % (r.config, NONE % {'runlog': r.runlog})), res.stderr)
+        self.assertEqual(u.raw(), raw)
+        self.assertFalse(u.get()['on'])
 
     def test_on_refuses_a_warm_pool(self):
         for n in ('1', '2', '01'):

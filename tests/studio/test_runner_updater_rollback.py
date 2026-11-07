@@ -81,7 +81,7 @@ class TestRollback(unittest.TestCase):
         res = rollback(w)
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn('rollback rc 0', res.stdout)
-        old = config((('mac-a', OLD),)).encode()
+        old = w.r.pin(config((('mac-a', OLD),))).encode()
         assert_runs(self, w, old)
         self.assertEqual((n_disable(w), len(w.enables())), (1, 1))
         self.assertEqual(w.r.curl_calls(), [])                   # no idle wait: no /healthz read
@@ -237,7 +237,7 @@ class TestConnectOnly(unittest.TestCase):
         s0 = w.u.get()
         s0['families'][FAM].update(candidate=cand(V2, {'mac-a': NEW}, int(time.time()) - 60), previous={'mac-a': OLD})
         w.u.put(s0)
-        w.sb.write(w.r.config, config((('mac-a', NEW),)))
+        w.r.write_config(config((('mac-a', NEW),)))
         w.sb.write(os.path.join(w.vms, NEW), '')
         self.assertEqual(rollback(w, reason=CONNECT).returncode, 0)
         self.assertEqual(w.family()['rejected'], [V2])
@@ -299,7 +299,7 @@ class TestRollbackKilled(unittest.TestCase):
         res = w.r.cmd('pass', ok=False)
         self.assertIn(res.returncode, (0, 1), (key, res.stdout))
         assert_closed(self, w)
-        old = config((('mac-a', OLD),)).encode()
+        old = w.r.pin(config((('mac-a', OLD),))).encode()
         f = w.family()
         want = old if f['candidate'] is None else w.pre
         self.assertTrue(os.path.exists(w.r.flag), key)
@@ -606,7 +606,7 @@ class TestRecoverAfterAPreCloseFailure(unittest.TestCase):
     TestRecoverAfterAFailedPostValidate's cell killed at `installed` still rolls back."""
 
     def target_never_runs(self, w, target):
-        tsha = sha(target)
+        tsha = sha(w.r.pin(target))
         for n in (1, 2, 3):
             w.hook('enable-hook.%d' % n, TARGET_NEVER_RUNS % (tsha, w.r.psd))
         return tsha
