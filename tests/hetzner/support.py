@@ -1000,6 +1000,15 @@ def act(a):
         with open(os.path.join(SB, 'logs', 'updater-pass-%d.txt' % n), 'w') as f:
             f.write(r.stdout + r.stderr)
         event('updater-pass %d rc %d' % (n, r.returncode))
+    elif a == 'runscaler-step' or a.startswith('runscaler-step:'):   # a person's `pool-image.sh runscaler [V]` runs
+        n = len([e for e in os.listdir(os.path.join(SB, 'logs')) if e.startswith('runscaler-step-')]) + 1   # NOW, whole,
+        v = a.split(':', 1)[1:]            # inside the command this hook fires in (M-6: a pass that starts before the
+        r = subprocess.run(['bash', os.path.join(os.environ['HOME'], 'build', 'setup', 'pool-image.sh'), 'runscaler']
+                           + v, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600,   # step and
+                           close_fds=True)   # ends after it); no file descriptor of that command (fd 9) reaches it
+        with open(os.path.join(SB, 'logs', 'runscaler-step-%d.txt' % n), 'w') as f:
+            f.write(r.stdout + r.stderr)
+        event('runscaler-step %d rc %d' % (n, r.returncode))
     else:
         event('hook action UNKNOWN: ' + a)
 
@@ -1284,16 +1293,46 @@ sys.exit(r.returncode)
 
 INSTALL_STUB = r'''#!/usr/bin/python3 -I
 # install, for the pool cells with hooks: the hooks of "install:NAME" (NAME: the destination's base name, the last
-# argument), the real install, then the hooks of "install-done:NAME" (logged as the event "install NAME")
+# argument), the real install, then the hooks of "install-done:NAME" (logged as the event "install NAME"). Two
+# injections for a copy of a file (not `install -d`), each named by its SOURCE's base name SRC (the same in every
+# release: ~/build's runner-start, pool-ready, validate-class, runscaler.service), whatever its destination is called:
+# "cut-copy:SRC", a copy cut midway (a power cut, a SIGKILL inside the copy): its destination is unlinked (as install
+# does first) and gets the first half of the source's bytes, then pool-image.sh's whole group is SIGKILLed (hzlib's
+# `kill`, which refuses any other group); "taint-copy:SRC", after the real copy, its destination gets a line more (a
+# copy that is not its source's bytes: the check after it must refuse)
 import os, subprocess, sys
 SB = @SB@
 sys.path.insert(0, SB + '/stubs')
 import hzlib
 a = sys.argv[1:]
 dest = os.path.basename(a[-1]) if a else ''
+pos, i = [], 0
+while i < len(a):                          # the operands: -m/-o/-g/-t/-S take a value
+    if a[i] in ('-m', '-o', '-g', '-t', '-S'):
+        i += 2
+        continue
+    if not a[i].startswith('-'):
+        pos.append(a[i])
+    i += 1
+copy = '-d' not in a and len(pos) == 2
+src = os.path.basename(pos[0]) if copy else None
 hzlib.event('install ' + dest)
 hzlib.fire('install:' + dest)
+if copy and hzlib.take('cut-copy:' + src):
+    with open(pos[0], 'rb') as f:
+        b = f.read()
+    if os.path.lexists(pos[1]):
+        os.unlink(pos[1])
+    with open(pos[1], 'wb') as f:
+        f.write(b[:len(b) // 2])
+    hzlib.event('cut-copy %s: %d of %d bytes into %s' % (src, len(b) // 2, len(b), os.path.basename(pos[1])))
+    hzlib.act('kill')
+    sys.exit(137)                          # only when the kill was refused (no pool-image.sh group): a failed copy
 r = subprocess.run(['/usr/bin/install'] + a)
+if r.returncode == 0 and copy and hzlib.take('taint-copy:' + src):
+    with open(pos[1], 'ab') as f:
+        f.write(b'# tainted\n')
+    hzlib.event('taint-copy %s: %s' % (src, os.path.basename(pos[1])))
 if r.returncode == 0:
     hzlib.fire('install-done:' + dest)
 sys.exit(r.returncode)
@@ -1651,6 +1690,23 @@ class Pool(Sandbox):
                 out.append((int(m.group(2)), self.read(self.path('logs', 'updater-pass-%s.txt' % m.group(1)))))
         return out
 
+    def runscaler_steps(self):
+        """[(rc, output)] of each `runscaler-step` hook action, in order."""
+        out = []
+        for e in self.events():
+            m = re.fullmatch(r'runscaler-step ([0-9]+) rc ([0-9]+)', e)
+            if m:
+                out.append((int(m.group(2)), self.read(self.path('logs', 'runscaler-step-%s.txt' % m.group(1)))))
+        return out
+
+    def act(self, *actions):
+        """hzlib's hook ACTIONS, run by the cell now (no hook): `restart` is a reboot's (or systemd's own) restart of
+        runscaler on the pair on disk: the new process runs ~/bin/runner's bytes as they are now (hzlib.ran)."""
+        code = 'import sys; sys.path.insert(0, sys.argv[1]); import hzlib\nfor a in sys.argv[2:]: hzlib.act(a)'
+        r = self.run(['python3', '-I', '-c', code, self.path('stubs')] + list(actions))
+        if r.returncode != 0:
+            raise AssertionError('hzlib.act %r: %s' % (actions, r.stdout + r.stderr))
+
     # ---- the unattended cells (pool-image.sh up --unattended / back --unattended)
 
     def fake_clock(self, ahead=10):
@@ -1680,9 +1736,12 @@ class Pool(Sandbox):
         count-shows (as
         count_shows(), from that event on), pend (at `systemctl:show-N`: that read stays pending while it names who holds
         the two locks, kills the window, and names them again: hzlib.pend), taint-runner-new (~/bin/runner.new's bytes
-        change), updater-pass (the updater's `pass` runs at that moment: updater_passes()). An injection, AT
-        with no ACTION: `ddfail:KEY` (the sync of that journal line fails), `ddfail-file:NAME` (the sync of another
-        file NAME fails). `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
+        change), updater-pass (the updater's `pass` runs at that moment: updater_passes()), runscaler-step or
+        runscaler-step:VERSION (a person's whole `pool-image.sh runscaler [VERSION]` runs at that moment:
+        runscaler_steps()). An injection, AT with no ACTION: `ddfail:KEY` (the sync of that journal line fails),
+        `ddfail-file:NAME` (the sync of another file NAME fails), `cut-copy:SRC` and `taint-copy:SRC` (INSTALL_STUB: the
+        copy of ~/build's SRC is cut midway, then pool-image.sh's group SIGKILLed; or gets a line more after it).
+        `systemctl:show-N` (after the Nth `systemctl show`) needs count_shows() too."""
         self.write(self.path('hooks.json'), json.dumps([{'at': h[0], 'do': list(h[1:])} for h in hooks]))
         sb = repr(self.root)
         self.write(self.path('stubs', 'dd'), DD_STUB.replace('@SB@', sb), 0o755)

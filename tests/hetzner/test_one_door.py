@@ -23,7 +23,9 @@
   (test_render.guard: the systemctl substitute runs no runner-start; H2a review r1, Opus F3).
 - THE ONE DOOR, over the tree (R-8; slice H2b-1): the programs of linux-docker/ write ~/bin/runner only by 03's two
   renames of ~/bin/runner.new (a fresh host's, and the stage of `pool-image.sh runscaler`), and runner.new only by 03's
-  one install of a checked `runner`. THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
+  one install of a checked `runner`: THE CENSUS walks every line that names the binary, and each is one of those three
+  WRITES or a READ the cell lists by its text, so a line of any other shape is red (review r1: Codex F2, Opus F2; a
+  planted line in a COPY of the tree, never run). THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
   ~/bin/runner.new, and its log-file guard hashes that file; `validate` takes no other argument; `run` (with any
   argument, or any env var) and `delete` exec ~/bin/runner and hash it. A fresh host's 03 real that ends between the
   install into runner.new and its rename leaves neither name (H2a review r1, Opus F4: the trap's cleanup).
@@ -34,6 +36,8 @@ the pinned substitute with a line more.
 """
 import os
 import re
+import shutil
+import tempfile
 import unittest
 
 from tests.hetzner.support import REPO, Pool, digest, needs_container, ref, sha256_file
@@ -107,7 +111,10 @@ class Pins(unittest.TestCase):
     def test_the_readme_says_what_03_does_with_the_runscaler(self):
         """M-1 as a person reads it: Install step 4 says 03 installs the download on a fresh host only, and step 9 that
         03 keeps a runscaler that is there (v0.12.0, or v0.9.5, the way back), refuses any other before it changes
-        anything, and names the one step that changes it. The Files table says it too. "The log-file line" no longer
+        anything, and names the one step that changes it. The Files table says it too: what each of 03's modes does
+        with ~/bin/runner (real: a fresh host's only, and keeps one that is there; render: installs nothing; stage, from
+        `pool-image.sh runscaler`: replaces it), and that an image operation keeps it (slice H2b-1 review r1, Codex F4:
+        49a2004's row said 03 "never replaces one that is there", which its stage does). "The log-file line" no longer
         says that 03 installs v0.9.5, and says a `back` to a config with no line needs the way-back runscaler."""
         text = readme()
         s4, s9 = step(text, 4), step(text, 9)
@@ -119,6 +126,12 @@ class Pins(unittest.TestCase):
         row = [l for l in text.splitlines() if l.startswith('| `setup/03-runscaler.sh` |')]
         self.assertEqual(len(row), 1)
         self.assertIn('fresh host', row[0])
+        for w in ('`real` installs runscaler (by sha256) on a fresh host only, and keeps one that is there',
+                  '`render` (the updater\'s) renders and validates a config into a file of its own and installs nothing',
+                  '`stage` (from `pool-image.sh runscaler` only) replaces `~/bin/runner`',
+                  'an image operation (`up`, `back`, `accept`, the updater\'s switch and rollback) keeps it'):
+            self.assertIn(w, row[0])
+        self.assertNotIn('never replaces one that is there', row[0])
         sec = text.split('\n## The log-file line\n', 1)[1].split('\n## ', 1)[0]
         self.assertNotIn('the release 03 installs', sec)
         for w in ('comment', 'way back', '`back` refuses'):
@@ -131,33 +144,165 @@ def code_lines(path):
         return [(i, l.rstrip('\n')) for i, l in enumerate(f, 1) if not l.lstrip().startswith('#')]
 
 
-BIN = r'(?:bin/runner|\$RB|\$NEWBIN|\$RUNNER)(?![-_A-Za-z.])'   # ~/bin/runner (or runner.new), by any name a program uses
-WRITE = re.compile(r'(?:^\s*|[;&|({]\s*)(?:mv|cp|install|ln|tar|dd|tee|rsync|curl)\b[^;&|]*' + BIN
-                   + r'|>>?\s*"?' + BIN)
+# THE CENSUS (R-8; slice H2b-1 review r1: Codex F2, Opus F2): every line of linux-docker/ (but the README) that is not a
+# whole-line comment and NAMES the binary: bin/runner (and bin/runner.new; not runner-start, runner-updater), runner.new,
+# or one of the words RB, NEWBIN, RUNNER (03's and runner-start's names for it) in any form ($X, ${X}, X=, python's
+# RUNNER). Each is one of 03's three WRITES or a READ listed here by its text (a line that reads the binary or names it
+# in a text, and 03's trap, which removes a runner.new it made): a line that is neither is red, whatever shape it has (a
+# new writer, a new reader, a new name), so a reviewer reads it before it is listed.
+NAMES = re.compile(r'bin/runner(?![-_A-Za-z0-9])|runner\.new|(?<![A-Za-z0-9_])(?:RB|NEWBIN|RUNNER)(?![A-Za-z0-9_])')
+S03R = 'setup/03-runscaler.sh'
+WRITES = [(S03R, 'install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN"'),
+          (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN='), (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN=')]
+READS = [
+    ('bin/runner-start',
+     'RUNNER=/home/${RS_USER}/bin/runner   # the file the guard hashes and exec runs: ~/bin/runner, or runner.new (--staged)'),
+    ('bin/runner-start',
+     'validate) case $#:${2-} in 1:) ;; 2:--staged) RUNNER=$RUNNER.new ;; *) die "usage: runner-start run|validate [--staged]|delete NAME" ;; esac; args=(validate) ;;'),
+    ('bin/runner-start',
+     'v095=0; s=$(sha256sum < "$RUNNER" 2> /dev/null) && [ "${s%% *}" = "$V095_SHA" ] && v095=1   # RUNSCALER\'S LOG (the header)'),
+    ('bin/runner-start',
+     'names=$(python3 - "$CONFIG" "$SOCK" runners "$LOGF" "$v095" "$RUNNER" 2>&1 <<\'PY\''),
+    ('bin/runner-start',
+     'cfg, SOCK, NET, LOGF, V095, RUNNER = sys.argv[1:7]'),
+    ('bin/runner-start',
+     'sys.exit(f"the config has no log-file key, and {RUNNER} is not runscaler v0.9.5\'s runner, the one release that then "'),
+    ('bin/runner-start',
+     'exec "$RUNNER" "${args[@]}" --config "$CONFIG"'),
+    ('setup/03-runscaler.sh',
+     'MODE=${1-} DIGEST= STAGED= ONLY= NEWBIN= VERSION= RULE='),
+    ('setup/03-runscaler.sh',
+     'trap \'rm -rf "${tmp:?}"; [ -z "$NEWBIN" ] || rm -f -- "$NEWBIN"; [ "${#PUBS[@]}" = 0 ] || rm -f -- "${PUBS[@]}"; [ -z "$STAGED" ] || [ "$kept" = 1 ] || rm -f -- "$STAGED"\' EXIT'),
+    ('setup/03-runscaler.sh',
+     'RB=$HOME/bin/runner   # ONE DOOR (the header)'),
+    ('setup/03-runscaler.sh',
+     "VSEL=   # runner-start validate's selector: --staged in THE STAGE (the header), so it hashes and runs ~/bin/runner.new"),
+    ('setup/03-runscaler.sh',
+     'say "runscaler: ~/bin/runner (ONE DOOR: 03 installs one on a fresh host, and in THE STAGE)"'),
+    ('setup/03-runscaler.sh',
+     'DL=$(dl_of "$VERSION") VSEL=--staged NOTCH="config.toml and $RB NOT changed"'),
+    ('setup/03-runscaler.sh',
+     'NEWBIN=$RB.new   # from here on every exit before the rename removes it (the trap): one a cut left too'),
+    ('setup/03-runscaler.sh',
+     'got=$(sha256sum < "$RB" 2> /dev/null) || got=none'),
+    ('setup/03-runscaler.sh',
+     'ok "$RB is $was; this stage puts runscaler v$VERSION in its place (from $DL)"'),
+    ('setup/03-runscaler.sh',
+     'elif [ -e "$RB" ] || [ -L "$RB" ]; then'),
+    ('setup/03-runscaler.sh',
+     'got=$(sha256sum < "$RB" 2> /dev/null) || got='),
+    ('setup/03-runscaler.sh',
+     '"$BIN_SHA") ok "$RB is runscaler v$PINNED, the one this release pins: kept as it is" ;;'),
+    ('setup/03-runscaler.sh',
+     '"$WAYBACK_BIN_SHA") ok "$RB is runscaler v$WAYBACK, the way back: kept as it is" ;;'),
+    ('setup/03-runscaler.sh',
+     'die "$RB (sha256 ${got:0:12}) is neither runscaler v$PINNED (BIN_SHA) nor v$WAYBACK (WAYBACK_BIN_SHA), the two this release knows: 03 never replaces a runscaler that is there, and only pool-image.sh runscaler changes it; $what" ;;'),
+    ('setup/03-runscaler.sh',
+     'die "there is no $RB, so the render cannot be validated: install this release first (03 real); nothing staged"'),
+    ('setup/03-runscaler.sh',
+     'ok "no $RB: a fresh host, so this run installs runscaler v$PINNED"'),
+    ('setup/03-runscaler.sh',
+     'if [ "$MODE" = stage ] || { ! [ -e "$RB" ] && ! [ -L "$RB" ]; }; then   # ONE DOOR (the header): through runner.new'),
+    ('setup/03-runscaler.sh',
+     'NEWBIN=$RB.new'),
+    ('setup/03-runscaler.sh',
+     'ok "installed runscaler v$PINNED as $RB"'),
+    ('setup/03-runscaler.sh',
+     'ver=$("${NEWBIN:-$RB}" version 2>&1) || die "runner version: $ver"; ok "${ver%%$\'\\n\'*} (${NEWBIN:-$RB})"'),
+    ('setup/03-runscaler.sh',
+     'sha "$NEWBIN" "$BIN"'),
+    ('setup/03-runscaler.sh',
+     'ok "renamed $RB.new over $RB: runscaler v$VERSION"'),
+    ('setup/03-runscaler.sh',
+     'echo; echo "03 DONE (stage): $RB is runscaler v$VERSION and config.toml is this release\'s render; the unit was NOT restarted (pool-image.sh runscaler restarts it)"'),
+    ('setup/pool-image.sh',
+     'runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner\'s'),
+    ('setup/pool-image.sh',
+     'ok "DONE ALREADY: $HOME/bin/runner is runscaler v$RSV, its process runs config.toml, which has the log-file line: no stage, no restart"'),
+    ('setup/pool-image.sh',
+     'echo; echo "== 03-runscaler.sh stage $RSV $rule ($HOME/bin/runner is $(rs_name "$rs"); the unit $st)"'),
+    ('setup/pool-image.sh',
+     'bash "$S03" stage "$RSV" "$rule" < /dev/null || die "03 stage failed (its FAIL line above): nothing restarted; $HOME/bin/runner is $(rs_name "$(runner_sha || echo none)"). $(again)"'),
+    ('setup/pool-image.sh',
+     '[ "$(runner_sha)" = "$WANT" ] || die "03 said DONE, but $HOME/bin/runner is not runscaler v$RSV: read it; nothing restarted"'),
+    ('setup/pool-image.sh',
+     '[ "$rs" = "$pin" ] || [ "$rs" = "$wb" ] || die "$HOME/bin/runner (sha256 ${rs:0:12}) is neither of the two runscalers this release knows (03-runscaler.sh\'s BIN_SHA and WAYBACK_BIN_SHA): an image switch never changes it, and only pool-image.sh runscaler does; nothing changed"'),
+    ('setup/pool-image.sh',
+     '[ "$rs" = "$wb" ] || die "the rollback $KEEPC has no log-file key, and $HOME/bin/runner (sha256 ${rs:0:12}) is not the way-back runscaler (v0.9.5, 03-runscaler.sh\'s WAYBACK_BIN_SHA), the one that runs such a config: runner-start would refuse it at the restart, and CI would be down. The steps of this release do not make this pair (pool-image.sh runscaler refuses while a release is open, and removes the rollback of one a back closed): read $HOME/bin/runner and $KEEPC. To keep the image config.toml runs, run pool-image.sh accept; nothing changed"'),
+    ('setup/pool-image.sh',
+     'case $MODE in up|back) holds="config.toml runs the $MODE image" ;; *) holds="$HOME/bin/runner is runscaler v$RSV" ;; esac'),
+    ('setup/pool-image.sh',
+     'echo "POOL RUNSCALER DONE: runscaler v$RSV runs ($HOME/bin/runner and the process, sha256 ${WANT:0:12}), on config.toml with the log-file line"'),
+]
+
+
+def census(root):
+    """[(file relative to ROOT, its text stripped)] of each line of ROOT's files (but *.md) that is not a whole-line
+    comment and names the binary (NAMES), in file and line order."""
+    found = []
+    for d, dirs, names in os.walk(root):
+        dirs.sort()
+        for n in sorted(names):
+            if n.endswith('.md'):
+                continue
+            for i, l in code_lines(os.path.join(d, n)):
+                if NAMES.search(l):
+                    found.append((os.path.relpath(os.path.join(d, n), root), l.strip()))
+    return found
+
+
+def unread(found):
+    """FOUND less the READS (each listed line once per listing): what is left must be exactly the WRITES."""
+    left, reads = [], list(READS)
+    for x in found:
+        if x in reads:
+            reads.remove(x)
+        else:
+            left.append(x)
+    return left
+
+
+# The shapes a command-pattern census missed (Opus r1 census_probe.txt: the eight; Codex r1 F2: a redirection into the
+# home's path, `>` and `>>`), and two in other files: each planted in a COPY of the tree, never run
+PLANTED = (('setup/pool-image.sh', 'if [ -s x ]; then mv -f "$tmp/runner" "$RB"; fi'),
+           ('setup/pool-image.sh', '  else cp "$tmp/runner" "$HOME/bin/runner"'),
+           ('setup/pool-image.sh', 'for f in a; do install -m 755 "$f" "$RB"; done'),
+           ('setup/03-runscaler.sh', '  mv -f "$tmp/runner" "${RB}"'),
+           ('setup/03-runscaler.sh', '  install -m 755 "$tmp/runner" "$RB.new"'),
+           ('setup/03-runscaler.sh', '  cp "$tmp/runner" "$HOME/bin/runner.new"'),
+           ('setup/03-runscaler.sh', '  /bin/mv -f "$tmp/runner" "$RB"'),
+           ('setup/03-runscaler.sh', '  command mv -f "$tmp/runner" "$RB"'),
+           ('setup/pool-image.sh', 'printf x > "$HOME/bin/runner"'),
+           ('setup/pool-image.sh', 'cat "$tmp/runner" >> "$HOME/bin/runner"'),
+           ('config/runscaler.service', 'ExecStartPre=/bin/cp %h/build/dl/runner %h/bin/runner'),
+           ('bin/runner-start', 'cp "$RUNNER.x" "$RUNNER"'))
 
 
 class Census(unittest.TestCase):
     def test_only_03_s_two_renames_write_bin_runner(self):
-        """R-8: every program of linux-docker/ (not the README): a command (mv, cp, install, ln, tar, dd, tee, rsync,
-        curl) whose arguments name ~/bin/runner or runner.new (bin/runner, $RB, $NEWBIN, runner-start's $RUNNER; not
-        runner-start or runner-updater), or a redirection into one, is one of 03's three: the install of a checked
-        `runner` into ~/bin/runner.new (one function, for a fresh host and for the stage), and the two renames of
-        runner.new over ~/bin/runner (a fresh host's at once, the stage's after config.toml). The build log has the git
-        grep of the same census. 3c0e0aa has the fresh host's two lines only (its install names $BIN_SHA)."""
-        found = []
-        root = os.path.join(REPO, 'linux-docker')
-        for d, _, names in os.walk(root):
-            for n in sorted(names):
-                f = os.path.join(d, n)
-                if n.endswith('.md'):
-                    continue
-                for i, l in code_lines(f):
-                    if WRITE.search(l):
-                        found.append((os.path.relpath(f, root), l.strip()))
-        s03 = 'setup/03-runscaler.sh'
-        want = [(s03, 'install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN"'),
-                (s03, 'mv -f "$NEWBIN" "$RB"; NEWBIN='), (s03, 'mv -f "$NEWBIN" "$RB"; NEWBIN=')]
-        self.assertEqual(sorted(found), sorted(want))
+        """R-8, THE CENSUS (the comment above): the tree's lines that name the binary are 03's three WRITES and the
+        listed READS, nothing else: the install of a checked `runner` into ~/bin/runner.new (one function, for a fresh
+        host and for the stage) and the two renames of runner.new over ~/bin/runner (a fresh host's at once, the
+        stage's after config.toml). The control of the cell below. The fix log has the census's own listing."""
+        found = census(os.path.join(REPO, 'linux-docker'))
+        self.assertEqual(unread(found), WRITES)
+        self.assertEqual(len(found), len(WRITES) + len(READS), 'every listed read is in the tree')
+
+    def test_a_line_of_any_other_shape_that_names_the_binary_is_red(self):
+        """Each of PLANTED, put in a COPY of linux-docker/ (appended to that file; never run), turns the census red:
+        that line is left over, beside the three WRITES. 49a2004's census matched a command name or a redirection
+        right after the names, and missed each of the first eight (Opus r1 census_probe.txt) and both redirections
+        into "$HOME/bin/runner" (Codex r1 F2)."""
+        for rel, line in PLANTED:
+            with self.subTest(file=rel, line=line):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = os.path.join(tmp, 'linux-docker')
+                    shutil.copytree(os.path.join(REPO, 'linux-docker'), root)
+                    with open(os.path.join(root, rel), 'a') as f:
+                        f.write(line + '\n')
+                    left = unread(census(root))
+                    self.assertIn((rel, line.strip()), left)
+                    self.assertNotEqual(left, WRITES)
 
     def test_the_h2_7_texts_say_what_03_s_header_says(self):
         """H2a review r1, Opus F1: 03 real --image-only refuses a drifted render after its validate and before it

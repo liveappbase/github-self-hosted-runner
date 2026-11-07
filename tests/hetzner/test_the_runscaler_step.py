@@ -4,29 +4,45 @@ plan's M-3 with its r3 FOLD R-1 to R-6, and M-6). It changes ~/bin/runner, and o
 - VERSION: 03's PINNED (the default, v0.12.0) or its WAYBACK (v0.9.5); any other refuses. Under the ONE RUN AT A TIME
   lock. (a) Each precondition refuses with nothing changed and names its fix: pool-image.sh's PINS, VERSION, no
   updater window journal, no open image release (a config.toml.pre-image byte-equal to config.toml is one a `back`
-  closed: removed first, and said so; any other refuses, "accept, or back": R-4), the unit enabled, VERSION's download
-  in ~/build/dl by its sha256 (03's dl_of: the pinned one Install step 4's file, the way back's its own name). The
-  unit: active and started after config.toml's install (runscaler runs config.toml), or active with config.toml
-  installed after its start (a pending config: only this step's own render, byte for byte, goes on: R-1), or enabled
-  and down (failed, inactive, a crash loop: R-3). The INSTALLED binary may be unknown: this step is the fix.
-- (b) DONE ALREADY (R-5): the running process and ~/bin/runner are VERSION's and config.toml has the log-file line: no
-  stage and no restart, but READY, the running binary and the restart-cut scan; exit 0 only when READY.
+  closed: removed, and said so, once every other check passed, when runscaler started after config.toml's install or
+  the unit is down; with config.toml installed after runscaler started it is a `back` cut before its restart: refused,
+  naming `pool-image.sh back`, which finishes it; any other refuses, "accept, or back": R-4), the unit enabled,
+  VERSION's download in ~/build/dl by its sha256 (03's dl_of: the pinned one Install step 4's file, the way back's its
+  own name). The unit: active and started after config.toml's install (runscaler runs config.toml), or active with
+  config.toml installed after its start (a pending config: only this step's own render, byte for byte, goes on: R-1),
+  or enabled and down (failed, inactive, a crash loop: R-3), in both directions. The INSTALLED binary may be unknown:
+  this step is the fix.
+- (b) DONE ALREADY (R-5): runscaler started after config.toml's install, its process and ~/bin/runner are VERSION's,
+  and config.toml has the log-file line: no stage and no restart, but READY, the running binary and the restart-cut
+  scan; exit 0 only when READY. A config.toml installed after runscaler started is never DONE ALREADY (R-1).
 - (c)+(d) `03-runscaler.sh stage VERSION content|bytes`: the render (config.toml's image) is compared with config.toml
   BEFORE anything is installed (THE CONFIG COMPARE, image lines as content; or byte for byte); then this release's
-  runner-start, pool-ready, validate-class and unit (R-2), VERSION's runner into ~/bin/runner.new (both sha256s), and
-  `runner-start validate --staged`: the strict control, the version line and the validate run THE STAGED BINARY; PASS
-  only; then config.toml (only when it differs), THEN the rename of runner.new over ~/bin/runner.
+  runner-start, pool-ready, validate-class and unit (R-2), each PUBLISHED WHOLE (03's THE PUBLISH: into DEST.new in the
+  same folder, checked against its PIN, then renamed over DEST; the live file is never written in place, and a DEST.new
+  a cut left is removed by the next run), VERSION's runner into ~/bin/runner.new (both sha256s), and `runner-start
+  validate --staged`: the strict control, the version line and the validate run THE STAGED BINARY; PASS only; then
+  config.toml (only when it differs), THEN the rename of runner.new over ~/bin/runner. 03 real (a person's up) publishes
+  the four the same way (its check: each copy is its ~/build source byte for byte).
 - (e) the restart at idle (none when the unit is down); both shortcuts need THE RUNNING BINARY (R-6: the process's
   /proc/<MainPID>/exe, the cells' fake process table) to be VERSION's too; READY; the running binary VERSION's; the
-  restart-cut scan. (f) NEXT: the way back's lines, or the way forward's.
-- RESUME: a SIGKILL at each boundary of (c)-(e), the uncut run's own install, mv, systemctl and /healthz events, leaves
-  a pair the INSTALLED runner-start's guard starts (test_render.guard), and the same line again finishes it.
-- M-6: the updater's pass (this release's, ON and OFF) after the step and after the way back, and a pass DURING the
-  step's restart (its drain): what it holds, measured.
-Every Pool cell runs the real scripts (support.Pool; a fake clock, so no wait is real) in a throwaway container. The
-pinned runscaler is Pool's substitute; the way-back one test_render.way_back's (other bytes), with its own download.
-The host before the step: Install step 3 done, so its ~/bin/runner-start is the release before's (no selector:
-old_wrapper). (Named for its CI part, test_[!a-qr][!np]*.py: .github/workflows/release-check.yml.)
+  restart-cut scan; a FAIL there names the way back's two lines (or, on the way back, the way forward's). (f) NEXT: the
+  way back's lines, or the way forward's.
+- RESUME: a SIGKILL at each boundary of (c)-(e), the uncut run's own install, mv, systemctl and /healthz events, forward
+  from a config before H1, forward from H1's config, and on the way back, leaves a pair the INSTALLED runner-start's
+  guard starts (test_render.guard); the same line again finishes it, also after a reboot (runscaler started again on
+  the pair on disk) for each pair a cut leaves on disk. A copy cut midway (each of the four, forward and back, and in a
+  person's up) leaves each live file whole.
+- R-1's last sentence: an image `up` after the step was cut before its restart refuses and names the line that finishes
+  that pending config: `pool-image.sh runscaler`, or `pool-image.sh back` while a release is open; no text names a
+  document that is not in this repository.
+- M-6: the updater's pass (this release's, ON and OFF) after the step and after the way back, a pass DURING the step's
+  restart (its drain), and a pass that starts before the step and ends after it (the step runs inside it: the two
+  locks do not exclude each other): what it holds, measured; its control: the same pass with a candidate whose lines
+  are not config.toml's holds STOP HAND CHANGE.
+Every Pool cell runs the real scripts (support.Pool; a fake clock, so no wait is real) in a throwaway container, each
+subtest on a rig of its own. The pinned runscaler is Pool's substitute; the way-back one test_render.way_back's (other
+bytes), with its own download. The host before the step: Install step 3 done, so its ~/bin/runner-start is the release
+before's (no selector: old_wrapper). (Named for its CI part, test_[!a-qr][!np]*.py: .github/workflows/release-check.yml.)
 """
 import hashlib
 import io
@@ -35,11 +51,15 @@ import os
 import re
 import tarfile
 import time
+import types
 import unittest
 
-from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, sha256_file
+from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, ref, sha256_file
 from tests.hetzner.test_one_door import binary, files, unknown
-from tests.hetzner.test_render import WAYBACK_MARK, Before, assignment, fixture, function, older, starts, way_back
+from tests.hetzner.test_render import (H1HEAD, UPOLD, UPOLDV, UPNEW, UPV, WAYBACK_MARK, Before, assignment, fixture,
+                                       function, older, starts, way_back)
+from tests.hetzner.test_updater import MAIN, SMALL, candidate
+from tests.hetzner.test_verdict import plant_r1
 
 S03 = os.path.join(REPO, 'linux-docker', 'setup', '03-runscaler.sh')
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
@@ -161,6 +181,118 @@ def ino(p, name):
     return sha256_file(f), s.st_mtime_ns, s.st_ino
 
 
+def forward_h1(test):
+    """THE HOST AT H1 (b2eb739): forward() with config.toml H1's render, this release's but its first line (H1HEAD: the
+    one comment line that differs, so the step installs config.toml), in the second it was installed (runscaler runs
+    it)."""
+    g, p = forward(test)
+    g.put(p.rpath('config.toml'), H1HEAD + g.h1.split('\n', 1)[1])
+    return g, p
+
+
+WAYS = ('pre-H1 forward', 'H1 forward', 'the way back')
+
+
+def rig(test, way):
+    """A host before the step, for each of WAYS: (its Pool, the step's arguments, the runscaler the step installs
+    (sha256), the config.toml it ends with)."""
+    if way == 'the way back':
+        p, wb, pin = on_pinned(test)
+        return p, (WAYBACK,), wb, p.config()
+    g, p = (forward if way == 'pre-H1 forward' else forward_h1)(test)
+    return p, (), g.bin, g.h1
+
+
+# THE PUBLISH (03's header): the four files 03 installs from ~/build, each (SOURCE in ~/build, DEST in the home)
+PUBLISHED = (('bin/runner-start', 'bin/runner-start'), ('bin/pool-ready', 'bin/pool-ready'),
+             ('bin/validate-class', 'bin/validate-class'),
+             ('config/runscaler.service', '.config/systemd/user/runscaler.service'))
+
+
+def live(p):
+    """{DEST: sha256 (None: no file)} of the four files 03 publishes, as installed."""
+    return {d: sha256_file(os.path.join(p.HOME, d)) if os.path.isfile(os.path.join(p.HOME, d)) else None
+            for s, d in PUBLISHED}
+
+
+def sources(p):
+    """{DEST: sha256 of its ~/build SOURCE}: what each one is once published."""
+    return {d: sha256_file(os.path.join(p.build, s)) for s, d in PUBLISHED}
+
+
+def left_new(p):
+    """The four's DEST.new files that are there (a copy a cut left)."""
+    return [d + '.new' for s, d in PUBLISHED if os.path.lexists(os.path.join(p.HOME, d + '.new'))]
+
+
+def disk(p):
+    """What a start meets: ~/bin/runner, config.toml and the four published files: {name: sha256}."""
+    return dict(live(p), **{'bin/runner': rb(p), 'config.toml': sha256_file(p.rpath('config.toml'))})
+
+
+def on_disk(p, before, want, cfg):
+    """The pair a cut left on disk, as a key that is the same in every rig of a way (each Pool's substitute runscaler
+    has bytes of its own: its sandbox path): each of disk()'s files is `before` (as BEFORE, disk() before the cut),
+    `after` (what the step ends with: WANT, CFG's text, its ~/build source), both, or `other`."""
+    goal = dict(sources(p), **{'bin/runner': want, 'config.toml': hashlib.sha256(cfg.encode()).hexdigest()})
+    return tuple(sorted((k, ('before ' if v == before[k] else '') + ('after' if v == goal[k] else '') or 'other')
+                        for k, v in disk(p).items()))
+
+
+def reboot(test, p):
+    """runscaler started again on the pair on disk (a reboot, or systemd's own restart): its process runs ~/bin/runner's
+    bytes (hzlib.ran); the INSTALLED runner-start's guard starts that pair (the substitute runs no runner-start)."""
+    p.act('restart')
+    test.assertEqual(p.exe(), rb(p), 'the process a reboot started runs the binary on disk')
+    starts(test, p)
+
+
+def cut_step(test, at='mv-done:runner'):
+    """forward(), then the step cut by a SIGKILL of its group AT (by default after both renames, before its restart:
+    config.toml and ~/bin/runner installed, runscaler not restarted). Returns (g, p)."""
+    g, p = forward(test)
+    p.hooks((at, 'kill'))
+    step(p)
+    test.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
+    p.hooks()
+    test.assertLessEqual(p.unit_now()['start'], int(os.stat(p.rpath('config.toml')).st_mtime), 'pending: no restart')
+    return g, p
+
+
+def cut_back(test):
+    """forward(), a person's `up` to UPV, then its `back` cut in its idle wait (at its first /healthz read: an ssh drop),
+    after it put the rollback back as config.toml and before its restart (Opus r1 F1's probe): config.toml.pre-image is
+    config.toml byte for byte, installed after the running process (UPNEW's) started. Returns (g, p, the rollback)."""
+    g, p = forward(test)
+    r = p.pool('up', UPV)
+    test.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+    keep = p.rpath('config.toml.pre-image')
+    # the process up started: a start in REAL seconds after up's install (the fake clock runs ahead of every real
+    # mtime, so back's install would read as older than that start), the clock waited for (a state), then named
+    m = int(os.stat(p.rpath('config.toml')).st_mtime)
+    while int(time.time()) <= m:
+        time.sleep(0.05)
+    p.set_unit(start=m + 1, pid=p.unit_now()['pid'])
+    while int(time.time()) <= m + 1:
+        time.sleep(0.05)
+    p.hooks(('healthz-read', 'kill'))
+    p.write(p.path('logs', 'runner.log'), '')
+    r = p.unattended('back', prefix=())
+    test.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
+    p.hooks()
+    test.assertEqual(sha256_file(keep), sha256_file(p.rpath('config.toml')), 'back put the rollback in place')
+    test.assertLessEqual(p.unit_now()['start'], int(os.stat(p.rpath('config.toml')).st_mtime), 'pending: no restart')
+    return g, p, keep
+
+
+def up_record(p, version, d):
+    """The build record of runner VERSION naming image d (the registry serves d; d's runner is VERSION)."""
+    p.record(version, d)
+    p.docker['versions'][ref(d)] = version + '\n'
+    if d not in p.curl['served']:
+        p.curl['served'] = p.curl['served'] + [d]
+
+
 class Text(unittest.TestCase):
     def test_the_download_s_name_is_one_rule_in_03_and_pool_image_sh(self):
         """dl_of VERSION: the file of VERSION's download in ~/build/dl, byte for byte the same function in both (03
@@ -205,6 +337,30 @@ class Text(unittest.TestCase):
                 self.assertIsNone(function(path, n), (path, n))
         self.assertEqual(rr.count('\nrr_same_() {'), 1)
 
+    def test_no_text_names_a_document_that_is_not_in_this_repository(self):
+        """R-1's last sentence (Codex F3, Opus F3): every text of linux-docker/ (its programs, configs and README) that
+        names a document (a file name ending .md, or a path under docs/) names one that is in this repository (from
+        its root, from linux-docker/, or from the naming file's folder). 49a2004's up named docs/runners.md section 3b.
+        The control: the references that are there (README.md, core/README.md) are found."""
+        root = os.path.join(REPO, 'linux-docker')
+        pat = re.compile(r'(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.-]+\.md\b|docs/[A-Za-z0-9_./-]+')
+        found, missing = set(), []
+        for d, _, names in os.walk(root):
+            for n in sorted(names):
+                try:
+                    with open(os.path.join(d, n), encoding='utf-8') as f:
+                        lines = f.read().splitlines()
+                except UnicodeDecodeError:
+                    continue
+                for i, l in enumerate(lines, 1):
+                    for m in pat.finditer(l):
+                        ref_ = m.group(0).rstrip('.')
+                        found.add(ref_)
+                        if not any(os.path.exists(os.path.join(b, ref_)) for b in (REPO, root, d)):
+                            missing.append('%s:%d %s' % (os.path.relpath(os.path.join(d, n), REPO), i, ref_))
+        self.assertEqual(missing, [])
+        self.assertTrue({'core/README.md', 'linux-docker/README.md'} <= found, sorted(found))
+
 
 class Readme(unittest.TestCase):
     def section(self):
@@ -218,7 +374,7 @@ class Readme(unittest.TestCase):
         sec = self.section()
         self.assertIn("'bash -s -- runscaler' < linux-docker/setup/pool-image.sh", sec)
         order = ('`~/bin/runner.new`', 'config.toml first', 'then renames', 'at idle', 'for READY', 'the process that runs',
-                 'cut')
+                 'any job a restart cut')
         at = [sec.find(w) for w in order]
         self.assertNotIn(-1, at, list(zip(order, at)))
         self.assertEqual(at, sorted(at), list(zip(order, at)))
@@ -226,6 +382,15 @@ class Readme(unittest.TestCase):
                       'goes live with this restart', sec)
         for w in ('Install step 3 for both users', 'Install step 4', 'at a quiet time', 'DONE ALREADY',
                   'accept or back', 'enable'):
+            self.assertIn(w, sec)
+
+    def test_what_a_cut_leaves_and_the_back_it_waits_for(self):
+        """THE PUBLISH (Codex r1 F1): each file 03 installs is copied beside itself and renamed over it, so a cut never
+        leaves a partial file. R-4 (Opus r1 F1): the rollback that config.toml already is goes only once runscaler runs
+        it (or its unit is down); a `back` cut before its restart stops the step, which names `pool-image.sh back`."""
+        sec = self.section()
+        for w in ('renamed over it, so a cut never leaves a partial file', 'a `back` cut before its restart',
+                  'run `pool-image.sh back` again first'):
             self.assertIn(w, sec)
 
     def test_the_way_back_s_two_lines_are_the_files_the_step_reads(self):
@@ -246,10 +411,12 @@ class Readme(unittest.TestCase):
         self.assertRegex(sec, r'(?i)never `runner update`')
 
     def test_the_updater_after_the_step_as_measured(self):
-        """M-6, as measured (UpdaterAfterTheStep): no candidate and no rollback; a pass during the step's restart holds
-        STOP POOL DOWN, and the next pass clears it once runscaler runs."""
+        """M-6, as measured (UpdaterAfterTheStep): no candidate and no rollback; a pass during the step's restart, or one
+        that started before the step and reads runscaler while it restarts (Codex r1's M-6 row), holds STOP POOL DOWN,
+        and the next pass clears it once runscaler runs."""
         sec = self.section()
-        for w in ('no candidate', 'rolls nothing back', '`STOP POOL DOWN`', 'the next pass clears it'):
+        for w in ('no candidate', 'rolls nothing back', '`STOP POOL DOWN`', 'the next pass clears it',
+                  'one that started before the step and reads runscaler while it restarts'):
             self.assertIn(w, sec)
 
     def test_every_text_that_names_the_step(self):
@@ -338,24 +505,32 @@ class Forward(unittest.TestCase):
                                  sha256_file(os.path.join(p.build, 'bin', 'runner-start')))
 
     def test_a_runner_new_a_cut_left_is_removed(self):
-        """(c): a ~/bin/runner.new a SIGKILL left (other bytes) is gone after the next run of the step, a refusal at its
-        compare too (the trap: 03 names it from its start), and a run that goes on installs VERSION's own runner."""
+        """(c), THE PUBLISH: a ~/bin/runner.new a SIGKILL left (other bytes), and a DEST.new of each of the four files 03
+        publishes (a copy a cut left), are gone after the next run of the step, a refusal at its compare too (the trap:
+        03 names them from its start), and a run that goes on installs VERSION's own runner and this release's four.
+        49a2004 leaves each DEST.new (it made none)."""
         for how in ('a refusal', 'a run that goes on'):
             with self.subTest(how):
                 g, p = forward(self)
                 new = os.path.join(p.HOME, 'bin', 'runner.new')
                 p.write(new, '#!/bin/sh\nexit 99\n', 0o755)
+                for s, d in PUBLISHED:
+                    p.write(os.path.join(p.HOME, d + '.new'), 'a copy a cut left\n', 0o600)
                 if how == 'a refusal':
                     g.label('linux-ci-x')
                 r = step(p)
                 self.assertEqual(r.returncode, 1 if how == 'a refusal' else 0, r.stdout[-4000:] + r.stderr)
                 self.assertFalse(os.path.lexists(new))
+                self.assertEqual(left_new(p), [])
                 self.assertEqual(rb(p), g.wb if how == 'a refusal' else g.bin)
+                if how != 'a refusal':
+                    self.assertEqual(live(p), sources(p))
 
     def test_the_stage_installs_only_the_pinned_files(self):
         """R-2: `03 stage` itself (a person may run it by hand, past pool-image.sh's PINS) refuses a ~/build file that is
         not its PIN before it installs that file: runner-start is this release's, pool-ready not, so 03 stops at
-        pool-ready, config.toml and ~/bin/runner as they were, no runner.new."""
+        pool-ready, config.toml and ~/bin/runner as they were, no runner.new. THE PUBLISH's control (Codex F1): the
+        live pool-ready as it was, and no DEST.new left."""
         g, p = forward(self)
         with open(os.path.join(p.build, 'bin', 'pool-ready'), 'a') as f:
             f.write('# not the pinned copy\n')
@@ -366,6 +541,52 @@ class Forward(unittest.TestCase):
         self.assertEqual((ino(p, 'config.toml'), binary(p)), (cfg, b0))
         self.assertEqual(sha256_file(os.path.join(p.HOME, 'bin', 'pool-ready')), pr)
         self.assertFalse(os.path.lexists(os.path.join(p.HOME, 'bin', 'runner.new')))
+        self.assertEqual(left_new(p), [])
+
+    def test_r_3_forward_with_a_down_unit(self):
+        """R-3 forward (Opus r1 F5; Codex's coverage table): runscaler v0.9.5's unit enabled and failed (or crash-looping):
+        the step compares with config.toml, installs v0.12.0 and starts it with no idle wait (no /healthz read before
+        the start), and v0.12.0 runs. (Green on 49a2004: a cell it lacked; its red is the mutants of R-3, P6 and P7.)"""
+        for how in ('failed', 'crash loop'):
+            with self.subTest(how):
+                g, p = forward(self)
+                if how == 'failed':
+                    p.set_unit(active=False, failed=True)
+                else:
+                    p.set_unit(runner='crash')
+                    p.hooks(('systemctl:restart-begin', 'serve'))
+                r = step(p)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertEqual((rb(p), p.exe(), p.config()), (g.bin, g.bin, g.h1))
+                ev = p.events()
+                started = next(i for i, e in enumerate(ev) if re.fullmatch(r'process [0-9]+ started [0-9]+', e))
+                self.assertNotIn('healthz read', ev[:started])
+                self.assertEqual(restarts(p), ['--user restart runscaler'])
+
+    def test_a_fail_after_the_restart_names_the_other_way_s_lines(self):
+        """(e), Opus r3 F3 (r1 F5): a pool that is not READY after the restart: FAIL, exit 1, and its line names the way
+        back's two lines (its download, then `pool-image.sh runscaler 0.9.5`); on the way back, the way forward's
+        (`pool-image.sh runscaler`). 49a2004's again() named only the README section."""
+        for way in ('forward', 'the way back'):
+            with self.subTest(way):
+                if way == 'forward':
+                    g, p = forward(self)
+                    args = ()
+                else:
+                    p, wb, pin = on_pinned(self)
+                    args = (WAYBACK,)
+                p.curl['healthz'] = healthz(**{'linux-ci-main': {'ready': False}})
+                r = step(p, *args)
+                self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+                fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
+                self.assertEqual(len(fail), 1, fail)
+                self.assertIn('not READY', fail[0])
+                if way == 'forward':
+                    self.assertIn('mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/%s %s' % (WBDL, URL % WAYBACK),
+                                  fail[0])
+                    self.assertIn('pool-image.sh runscaler %s' % WAYBACK, fail[0])
+                else:
+                    self.assertRegex(fail[0], r'the way forward again: pool-image\.sh runscaler(?! ?[0-9])')
 
     def test_a_restart_that_leaves_the_old_binary_running_is_a_fail(self):
         """(e): after READY the step reads the running binary: the restart's stop did not stop the old process (it
@@ -462,16 +683,131 @@ class TheWayBack(unittest.TestCase):
 
 
 @needs_container
+class Publish(unittest.TestCase):
+    """THE PUBLISH (Codex r1 F1, P1): 03 (the stage and real) installs runner-start, pool-ready, validate-class and the
+    unit into DEST.new in the same folder, checks it (the stage: its PIN; real: its ~/build source byte for byte), then
+    renames it over DEST: the live file is never written in place. The fault (support.INSTALL_STUB's cut-copy): the
+    copy of one named file writes half of it into its destination, then pool-image.sh's group is SIGKILLed. 49a2004
+    copies onto the live file: it is then partial (an empty unit file reads as masked after a reboot, Codex F1)."""
+
+    def cut_copy(self, p, src, run):
+        """RUN (a callable) with the copy of ~/build's SRC cut midway: the cut ran, RUN did not end well, and each of
+        the four live files is whole: as it was, or its source (a partial one is neither)."""
+        before, srcs = live(p), sources(p)
+        p.hooks(('cut-copy:' + os.path.basename(src),))
+        r = run()
+        self.assertTrue([e for e in p.events() if e.startswith('cut-copy ')], 'the cut ran')
+        self.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
+        self.assertNotEqual(r.returncode, 0)
+        p.hooks()
+        now = live(p)
+        for k in now:
+            self.assertIn(now[k], (before[k], srcs[k]), 'the live %s is not whole' % k)
+
+    def test_a_copy_cut_midway_leaves_each_live_file_whole_and_the_same_line_finishes(self):
+        """Each of the four, forward (from v0.9.5 and a config before H1) and on the way back (from v0.12.0): the step
+        cut inside the copy of that file: each live file whole; after a reboot (runscaler started again on the pair on
+        disk) the INSTALLED runner-start's guard starts that pair; the same line then finishes (VERSION's runscaler
+        runs, the four are this release's, no DEST.new left)."""
+        for way in ('forward', 'the way back'):
+            for s, d in PUBLISHED:
+                with self.subTest(way=way, file=d):
+                    if way == 'forward':
+                        g, p = forward(self)
+                        args, want = (), g.bin
+                    else:
+                        p, wb, pin = on_pinned(self)
+                        args, want = (WAYBACK,), wb
+                    self.cut_copy(p, s, lambda: step(p, *args))
+                    reboot(self, p)
+                    r = step(p, *args)
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    self.assertEqual((rb(p), p.exe()), (want, want))
+                    self.assertEqual(live(p), sources(p))
+                    self.assertEqual(left_new(p), [])
+
+    def test_03_real_from_a_person_s_up_publishes_each_file_whole_too(self):
+        """03 real (here a person's `up`, its `03 real DIGEST --image-only`) the same way: each of the four, the copy cut
+        midway: each live file whole, config.toml not changed; after a reboot the installed guard starts the pair; the
+        same `up` line then ends with POOL IMAGE DONE, the four this release's, no DEST.new left."""
+        for s, d in PUBLISHED:
+            with self.subTest(file=d):
+                g = Before(self)
+                g.way_back()
+                p = g.p
+                p.fake_clock()
+                cfg = ino(p, 'config.toml')
+                self.cut_copy(p, s, lambda: p.unattended('up', UPV, prefix=()))
+                self.assertEqual(ino(p, 'config.toml'), cfg)
+                reboot(self, p)
+                r = p.unattended('up', UPV, prefix=())
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertIn('POOL IMAGE DONE (up): %s' % ref(UPNEW), r.stdout)
+                self.assertEqual(live(p), sources(p))
+                self.assertEqual(left_new(p), [])
+
+    def test_a_copy_that_is_not_its_source_is_refused_and_the_live_file_stays(self):
+        """THE PUBLISH's check: a copy that gets a line more after it was made (support.INSTALL_STUB's taint-copy) is
+        refused before its rename: the stage by its PIN, real (a person's up) by its source's bytes. Exit 1, the live
+        file as it was, no DEST.new left (the trap), nothing restarted, ~/bin/runner and config.toml as they were.
+        49a2004 checks the live file after it wrote it (the stage), or not at all (real)."""
+        for how in ('the stage', "a person's up"):
+            for s, d in PUBLISHED:
+                with self.subTest(how=how, file=d):
+                    if how == 'the stage':
+                        g, p = forward(self)
+                    else:
+                        g = Before(self)
+                        g.way_back()
+                        p = g.p
+                        p.fake_clock()
+                        p.hooks()
+                    before, cfg, b0 = live(p), ino(p, 'config.toml'), binary(p)
+                    p.hooks(('taint-copy:' + os.path.basename(s),))
+                    r = step(p) if how == 'the stage' else p.unattended('up', UPV, prefix=())
+                    self.assertTrue([e for e in p.events() if e.startswith('taint-copy ')], 'the taint ran')
+                    self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+                    self.assertEqual(live(p)[d], before[d])
+                    self.assertEqual(left_new(p), [])
+                    self.assertEqual((ino(p, 'config.toml'), binary(p)), (cfg, b0))
+                    self.assertEqual(restarts(p), [])
+
+
+@needs_container
 class Resume(unittest.TestCase):
-    def test_a_sigkill_at_each_boundary_leaves_a_pair_that_starts_and_the_same_line_finishes_it(self):
-        """M-3 (b)'s cut cell (R-1): the boundaries are the uncut run's own events (each install and mv destination,
-        before and after; the restart, before and after; the idle wait's first /healthz read). At each, a SIGKILL of
-        the step's process group (no trap runs) leaves a pair the INSTALLED runner-start's guard starts (whichever
-        runner-start is installed by then), and the same line again ends with v0.12.0 running the render, no
-        runner.new left, at most one restart. The mutant (the binary renamed before config.toml) leaves the pinned
-        runscaler with the config with no line: the guard refuses."""
-        g, p = forward(self)
-        r = step(p)
+    """M-3 (b)'s cut cells (R-1; Opus r1 F5, Codex's coverage table): the boundaries are the uncut run's own events (each
+    install and mv destination, before and after; the restart, before and after; the idle wait's first /healthz read),
+    for each of WAYS. At each, a SIGKILL of the step's process group (no trap runs) leaves a pair the INSTALLED
+    runner-start's guard starts (whichever runner-start is installed by then), and the same line again ends with
+    VERSION's runscaler running the config it ends with, no runner.new and no DEST.new left, at most one restart. For
+    each pair a cut leaves on disk (on_disk: the first boundary that leaves it), once more with a reboot before the
+    rerun: runscaler started on that pair (its guard starts it), then the same line finishes. The mutant (the binary
+    renamed before config.toml) leaves the pinned runscaler with the config with no line: the guard refuses."""
+
+    def cut(self, way, at, boot):
+        p, args, want, cfg = rig(self, way)
+        before = disk(p)
+        p.hooks((at, 'kill'))
+        r = step(p, *args)
+        self.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
+        self.assertNotEqual(r.returncode, 0)
+        starts(self, p)
+        p.hooks()
+        pair = on_disk(p, before, want, cfg)
+        if boot:
+            reboot(self, p)
+        n = len(restarts(p))
+        r = step(p, *args)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertEqual((rb(p), p.exe(), p.config()), (want, want, cfg))
+        self.assertFalse(os.path.lexists(os.path.join(p.HOME, 'bin', 'runner.new')))
+        self.assertEqual(left_new(p), [])
+        self.assertLessEqual(len(restarts(p)) - n, 1)
+        return pair
+
+    def matrix(self, way):
+        p, args, want, cfg = rig(self, way)
+        r = step(p, *args)
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
         at = []
         for e in p.events():
@@ -479,23 +815,31 @@ class Resume(unittest.TestCase):
             if m and '%s:%s' % m.groups() not in at:
                 at += ['%s:%s' % m.groups(), '%s-done:%s' % m.groups()]
         at += ['healthz-read', 'systemctl:restart-begin', 'systemctl:restart-done']
-        for name in ('install:runner.new', 'mv:config.toml', 'mv:runner'):
+        for name in ('install:runner.new', 'mv:runner') + (('mv:config.toml',) if way != 'the way back' else ()):
             self.assertIn(name, at)
+        pairs = set()
         for a in at:
-            with self.subTest(a):
-                g, p = forward(self)
-                p.hooks((a, 'kill'))
-                r = step(p)
-                self.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
-                self.assertNotEqual(r.returncode, 0)
-                starts(self, p)
-                p.hooks()
-                n = len(restarts(p))
-                r = step(p)
-                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-                self.assertEqual((rb(p), p.exe(), p.config()), (g.bin, g.bin, g.h1))
-                self.assertFalse(os.path.lexists(os.path.join(p.HOME, 'bin', 'runner.new')))
-                self.assertLessEqual(len(restarts(p)) - n, 1)
+            pair = None
+            with self.subTest(way=way, at=a):
+                pair = self.cut(way, a, False)
+            if pair is not None and pair not in pairs:
+                pairs.add(pair)
+                with self.subTest(way=way, at=a, reboot=True):
+                    self.cut(way, a, True)
+        self.assertGreaterEqual(len(pairs), 2, 'the cuts left the pair before the step and the one after it')
+        self.assertLess(len(pairs), len(at), 'a pair is a class of the boundaries, not each one: %r' % sorted(pairs))
+
+    def test_a_sigkill_at_each_boundary_leaves_a_pair_that_starts_and_the_same_line_finishes_it(self):
+        """Forward from v0.9.5 and a config before H1 (no log-file line)."""
+        self.matrix('pre-H1 forward')
+
+    def test_the_same_forward_from_h1_s_config(self):
+        """Forward from v0.9.5 and H1's config (the line, H1's header: the step installs config.toml for a comment)."""
+        self.matrix('H1 forward')
+
+    def test_the_same_on_the_way_back(self):
+        """The way back from v0.12.0 (config.toml already the render: not installed again)."""
+        self.matrix('the way back')
 
     def test_a_config_a_bare_03_real_installed_goes_live_with_this_restart(self):
         """R-1: config.toml installed after runscaler started, and byte for byte this step's render (a bare `03 real`
@@ -565,19 +909,138 @@ class Keep(unittest.TestCase):
         self.assertEqual(files(p), before)
         self.assertEqual((p.calls('runner'), restarts(p)), ([], []))
 
+    def test_a_back_cut_before_its_restart_is_finished_by_back_first(self):
+        """R-4, Opus r1 F1 (P2): a person's `back` cut in its idle wait (cut_back: config.toml.pre-image is config.toml
+        byte for byte, installed after the running process started, the unit active) is not a release a back closed:
+        the step refuses before any change (the rollback and config.toml keep sha256 and mtime: every file of the home
+        as it was), runs no runscaler, restarts nothing, and its line names `pool-image.sh back`, which finishes it.
+        Then `back`: exit 0, one restart; then the step: the rollback removed (runscaler now started after config.toml's
+        install), exit 0, v0.12.0 runs. 49a2004 removed the rollback and then refused at its stage: `back` and `up`
+        refused too."""
+        g, p, keep = cut_back(self)
+        before, b0, n = files(p), binary(p), len(restarts(p))
+        r = step(p)
+        self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+        fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
+        self.assertTrue([l for l in fail if re.search(r'(?i)\brun pool-image\.sh back\b', l)],
+                        'no FAIL line names the line to run, `pool-image.sh back` (a cause it names is not one): %r' % fail)
+        self.assertEqual(len(fail), 1, fail)
+        self.assertIn('nothing changed', fail[0])
+        self.assertEqual(files(p), before)
+        self.assertEqual(binary(p), b0)
+        self.assertFalse(os.path.lexists(os.path.join(p.HOME, 'bin', 'runner.new')))
+        self.assertEqual((p.calls('runner'), len(restarts(p))), ([], n))
+        r = p.pool('back')
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertEqual(len(restarts(p)), n + 1)
+        r = step(p)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertIn('removed %s' % keep, r.stdout)
+        self.assertFalse(os.path.lexists(keep))
+        self.assertEqual((rb(p), p.exe(), p.config()), (g.bin, g.bin, g.h1))
+
+    def test_control_a_down_unit_s_byte_equal_rollback_is_removed(self):
+        """R-4's control for a down unit (Opus r1 F1): config.toml.pre-image byte-equal to config.toml, the unit enabled
+        and failed: nothing runs, so the step's own start runs config.toml: the rollback is removed, said so, and the
+        step goes on; v0.12.0 runs."""
+        g, p = forward(self)
+        g.put(p.rpath('config.toml.pre-image'), g.pre)
+        p.set_unit(active=False, failed=True)
+        r = step(p)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertIn('removed %s' % p.rpath('config.toml.pre-image'), r.stdout)
+        self.assertFalse(os.path.lexists(p.rpath('config.toml.pre-image')))
+        self.assertEqual((rb(p), p.exe()), (g.bin, g.bin))
+
+    def test_a_byte_equal_rollback_stays_when_a_later_check_refuses(self):
+        """R-4's order (a builder's choice, Opus r1 F5): a byte-equal config.toml.pre-image (runscaler started after
+        config.toml's install) is removed only once every other check passed: with no download (a later check) the step
+        refuses with every file of the home as it was, the rollback too. The mutant (the removal above the download
+        check) removes it."""
+        g, p = forward(self)
+        g.put(p.rpath('config.toml.pre-image'), g.pre)
+        os.remove(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz'))
+        before = files(p)
+        r = step(p)
+        self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+        self.assertIn(URL % PINNED, r.stdout)
+        self.assertEqual(files(p), before)
+        self.assertTrue(os.path.lexists(p.rpath('config.toml.pre-image')))
+
+    def test_r_4_on_the_way_back(self):
+        """R-4 on the way back (Opus r3 F4, r1 F5): on v0.12.0, an image `up`, then its `back` (config.toml.pre-image
+        stays, byte-equal to config.toml, and runscaler restarted on it), then `runscaler 0.9.5`: the rollback is
+        removed, said so, exit 0, v0.9.5 runs config.toml."""
+        p, wb, pin = on_pinned(self)
+        p.curl['served'] = [V2]           # the registry serves the image the pool runs (the rollback's): back needs it
+        up_record(p, UPV, UPNEW)
+        r = p.pool('up', UPV)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        r = p.pool('back')
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        keep = p.rpath('config.toml.pre-image')
+        self.assertEqual(sha256_file(keep), sha256_file(p.rpath('config.toml')))
+        cfg = p.config()
+        r = step(p, WAYBACK)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertIn('removed %s' % keep, r.stdout)
+        self.assertFalse(os.path.lexists(keep))
+        self.assertEqual((rb(p), p.exe(), p.config()), (wb, wb, cfg))
+        starts(self, p)
+
+
+@needs_container
+class UpAfterACut(unittest.TestCase):
+    """R-1's last sentence (Codex r1 F3, Opus r1 F3): a person's `up` that refuses a config.toml installed after
+    runscaler started names the line that finishes that pending config, in both of its branches (another image; the
+    running version): `pool-image.sh runscaler` (no release open: the step cut before its restart), or `pool-image.sh
+    back` (a release open: its back cut before its restart). Nothing changed, and no document outside this repository
+    (49a2004 named docs/runners.md section 3b, or nothing). Each control: that line, then the same up passes."""
+
+    def refuses(self, p, version, names):
+        before, b0 = files(p), binary(p)
+        r = p.pool('up', version)
+        self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+        fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
+        self.assertEqual(len(fail), 1, fail)
+        self.assertRegex(fail[0], r'(?i)\brun %s\b' % re.escape(names), 'the line to run (not a cause it names)')
+        self.assertNotIn('docs/', fail[0])
+        self.assertEqual((files(p), binary(p)), (before, b0))
+
+    def test_an_up_after_a_cut_names_the_line_that_finishes_it(self):
+        for case in ('another image', 'the running version', 'the running version, a release open'):
+            with self.subTest(case):
+                if case == 'the running version, a release open':
+                    g, p, keep = cut_back(self)
+                    fix = 'pool-image.sh back'
+                else:
+                    g, p = cut_step(self)
+                    fix = 'pool-image.sh runscaler'
+                up_record(p, UPOLDV, UPOLD)
+                version = UPV if case == 'another image' else UPOLDV
+                n = len(restarts(p))
+                self.refuses(p, version, fix)
+                self.assertEqual(len(restarts(p)), n)
+                r = step(p) if fix == 'pool-image.sh runscaler' else p.pool('back')
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                r = p.pool('up', version)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertIn('POOL IMAGE DONE (up)', r.stdout)
+
 
 @needs_container
 class DoneAlready(unittest.TestCase):
     def test_done_already_restarts_nothing_and_still_checks(self):
         """R-5: after the step, the same line: DONE ALREADY, no stage (no runscaler call), no restart, no file changed,
         exit 0 when READY. A job a restart cut (a `Job started for unknown runner` record since config.toml's install,
-        a cut before the first run's scan) is named; a pool that is not READY exits 1."""
-        g, p = forward(self)
-        r = step(p)
-        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-        n = len(restarts(p))
+        a cut before the first run's scan) is named; a pool that is not READY exits 1. Each case on a rig and a first
+        step of its own (Opus r1 F6: no case reads what another one left)."""
         for case in ('ready', 'a cut job', 'not ready'):
             with self.subTest(case):
+                g, p = forward(self)
+                r = step(p)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                n = len(restarts(p))
                 if case == 'a cut job':
                     with open(p.rpath('runner.log'), 'a') as f:
                         f.write('%s WARN linux-ci-main: Job started for unknown runner runnerName=runner-cut01\n'
@@ -594,6 +1057,25 @@ class DoneAlready(unittest.TestCase):
                     self.assertRegex(r.stdout, r'WARN a restart since this config was installed .*runner-cut01')
                 if case == 'not ready':
                     self.assertIn('not READY', r.stdout)
+
+    def test_a_config_installed_after_runscaler_started_is_never_done_already(self):
+        """R-1 and R-5 (a builder's choice, Opus r1 F5 and its ProbePendingOnPinned): on the pinned host (v0.12.0 runs,
+        ~/bin/runner v0.12.0), a bare `03 real` installs config.toml again after runscaler started: the step is not
+        DONE ALREADY: its stage (rule bytes: config.toml is its render, not installed again) and ONE restart, exit 0, so
+        that config goes live with this restart. The mutant (DONE ALREADY with no started_after) restarts nothing."""
+        p, wb, pin = on_pinned(self)
+        r = p.s03('real')
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertGreaterEqual(int(os.stat(p.rpath('config.toml')).st_mtime), p.unit_now()['start'], 'pending')
+        cfg = ino(p, 'config.toml')
+        r = step(p)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertNotIn('DONE ALREADY', r.stdout)
+        self.assertIn('== 03-runscaler.sh stage %s bytes' % PINNED, r.stdout)
+        self.assertEqual(ino(p, 'config.toml'), cfg)
+        self.assertEqual(restarts(p), ['--user restart runscaler'])
+        self.assertEqual(p.exe(), pin)
+        self.assertGreater(p.unit_now()['start'], int(os.stat(p.rpath('config.toml')).st_mtime))
 
 
 @needs_container
@@ -639,11 +1121,24 @@ class Refusals(unittest.TestCase):
                 self.assertIn('runscaler [VERSION]', r.stdout)
 
 
+def state(p, on=False, fam=None):
+    """The updater's state.json: ON or OFF, hz-docker's family FAM (none: no family yet)."""
+    os.makedirs(Pool.STATE, mode=0o700, exist_ok=True)
+    p.write(STATE, json.dumps({'format': 1, 'on': on, 'families': {'hz-docker': fam} if fam else {}}) + '\n', 0o600)
+
+
+def held(p):
+    """hz-docker's held STOPs in the updater's state."""
+    st = json.loads(p.read(STATE))
+    return [s['stop'] for s in st.get('families', {}).get('hz-docker', {}).get('stops', [])]
+
+
 @needs_container
 class UpdaterAfterTheStep(unittest.TestCase):
     """M-6 MEASURED: this release's updater (3c-1: it switches nothing, so it has no candidate) after the step and after
-    the way back, OFF then ON, and a pass DURING the step's restart (the stop job's drain: the hook at its start runs
-    `runner-updater pass`). The build log has the measured lines."""
+    the way back, OFF then ON, a pass DURING the step's restart (the stop job's drain: the hook at its start runs
+    `runner-updater pass`), and a pass that starts before the step and ends after it. The fix log has the measured
+    lines. Each subtest on a rig of its own (Opus r1 F6)."""
 
     def on(self, p, on):
         st = json.loads(p.read(STATE))
@@ -654,13 +1149,17 @@ class UpdaterAfterTheStep(unittest.TestCase):
         """A pass during the restart's drain holds STOP POOL DOWN (no runscaler runs then); the next pass (OFF) clears
         it once runscaler runs; a pass ON then runs the core (r1, keep) and holds nothing: no candidate, no rollback
         window, no STOP (no HAND CHANGE for a config whose content changed by the log-file line and comments, a binary
-        changed, a restart outside a window). The same after the way back."""
-        g, p = forward(self)
-        os.makedirs(Pool.STATE, mode=0o700, exist_ok=True)
-        p.write(STATE, json.dumps({'format': 1, 'on': False, 'families': {}}) + '\n', 0o600)
-        p.set_unit(drain=60)
-        for args in ((), (WAYBACK,)):
-            with self.subTest(args=args):
+        changed, a restart outside a window). The same after the way back, from the pinned host."""
+        for way in ('forward', 'the way back'):
+            with self.subTest(way):
+                if way == 'forward':
+                    g, p = forward(self)
+                    args = ()
+                else:
+                    p, wb, pin = on_pinned(self)
+                    args = (WAYBACK,)
+                state(p)
+                p.set_unit(drain=60)
                 p.hooks(('systemctl:stop-begin', 'updater-pass'))
                 r = step(p, *args)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
@@ -680,6 +1179,78 @@ class UpdaterAfterTheStep(unittest.TestCase):
                     self.assertIsNone(fam.get('candidate'), st)
                     self.assertEqual([s['stop'] for s in fam.get('stops', [])], [], st)
                     self.assertIsNone(p.window())
+
+    def test_control_a_candidate_whose_lines_are_not_config_toml_s_holds_hand_change(self):
+        """Opus r1 F4 (its r3 F9 (d)): the cell above's "no HAND CHANGE" can fail. After the step, a pass ON with R1
+        planted to say rollback (test_verdict.plant_r1, the real core's answer with hz-docker's verdict set): with a
+        candidate whose lines are not config.toml's (UPNEW's; config.toml runs UPOLD), it holds STOP HAND CHANGE (a
+        rollback would replace a file its window did not write); with no candidate (the cell above's rig, as this
+        release makes it), it holds none."""
+        for cand in (False, True):
+            with self.subTest(candidate=cand):
+                g, p = forward(self)
+                r = step(p)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                lines = {MAIN: ref(UPNEW), SMALL: ref(UPNEW)}
+                self.assertNotIn(ref(UPNEW), p.config())
+                state(p, True, {'candidate': candidate(p.clock() - 60, lines=lines),
+                                'previous': {MAIN: ref(UPOLD), SMALL: ref(UPOLD)}} if cand else None)
+                plant_r1(types.SimpleNamespace(p=p, plant=lambda rel, text: p.write(os.path.join(p.build, rel), text)))
+                rr = p.updater('pass')
+                if cand:
+                    self.assertIn('STOP HAND CHANGE', rr.stdout, rr.stdout[-4000:] + rr.stderr)
+                    self.assertEqual(held(p), ['HAND CHANGE'])
+                else:
+                    self.assertEqual(rr.returncode, 0, rr.stdout[-4000:] + rr.stderr)
+                    self.assertIn("R1 says rollback for hz-docker, but it has no candidate", rr.stdout)
+                    self.assertNotIn('HAND CHANGE', rr.stdout)
+                    self.assertEqual(held(p), [])
+                self.assertIsNone(p.window())
+
+    def test_a_pass_that_starts_before_the_step_and_ends_after_it(self):
+        """Codex r1's M-6 row, MEASURED: the locks do not exclude it (the step takes pool-image.sh's own lock, a pass
+        the updater lock), so the whole step runs inside a pass (support's runscaler-step action at the pass's Nth
+        `systemctl show`, each N a plain pass reaches; OFF and ON). Each: the step ends with POOL RUNSCALER DONE, the
+        pass exits 0 and holds no HAND CHANGE, no candidate and no window; it holds STOP POOL DOWN when the step's
+        restart came inside its RUNS check (the measured N: 2 and 3), else nothing; the next pass holds nothing (it
+        clears POOL DOWN: runscaler RUNS). Both outcomes come out (a uniform result would be a harness that measured
+        nothing)."""
+        seen = set()
+        for on in (False, True):
+            g, p = forward(self)
+            state(p, on)
+            p.count_shows()
+            r = p.updater('pass')
+            self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+            n = p.unit_now()['shows']
+            self.assertGreaterEqual(n, 4, 'a pass reads the unit 4 times or more (THE OUTAGE RULE)')
+            for k in range(1, n + 1):
+                with self.subTest(on=on, show=k):
+                    g, p = forward(self)
+                    state(p, on)
+                    p.set_unit(drain=60)
+                    p.count_shows()
+                    p.hooks(('systemctl:show-%d' % k, 'runscaler-step'))
+                    r = p.updater('pass')
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    steps = p.runscaler_steps()
+                    self.assertEqual(len(steps), 1, 'the step ran inside the pass')
+                    self.assertEqual(steps[0][0], 0, steps[0][1][-3000:])
+                    self.assertIn('POOL RUNSCALER DONE', steps[0][1])
+                    self.assertNotIn('HAND CHANGE', r.stdout)
+                    h = held(p)
+                    self.assertIn(h, ([], ['POOL DOWN']), r.stdout[-3000:])
+                    seen.add(tuple(h))
+                    self.assertIsNone(json.loads(p.read(STATE)).get('families', {}).get('hz-docker', {}).get(
+                        'candidate'))
+                    self.assertIsNone(p.window())
+                    r = p.updater('pass')
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    if h:
+                        self.assertIn('STOP POOL DOWN is cleared: runscaler RUNS', r.stdout)
+                    self.assertEqual(held(p), [])
+                    self.assertEqual((rb(p), p.exe()), (g.bin, g.bin))
+        self.assertEqual(seen, {(), ('POOL DOWN',)})
 
 
 if __name__ == '__main__':

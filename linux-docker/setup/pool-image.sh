@@ -30,7 +30,9 @@
 #       than the image (THE CONFIG COMPARE), the
 #       rollback goes back with config.toml's old mtime and nothing restarts. config.toml already on the record's image
 #       with a restart pending (a run cut off before its restart, or a bare 03 run) restarts only when the rollback was
-#       kept while the running process ran.
+#       kept while the running process ran. Each refusal of a config.toml installed after runscaler started, in both
+#       branches (another image; the running version), names the line that finishes that pending config (the H2 plan's
+#       R-1): `pool-image.sh back` while a release is open (a rollback is kept), else `pool-image.sh runscaler`.
 # back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes (THE
 #       CONFIG COMPARE) and the registry still serves the old digest (runscaler pulls it at every runner start, so a
 #       dead registry stops both images alike). `03 real` with no digest renders the image config.toml runs NOW, so a
@@ -55,9 +57,12 @@
 #       RUNSCALERS, read from $S03 as data: ver03, pin03); any other refuses. It keeps nothing (no rollback, no accept):
 #       the way back is this step with the way-back version, after its download. In order, each refusing with nothing
 #       changed and naming its fix: (a) PINS; VERSION; no updater window journal; no open image release: a
-#       config.toml.pre-image that is config.toml byte for byte is one a `back` closed (removed once every check has
-#       passed, and said so: a later `back` cannot put it under another runscaler), any other refuses ("accept, or
-#       back"); the unit enabled; the unit active and runscaler started after config.toml was installed (it runs
+#       config.toml.pre-image that is config.toml byte for byte is one a `back` closed when runscaler started after
+#       config.toml's install or the unit is down (removed once every check has passed, and said so: a later `back`
+#       cannot put it under another runscaler); with the unit active and config.toml installed after its start it is a
+#       `back` cut before its restart, which only `back` finishes: refused, naming `pool-image.sh back` (slice H2b-1
+#       review r1, Opus F1); any other refuses ("accept, or back"); the unit enabled; the unit active and runscaler
+#       started after config.toml was installed (it runs
 #       config.toml: the stage compares with it), or active with config.toml installed after its start (a pending
 #       config: only this step's own render, byte for byte, goes on, and goes live with this restart: R-1, a run of this
 #       step cut before its restart, or a bare 03 real of the same values), or down (inactive, failed, activating: R-3,
@@ -71,8 +76,10 @@
 #       the rename over ~/bin/runner. (e) THE RESTART below, whose two shortcuts ("runscaler started after config.toml
 #       was installed") hold here only when THE RUNNING BINARY is VERSION's too (a crash restart between 03's two
 #       renames runs the old binary on the new config: restart again); READY; the running binary VERSION's (else a FAIL
-#       naming journalctl); the restart-cut scan. (f) NEXT: the way back's two lines, or the way forward's. A cut at any
-#       point leaves a pair runner-start starts (03's header), and the same line again finishes it.
+#       naming journalctl); the restart-cut scan. Each FAIL of (c) to (e) names the way back's two lines (again: its
+#       download, then this step with its version), or on the way back the way forward's. (f) NEXT: the way back's two
+#       lines, or the way forward's. A cut at any point leaves a pair runner-start starts (03's header: THE PUBLISH too),
+#       and the same line again finishes it.
 # THE RUNNING BINARY (the H2 plan's R-6): running_sha, ONE function: systemd's MainPID of runscaler, then the sha256 of
 #       PROCFS/<pid>/exe (/proc: the binary that process runs, read through /proc also when ~/bin/runner was renamed over
 #       since and it shows "(deleted)"). The cells' copy names their own process table (PROCFS, a pin line).
@@ -440,7 +447,7 @@ PROCFS=/proc
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
 DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=7722523217b86c8b5cb9683e2cd0103f9092b76682a4f877aac5046d94ffe375
+PINS="$S03=dee32326b47be5ed63911116140354c421b661b3f094a5451c6f9cde4b4cfba9
 $B/bin/runner-start=c3ea9dc7fce283128a6fc2e908397c89290086b17e816c10a2aece075a717b1e
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/bin/validate-class=b5127e6e18e926976b62b15f0dd0eead26085657c192ad4b111ccc2defaceda2
@@ -553,7 +560,11 @@ again() {
   case $MODE in
     up) echo "Run pool-image.sh up again once that is fixed, or pool-image.sh back to go back" ;;
     back) echo "Run pool-image.sh back again once that is fixed" ;;
-    *) echo "Run pool-image.sh runscaler $RSV again once that is fixed, or go the way back (README \"runscaler: the release this one pins, and the way back\")" ;;
+    *) if [ "$RSV" = "$PINNED" ]; then
+         echo "Run pool-image.sh runscaler $RSV again once that is fixed, or take the way back (as RS_USER): mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/$(basename "$(dl_of "$WAYBACK")") https://github.com/ysya/runscaler/releases/download/v$WAYBACK/runner-linux-amd64.tar.gz ; then pool-image.sh runscaler $WAYBACK"
+       else
+         echo "Run pool-image.sh runscaler $RSV again once that is fixed, or the way forward again: pool-image.sh runscaler (README \"runscaler: the release this one pins, and the way back\")"
+       fi ;;
   esac
 }
 
@@ -1630,7 +1641,10 @@ if [ "$MODE" = runscaler ]; then   # THE RUNSCALER STEP (the header)
   [ "$en" = enabled ] || die "runscaler's unit is ${en:-not readable}, not enabled (CI off by a person): enable it first (systemctl --user enable --now runscaler), then run this again; nothing changed"
   st=$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)
   case $st in
-    active) if started_after; then rule=content; else rule=bytes; fi ;;
+    active) if started_after; then rule=content
+      elif [ "$rmkeep" = 1 ]; then   # R-4: a back cut before its restart (the header): back finishes it
+        die "config.toml is $KEEPC byte for byte, and it was installed after runscaler started: a pool-image.sh back put the rollback in place and was cut before its restart. Run pool-image.sh back again (it restarts runscaler at idle on that rollback), then this step; nothing changed"
+      else rule=bytes; fi ;;
     inactive|failed|activating) rule=content ;;
     *) die "runscaler's unit is ${st:-not readable} (a stop or a start in progress): run this again once it ended; nothing changed" ;;
   esac
@@ -1692,7 +1706,7 @@ if [ "$MODE" = up ]; then
     elif [ "$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)" = active ] && ! started_after; then
       # No rollback yet, so this keeps config.toml as one: it must be the config runscaler RUNS (a bare 03 run
       # installs a config under the running process).
-      die "config.toml was installed after runscaler started (03 ran outside pool-image.sh?), so it is not the config the pool runs, and keeping it would be no rollback. Restart runscaler at idle first (docs/runners.md section 3b), then run up again; nothing changed"
+      die "config.toml was installed after runscaler started (pool-image.sh runscaler cut before its restart, or 03 run outside pool-image.sh), so it is not the config the pool runs, and keeping it would be no rollback. Run pool-image.sh runscaler first (it restarts runscaler at idle into that config when it is this release's render), then up again; nothing changed"
     fi
     holds_pool "$CFG" || die "pool.env does not hold the numbers config.toml runs, and 03 renders pool.env's: they would go live with the image. Compare $POOL with $CFG first; nothing changed"
     pulls "$cur" || echo "WARN the registry does not serve the image the pool runs now ($cur): its rollback could not start a runner"
@@ -1709,12 +1723,12 @@ if [ "$MODE" = up ]; then
   else
     ok "config.toml already runs the build record's image: 03 is not run again"
     if ! started_after; then   # a restart is pending: allowed only into a config this script installed
-      [ -e "$KEEPC" ] || die "config.toml names the build record's image, but no rollback was kept for the config runscaler runs (03 ran outside pool-image.sh?): nothing restarted"
+      [ -e "$KEEPC" ] || die "config.toml names the build record's image, and runscaler has not started on it since it was installed, but no rollback was kept for the config runscaler runs (pool-image.sh runscaler cut before its restart, or 03 run outside pool-image.sh): run pool-image.sh runscaler first (it restarts runscaler at idle into that config when it is this release's render), then up again; nothing restarted"
       if [ "$(systemctl --user is-active runscaler 2> /dev/null 8>&- 9>&-)" = active ]; then
         a=$(start_of) || die "cannot read runscaler's start time: nothing restarted"
-        [ "$(stat -c %Y "$KEEPC")" -ge "$a" ] || die "the rollback $KEEPC is older than the running process, so it is not the config that process runs (03 ran outside pool-image.sh?): nothing restarted"
+        [ "$(stat -c %Y "$KEEPC")" -ge "$a" ] || die "the rollback $KEEPC is older than the running process, so it is not the config that process runs (a pool-image.sh back cut before its restart, or 03 run outside pool-image.sh): a release is open: run pool-image.sh back to finish it (it restarts runscaler at idle on the rollback); nothing restarted"
       fi
-      rr_same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image: nothing restarted. Compare $KEEPC with $CFG"
+      rr_same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image: nothing restarted. Compare $KEEPC with $CFG: a release is open, and pool-image.sh back finishes it once config.toml differs from the rollback in the image alone"
     fi
   fi
 elif [ "$MODE" = back ]; then
