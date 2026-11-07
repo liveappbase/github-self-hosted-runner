@@ -4,14 +4,15 @@ lines of the Studio's runscaler.log (2026-10-24..26), every host value replaced 
 organization, the registry, ids, the address). Pinned: a record per header line, the other programs' lines (a Docker
 pull) are no record, the set prefix, exact messages, quoted values unescaped, multi-line values joined, and the last
 record held back until a following record header is read: it may yet grow, also when the text ends with a newline
-(Codex r1 F1). tokenize_final reads every record (r1.jq calls it on a held record once the log has been quiet)."""
+(Codex r1 F1). tokenize_final reads every record (r1.jq calls it on a held record once the log has been quiet).
+LevelColumns: the level column of runscaler 0.10.0 and later (5 wide) reads as 0.9.x's (census finding 2)."""
 import json
 import os
 import re
 import subprocess
 import unittest
 
-from tests.core.corejq import CORE, fixture, jq, tmpdir
+from tests.core.corejq import CORE, charm, fixture, jq, tmpdir, to_v012
 
 # hz-cut.log:3, a line of a Docker pull (another program's line in runscaler's log), here with no newline
 PULL_LINE = fixture('hz-cut.log').split('\n')[2]
@@ -28,6 +29,21 @@ def tok(test, text, final=False):
                        capture_output=True, text=True)
     test.assertEqual(r.returncode, 0, r.stderr)
     return json.loads(r.stdout)
+
+
+def toks(test, texts, final=False):
+    """tok() of each text, in ONE jq run (a cut cell reads a hundred texts)"""
+    d = tmpdir(test)
+    p = os.path.join(d, 'texts.json')
+    with open(p, 'w', encoding='utf-8') as f:
+        json.dump(list(texts), f)
+    r = subprocess.run([jq(), '-n', '-c', '-L', os.path.join(CORE, 'lib'), '--slurpfile', 't', p,
+                        'import "logfmt" as L; $t[0][] | L::tokenize%s' % ('_final' if final else '')],
+                       capture_output=True, text=True)
+    test.assertEqual(r.returncode, 0, r.stderr)
+    out = [json.loads(l) for l in r.stdout.splitlines()]
+    test.assertEqual(len(out), len(texts))
+    return out
 
 
 class RealCuts(unittest.TestCase):
@@ -245,6 +261,170 @@ class Shapes(unittest.TestCase):
                         '2026-10-26 21:10:54 INFO mac-a: Scaling up runner currentCount=1\n', final=True)
         self.assertEqual(len(out['records']), 1)
         self.assertEqual(out['records'][0]['msg'], 'Scaling up runner')
+
+
+FIELDS = ('t', 'lvl', 'set', 'msg', 'attrs', 'partial')
+
+
+def fields(r):
+    return {k: r.get(k) for k in FIELDS}
+
+
+def but_text(r):
+    return {k: v for k, v in r.items() if k != 'text'}
+
+
+T = '2026-11-06 20:04:01'
+MULTI = ('failed to start runner: runner process exited on runner-e2ddacdc right after connecting to GitHub; runner '
+         'log:\n√ Connected to GitHub\n\nThe runner no longer exists on the server. Cleaning up local configuration.\n'
+         'Exiting runner...')
+JOB = [('jobId', '2ce18645-b726-290f-1564-ea0902058718'), ('repo', 'example-org/example'),
+       ('workflowRunId', '15885850636'), ('job', 'build (9150)')]
+# each message core/r1.jq reads, at the level runscaler logs it with (v0.12.0: internal/controller/controller.go:160,
+# 176, 254, 445, 560, 734; internal/provider/tart.go:350), as (the level in 0.9.x's column, set, message, attributes);
+# then a DEBU and a FATA record
+CORE_READS = [
+    ('INFO', 'mac-a', 'Runner removed', [('name', 'runner-0000beef'), ('instanceID', 'runner-0000beef'),
+                                         ('reason', 'job-completed')] + JOB + [('result', 'succeeded')]),
+    ('INFO', 'mac-a', 'Runner removed', [('name', 'runner-0000beef'), ('instanceID', 'runner-0000beef'),
+                                         ('reason', 'exited')]),
+    ('INFO', 'mac-a', 'Runner started', [('name', 'runner-0000beef'), ('instanceID', 'runner-0000beef'),
+                                         ('startupTime', '22.4s')]),
+    ('ERRO', 'mac-a', 'Failed to start runner, will retry', [('error', 'failed to start runner: runner on runner-0000beef '
+                                                                       'did not connect to GitHub within 5m0s')]),
+    ('ERRO', 'mac-a', 'Failed to start runner, will retry', [('error', MULTI)]),
+    ('WARN', 'mac-a', 'Job started for unknown runner (already removed?)', [('runnerName', 'runner-58c119b8')]),
+    ('WARN', 'mac-a', 'Job completed for unknown runner (already removed?)', [('runnerName', '')]),
+    ('WARN', 'mac-a', 'Runner exited before job completion; removing stale capacity', [('name', 'runner-0000beef')]),
+    ('ERRO', 'tart-mac-a', 'VM exited unexpectedly', [('name', 'runner-0000beef'), ('error', 'exit status 1')]),
+    ('DEBU', 'tart-mac-a', 'Runner started (cold)', [('name', 'runner-d5741c95')]),
+    ('FATA', None, 'failed to start the scale sets', [('error', 'context canceled')]),
+]
+# the census probe (census-src/probe-logfmt/v012.log): runscaler 0.12.0's column, from source
+PROBE = ('2026-11-06 20:04:01 INFO  linux-a: Runner removed name=runner-1d1af85d reason=job-completed jobId=j1 '
+         'result=succeeded\n',
+         '2026-11-06 20:04:02 ERROR linux-a: Failed to start runner, will retry error="did not connect to GitHub within '
+         '2m"\n',
+         '2026-11-06 20:04:03 WARN  linux-a: Job started for unknown runner (already removed?) '
+         'runnerName=runner-58c119b8\n')
+# THE CUT HEADER: a record, then a header cut short at any char (a short write, or the pass's capture inside it)
+R95 = ('2026-11-06 20:04:00 INFO mac-a: Runner removed name=runner-0000beef reason=job-completed jobId=j1 '
+       'result=succeeded\n')
+R12 = to_v012(R95)
+REC = {'t': '2026-11-06 20:04:00', 'lvl': 'INFO', 'set': 'mac-a', 'msg': 'Runner removed',
+       'attrs': {'name': 'runner-0000beef', 'reason': 'job-completed', 'jobId': 'j1', 'result': 'succeeded'},
+       'partial': None}
+HI = '2026-11-06 20:04:01 INFO  mac-a: Runner removed'
+HE = '2026-11-06 20:04:01 ERROR mac-a: Failed to start runner'
+
+
+class LevelColumns(unittest.TestCase):
+    """runscaler 0.10.0 and later write the level in a 5-wide column (census finding 2: charm log v2.0.1 styles.go
+    :57-77, DEBUG, `INFO `, `WARN `, ERROR, FATAL, then one space), 0.9.x the 4-letter word (DEBU INFO WARN ERRO FATA).
+    The census probe (logfmt.jq at 1cbc254 on the v0.12.0 lines) read the INFO and WARN lines as set null with a message
+    that starts with ` linux-a:`, and an ERROR line as another program's line: no record. Pinned: each message the core
+    reads gives the same record in both columns, an ERROR line is a record, a global record has no set, the real cuts
+    read the same, a text may change its column mid-way (the switch, a way back), and a header cut short (the
+    partial-line rules) is held from the char where it can first be a header in either column."""
+
+    def test_each_message_the_core_reads_reads_the_same_in_both_columns(self):
+        v095 = [charm(T, lvl, s, m, a) for lvl, s, m, a in CORE_READS]
+        v012 = [to_v012(x) for x in v095]
+        o95, o12 = toks(self, v095, final=True), toks(self, v012, final=True)
+        for (lvl, s, m, a), r95, r12 in zip(CORE_READS, o95, o12):
+            with self.subTest(lvl=lvl, msg=m):
+                # the control against an empty pair: the v095 twin's set is the set, its msg the message
+                self.assertEqual([(r['lvl'], r['set'], r['msg']) for r in r95['records']], [(lvl, s, m)])
+                self.assertEqual([fields(r) for r in r12['records']], [fields(r) for r in r95['records']])
+
+    def test_an_error_line_is_a_record(self):
+        before, err, after = PROBE
+        out = tok(self, before + err + after, final=True)
+        self.assertEqual([fields(r) for r in out['records']], [
+            {'t': '2026-11-06 20:04:01', 'lvl': 'INFO', 'set': 'linux-a', 'msg': 'Runner removed',
+             'attrs': {'name': 'runner-1d1af85d', 'reason': 'job-completed', 'jobId': 'j1', 'result': 'succeeded'},
+             'partial': None},
+            {'t': '2026-11-06 20:04:02', 'lvl': 'ERRO', 'set': 'linux-a', 'msg': 'Failed to start runner, will retry',
+             'attrs': {'error': 'did not connect to GitHub within 2m'}, 'partial': None},
+            {'t': '2026-11-06 20:04:03', 'lvl': 'WARN', 'set': 'linux-a',
+             'msg': 'Job started for unknown runner (already removed?)', 'attrs': {'runnerName': 'runner-58c119b8'},
+             'partial': None}])
+        self.assertEqual([r['text'] + '\n' for r in out['records']], list(PROBE))
+        # controls: a level of neither column is no record (another program's line), and the record before it is whole
+        for bad in ('NOTICE', 'ERRORS'):
+            with self.subTest(bad):
+                out = tok(self, before + '2026-11-06 20:04:02 %s mac-a: x\n' % bad + after, final=True)
+                self.assertEqual([r['text'] + '\n' for r in out['records']], [before, after])
+                self.assertEqual([r.get('partial') for r in out['records']], [None, None])
+
+    def test_a_global_v012_record_has_no_set(self):
+        out = tok(self, '2026-11-06 20:04:00 INFO  Health check server started address=127.0.0.1 port=8080\n', final=True)
+        self.assertEqual([fields(r) for r in out['records']], [
+            {'t': '2026-11-06 20:04:00', 'lvl': 'INFO', 'set': None, 'msg': 'Health check server started',
+             'attrs': {'address': '127.0.0.1', 'port': '8080'}, 'partial': None}])
+
+    def test_the_real_cuts_read_the_same_in_the_v012_column(self):
+        for name in ('hz-cut.log', 'studio-cut.log'):
+            text = fixture(name)
+            for final in (False, True):
+                with self.subTest(name=name, final=final):
+                    a, b = toks(self, [text, to_v012(text)], final)
+                    self.assertGreater(len(a['records']), 40)
+                    self.assertEqual([but_text(r) for r in b['records']], [but_text(r) for r in a['records']])
+                    self.assertEqual([r['text'] for r in b['records']], [to_v012(r['text']) for r in a['records']])
+                    if final:
+                        self.assertEqual((a['carry'], b['carry']), ('', ''))
+                    else:
+                        self.assertEqual(b['carry'], to_v012(a['carry']))
+
+    def test_a_text_that_changes_column_mid_way(self):
+        # v095 records then v012 ones (the switch to 0.12.0) and the reverse (a way back), in one text and across a
+        # pass boundary (the first part's carry prepended to the second): the records of the all-v095 text
+        text = fixture('studio-cut.log')
+        ls = text.split('\n')
+        heads = [i for i, l in enumerate(ls) if HEADER.match(l)]
+        multi = next(i for i, l in enumerate(ls) if 'Failed to start runner' in l)
+        whole = [but_text(r) for r in tok(self, text, final=True)['records']]
+        # the cuts: right after the multi-line start failure (so it is the first part's carry), and one mid-way
+        for cut in (next(i for i in heads if i > multi), heads[len(heads) // 2]):
+            a, b = '\n'.join(ls[:cut]) + '\n', '\n'.join(ls[cut:])
+            self.assertEqual(a + b, text)
+            for how, first, second in (('the switch', a, to_v012(b)), ('a way back', to_v012(a), b)):
+                with self.subTest(cut=cut, how=how):
+                    one = tok(self, first + second, final=True)
+                    self.assertEqual([but_text(r) for r in one['records']], whole)
+                    p1 = tok(self, first)
+                    self.assertTrue(p1['carry'])
+                    p2 = tok(self, p1['carry'] + second, final=True)
+                    self.assertEqual([but_text(r) for r in p1['records'] + p2['records']], whole)
+
+    def cut(self, rec, head, held_from=None):
+        """REC + HEAD[:n] for every n: tokenize_final keeps the record before whole (REC's fields and text, no
+        partial). With HELD_FROM: tokenize's carry is the whole text while HEAD[:n] can be no header (n < HELD_FROM),
+        and HEAD[:n] from then on, with the record before read"""
+        ns = range(1, len(head) + 1)
+        texts = [rec + head[:n] for n in ns]
+        held = toks(self, texts) if held_from else [None] * len(texts)
+        for n, f, h in zip(ns, toks(self, texts, final=True), held):
+            with self.subTest(head=head[:n]):
+                self.assertEqual(fields(f['records'][0]), REC)
+                self.assertEqual(f['records'][0]['text'] + '\n', rec)
+                if held_from:
+                    self.assertEqual(h['carry'], rec + head[:n] if n < held_from else head[:n])
+                    self.assertEqual([fields(r) for r in h['records']], [] if n < held_from else [REC])
+
+    def test_a_cut_header_after_a_v095_record_leaves_it_whole(self):
+        self.assertEqual((len(HI), len(HE)), (47, 55))
+        self.cut(R95, HI, 25)
+        self.cut(R95, HE)
+
+    def test_a_cut_error_header_is_held_from_char_26(self):
+        # an ERROR header can be a header only once its 26th char, the space after ERROR, is written
+        self.cut(R95, HE, 26)
+
+    def test_a_cut_header_after_a_v012_record(self):
+        self.cut(R12, HI, 25)
+        self.cut(R12, HE, 26)
 
 
 if __name__ == '__main__':

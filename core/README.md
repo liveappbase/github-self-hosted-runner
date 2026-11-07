@@ -130,9 +130,11 @@ pass whose P has no provenance closes the window; the next one with provenance o
 
 **The log.** Records are runscaler's text format: `YYYY-MM-DD HH:MM:SS LEVEL [SET: ]MESSAGE key=value ...`,
 multi-line values as `  key=` and `  │ ` lines (joined with newlines), and lines of other programs (a Docker pull)
-ignored. A record is complete only when a following record header is read, so the last record of a pass is always
-held to the next one (`state.carry`), also when the text ends with a newline: a record cut at the captured position
-is never read from its first part. A held record is read once the log has been quiet for SETTLE (120 s of the glue's
+ignored. LEVEL is read in both columns: runscaler 0.9.x's 4-letter word (`DEBU INFO WARN ERRO FATA`) and the 5-wide
+column of 0.10.0 and later (`DEBUG`, `INFO `, `WARN `, `ERROR`, `FATAL`), then one space; one text may hold both (the
+switch, a way back). A record's `lvl` is the 4-letter word in both (`ERROR` reads `ERRO`). A record is complete only
+when a following record header is read, so the last record of a pass is always held to the next one (`state.carry`),
+also when the text ends with a newline: a record cut at the captured position is never read from its first part. A held record is read once the log has been quiet for SETTLE (120 s of the glue's
 clock with the text unchanged, `state.carry_at`). runscaler writes each record with one write, so a held text that
 still ends in a partial line then is a short write (a full disk): the record that line belongs to is read only as what
 a proof of life is (a job completed, a Tart start, an unknown-runner line); any other truncated record is unknown text,

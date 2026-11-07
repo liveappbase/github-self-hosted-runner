@@ -9,7 +9,7 @@ import datetime
 import re
 import unittest
 
-from tests.core.corejq import charm, fixture, ok, run
+from tests.core.corejq import charm, fixture, ok, run, to_v012
 
 # hz-cut.log:3, a line of a Docker pull (another program's line in runscaler's log), here with no newline
 PULL_LINE = fixture('hz-cut.log').split('\n')[2]
@@ -2131,6 +2131,62 @@ class Formats(unittest.TestCase):
         rc, _, err = run(self, 'r1', state=[], healthz=[], facts=facts({'fx': fam()}), now=NOW)
         self.assertNotEqual(rc, 0)
         self.assertIn('r1: --rawfile log is required', err)
+
+
+class LevelColumnV012(unittest.TestCase):
+    """runscaler 0.10.0 and later write the level in a 5-wide column (corejq.to_v012; test_logfmt.py LevelColumns).
+    The log pass reads the same in both columns: Run() over each log below and over its to_v012 gives the same
+    `families` and the same state, but `boundary.position`, whose offset follows the text's bytes (r1.jq:460; +1 per
+    record header: each level is one char wider), and `carry`, the held record as written (to_v012 of the 0.9.x one)."""
+
+    @staticmethod
+    def cases():
+        """(the cell whose log it is, families, log, its verdict and succeeded count in 0.9.x's column)"""
+        d = {'fx': fam('docker', ('linux-a',))}
+        exited = (failed(10, DOCKER_CREATE, 'linux-a') + failed(20, DOCKER_CREATE, 'linux-a')
+                  + removed(25, 'runner-0000beef', 'exited', job=False, set_='linux-a'))
+        after = failed(40, DOCKER_CREATE, 'linux-a') + tail(200, 'linux-a')
+        return (
+            ('R1.test_three_connect_failures_roll_back_connect_only', None,
+             three(lambda i: before_connecting('runner-0000000%d' % i)), 'rollback', 0),
+            ('R1.test_control_a_job_completed_between_them_is_proof_of_life', None,
+             failed(10, before_connecting('runner-00000001')) + failed(20, before_connecting('runner-00000002'))
+             + removed(25, 'runner-0000beef', 'job-completed') + failed(30, before_connecting('runner-00000003'))
+             + tail(), 'none', 1),
+            ('ProofOfLife.test_tart_runner_started_is_proof_of_life', None,
+             failed(10, OTHER) + failed(20, OTHER) + started(25, 'runner-0000beef') + failed(30, OTHER) + tail(),
+             'none', 0),
+            ('ProofOfLife.test_exited_without_a_job_counts_and_with_a_job_does_not (no job)', None,
+             ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', job=False) for i in range(3)) + tail(),
+             'rollback', 0),
+            ('ProofOfLife.test_exited_without_a_job_counts_and_with_a_job_does_not (a job)', None,
+             ''.join(removed(10 * i + 10, 'runner-0000000%d' % i, 'exited', result=None) for i in range(3)) + tail(),
+             'none', 0),
+            ('Settle.test_the_unknown_runner_line_is_proof_of_life_for_the_set', d,
+             exited + unknown(30, 'runner-0000beef', 'linux-a', 'started') + after, 'none', 0),
+            ('Settle.test_the_unknown_runner_line_is_proof_of_life_for_the_set (its control)', d, exited + after,
+             'rollback', 0),
+        )
+
+    def test_each_log_reads_the_same_in_the_v012_column(self):
+        for name, fams, log, verdict, succeeded in self.cases():
+            with self.subTest(name):
+                a = Run(self, fams).go(log)
+                b = Run(self, fams).go(to_v012(log))
+                # the control: in 0.9.x's column the log reads as its cell says
+                self.assertEqual((a['families']['fx']['verdict'], a['state']['families']['fx']['succeeded']),
+                                 (verdict, succeeded))
+                self.assertEqual(b['families'], a['families'])
+                sa, sb = dict(a['state']), dict(b['state'])
+                ba, bb = sa.pop('boundary'), sb.pop('boundary')
+                self.assertEqual(bb['owner'], ba['owner'])
+                pa, pb = dict(ba['position']), dict(bb['position'])
+                self.assertEqual(pb.pop('offset') - pa.pop('offset'),
+                                 len(re.findall(r'^\S+ \S+ (?:DEBU|INFO|WARN|ERRO|FATA) ', log, re.M)))
+                self.assertEqual(pb, pa)
+                self.assertTrue(sa['carry'])
+                self.assertEqual(sb.pop('carry'), to_v012(sa.pop('carry')))
+                self.assertEqual(sb, sa)
 
 
 if __name__ == '__main__':

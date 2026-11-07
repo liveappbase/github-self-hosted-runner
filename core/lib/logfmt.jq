@@ -4,14 +4,19 @@
 #   YYYY-MM-DD HH:MM:SS LEVEL [SET: ]MESSAGE key=value key="quoted \"value\""
 #   a multi-line value as a line "  key=" and then one line "  │ TEXT" per value line; after it, more keys on a line
 #   " key=value", or another "  key=" (a blank line may come between)
+# LEVEL is runscaler 0.9.x's 4-letter word (DEBU INFO WARN ERRO FATA: charm log v2.0.0) or the 5-wide column of
+# runscaler 0.10.0 and later (DEBUG, "INFO ", "WARN ", ERROR, FATAL: charm log v2.0.1), then one space: an INFO or WARN
+# record of 0.10+ has two spaces before its SET. Both are read, also in one text (a switch, or a way back).
 # Lines of other programs (a Docker pull writes "…: Pulling from …", "Digest: …") are no record and end the record
 # before them; continuation lines with no record before them (the tail of an earlier interval's record) are ignored.
 #
-# tokenize: the log text -> {"records": [RECORD], "carry": TEXT}. RECORD = {"t", "lvl", "set" (null for a global
-# record), "msg", "attrs" (top-level keys only; quoted values unquoted, multi-line values joined with "\n"), "text" (the
-# record's lines as written)}. carry = the last record, from its header on: a record is complete only when a following
-# record header is read, so the last one is always held, also when the text ends with a newline (with no header in
-# the text: a partial last line). The caller prepends it to the next interval's text. tokenize_final reads every
+# tokenize: the log text -> {"records": [RECORD], "carry": TEXT}. RECORD = {"t", "lvl" (the 4-letter word, in either
+# column: DEBUG reads DEBU, ERROR ERRO), "set" (null for a global record), "msg", "attrs" (top-level keys only; quoted
+# values unquoted, multi-line values joined with "\n"), "text" (the record's lines as written)}. carry = the last
+# record, from its header on: a record is complete only when a following record header is read, so the last one is
+# always held, also when the text ends with a newline (with no header in the text: a partial last line). A header cut
+# short is a header from the char where it can first be one, in either column (an ERROR header from its 26th char,
+# the space after ERROR). The caller prepends the carry to the next interval's text. tokenize_final reads every
 # record and holds nothing (r1.jq: a held record once the log has been quiet for SETTLE, and P's text at the updater's
 # own restart); when the text ends in a partial line that belongs to a record, that record has "partial": true. A
 # partial last line that can still become a continuation line belongs to the record before it: it is one cut short
@@ -20,7 +25,11 @@
 # line, also one that starts with a space, such as " ---> Running in …", or " name=x" after a line that is no value
 # line) leaves the record before it whole.
 
-def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (DEBU|INFO|WARN|ERRO|FATA) ";
+# the level column, ONE pattern for the line kind (_hdr_re) and the capture (_header): the 5-wide forms FIRST
+# (Oniguruma takes the alternatives in order: with INFO first, `INFO  mac-a: x` would read as a global record whose
+# message starts with a space). The one ambiguity: a 0.9.x message that starts with a space (runscaler's never do)
+def _lvl_re: "DEBUG|ERROR|FATAL|INFO |WARN |DEBU|INFO|WARN|ERRO|FATA";
+def _hdr_re: "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (" + _lvl_re + ") ";
 def _key_re: "[A-Za-z_][A-Za-z0-9_.-]*";
 
 # runscaler's messages the core reads, matched EXACTLY: the message, then the end or " key=" (so "Runner started
@@ -65,10 +74,10 @@ def _split_message:
     else $r | capture("^(?<msg>.*?)(?<attrs>( " + _key_re + "=.*)?)$") end;
 
 def _header:
-  capture("^(?<t>[0-9-]{10} [0-9:]{8}) (?<lvl>[A-Z]{4}) (?<rest>.*)$") as $h
+  capture("^(?<t>[0-9-]{10} [0-9:]{8}) (?<lvl>" + _lvl_re + ") (?<rest>.*)$") as $h
   | (($h.rest | capture("^(?<set>[A-Za-z0-9][A-Za-z0-9._-]*): (?<r>.*)$")) // {set: null, r: $h.rest}) as $p
   | ($p.r | _split_message) as $m
-  | {t: $h.t, lvl: $h.lvl, set: $p.set, msg: $m.msg, attrs: ($m.attrs | _attrs), text: .};
+  | {t: $h.t, lvl: ($h.lvl | .[0:4]), set: $p.set, msg: $m.msg, attrs: ($m.attrs | _attrs), text: .};
 
 def _tokenize($final):
   . as $text

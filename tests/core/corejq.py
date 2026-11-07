@@ -11,6 +11,7 @@ and returns (rc, the one JSON object it printed or None, stderr).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -155,6 +156,23 @@ def charm(t, lvl, set_, msg, attrs=()):
         else:
             b += ' %s=%s' % (k, v)
     return b + '\n'
+
+
+_V095_HEADER = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (DEBU|INFO|WARN|ERRO|FATA) ', re.M)
+_V012_COLUMN = {'DEBU': 'DEBUG', 'INFO': 'INFO ', 'WARN': 'WARN ', 'ERRO': 'ERROR', 'FATA': 'FATAL'}
+
+
+def to_v012(text):
+    """TEXT (runscaler 0.9.x records) in the level column of runscaler 0.10.0 and later: each record header
+    `YYYY-MM-DD HH:MM:SS LEVL ` gets the 5-wide column, DEBUG, `INFO `, `WARN `, ERROR or FATAL, then one space (charm
+    log v2.0.1 styles.go:57-77, Width(5); its logger_test.go:116-130,193 expect `INFO  prefix: info`). Nothing else
+    changes. It raises when no line changed. charm() is unchanged: charm(t, 'INFO ', set, ...) is a v0.12.0 line. The
+    set-prefixed shape (`INFO  mac-a: ...`) is from that source; test_records.py pins charm() and to_v012 to real
+    v0.12.0 lines (global records: fixtures/v012-validate.log)."""
+    out, n = _V095_HEADER.subn(lambda m: '%s %s ' % (m.group(1), _V012_COLUMN[m.group(2)]), text)
+    if n == 0:
+        raise ValueError('to_v012: no record header in the text: %r' % text[:200])
+    return out
 
 
 def ok(test, name, **kw):

@@ -881,18 +881,51 @@ class TestObserve(unittest.TestCase):
         res = r.report()
         self.assertEqual(r.facts()['families']['fx']['candidate'], cand)
         self.assertTrue(r.facts()['continuous'])
-        return res
+        return r, res
+
+    @staticmethod
+    def succeeded(r):
+        """the jobs the pass's log pass counted as succeeded for fx (r1.json: the core state it wrote)"""
+        with open(os.path.join(r.pass_dir, 'r1.json')) as f:
+            return json.load(f)['state']['families']['fx']['succeeded']
 
     def test_three_counted_failures_on_one_set_roll_back(self):
-        res = self.two_passes(fixture('three-failures.log'))
+        r, res = self.two_passes(fixture('three-failures.log'))
         self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
                       '(connect-class only))\n', res.stdout)
         self.assertIn('\nfx: R1: a rollback is due (set mac-a, 3 counted failures, connect-class only)\n', res.stdout)
 
     def test_control_a_proof_of_life_between_them_is_no_rollback(self):
-        res = self.two_passes(fixture('three-failures-proof-between.log'))
+        r, res = self.two_passes(fixture('three-failures-proof-between.log'))
         self.assertIn('\nr1 fx: none (observing runner observed since ', res.stdout)
         self.assertNotIn('rollback', res.stdout)
+        self.assertEqual(self.succeeded(r), 3)    # the proof was read: studio-cut.log's two mac-a jobs, and its one
+
+    # runscaler 0.10.0 and later write the level in a 5-wide column (DEBUG, `INFO `, `WARN `, ERROR, FATAL; the
+    # core's tests/core/test_logfmt.py LevelColumns): the same fixtures in that column, through the glue, print the
+    # same r1 lines
+    @staticmethod
+    def v012(text):
+        out, n = re.subn(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (DEBU|INFO|WARN|ERRO|FATA) ',
+                         lambda m: '%s %s ' % (m.group(1), {'DEBU': 'DEBUG', 'INFO': 'INFO ', 'WARN': 'WARN ',
+                                                            'ERRO': 'ERROR', 'FATA': 'FATAL'}[m.group(2)]),
+                         text, flags=re.M)
+        assert n >= 3, n
+        return out
+
+    def test_three_counted_failures_in_the_v012_column_roll_back(self):
+        r, res = self.two_passes(self.v012(fixture('three-failures.log')))
+        self.assertIn('\nr1 fx: rollback (R1 on set mac-a: 3 counted failures with no proof of life between them '
+                      '(connect-class only))\n', res.stdout)
+        self.assertIn('\nfx: R1: a rollback is due (set mac-a, 3 counted failures, connect-class only)\n', res.stdout)
+
+    def test_control_a_proof_of_life_between_them_in_the_v012_column(self):
+        # `none` alone would also be what a pass that reads no record prints: the succeeded count says the proof was
+        # read
+        r, res = self.two_passes(self.v012(fixture('three-failures-proof-between.log')))
+        self.assertIn('\nr1 fx: none (observing runner observed since ', res.stdout)
+        self.assertNotIn('rollback', res.stdout)
+        self.assertEqual(self.succeeded(r), 3)
 
     def test_the_record_stays_until_it_is_cleared(self):
         r = Rig(self)
