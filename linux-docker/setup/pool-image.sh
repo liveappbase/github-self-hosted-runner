@@ -17,25 +17,34 @@
 # THE ROLLBACK FILE (config.toml.pre-image) belongs to ONE release: `up` writes it only when it is absent or names the
 # image config.toml runs now (each up names its own new image, so "differs from the new image" would keep an unproven
 # config).
-# up:   refuses unless pool.env holds the numbers config.toml runs (03 renders from pool.env, so others would go live
-#       with the image) and the record's image's runner is VERSION; keeps the rollback; 03 real DIGEST (the same sets and
-#       numbers, the record's image: it installs with the pool running and restarts nothing; if it fails, config.toml is
-#       unchanged); if config.toml then differs from the rollback in more than the image (THE LOG-FILE LINE aside), the
+# up:   refuses unless ~/bin/runner is one of the two runscalers 03 knows (ONE DOOR, below), pool.env holds the
+#       numbers config.toml runs (03 renders from pool.env, so others would go live with the image) and the record's
+#       image's runner is VERSION; keeps the rollback; `03 real DIGEST --image-only` (the same sets and numbers, the
+#       record's image: it installs with the pool running and restarts nothing; with --image-only 03 itself refuses,
+#       after its validate and before it installs anything, a render that differs from config.toml in more than the
+#       image (THE CONFIG COMPARE): a drifted host value never reaches config.toml; if 03 fails, config.toml is
+#       unchanged); if config.toml then differs from the rollback in more than the image (THE CONFIG COMPARE), the
 #       rollback goes back with config.toml's old mtime and nothing restarts. config.toml already on the record's image
 #       with a restart pending (a run cut off before its restart, or a bare 03 run) restarts only when the rollback was
 #       kept while the running process ran.
 # back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes (THE
-#       LOG-FILE LINE aside) and the registry still serves the old digest (runscaler pulls it at every runner start, so a
+#       CONFIG COMPARE) and the registry still serves the old digest (runscaler pulls it at every runner start, so a
 #       dead registry stops both images alike). `03 real` with no digest renders the image config.toml runs NOW, so a
-#       later 03 (a change of the numbers) keeps the old image; only an `up` puts a new one in.
-# THE LOG-FILE LINE (runscaler 0.12 bump, slice H1, review r1): "differs in more than the image" (same_but_image, the
-#       ONE function of every caller: up and back here, the unattended up's D3 and back's check) has one exception.
-#       03's render has two lines that a config.toml rendered before that release has not, right after its log-level
-#       line: LOGC, its comment, and LOGK, `log-file = "R/runner.log"` (tests/hetzner/test_render.py binds both to 03's
-#       header). A newer config B that is the older one A (the one that runs, or the kept rollback) plus EXACTLY those
-#       two lines, each once, in that place, differs in the image alone too, but only when A has no line that names
-#       log-file at all. So the next up (a person's, or the updater's switch) adds the line with all of its checks and
-#       its idle restart, and a back puts the config kept before it back: no hand step (README, "The log-file line").
+#       later 03 (a change of the numbers) keeps the old image; only an `up` puts a new one in. BACK'S PAIR GUARD
+#       (runscaler 0.12 bump, slice H2a; the H2 plan's R-4): a rollback with no log-file key runs only on the way-back
+#       runscaler (v0.9.5: 03's WAYBACK_BIN_SHA, runner-start's V095_SHA), so on any other ~/bin/runner `back` refuses
+#       it before any put (runner-start would refuse that pair at the restart: CI down).
+# THE CONFIG COMPARE (runscaler 0.12 bump, slices H1 and H2a): "differs in more than the image" is runner-release.sh's
+#       rr_same_but_image, ONE copy for every caller (up and back here, the unattended up's D3 and back's check, and
+#       03's `real --image-only`): comment lines are not content, and THE LOG-FILE LINE, 03's top-level log-file KEY
+#       line (RR_LOGK), may be added once right after the older config's log-level line when that config has no
+#       log-file key at all. So the next up (a person's, or the updater's switch) adds the line with all of its checks
+#       and its idle restart, and a back puts the config kept before it back: no hand step (README, "The log-file
+#       line").
+# ONE DOOR (runscaler 0.12 bump, slice H2a; the H2 plan's M-1): an image switch never changes ~/bin/runner. 03 names the
+#       two runscalers this release knows (THE RUNSCALERS: BIN_SHA, the pinned v0.12.0, and WAYBACK_BIN_SHA, v0.9.5),
+#       which this script reads from $S03 as data (pin03; PINS checks $S03 first); `up` refuses before anything else
+#       when ~/bin/runner is neither, naming `pool-image.sh runscaler`, the one step that changes it.
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
 # Then, up and back: the restart. restart() re-reads the start time just before it restarts, so it never restarts a
@@ -88,7 +97,7 @@
 #   DIGEST STAGED` (STAGED = ~/.config/runner/config.staged.toml; 03 refuses a rejected digest), up to 3 tries 20 s
 #   apart, each a VALIDATE TRY: exit 0 (PASS) ends them, exit 4 (API-ONLY) tries again and after the third counts as
 #   PASS, anything else (a cut try: UNKNOWN) is STOP check failed, nothing installed; then D3: STAGED names DIGEST and
-#   differs from config.toml in its runner-image lines alone (THE LOG-FILE LINE aside). (2) THE IDLE PAIR: two /healthz
+#   differs from config.toml in its runner-image lines alone (THE CONFIG COMPARE). (2) THE IDLE PAIR: two /healthz
 #   reads 3 s apart, decided by ~/build/core/idle.jq over every set config.toml names and every set the reads list (no
 #   state: no set is excused, the updater keeps the 24 h); a core that fails or answers no idle/not-idle: `end`. Not
 #   idle: STAGED removed, config.toml unchanged, the journal removed, exit 3. (3) At once: THE BACKUP to
@@ -111,7 +120,7 @@
 #   since its install): done, `running`, no restart, else `end`; a start or a drain in progress: `end`. No backup, one
 #   that does
 #   not name ONE image, a config.toml that does not, one that differs from config.toml in more than its runner-image
-#   lines (THE LOG-FILE LINE aside), or one whose image the registry does not serve: STOP ROLLBACK FAILED.
+#   lines (THE CONFIG COMPARE), or one whose image the registry does not serve: STOP ROLLBACK FAILED.
 #   PRE-VALIDATE of a copy (STAGED = ~/.config/runner/config.rollback.toml, its lines checked once it is made) by the
 #   ONE VALIDATE RULE
 #   (~/bin/runner-start validate, stdout and stderr, ~/bin/validate-class), up to 3 tries 20 s apart, each a VALIDATE
@@ -396,7 +405,7 @@ S03=$B/setup/03-runscaler.sh
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
 DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
-PINS="$S03=209d250f4d6ee35f9c1f27a2a16892a83d0a8e3ee4bb74855d77e05f3bd3a984
+PINS="$S03=3b507dac0b5da502b78ac7719334c9bfc0f1dfce456296ad84a815773984898a
 $B/bin/runner-start=67d8cba9a195da6361e630db3b395d52ea75d66499f243f102e4c4c0b5293431
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
 $B/bin/validate-class=b5127e6e18e926976b62b15f0dd0eead26085657c192ad4b111ccc2defaceda2
@@ -419,18 +428,11 @@ pulls() {   # pulls IMAGE: 0 = the local registry serves this digest; 1 = it ans
     "$REG/v2/${IMAGE_NAME}/manifests/${1#*@}"
   case $? in 0) return 0 ;; 22) return 1 ;; *) return 2 ;; esac
 }
-# THE LOG-FILE LINE (the header): the two lines 03's render has right after its log-level line, as it renders them
-LOGC='# log-file: the runner.log the updater reads; runner-start refuses any other.'
-LOGK="log-file = \"$R/runner.log\""   # 03's `log-file = "$LOGF"`: RS_USER's ~/.config/runner/runner.log
-same_but_image() {   # same_but_image A B (A the older config): they differ in their runner-image lines alone, or by
-  # THE LOG-FILE LINE too (the header)
-  cmp -s <(grep -v '^runner-image = ' "$1") <(grep -v '^runner-image = ' "$2") && return 0
-  # A names no log-file at all (grep's 1: no line, and A was read), and B is A plus LOGC and LOGK, each once, right
-  # after A's first log-level line
-  grep -q -i -F -e log-file -- "$1" 2> /dev/null; [ $? = 1 ] || return 1
-  cmp -s <(grep -v '^runner-image = ' "$1" | LOGC=$LOGC LOGK=$LOGK awk '{ print }
-    /^log-level = / && !n++ { print ENVIRON["LOGC"]; print ENVIRON["LOGK"] }') <(grep -v '^runner-image = ' "$2")
+pin03() {   # NAME: 03's pin line NAME=<64 hex> (ONE DOOR, the header), read from $S03 as data; rc 1 unless it is there once
+  local v; v=$(sed -n "s/^$1=\([0-9a-f]\{64\}\)\$/\1/p" "$S03" 2> /dev/null)
+  [[ $v =~ ^[0-9a-f]{64}$ ]] && echo "$v"
 }
+runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner's
 pv() { sed -n "s/^$1=\([0-9][0-9]*\)$/\1/p" "$POOL" 2> /dev/null; }   # one number from pool.env (twice = no match below)
 holds_pool() {   # holds_pool FILE: does this config carry pool.env's numbers, the ones 03 renders?
   local c cpu mem max scpu smem
@@ -510,9 +512,9 @@ UFAIL_RC=1   # the exit of a window that stops with its journal open (RECOVER's:
 ufail() { echo "FAIL $*"; exit "$UFAIL_RC"; }   # the window stops here; its journal stays as it is (open)
 ujs() { uj "$@" || ufail "the window journal $J could not record '$1': the window stops before that step (the journal stays open)"; }
 content_of() {   # FILE: REPLY = its CONTENT sha (PLAN D1): the sha256 of its lines whose first non-blank character is not
-  # `#` and that are not blank, each with its newline (the Studio's ru_w_shas); `unreadable` when it cannot be read
-  REPLY=$( { grep -v -E '^[[:blank:]]*(#|$)' -- "$1" 2> /dev/null || [ $? = 1 ]; } | sha256sum) \
-    && REPLY=${REPLY%% *} && [[ $REPLY =~ ^[0-9a-f]{64}$ ]] || REPLY=unreadable
+  # `#` and that are not blank, each with its newline (the Studio's ru_w_shas): runner-release.sh's rr_content, the ONE
+  # copy THE CONFIG COMPARE reads too; `unreadable` when it cannot be read
+  REPLY=$(rr_content "$1" | sha256sum) && REPLY=${REPLY%% *} && [[ $REPLY =~ ^[0-9a-f]{64}$ ]] || REPLY=unreadable
 }
 cfg_now() {   # config.toml read ONCE: a private copy, WDIR/config.now (kept until the next call: NOW_COPY), and its
   # NOW_SHA and NOW_CONTENT; both `none` when it cannot be read
@@ -794,7 +796,7 @@ un_up() {
   TSHA=$(sed -n 's/^03 STAGED (render): .* sha256 \([0-9a-f]\{64\}\)\. Nothing was installed\.$/\1/p' "$out" | tail -n 1)
   [[ $TSHA =~ ^[0-9a-f]{64}$ ]] || ustop "check failed" "03-runscaler.sh render printed no sha256 of $STAGED ($out)"
   ujs staged-sha "$TSHA"
-  { [ "$(image_of "$STAGED")" = "$new" ] && same_but_image "$CFG" "$STAGED"; } \
+  { [ "$(image_of "$STAGED")" = "$new" ] && rr_same_but_image "$CFG" "$STAGED"; } \
     || ustop "check failed" "03's render differs from config.toml in more than the runner-image lines (pool.env's numbers are not the ones config.toml runs?): an unattended switch changes the runner version only (plan D3). Compare $POOL with $CFG"
   utargetlines
   uidle; case $? in
@@ -869,7 +871,7 @@ un_back() {
   # the COPY is what is validated and installed, so the rollback's lines are checked on it (a copy is checked after it
   # is made): ONE image, the one the registry was asked for, and config.toml's other lines
   [ "$(image_of "$STAGED")" = "$tgt" ] || ustop "ROLLBACK FAILED" "$KEEPP changed during the rollback window: its copy $STAGED does not name ${tgt}, the image the registry was asked for, for both sets. Read it"
-  same_but_image "$STAGED" "$CFG" || ustop "ROLLBACK FAILED" "config.toml differs from the rollback $KEEPP in more than the runner-image lines (sets or numbers changed since the switch): the rollback would undo that too. Compare the two"
+  rr_same_but_image "$STAGED" "$CFG" || ustop "ROLLBACK FAILED" "config.toml differs from the rollback $KEEPP in more than the runner-image lines (sets or numbers changed since the switch): the rollback would undo that too. Compare the two"
   for n in 1 2 3; do
     out=$WDIR/validate-pre-$n.out
     vtry - "$out" env RUNNER_START_CONFIG="$STAGED" "$HOME/bin/runner-start" validate; rc=$?
@@ -1543,6 +1545,10 @@ fi
 if [ "$MODE" = up ]; then
   # Only `up` reads a build record: `back` and `accept` work from what runs and what was kept.
   p=$(pins_bad) && die "$p is not the reviewed copy (sha256): nothing changed"
+  # ONE DOOR (the header): an image switch runs on the runscaler that is there, one of the two 03 knows
+  pin=$(pin03 BIN_SHA) && wb=$(pin03 WAYBACK_BIN_SHA) || die "$S03 does not name its two runscalers (BIN_SHA, WAYBACK_BIN_SHA) once each: nothing changed"
+  rs=$(runner_sha) || rs=none
+  [ "$rs" = "$pin" ] || [ "$rs" = "$wb" ] || die "$HOME/bin/runner (sha256 ${rs:0:12}) is neither of the two runscalers this release knows (03-runscaler.sh's BIN_SHA and WAYBACK_BIN_SHA): an image switch never changes it, and only pool-image.sh runscaler does; nothing changed"
   fix="build it as ${RUN_USER}, with this release's linux-docker/ as its ~/build: ssh ${RUN_USER}@<host> 'bash ~/build/setup/02-d1.sh build $VERSION'"
   # the recipe and the build record: runner-release.sh's rr_recipe and rr_record, the ONE copy 02-d1.sh and the
   # updater use too (the header)
@@ -1577,10 +1583,10 @@ if [ "$MODE" = up ]; then
     pulls "$cur" || echo "WARN the registry does not serve the image the pool runs now ($cur): its rollback could not start a runner"
     put "$CFG" "$KEEPC"; ok "kept $KEEPC (the rollback: $cur)"
     m0=$(stat -c %Y "$CFG")
-    echo; echo "== 03-runscaler.sh real $digest (the same sets and numbers, the record's image: it installs with the pool running, and restarts nothing)"
-    bash "$S03" real "$digest" < /dev/null || die "03 real failed: config.toml was not changed, so the pool keeps $cur. Read 03's FAIL line above"
+    echo; echo "== 03-runscaler.sh real $digest --image-only (the same sets and numbers, the record's image: it installs with the pool running, and restarts nothing)"
+    bash "$S03" real "$digest" --image-only < /dev/null || die "03 real failed: config.toml was not changed, so the pool keeps $cur. Read 03's FAIL line above"
     [ "$(image_of "$CFG")" = "$new" ] || die "03 said DONE but config.toml does not run $new: read it; to go back run pool-image.sh back"
-    if ! same_but_image "$KEEPC" "$CFG"; then
+    if ! rr_same_but_image "$KEEPC" "$CFG"; then
       put "$KEEPC" "$R/config.real.toml"; put "$KEEPC" "$CFG"
       python3 -c 'import os, sys; t = int(sys.argv[2]); os.utime(sys.argv[1], (t, t))' "$CFG" "$m0" || die "config.toml is the old one again, but its mtime is new: do NOT restart; read $R"
       die "03's config differed from the rollback in more than the image (did pool.env change during the run?): config.toml is back as it was, mtime too, and nothing restarted"
@@ -1593,16 +1599,25 @@ if [ "$MODE" = up ]; then
         a=$(start_of) || die "cannot read runscaler's start time: nothing restarted"
         [ "$(stat -c %Y "$KEEPC")" -ge "$a" ] || die "the rollback $KEEPC is older than the running process, so it is not the config that process runs (03 ran outside pool-image.sh?): nothing restarted"
       fi
-      same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image: nothing restarted. Compare $KEEPC with $CFG"
+      rr_same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image: nothing restarted. Compare $KEEPC with $CFG"
     fi
   fi
 else
   [ -e "$KEEPC" ] || die "no $KEEPC: there is no open release to roll back (accept removed it, or up never ran); nothing changed"
   old=$(image_of "$KEEPC") || die "$KEEPC does not name ONE runner image for both sets: read it; nothing changed"
+  # THE CONFIG COMPARE and BACK'S PAIR GUARD (the header): runner-release.sh's
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (is this release's linux-docker/ ~/build?): nothing changed"
+  kc=$(rr_content "$KEEPC") || die "cannot read $KEEPC: nothing changed"
+  if rr_logfile_free "$kc"; then
+    wb=$(pin03 WAYBACK_BIN_SHA) || wb="unread (03 names no WAYBACK_BIN_SHA)"
+    rs=$(runner_sha) || rs=none
+    [ "$rs" = "$wb" ] || die "the rollback $KEEPC has no log-file key, and $HOME/bin/runner (sha256 ${rs:0:12}) is not the way-back runscaler (v0.9.5, 03-runscaler.sh's WAYBACK_BIN_SHA), the one that runs such a config: runner-start would refuse it at the restart, and CI would be down. The steps of this release do not make this pair (pool-image.sh runscaler refuses while a rollback is kept): read $HOME/bin/runner and $KEEPC. To keep the image config.toml runs, run pool-image.sh accept; nothing changed"
+  fi
   if cmp -s "$KEEPC" "$CFG"; then
     ok "config.toml already is the rollback ($old)"
   else
-    same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image (sets or numbers changed since up): a rollback would undo that too. Compare $KEEPC with $CFG; nothing changed"
+    rr_same_but_image "$KEEPC" "$CFG" || die "config.toml differs from the rollback in more than the image (sets or numbers changed since up): a rollback would undo that too. Compare $KEEPC with $CFG; nothing changed"
     pulls "$old"; case $? in
       0) ;;
       1) die "the registry no longer holds the rollback's image $old: a runner of it could not start; nothing changed" ;;

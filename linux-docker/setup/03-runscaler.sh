@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# 03-runscaler.sh — runscaler as RS_USER: the binary (both checksums), runner-start, pool-ready, validate-class, the user
-# unit, and ONE named config. Runs AS RS_USER, never root (linux-docker/README.md; needs this release's linux-docker/ as
-# ~/build):
+# 03-runscaler.sh — runscaler as RS_USER: the binary (both checksums; a fresh host's only: ONE DOOR, below),
+# runner-start, pool-ready, validate-class, the user unit, and ONE named config. Runs AS RS_USER, never root
+# (linux-docker/README.md; needs this release's linux-docker/ as ~/build):
 #   ssh RS_USER@<host> 'bash -s -- MODE' < linux-docker/setup/03-runscaler.sh
 # The set names, groups and labels are the host config's (host.conf.example):
 #   MODE real [DIGEST] two sets: MAIN_SET    (group GROUP, labels self-hosted + MAIN_LABEL) and the small lane
 #                      SMALL_SET             (same group, labels self-hosted + SMALL_LABEL, 1 runner, its own
 #                      cpu/memory: SMALL_CPU/SMALL_MEMORY)
+#   MODE real DIGEST --image-only   real, from a person's `pool-image.sh up` (NO EXPOSURE BEFORE THE COMPARE, below)
 #   MODE render DIGEST STAGED   real's sets, for an image switch of the updater (below); it installs nothing
 # (The one-off modes `probe` and `c1` of the first install are cut, with the five host-config keys only they read.)
 # THE IMAGE: DIGEST (sha256:<64 hex>) is an image of the local registry. With none, the image the installed config.toml
@@ -20,10 +21,29 @@
 # real: it installs the files above from ~/build, renders ~/.config/runner/config.real.new.toml (a .toml NAME:
 # runscaler takes the config type from the extension) and runs the refusal controls on throwaway copies. Only when
 # the token is in does it validate the render with runscaler's own strict `validate` and THEN install it as
-# config.real.toml and config.toml. No token: no CONFIG is installed ("03 STOPPED", exit 3; the binary, runner-start,
-# pool-ready, validate-class and the unit are). A validate that is not PASS: config.toml is not touched. It does not
-# start or restart runscaler (a running pool is fine: validate takes no lock). A config that registers a NEW set is
-# rendered only with the unit stopped (a crash restart must not register it before the operator's go).
+# config.real.toml and config.toml. No token: no CONFIG is installed ("03 STOPPED", exit 3; runner-start, pool-ready,
+# validate-class, the unit, and on a fresh host the binary are). A validate that is not PASS: config.toml is not
+# touched. It does not start or restart runscaler (a running pool is fine: validate takes no lock). A config that
+# registers a NEW set is rendered only with the unit stopped (a crash restart must not register it before the
+# operator's go).
+# THE RUNSCALERS (runscaler 0.12 bump, slice H2a; the H2 plan's M-2): the two this release knows, in ONE block (below):
+# PINNED (v0.12.0: TGZ_SHA, its release tarball's sha256, ~/build/dl/runner-linux-amd64.tar.gz of Install step 4;
+# BIN_SHA, its `runner`'s) and WAY-BACK (v0.9.5, the release before: WAYBACK_TGZ_SHA, WAYBACK_BIN_SHA), which
+# runner-start's V095_SHA names too (tests/hetzner/test_render.py binds the two). pool-image.sh reads BIN_SHA and
+# WAYBACK_BIN_SHA from this file as data.
+# ONE DOOR (the H2 plan's M-1, R-8): real installs ~/bin/runner ONLY on a fresh host, one with no ~/bin/runner: the
+# tarball by TGZ_SHA, its `runner` by BIN_SHA, into ~/bin/runner.new (its sha checked again), then renamed over
+# ~/bin/runner (a cut leaves no partial binary under that name; any exit before the rename removes runner.new). On a
+# host with one it leaves it as it is and validates with it. real and render REFUSE, before anything changes, a
+# ~/bin/runner that is neither the pinned nor the way-back runscaler (by sha256), naming `pool-image.sh runscaler`, the
+# one step that changes it: an image switch (a person's up, the updater's switch) runs on v0.12.0, or after a way back
+# on v0.9.5.
+# NO EXPOSURE BEFORE THE COMPARE (the H2 plan's H2-7): `real DIGEST --image-only` (a person's `pool-image.sh up`)
+# REFUSES, after its validate and before it installs config.real.toml or config.toml, a render that differs from
+# config.toml in more than the runner-image lines (runner-release.sh's rr_same_but_image, THE CONFIG COMPARE: comment
+# lines and THE LOG-FILE LINE aside): a value of the host config or of pool.env that is not the one the pool runs
+# never reaches config.toml, so no crash restart can run it. A bare `real` (Install step 9, a change of pool.env's
+# numbers) installs what it renders.
 # RUNSCALER'S LOG: the render's top-level `log-file` names LOGF, RS_USER's ~/.config/runner/runner.log, built from the
 # host config's RS_USER as runner-start builds it: the runner.log the updater (runner-facts.sh's log_pos) and
 # pool-image.sh's restart-cut scan read. runscaler v0.10 and later, with no log-file key, write their log elsewhere
@@ -52,11 +72,12 @@
 # and from here on nothing is staged unless this run stages it: at any exit but a render's PASS or API-ONLY, STAGED (one
 # from before too) is removed, also when the host config refuses.
 R=$HOME/.config/runner
-usage() { echo "usage: 03-runscaler.sh real [DIGEST] | render DIGEST STAGED (DIGEST: sha256:<64 hex>; STAGED: a .toml file in $R, not config.toml or config.MODE.toml)"; exit 2; }
-MODE=${1-} DIGEST= STAGED=
+usage() { echo "usage: 03-runscaler.sh real [DIGEST [--image-only]] | render DIGEST STAGED (DIGEST: sha256:<64 hex>; STAGED: a .toml file in $R, not config.toml or config.MODE.toml)"; exit 2; }
+MODE=${1-} DIGEST= STAGED= ONLY= NEWBIN=
 case $MODE:$# in
   real:1) ;;
   real:2) DIGEST=$2 ;;
+  real:3) DIGEST=$2; [ "$3" = --image-only ] || usage; ONLY=1 ;;
   render:3) DIGEST=$2 STAGED=$3
     case ${STAGED##*/} in config.toml|config.probe.toml|config.real.toml|config.c1.toml) usage ;; esac
     [[ ${STAGED%/*} == "$R" && ${STAGED##*/} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.toml$ ]] || usage ;;
@@ -65,7 +86,7 @@ esac
 [ -z "$DIGEST" ] || [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage
 tmp=$(mktemp -d) || exit 1
 kept=0
-trap 'rm -rf "${tmp:?}"; [ -z "$STAGED" ] || [ "$kept" = 1 ] || rm -f -- "$STAGED"' EXIT
+trap 'rm -rf "${tmp:?}"; [ -z "$NEWBIN" ] || rm -f -- "$NEWBIN"; [ -z "$STAGED" ] || [ "$kept" = 1 ] || rm -f -- "$STAGED"' EXIT
 set -euo pipefail
 # THE HOST CONFIG: every value of this host (users, ports, addresses, names) is in HOST_CONF, root's file, never in
 # this script; linux-docker/host.conf.example names each key. Absent, not root's, writable by another user, a line that
@@ -89,8 +110,14 @@ cd ~
 B=$HOME/build; POOL=$R/pool.env
 D1=unix:///home/${RUN_USER}/run/docker.sock
 LOGF=/home/${RS_USER}/.config/runner/runner.log   # RUNSCALER'S LOG (the header): what the render's log-file names
-TGZ_SHA=f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f
-BIN_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
+# THE RUNSCALERS (the header): PINNED, then WAY-BACK
+PINNED=0.12.0
+TGZ_SHA=76a8130fd553cfff5437fe70dd6ec1badd723469ea13e1679958d0200b67794c
+BIN_SHA=4b8b45ae91430bd20391837955d0e44a90127ae8383710930596c302b2ffae74
+WAYBACK=0.9.5
+WAYBACK_TGZ_SHA=f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f
+WAYBACK_BIN_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
+RB=$HOME/bin/runner   # ONE DOOR (the header)
 KEYS="CONCURRENT CPU MEMORY MAX SMALL_CPU SMALL_MEMORY"
 PIMG=$B/setup/pool-image.sh   # its PINS are the ONE copy of the pins: render compares the installed files with them
 REJECTED=$HOME/.local/state/runner-updater/rejected
@@ -189,6 +216,21 @@ fi
 if rejected "${IMAGE#*@}"; then die "the image $IMAGE is rejected (listed in $REJECTED): nothing changed"; fi
 ok "not a rejected image"
 
+say "runscaler: ~/bin/runner (ONE DOOR: 03 installs one on a fresh host only)"
+if [ -e "$RB" ] || [ -L "$RB" ]; then
+  got=$(sha256sum < "$RB" 2> /dev/null) || got=
+  case ${got%% *} in
+    "$BIN_SHA") ok "$RB is runscaler v$PINNED, the one this release pins: kept as it is" ;;
+    "$WAYBACK_BIN_SHA") ok "$RB is runscaler v$WAYBACK, the way back: kept as it is" ;;
+    *) what="nothing changed"; [ "$MODE" != render ] || what="nothing staged"
+       die "$RB (sha256 ${got:0:12}) is neither runscaler v$PINNED (BIN_SHA) nor v$WAYBACK (WAYBACK_BIN_SHA), the two this release knows: 03 never replaces a runscaler that is there, and only pool-image.sh runscaler changes it; $what" ;;
+  esac
+elif [ "$MODE" = render ]; then
+  die "there is no $RB, so the render cannot be validated: install this release first (03 real); nothing staged"
+else
+  ok "no $RB: a fresh host, so this run installs runscaler v$PINNED"
+fi
+
 if [ "$MODE" = render ]; then
   say "render installs nothing: the installed files must be the ones this release pins (pool-image.sh's PINS; runscaler by BIN_SHA)"
   pins=$(read_pins) || die "$PIMG: no PINS block of \$S03=HEX and \$B/PATH=HEX lines, so the pins cannot be read; nothing staged"
@@ -199,15 +241,18 @@ if [ "$MODE" = render ]; then
     got=$(sha256sum < "$HOME/$d" 2> /dev/null) || got=
     [ "${got%% *}" = "$pin" ] || die "$HOME/$d is not the $s this release pins (pool-image.sh's PINS): install this release first (pool-image.sh up, or 03 real); nothing staged"
   done <<< "$INSTALLS"
-  got=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) || got=
-  [ "${got%% *}" = "$BIN_SHA" ] || die "$HOME/bin/runner is not the runscaler this release pins (BIN_SHA): nothing staged"
-  ok "runscaler, $(while read -r s d m; do printf '%s ' "${d##*/}"; done <<< "$INSTALLS")are the pinned ones"
+  ok "$(while read -r s d m; do printf '%s ' "${d##*/}"; done <<< "$INSTALLS")are the pinned ones; runscaler is one of the two this release knows"
 else
-  say "runscaler v0.9.5, runner-start, pool-ready, validate-class, the unit"
-  sha "$B/dl/runner-linux-amd64.tar.gz" "$TGZ_SHA"
+  say "runner-start, pool-ready, validate-class, the unit; on a fresh host runscaler v$PINNED"
   install -d -m 700 "$HOME/bin" "$R"; install -d -m 755 "$HOME/.config/systemd/user"
-  tar -xzf "$B/dl/runner-linux-amd64.tar.gz" -C "$tmp" runner; sha "$tmp/runner" "$BIN_SHA"
-  install -m 755 "$tmp/runner" "$HOME/bin/runner"
+  if ! [ -e "$RB" ] && ! [ -L "$RB" ]; then   # ONE DOOR (the header): a fresh host's, through runner.new and a rename
+    sha "$B/dl/runner-linux-amd64.tar.gz" "$TGZ_SHA"
+    tar -xzf "$B/dl/runner-linux-amd64.tar.gz" -C "$tmp" runner; sha "$tmp/runner" "$BIN_SHA"
+    NEWBIN=$RB.new
+    install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN_SHA"
+    mv -f "$NEWBIN" "$RB"; NEWBIN=
+    ok "installed runscaler v$PINNED as $RB"
+  fi
   while read -r s d m; do install -m "$m" "$B/$s" "$HOME/$d"; done <<< "$INSTALLS"
   systemctl --user daemon-reload
   ver=$("$HOME/bin/runner" version 2>&1) || die "runner version: $ver"; ok "${ver%%$'\n'*}"
@@ -217,7 +262,7 @@ umask 077
 NEW=$R/config.$MODE.new.toml; [ "$MODE" != render ] || NEW=$STAGED
 say "render ${NEW##*/}"
 header() { cat <<T
-# runscaler v0.9.5 config, MODE real, rendered by 03-runscaler.sh. 0600.
+# runscaler v${PINNED} config, MODE real, rendered by 03-runscaler.sh. 0600.
 # Numbers from $src.
 log-level = "info"
 # log-file: the runner.log the updater reads; runner-start refuses any other.
@@ -352,6 +397,12 @@ if [ "$MODE" = render ]; then
   esac
 fi
 [ "$cls" = PASS ] || die "validate $cls, config.toml NOT changed"
+if [ -n "$ONLY" ]; then   # NO EXPOSURE BEFORE THE COMPARE (the header): before anything is installed
+  # shellcheck source=runner-release.sh
+  . "$B/setup/runner-release.sh" || die "cannot read $B/setup/runner-release.sh (~/build: this release's linux-docker/): config.toml NOT changed"
+  rr_same_but_image "$R/config.toml" "$NEW" || die "the render differs from config.toml in more than the runner-image lines (its comment lines and the log-file line aside): a value of the host config or of pool.env is not the one the pool runs, and --image-only (a person's up) changes the image only: compare $NEW with $R/config.toml; config.toml NOT changed"
+  ok "the render differs from config.toml in the image alone (--image-only)"
+fi
 vsha=$(sha256sum < "$NEW")
 ok "validate passed: $NEW"
 before=$( (sha256sum "$R/config.toml" 2>/dev/null || echo none) | cut -c1-12)

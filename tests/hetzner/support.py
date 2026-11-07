@@ -909,9 +909,17 @@ def act(a):
         name = 'config.staged.toml' if a == 'edit-staged' else 'config.rollback.toml'
         with open(os.path.join(os.path.dirname(LOG), name), 'a') as f:
             f.write('# changed after the validate\n')
-    elif a == 'edit-prev':                 # a person edits config.toml.prev, the rollback
+    elif a == 'edit-prev':                 # a person edits config.toml.prev, the rollback (a comment line)
         with open(os.path.join(os.path.dirname(LOG), 'config.toml.prev'), 'a') as f:
             f.write('# a hand change of the rollback\n')
+    elif a == 'edit-prev-value':           # ... or a value of it: the main set's max-runners 3 -> 2, in place
+        p = os.path.join(os.path.dirname(LOG), 'config.toml.prev')
+        with open(p) as f:
+            text = f.read()
+        if text.count('max-runners = 3\n') != 1:
+            raise SystemExit('edit-prev-value: no single max-runners = 3 line in ' + p)
+        with open(p, 'w') as f:
+            f.write(text.replace('max-runners = 3\n', 'max-runners = 2\n'))
     elif a == 'edit-prev-image':           # ... or puts another image into both its runner-image lines
         p = os.path.join(os.path.dirname(LOG), 'config.toml.prev')
         with open(p) as f:
@@ -1579,7 +1587,7 @@ class Pool(Sandbox):
         serve (runner-start from now on: hzlib.shown), busy (/healthz turns busy), edit-config (a hand edit: a
         comment), hand-file (a person installs another file: the main set's max-runners 3 -> 2), put-prev (a person
         puts config.toml.prev back as config.toml), edit-staged, edit-rollback (back's STAGED), edit-prev
-        (config.toml.prev), edit-prev-image (another image in its runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
+        (config.toml.prev: a comment line), edit-prev-value (a value of it: the main set's max-runners 3 -> 2), edit-prev-image (another image in its runner-image lines), tick (wait for the next second of the REAL clock), probe-lock (is the updater lock
         held?), kill (SIGKILL of the unattended run's process group: its holder and pool-image.sh), kill-updater
         (SIGKILL of the runner-updater run the hooked command is a child of: a kill at a boundary of the apply step),
         count-shows (as

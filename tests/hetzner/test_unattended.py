@@ -1213,10 +1213,14 @@ class Back(unittest.TestCase):
     def test_a_rollback_changed_before_its_copy_is_rollback_failed(self):
         """A copy is checked after it is made: config.toml.prev changed by hand once `staged` is synced (after back
         read the rollback's image and asked the registry for it, before it copies the file): the copy, the file back
-        validates and installs, is what is checked (one image, the one asked for; config.toml's other lines). A line
-        that is no image line, and another image in both its image lines: a closed STOP ROLLBACK FAILED, nothing
-        validated or renamed. The control: the first cell."""
-        for why, edit in (('a line that is no image line', 'edit-prev'), ('another image', 'edit-prev-image')):
+        validates and installs, is what is checked (one image, the one asked for; config.toml's other lines). A content
+        line that is no image line (the main set's max-runners), and another image in both its image lines: a closed
+        STOP ROLLBACK FAILED, nothing validated or renamed. The control: the first cell, and a COMMENT line added the
+        same way, which is no content (runscaler 0.12 bump, slice H2a: comments are not content; b2eb739's
+        'a line that is no image line' subtest was that comment line, and refused): the rollback goes on, its copy with
+        the comment installed and running."""
+        for why, edit in (('a content line that is no image line', 'edit-prev-value'),
+                          ('another image', 'edit-prev-image')):
             with self.subTest(why):
                 g = BackRig(self)
                 g.p.hooks(('journal:staged', edit))
@@ -1225,6 +1229,14 @@ class Back(unittest.TestCase):
                 self.assertTrue(value(lines, 'stop').startswith('ROLLBACK FAILED: '), lines)
                 self.assertNotIn('rename-start', keys(lines))
                 self.assertEqual(g.validates(), [], 'the changed copy was validated')
+        with self.subTest('control: a comment line'):
+            g = BackRig(self)
+            prev = g.p.read(g.prev)
+            g.p.hooks(('journal:staged', 'edit-prev'))
+            r = g.back()
+            self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+            self.assertEqual(g.p.config(), prev + '# a hand change of the rollback\n')
+            self.assertEqual(installed(g.done()[1])[2], 'target-running')
 
 
 def mode_rig(test, mode, clock=True):

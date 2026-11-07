@@ -27,8 +27,10 @@ D5; the changed-lines list, items 30-33 and 41).
   release that then writes runner.log beside the config); else it REFUSES, naming `03-runscaler.sh real`.
 The text cells run anywhere; the others run the real scripts (pin lines rewritten) in a container (support.Pool).
 """
+import hashlib
 import os
 import re
+import tarfile
 import time
 import unittest
 
@@ -44,6 +46,7 @@ UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
 FIX = os.path.join(REPO, 'tests', 'studio', 'fixtures', 'validate')
 V0, V2, X = digest(10), digest(12), digest(20)
+V095 = 'd9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948'   # runscaler v0.9.5's linux-amd64 runner
 INSTALLED = ('bin/runner', 'bin/runner-start', 'bin/pool-ready', 'bin/validate-class',
              '.config/systemd/user/runscaler.service')
 
@@ -120,14 +123,16 @@ class Text(unittest.TestCase):
         self.assertEqual(len(cut), 1, cut)
         self.assertIn(' "$R/runner.log" ', cut[0])
 
-    def test_runner_start_s_v0_9_5_runner_is_the_one_03_installs(self):
-        """runner-start runs a config with NO log-file key only on the runner V095_SHA names (runscaler v0.9.5's): in
-        this release 03 installs that runner (its BIN_SHA), so a live config of an older 03, which has no log-file key,
-        keeps starting until 03 renders the line (03 real installs runner-start before it installs a config, and
-        installs no config on a validate that is not PASS). A release that moves BIN_SHA keeps V095_SHA: this cell then
-        compares it with v0.9.5's digest instead."""
-        self.assertEqual(len(assignment(START, 'V095_SHA')), 1, 'runner-start names the v0.9.5 runner once')
-        self.assertEqual(assignment(START, 'V095_SHA'), assignment(S03, 'BIN_SHA'))
+    def test_runner_start_s_v0_9_5_runner_is_03_s_way_back(self):
+        """runner-start runs a config with NO log-file key only on the runner V095_SHA names (runscaler v0.9.5's): from
+        runscaler 0.12 bump slice H2a that is 03's WAY-BACK runscaler (THE RUNSCALERS: WAYBACK_BIN_SHA, ONE value in two
+        files, bound here), and no longer the one 03 pins (BIN_SHA, v0.12.0's): a live config of an older 03, with no
+        log-file key, keeps starting on a host that still runs v0.9.5, and on the way back. V095_SHA is runscaler
+        v0.9.5's linux-amd64 `runner` by its own constant (b2eb739's 03 BIN_SHA)."""
+        self.assertEqual(assignment(START, 'V095_SHA'), [V095], 'runner-start names the v0.9.5 runner once, by sha256')
+        self.assertEqual(assignment(START, 'V095_SHA'), assignment(S03, 'WAYBACK_BIN_SHA'))
+        self.assertEqual(len(assignment(S03, 'BIN_SHA')), 1)
+        self.assertNotEqual(assignment(S03, 'BIN_SHA'), assignment(START, 'V095_SHA'))
 
     def test_the_readme_says_03_renders_the_log_file_line_and_the_next_up_adds_it(self):
         """Install step 9 says what 03 renders for runscaler's log and what runner-start refuses. The upgrade notes and
@@ -157,23 +162,27 @@ class Text(unittest.TestCase):
         for s in ('do "The log-file line"', 'Apart from that one run', 'systemctl --user restart runscaler && sleep'):
             self.assertNotIn(s, text)
 
-    def test_pool_image_sh_s_log_file_lines_are_the_two_03_renders(self):
-        """THE LOG-FILE LINE's one spelling: the two lines same_but_image lets a newer config add (pool-image.sh's
-        LOGC and LOGK) are the two 03's header() renders right after its log-level line: the comment byte for byte,
-        and the key line, `log-file = "$LOGF"` in 03 (LOGF, RS_USER's ~/.config/runner/runner.log, runner-start's
-        spelling) and `log-file = "$R/runner.log"` in pool-image.sh (R, the readers' folder: the readers cell above),
-        the same file on a host, whose RS_USER's home is /home/RS_USER. LogFileUp runs them on 03's real render."""
+    def test_the_compare_s_log_file_key_line_is_03_s(self):
+        """THE LOG-FILE LINE's one spelling (runscaler 0.12 bump, slice H2a: the KEY line alone, and comments are not
+        content): the line THE CONFIG COMPARE (runner-release.sh's rr_same_but_image, ONE copy) lets a newer config add
+        is RR_LOGK, `log-file = "$HOME/.config/runner/runner.log"`: the key line 03's header() renders right after its
+        log-level line (a comment line between them is no content), `log-file = "$LOGF"` in 03 (LOGF, RS_USER's
+        ~/.config/runner/runner.log, runner-start's spelling): the same file on a host, whose RS_USER's home is
+        /home/RS_USER. pool-image.sh has no compare of its own (no same_but_image, LOGC or LOGK): its five callers call
+        rr_same_but_image. LogFileUp runs it on 03's real render."""
         hdr = function(S03, 'header')
         self.assertIsNotNone(hdr)
-        m = re.findall(r'\nlog-level = "info"\n(# log-file: [^\n]*)\n(log-file = [^\n]*)\n', hdr)
-        self.assertEqual(len(m), 1, hdr)
-        comment, key = m[0]
-        self.assertEqual(key, 'log-file = "$LOGF"')
+        self.assertEqual(re.findall(r'\nlog-level = "info"\n(?:#[^\n]*\n)*(log-file = [^\n]*)\n', hdr),
+                         ['log-file = "$LOGF"'], hdr)
         self.assertEqual(assignment(S03, 'LOGF')[0].split('   #')[0], '/home/${RS_USER}/.config/runner/runner.log')
+        with open(RR) as f:
+            rr = f.read()
+        self.assertEqual(re.findall(r'^RR_LOGK=("[^"\\]*(?:\\.[^"\\]*)*")', rr, re.M),
+                         [r'"log-file = \"$HOME/.config/runner/runner.log\""'])
         with open(PIMG) as f:
             pimg = f.read()
-        self.assertEqual(re.findall(r"^LOGC='([^']*)'", pimg, re.M), [comment])
-        self.assertEqual(re.findall(r'^LOGK=("[^ ]* = [^ ]*")', pimg, re.M), [r'"log-file = \"$R/runner.log\""'])
+        self.assertEqual(re.findall(r'(?m)^(same_but_image\(\)|LOGC=|LOGK=)', pimg), [])
+        self.assertEqual(len(re.findall(r'\brr_same_but_image "\$', pimg)), 5, 'the five callers')
 
 
 @needs_container
@@ -423,7 +432,9 @@ class Render(unittest.TestCase):
                      ('render', X, '/tmp/config.staged.toml'), ('render', X, R + '/config.toml'),
                      ('render', X, R + '/config.real.toml'), ('render', X, R + '/staged.txt'),
                      ('render', X, R + '/sub/x.toml'), ('render', ref(X), g.staged), ('real', 'x'), ('real', X, 'x'),
-                     ('probe', X), ('upgrade',), ('probe',), ('c1',)):
+                     ('probe', X), ('upgrade',), ('probe',), ('c1',), ('real', '--image-only'),
+                     ('real', X, '--image'), ('real', X, '--image-only', '--image-only'),
+                     ('render', X, g.staged, '--image-only')):
             with self.subTest(args=args):
                 before = g.p.snapshot()
                 g.p.write(g.p.path('logs', 'docker.log'), '')
@@ -725,17 +736,66 @@ def after_level(text, add):
     return text.replace('\n' + LEVEL, '\n' + LEVEL + add, 1)
 
 
+OLDC = '# a comment line of a config an older release rendered\n'
+H1HEAD = '# runscaler v0.9.5 config, MODE real, rendered by 03-runscaler.sh. 0600.\n'   # b2eb739's header line
+
+
+def older(text):
+    """TEXT with OLDC right after its first line (03's header comment): a config whose comments differ, as one an
+    older release rendered (no release this cell knows renders OLDC, b2eb739's neither)."""
+    head, rest = text.split('\n', 1)
+    return head + '\n' + OLDC + rest
+
+
+WAYBACK_MARK = b'# the way-back runscaler of the cell: the same program, other bytes\n'
+
+
+def way_back(test, p, install=True):
+    """THE WAY-BACK RUNSCALER of a Pool (03's WAYBACK_BIN_SHA and runner-start's V095_SHA: v0.9.5 on a host) as a
+    substitute of its own: the pinned substitute (the `runner` of ~/build/dl's tarball, Pool's) with WAYBACK_MARK added,
+    the same program with other bytes. 03's WAYBACK_BIN_SHA line (when 03 has one; test_one_door's Pins requires it
+    once) and runner-start's V095_SHA line, in ~/build and in the installed ~/bin/runner-start, name its sha256, and
+    pool-image.sh's PINS follow (Pool.rewrite_pins). INSTALL: it is ~/bin/runner (0755), the runscaler the host runs.
+    Returns its sha256."""
+    with tarfile.open(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz')) as t:
+        wb = t.extractfile('runner').read() + WAYBACK_MARK
+    s = hashlib.sha256(wb).hexdigest()
+    with open(os.path.join(p.build, 'setup', '03-runscaler.sh')) as f:
+        n = len(re.findall(r'^WAYBACK_BIN_SHA=[0-9a-f]{64}$', f.read(), re.M))
+    test.assertLessEqual(n, 1, "03 names WAYBACK_BIN_SHA %d times" % n)
+    if n:
+        p.pin('setup/03-runscaler.sh', 'WAYBACK_BIN_SHA', s)
+    p.pin('bin/runner-start', 'V095_SHA', s)
+    rs = os.path.join(p.HOME, 'bin', 'runner-start')
+    if os.path.exists(rs):
+        t = p.read(rs)
+        pins = re.findall(r'^V095_SHA=[0-9a-f]{64}$', t, re.M)
+        test.assertEqual(len(pins), 1)
+        p.write(rs, t.replace(pins[0] + '\n', 'V095_SHA=%s\n' % s), 0o755)
+    p.rewrite_pins()
+    if install:
+        rb = os.path.join(p.HOME, 'bin', 'runner')
+        with open(rb + '.cell', 'wb') as f:
+            f.write(wb)
+        os.chmod(rb + '.cell', 0o755)
+        os.replace(rb + '.cell', rb)
+    return s
+
+
 class Before:
     """A Pool whose production runs UPOLD on a config.toml of BEFORE THIS RELEASE: 03's render less its two log-file
     lines (the comment and the key, taken from 03's own render), installed in the second 03 installed it, so runscaler
     (started after that second) runs it. The registry serves UPOLD and UPNEW, UPNEW's runner is UPV, and UPV's build
-    record names UPNEW. h1: 03's render of this release (UPOLD); pre: the config.toml it runs; comment, key: the two."""
+    record names UPNEW. h1: 03's render of this release (UPOLD); pre: the config.toml it runs; comment, key: the two.
+    LABEL: the host config's MAIN_LABEL from the start (the pool runs it)."""
 
-    def __init__(self, test):
+    def __init__(self, test, label=None):
         self.t = test
         p = self.p = Pool(test)
         p.docker['versions'] = {ref(UPOLD): UPOLDV + '\n', ref(UPNEW): UPV + '\n'}
         p.curl['served'] = [UPOLD, UPNEW]
+        if label:
+            self.label(label)
         p.production(UPOLD)
         self.cfg = p.rpath('config.toml')
         self.h1 = p.config()
@@ -773,16 +833,18 @@ class Before:
             time.sleep(0.05)
         self.p.set_unit(start=int(time.time()), pid=self.p.unit_now()['pid'] + 1)
 
-    def v095(self):
-        """The INSTALLED runner-start names this runner as runscaler v0.9.5's (V095_SHA), as on the host this release
-        installs (03's BIN_SHA is v0.9.5): a config with no log-file line then validates (LogFile's own control)."""
-        rs = os.path.join(self.p.HOME, 'bin', 'runner-start')
-        with open(rs) as f:
-            t = f.read()
-        pins = re.findall(r'^V095_SHA=[0-9a-f]{64}$', t, re.M)
-        self.t.assertEqual(len(pins), 1)
-        self.p.write(rs, t.replace(pins[0] + '\n', 'V095_SHA=%s\n' % sha256_file(os.path.join(self.p.HOME, 'bin',
-                                                                                             'runner'))), 0o755)
+    def label(self, value):
+        """The host config's MAIN_LABEL becomes VALUE (03 renders it from then on)."""
+        conf = self.p.read(self.p.path('host.conf'))
+        self.t.assertEqual(conf.count('\nMAIN_LABEL=linux-ci\n'), 1)
+        self.p.write(self.p.path('host.conf'), conf.replace('\nMAIN_LABEL=linux-ci\n', '\nMAIN_LABEL=%s\n' % value),
+                     0o644)
+
+    def way_back(self, install=True):
+        """The host runs THE WAY-BACK RUNSCALER (way_back): runner-start's V095_SHA, so a config with no log-file line
+        validates and starts on it (LogFile's own control), and a person's `back` to one is accepted (BACK'S PAIR
+        GUARD, test_one_door)."""
+        return way_back(self.t, self.p, install)
 
     def unattended(self, *args):
         """pool-image.sh ARGS as the updater's child, on a fake clock (the window's sleeps return at once)."""
@@ -809,13 +871,18 @@ class Before:
 
 @needs_container
 class LogFileUp(unittest.TestCase):
-    """THE LOG-FILE LINE GOES IN THROUGH `up` (H1 review r1: Opus F1, Codex F1, Opus F2). A host installed before this
-    release runs a config.toml with no log-file line. The next `pool-image.sh up` to another image (a person's, or the
-    updater's switch: `up --unattended`) adds the line with every check of its own and its own idle restart, because
-    same_but_image A B (the one function of every caller; A is the config that runs or was kept, B the newer one) also
-    accepts B = A plus EXACTLY 03's two log-file lines, each once, in the render's place (right after log-level), and
-    only when A has no log-file line at all. A `back` to the config kept before the line is accepted the same way. Any
-    other difference still refuses, config.toml as it was (sha and mtime), nothing restarted."""
+    """THE LOG-FILE LINE GOES IN THROUGH `up` (H1 review r1: Opus F1, Codex F1, Opus F2), and COMMENTS ARE NOT CONTENT
+    (runscaler 0.12 bump, slice H2a: the plan's H2-2', H2-6). A host installed before H1 runs a config.toml with no
+    log-file line. The next `pool-image.sh up` to another image (a person's, or the updater's switch: `up --unattended`)
+    adds the line with every check of its own and its own idle restart, because THE CONFIG COMPARE (runner-release.sh's
+    rr_same_but_image A B, ONE copy for every caller; A is the config that runs or was kept, B the newer one) reads each
+    config less its whole-line comments and blank lines (PLAN D1's CONTENT) and less its runner-image lines, and also
+    accepts B = A plus 03's log-file KEY line once, right after A's first log-level line, only when A has no log-file key
+    at all (TOML keys as runner-start reads them: bare or quoted, any case and spacing, at the top level, dotted or in a
+    table). A `back` to the config kept before the line is accepted the same way (on the way-back runscaler: BACK'S PAIR
+    GUARD, test_one_door). Any other difference still refuses, config.toml as it was (sha and mtime), nothing
+    restarted. Each of the five callers (a person's up after 03, the pending-restart up, a person's back, the switch's
+    D3 and back --unattended) accepts a difference in comments alone."""
 
     def test_a_person_s_up_on_a_config_from_before_the_line_adds_it_and_restarts_at_idle(self):
         """The rollback it keeps is the config with no line; config.toml is this release's render of the new image;
@@ -846,9 +913,12 @@ class LogFileUp(unittest.TestCase):
         self.assertEqual([l.split(' ')[1] for l in g.restarts()], ['stop', 'start'])
 
     def test_a_person_s_back_to_the_config_kept_before_the_line_is_accepted(self):
-        """After that up: `back` puts the kept config (no line) back as config.toml and restarts once."""
+        """After that up, on the way-back runscaler (v0.9.5, the one that runs a config with no line: BACK'S PAIR GUARD
+        refuses it on any other, test_one_door): `back` puts the kept config (no line) back as config.toml and restarts
+        once."""
         g = Before(self)
         g.after_up('config.toml.pre-image')
+        g.way_back()
         r = g.p.pool('back')
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertIn('POOL IMAGE DONE (back): %s' % ref(UPOLD), r.stdout)
@@ -857,67 +927,224 @@ class LogFileUp(unittest.TestCase):
 
     def test_back_unattended_to_the_config_kept_before_the_line_is_accepted(self):
         """After the updater's switch: its rollback validates the copy of config.toml.prev (no line: runner-start starts
-        it on runscaler v0.9.5 only, the runner this release installs) and puts it back, running."""
+        it on the way-back runscaler v0.9.5 only, its V095_SHA) and puts it back, running."""
         g = Before(self)
         g.after_up('config.toml.prev')
-        g.v095()
+        g.way_back()
         r = g.unattended('back', '--unattended', '--why', 'back')
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         self.assertEqual(g.p.config(), g.pre)
         g.closed('target-running')
 
+    def test_a_label_holding_the_text_log_file_on_a_config_from_before_the_line_passes(self):
+        """H2-2' (the plan's F6; H1 review r2, Codex F1 / Opus F2): "A has no log-file key" is a TOML key test, never a
+        text match, so a host value that holds the text `log-file` (MAIN_LABEL, a label the pool runs) is no key: a
+        person's up from a config before the line adds it, as for any other label. b2eb739's test read every line for
+        the text and refused."""
+        g = Before(self, label='log-file')
+        self.assertIn('labels = ["self-hosted", "log-file"]\n', g.pre)
+        r = g.p.pool('up', UPV)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertIn('POOL IMAGE DONE (up): %s' % ref(UPNEW), r.stdout)
+        self.assertEqual(g.p.config(), g.on(g.h1, UPNEW))
+        self.assertEqual(g.p.unit_now()['restarts'], 1)
+
+    def test_a_person_s_up_from_a_config_whose_comments_differ_passes(self):
+        """H2-2 (a person's up after its 03, and 03's own compare: test_one_door's NoExposure): the config the pool runs
+        has a comment line no render of this release has (OLDC), or the header of the release before this one (03's
+        header names the runscaler release): comments are not content, so the up goes on, keeps that config as the
+        rollback and restarts once. OLDC is red on b2eb739 (its compare read comments); the header subtest is the case
+        a host meets, which b2eb739 cannot tell apart (its render has that header)."""
+        for why, a in (('a comment line of its own', lambda g: older(g.pre)),
+                       ('the header of the release before', lambda g: H1HEAD + g.pre.split('\n', 1)[1])):
+            with self.subTest(why):
+                g = Before(self)
+                kept = a(g)
+                g.put(g.cfg, kept)
+                r = g.p.pool('up', UPV)
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertIn('POOL IMAGE DONE (up): %s' % ref(UPNEW), r.stdout)
+                self.assertEqual(g.p.config(), g.on(g.h1, UPNEW))
+                self.assertEqual(g.p.config('config.toml.pre-image'), kept)
+                self.assertEqual(g.p.unit_now()['restarts'], 1)
+
+    def test_up_unattended_from_a_config_whose_comments_differ_passes(self):
+        """H2-2 at D3 (the switch's compare, A config.toml, B STAGED): the config the pool runs has OLDC; the switch
+        goes on, config.toml.prev is that config."""
+        g = Before(self)
+        g.put(g.cfg, older(g.pre))
+        r = g.unattended('up', '--unattended', UPV, UPNEW)
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(g.p.config(), g.on(g.h1, UPNEW))
+        self.assertEqual(g.p.config('config.toml.prev'), older(g.pre))
+        g.closed('target-running')
+
+    def test_back_unattended_to_a_rollback_whose_comments_differ_passes(self):
+        """H2-2 at back --unattended (A the copy of config.toml.prev, B config.toml): the rollback has OLDC (and the line,
+        so it validates on any runscaler); it goes back, running."""
+        g = Before(self)
+        g.after_up('config.toml.prev')
+        g.put(g.p.rpath('config.toml.prev'), older(g.h1))
+        r = g.unattended('back', '--unattended', '--why', 'back')
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        self.assertEqual(g.p.config(), older(g.h1))
+        g.closed('target-running')
+
+    def test_the_pending_restart_up_reads_the_kept_config_as_the_older_one(self):
+        """H2-6 (the 5th caller, pool-image.sh's pending-restart up: config.toml already names the record's image, and
+        runscaler has not started since it was installed): A is the kept config (no line), B config.toml (a bare `03
+        real` of the new image, with the line): the compare accepts it and restarts once; with A's arguments swapped
+        it would read B as the older one and refuse (the mutant). A with comments of its own (OLDC) too (red on
+        b2eb739). The control: a label changed under that 03 refuses, nothing restarted."""
+        for why, kept, label, ok in (('the kept config has no line', lambda g: g.pre, None, True),
+                                     ('and comments of its own', lambda g: older(g.pre), None, True),
+                                     ('control: a changed label', lambda g: g.pre, 'linux-ci-x', False)):
+            with self.subTest(why):
+                g = Before(self)
+                g.put(g.p.rpath('config.toml.pre-image'), kept(g))
+                if label:
+                    g.label(label)
+                r = g.p.s03('real', UPNEW)
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertGreaterEqual(int(os.stat(g.cfg).st_mtime), g.p.unit_now()['start'],
+                                        'a restart is pending: runscaler started before this config.toml')
+                before = g.state()
+                r = g.p.pool('up', UPV)
+                self.assertIn('config.toml already runs the build record\'s image', r.stdout)
+                if ok:
+                    self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                    self.assertIn('POOL IMAGE DONE (up): %s' % ref(UPNEW), r.stdout)
+                    self.assertEqual(g.p.unit_now()['restarts'], 1)
+                    continue
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                self.assertIn('config.toml differs from the rollback in more than the image: nothing restarted', r.stdout)
+                self.assertEqual(g.state(), before)
+                self.assertEqual(g.restarts(), [])
+
+    def test_up_s_own_compare_after_03_puts_the_rollback_back(self):
+        """A person's up keeps its own compare after 03 (the plan's H2-7: 03's compare comes first, this one stays): a
+        config.toml that changes between 03's install and that compare (a person's hand install of another
+        max-runners at 03's last rename: the hook) refuses, and the rollback goes back with config.toml's old mtime,
+        nothing restarted."""
+        g = Before(self)
+        before = g.state()
+        g.p.hooks(('mv-done:config.toml', 'hand-file'))
+        r = g.p.pool('up', UPV)
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        self.assertIn('hand install hand-file', g.p.events())
+        self.assertIn("03's config differed from the rollback in more than the image", r.stdout)
+        self.assertEqual(g.state(), before)
+        self.assertEqual(g.p.config(), g.pre)
+        self.assertEqual(g.restarts(), [])
+
     def test_control_the_line_and_another_change_refuse(self):
-        """The control of the accept cells: the two lines AND one other change. A person's up whose host config's
-        MAIN_LABEL is not the one the pool runs (the hand-copy move's promise: that `up` stops with config.toml as it
-        was, and nothing restarts), and the updater's switch whose pool.env holds another number (D3)."""
+        """The control of the accept cells: the line AND one other change. A person's up whose host config's MAIN_LABEL
+        is not the one the pool runs (the hand-copy move's promise: that `up` stops with config.toml as it was, and
+        nothing restarts; from H2a its 03 refuses it before it installs: test_one_door's NoExposure), and the updater's
+        switch whose pool.env holds another number (D3)."""
         for why in ('up, MAIN_LABEL changed', 'up --unattended, a pool.env number changed'):
             with self.subTest(why):
                 g = Before(self)
                 if why.startswith('up,'):
-                    conf = g.p.read(g.p.path('host.conf'))
-                    self.assertEqual(conf.count('\nMAIN_LABEL=linux-ci\n'), 1)
-                    g.p.write(g.p.path('host.conf'), conf.replace('\nMAIN_LABEL=linux-ci\n', '\nMAIN_LABEL=linux-ci-x\n'),
-                              0o644)
+                    g.label('linux-ci-x')
                     before = g.state()
                     r = g.p.pool('up', UPV)
-                    says = "03's config differed from the rollback in more than the image"
+                    says = ('FAIL the render differs from config.toml in more than the runner-image lines',
+                            '03 real failed: config.toml was not changed')
                 else:
                     g.p.pool_env(CONCURRENT=3, MAX=2)
                     before = g.state()
                     r = g.unattended('up', '--unattended', UPV, UPNEW)
-                    says = 'STOP check failed: 03\'s render differs from config.toml in more than the runner-image lines'
+                    says = ('STOP check failed: 03\'s render differs from config.toml in more than the runner-image '
+                            'lines',)
                 self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
-                self.assertIn(says, r.stdout)
+                for s in says:
+                    self.assertIn(s, r.stdout)
                 self.assertEqual(g.state(), before)
                 self.assertEqual(g.restarts(), [])
                 if 'unattended' in why:
                     g.closed('pre')
                     self.assertFalse(os.path.lexists(g.p.rpath('config.toml.prev')), 'no rollback was kept')
 
+    def test_the_key_line_alone_or_a_difference_in_comments_is_accepted(self):
+        """H2-2': a person's `back` from config.toml B (the image UPNEW) to the kept config A, on the way-back
+        runscaler, is accepted when B is A plus the KEY line alone right after log-level (no comment line above it),
+        B is A plus a comment alone, or A has comments of its own (OLDC). Two of these were H1's controls ('the key line
+        alone', 'the comment alone' of test_control_any_other_log_file_difference_refuses), which refused: they flip
+        here."""
+        for why, kept, newer in (
+                ('the key line alone', lambda g: g.pre, lambda g, new: after_level(new, g.key)),
+                ('the comment alone', lambda g: g.pre, lambda g, new: after_level(new, g.comment)),
+                ('the kept config has comments of its own', lambda g: older(g.pre),
+                 lambda g, new: after_level(g.on(g.pre, UPNEW), g.comment + g.key))):
+            with self.subTest(why):
+                g = Before(self)
+                g.way_back()
+                a = kept(g)
+                g.put(g.p.rpath('config.toml.pre-image'), a)
+                g.put(g.cfg, newer(g, g.on(a, UPNEW)))
+                r = g.p.pool('back')
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertIn('POOL IMAGE DONE (back): %s' % ref(UPOLD), r.stdout)
+                self.assertEqual(g.p.config(), a)
+                self.assertEqual(g.p.unit_now()['restarts'], 1)
+
     def test_control_any_other_log_file_difference_refuses(self):
-        """The controls of EXACTLY, once, in the render's place and A with no line: a person's `back` from config.toml B
-        (the image UPNEW) to the kept config A refuses, config.toml as it was, nothing restarted, when B is A plus
-        anything else than the two lines once each right after log-level, or when A has a log-file line itself."""
+        """The controls of the KEY line once, in the render's place, A with no log-file key (and of comments are not
+        content: a value is): a person's `back` from config.toml B (the image UPNEW) to the kept config A, on the
+        way-back runscaler (so the compare decides, not BACK'S PAIR GUARD), refuses, config.toml as it was, nothing
+        restarted, when B is A plus anything else than that key line once right after log-level (another value, the
+        line twice, in another place, with an inline comment, with a value changed too, or a value changed alone), or
+        when A has a log-file key itself: the render's, or one spelled otherwise (quoted, upper case, spaced), dotted, or
+        in a table (never read as "no key")."""
         other = 'log-file = "/home/root/.local/state/runner/runner.log"\n'
 
         def elsewhere(text, add):
             if text.count('\n\n[docker]\n') != 1:
                 raise AssertionError('no single [docker] table after a blank line')
             return text.replace('\n\n[docker]\n', '\n' + add + '\n[docker]\n', 1)
+
+        def after(text, line, add):
+            if text.count('\n' + line) != 1:
+                raise AssertionError('no single line %r' % line)
+            return text.replace('\n' + line, '\n' + line + add, 1)
+
+        def logf(g):
+            return re.fullmatch(r'log-file = "(.*)"\n', g.key).group(1)
+
+        def spelled(fmt):
+            return lambda g: after_level(g.pre, fmt % logf(g))
+
+        def with_key(g, new):
+            return after_level(new, g.comment + g.key)
         for why, kept, newer in (
-                ('another log-file value', 'pre', lambda g, c, k, new: after_level(new, c + other)),
-                ('the two lines twice', 'pre', lambda g, c, k, new: after_level(new, c + k + c + k)),
-                ('the key line alone', 'pre', lambda g, c, k, new: after_level(new, k)),
-                ('the comment alone', 'pre', lambda g, c, k, new: after_level(new, c)),
-                ('the two lines in another place', 'pre', lambda g, c, k, new: elsewhere(new, c + k)),
-                ('A has the line, B has it twice', 'h1', lambda g, c, k, new: after_level(g.on(g.h1, UPNEW), c + k)),
-                ('A has the line, B has not', 'h1', lambda g, c, k, new: new)):
+                ('another log-file value', lambda g: g.pre, lambda g, new: after_level(new, g.comment + other)),
+                ('the two lines twice', lambda g: g.pre, lambda g, new: after_level(new, (g.comment + g.key) * 2)),
+                ('the key line twice', lambda g: g.pre, lambda g, new: after_level(new, g.key * 2)),
+                ('the two lines in another place', lambda g: g.pre, lambda g, new: elsewhere(new, g.comment + g.key)),
+                ('the key line after another key', lambda g: g.pre,
+                 lambda g, new: after(new, 'concurrent = 4\n', g.key)),
+                ('the key line with an inline comment', lambda g: g.pre,
+                 lambda g, new: after_level(new, g.key[:-1] + '   # the runner.log the readers read\n')),
+                ('the key line and a value changed', lambda g: g.pre,
+                 lambda g, new: with_key(g, new).replace('max-runners = 3\n', 'max-runners = 2\n', 1)),
+                ('a value changed alone', lambda g: g.pre,
+                 lambda g, new: new.replace('max-runners = 3\n', 'max-runners = 2\n', 1)),
+                ('A has the line, B has it twice', lambda g: g.h1, lambda g, new: with_key(g, new)),
+                ('A has the line, B has not', lambda g: g.h1, lambda g, new: g.on(g.pre, UPNEW)),
+                ('A has the key quoted', spelled('"log-file" = "%s"\n'), with_key),
+                ('A has the key in upper case', spelled('LOG-FILE = "%s"\n'), with_key),
+                ('A has the key spaced, its value a literal string', spelled("  log-file   =   '%s'\n"), with_key),
+                ('A has a dotted log-file key', spelled('log-file.path = "%s"\n'), with_key),
+                ('A has a log-file key in a table', lambda g: after(g.pre, '[docker]\n', 'log-file = "%s"\n' % logf(g)),
+                 with_key)):
             with self.subTest(why):
                 g = Before(self)
-                new = g.on(g.pre, UPNEW)
-                b = newer(g, g.comment, g.key, new)
-                self.assertNotEqual(b, after_level(new, g.comment + g.key), 'the accepted shape is no control')
-                g.put(g.p.rpath('config.toml.pre-image'), g.pre if kept == 'pre' else g.h1)
+                g.way_back()
+                a = kept(g)
+                b = newer(g, g.on(a, UPNEW))
+                self.assertNotEqual(b, g.on(a, UPNEW))
+                g.put(g.p.rpath('config.toml.pre-image'), a)
                 g.put(g.cfg, b)
                 before = g.state()
                 r = g.p.pool('back')

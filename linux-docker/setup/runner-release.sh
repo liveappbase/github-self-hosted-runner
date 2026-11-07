@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # runner-release.sh — SOURCED, never run: ONE copy of how the Linux host reads an actions/runner release, and of the
-# trust every such download uses; ONE copy of a release's image RECIPE and of its BUILD RECORD reader; and ONE reader
-# of a file that the host's other user owns (rr_read). 02-d1.sh
-# sources it (`02-d1.sh build VERSION` and its full run), and so do pool-image.sh (its `up` and its unattended modes)
-# and bin/runner-updater (both users: RS_USER's DUE, RUN_USER's build pass), so a person's build and the updater read a
+# trust every such download uses; ONE copy of a release's image RECIPE and of its BUILD RECORD reader; ONE reader of a
+# file that the host's other user owns (rr_read); and ONE CONFIG COMPARE (rr_same_but_image, below). 02-d1.sh
+# sources it (`02-d1.sh build VERSION` and its full run), and so do pool-image.sh (its `up`, its `back` and its
+# unattended modes), 03-runscaler.sh (inside a window, with no config.toml, and for `real --image-only`) and
+# bin/runner-updater (both users: RS_USER's DUE, RUN_USER's build pass), so a person's build and the updater read a
 # release, a recipe and a record the same way. It reads no host config. Needs bash 5, GNU coreutils, curl, python3 and
 # RR_OPENSSL.
 #
@@ -55,6 +56,26 @@
 #                           regular file only: a FIFO (with a writer or none), a symlink, a device or a folder under the
 #                           name is none, at once. 0, or 1 and RR_WHY: there is none; it is not a plain file; it cannot
 #                           be read
+# THE CONFIG COMPARE (runscaler 0.12 bump, slice H2a: the H2 plan's H2-2', R-8): ONE copy of how two runscaler configs
+# of this host are compared, read by pool-image.sh (its five callers: a person's up after its 03, the pending-restart
+# up, a person's back, the unattended up's D3 and back --unattended's check of its copy) and by 03-runscaler.sh (`real
+# DIGEST --image-only`, a person's up: H2-7). COMMENTS ARE NOT CONTENT, so a render whose comment lines changed (03's
+# header names the runscaler release) is the same config; a VALUE is content, an inline comment after one too:
+#   rr_content FILE         the CONTENT of FILE (PLAN D1, the closing lines'): its lines whose first non-blank character
+#                           is not `#` and that are not blank ([[:blank:]]: space and tab), each with its newline, on
+#                           stdout; 1 when FILE cannot be read
+#   rr_logfile_free TEXT    0 when the config TEXT has NO log-file key, read as runner-start reads a config (TOML,
+#                           python3's tomllib; a key bare or quoted, in any case and spacing, at the top level, dotted,
+#                           or in any table); 1 when it has one, or a key this cannot read as plain ASCII, or TEXT does
+#                           not parse: a log-file key it cannot place is never read as "none"
+#   rr_same_but_image A B   0 when config A (the older one: the one that runs, or the kept rollback) and config B (the
+#                           newer) are the same less their `runner-image = ` lines, each read ONCE by rr_content; or when
+#                           A has no log-file key (rr_logfile_free) and B is A with RR_LOGK, the log-file KEY line 03's
+#                           render has, once, right after A's first `log-level = ` line (THE LOG-FILE LINE: so the next
+#                           up of a host whose config is older than that line adds it); else 1 (a value, an inline
+#                           comment, another log-file value, the line twice or in another place). It prints nothing.
+#   RR_LOGK                 that line: `log-file = "$HOME/.config/runner/runner.log"`, the runner.log beside the config
+#                           (03's `log-file = "$LOGF"`: on a host, RS_USER's HOME is /home/RS_USER)
 #
 # TRUST (plan D2): every download is rr_curl, curl with ~/.curlrc ignored (-q first), https only (redirects too), TLS
 # 1.2 or newer, OPENSSL_X509_TEA_DISABLE=1, --cacert RR_BUNDLE and --capath RR_CAPATH, an EMPTY folder. That folder
@@ -121,6 +142,7 @@ case ${BASH_SOURCE[0]} in */*) RR_EXCLUDED=${BASH_SOURCE[0]%/*}/tls-excluded-spk
 case $(uname -m) in x86_64) RR_ARCH=x64 ;; aarch64) RR_ARCH=arm64 ;; *) RR_ARCH= ;; esac
 RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
 RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY= RR_STATE_MODE=
+RR_LOGK="log-file = \"$HOME/.config/runner/runner.log\""   # THE CONFIG COMPARE (the header)
 
 rr_no() { echo "runner-release: REFUSE $*" >&2; }
 rr_sha() {   # rr_sha FILE: its sha256, 64 hex, or rc 1
@@ -323,6 +345,40 @@ rr_recipe() {   # rr_recipe DIR [CTX]: RR_RECIPE and RR_NAMES of an image/ folde
   done <<< "$names"
   h=$(printf '%s' "$lines" | sha256sum) && h=${h%% *} && [[ $h =~ ^[0-9a-f]{64}$ ]] || { RR_WHY="cannot hash the recipe"; return 1; }
   RR_RECIPE=$h RR_NAMES=$names
+}
+
+rr_content() {   # rr_content FILE: its CONTENT on stdout (THE CONFIG COMPARE, the header); 1 when it cannot be read
+  grep -v -E '^[[:blank:]]*(#|$)' -- "${1-}" 2> /dev/null || [ $? = 1 ]
+}
+rr_logfile_free() {   # rr_logfile_free TEXT: 0 the config TEXT has no log-file key (THE CONFIG COMPARE, the header); 1
+  # it has one, a key that is not plain ASCII (runner-start's own key rule), or it does not parse
+  python3 -I -c '
+import re, sys, tomllib
+def keys(t):
+    if isinstance(t, dict):
+        for k, v in t.items():
+            yield k
+            yield from keys(v)
+    elif isinstance(t, list):
+        for x in t:
+            yield from keys(x)
+try:
+    c = tomllib.loads(sys.stdin.buffer.read().decode("utf-8"))
+except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+    sys.exit(1)
+sys.exit(1 if any(not re.fullmatch(r"[A-Za-z0-9_-]+", k) or "log-file" in k.lower() for k in keys(c)) else 0)' \
+    <<< "${1-}" 2> /dev/null
+}
+rr_same_but_image() {   # rr_same_but_image A B: THE CONFIG COMPARE (the header): 0 the same but the image, or B is A
+  # with THE LOG-FILE LINE added; else 1
+  local ca cb na nb
+  ca=$(rr_content "${1-}") && cb=$(rr_content "${2-}") || return 1
+  na=$(printf '%s\n' "$ca" | grep -v '^runner-image = ') || :
+  nb=$(printf '%s\n' "$cb" | grep -v '^runner-image = ') || :
+  [ "$na" = "$nb" ] && return 0
+  rr_logfile_free "$ca" || return 1
+  na=$(printf '%s\n' "$na" | RR_K=$RR_LOGK awk '{ print } /^log-level = / && !n++ { print ENVIRON["RR_K"] }') || return 1
+  [ "$na" = "$nb" ]
 }
 
 rr_read() {   # rr_read FILE MAX: ANOTHER USER'S FILE (the header), at most MAX bytes of it on stdout; 1 + RR_WHY
