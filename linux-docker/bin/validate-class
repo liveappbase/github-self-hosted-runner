@@ -11,11 +11,13 @@
 #             RC 0 is a contradiction: UNKNOWN).
 #   API-ONLY  RC not 0, no line that starts with "runner-start: REFUSE ", and the FIRST line that starts with "  ✗ " is
 #             a GitHub API line: `  ✗ scaleset[N] "NAME" GitHub API: ` (NAME as Go's %q writes it). Every other line
-#             is ignored: the scaleset client's log records (INFO, ERRO), the token-scopes hint, cobra's "Error:" and
-#             its usage. The API part reads only the URLs and the tokens, which an image switch never changes.
+#             is ignored: the scaleset client's log records (their level column: INFO, ERRO in runscaler v0.9.5's;
+#             INFO, ERROR, five wide, in v0.12.0's), the token-scopes hint, cobra's "Error:" and its usage. The API
+#             part reads only the URLs and the tokens, which an image switch never changes.
 #   NON-API   RC not 0 and a line that starts with "runner-start: REFUSE " (anywhere), or a FIRST "  ✗ " line that is
 #             one of runscaler's config checks: "  ✗ config: ", "  ✗ global config: ", `  ✗ scaleset[N] "NAME": `,
-#             "  ✗ scale set collection: " (cmd/runner/cmd_validate.go, runscaler v0.9.5).
+#             "  ✗ scale set collection: " (cmd/runner/cmd_validate.go, the same lines in runscaler v0.9.5 and
+#             v0.12.0).
 #   UNKNOWN   anything else: RC 0 without the PASS line, an empty OUTPUT_FILE, RC not 0 with no "  ✗ " line (cobra's
 #             error alone: a config file that does not parse), or a first "  ✗ " line of another check (the Docker
 #             client, Docker connectivity: they test the host, not the config).

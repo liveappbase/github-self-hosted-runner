@@ -12,9 +12,19 @@ pins that the reader answers both alike: each is a GUARD, green before the bump 
 - runner validate's output (A8): the same check lines (`  ✗ scaleset[0] "…" GitHub API: …`, `All checks passed.`), and
   the client's records now start `INFO  ` and `ERROR `: bin/validate-class gives each output the class of its v0.9.5
   twin (`INFO `, `ERRO `).
-The /healthz cell runs pool-ready in a container (support.Sandbox: the host config and the curl substitute); the others
-run anywhere with bash 5, awk and jq.
+- THE UPDATER'S PASS (runscaler 0.12 bump, slice H2c: the Hetzner half of the Studio's C2, core/lib/logfmt.jq reading
+  both level columns): RS_USER's `runner-updater pass` (linux-docker/bin/runner-updater, the core as it ships) reads
+  runner.log through runner-facts.sh's log_pos and the core state's carry, on a v0.12.0-form log and on its v0.9.5
+  twin (the same records in the four-letter column), and gives the same R1 and KEEP verdicts from the same records
+  read: the five-wide level column of a set's record (`INFO  linux-ci-main: Runner removed …`), an ERROR record (a
+  counted start failure), a global record (no set: the disk guard's WARN, the one record that settles the failures),
+  and a record cut where a pass's position falls (held as the carry, then read whole once the rest is written).
+  Unlike the cells above, this one is red before C2: on b2eb739's logfmt.jq (the pre-C2 reader) the v0.12.0 log gives
+  no R1 and no KEEP accept, while its v0.9.5 twin gives both (the control).
+The /healthz cell runs pool-ready in a container (support.Sandbox: the host config and the curl substitute), the pass
+cell the real scripts in one (support.Pool, a fake clock); the others run anywhere with bash 5, awk and jq.
 """
+import calendar
 import json
 import os
 import re
@@ -25,6 +35,7 @@ import time
 import unittest
 
 from tests.hetzner.support import REPO, Sandbox, bash5, needs_container
+from tests.hetzner.test_updater import FAM, Rig, candidate
 
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 VCLASS = os.path.join(REPO, 'linux-docker', 'bin', 'validate-class')
@@ -204,6 +215,150 @@ class Validate(unittest.TestCase):
                 self.assertEqual(self.classify(rc, records(text, 4)), want, 'the v0.9.5 twin: the premise')
                 self.assertEqual(self.classify(rc, records(text, 5)), want)
 
+
+# THE UPDATER'S PASS: runscaler's records, each one both releases write, field for field; only the level column
+# differs (charm log v2.0.0's four letters in v0.9.5, v2.0.1's five-wide column in v0.12.0: records()). Their source,
+# runscaler v0.12.0's (v0.9.5's):
+# - a start failure: internal/controller/controller.go:254 (:248) `Failed to start runner, will retry` error=, the docker
+#   provider's internal/provider/docker.go:162 (both) around Docker's own text (test_updater.failed's);
+# - a job's removal: logRemoved, controller.go:717-734 (:656-673): name instanceID reason jobId repo workflowRunId job
+#   result (tests/core/fixtures/hz-cut.log's line 42, its set renamed);
+# - the disk guard's WARN: internal/diskguard/guard.go:215 (both), warnShortfall: path free_bytes target_bytes
+#   shortfall_bytes, by the process logger, so with no set prefix (cmd/runner/main.go's runManager);
+# - a scale-up: controller.go:236 (:230) currentCount desiredCount.
+ERR = 'failed to create runner container: Error response from daemon: No such image: example-runner'
+CUT_AT = 'error="failed to create runner con'   # where a pass's position cuts the third failure (the rest: later)
+
+
+def stamp(t):
+    return time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(t))
+
+
+def start_failed(t):
+    return '%s {ERROR} %s: Failed to start runner, will retry error="%s"\n' % (stamp(t), MAIN, ERR)
+
+
+def job_done(t, s):
+    return ('%s {INFO} %s: Runner removed name=runner-1d1af85d instanceID=5869c40ebfde32e17ad9799d5b287c5170d517260be9'
+            '646c39fb3ffa06c3d300 reason=job-completed jobId=3247e383-0f16-cfaf-b270-199a67527096 repo=example-org/example'
+            ' workflowRunId=82593050714 job="build (9150)" result=succeeded\n' % (stamp(t), s))
+
+
+def guard_warn(t):
+    return ('%s {WARN} Disk guard: reached max-tier without meeting target-free path=/home/ci-run/.local/share/docker '
+            'free_bytes=30000000000 target_bytes=32140000000 shortfall_bytes=2140000000\n' % stamp(t))
+
+
+def scale_up(t):
+    return '%s {INFO} %s: Scaling up runner currentCount=0 desiredCount=1\n' % (stamp(t), MAIN)
+
+
+# the members of the core's state that are the passes' clock (each rig has its own), not what the log said
+CLOCK = ('seen', 'since', 'carry_at', 'closed_at', 'keep_at')
+
+
+def read_as(x, t0):
+    """X (r1's family evidence, KEEP's answer) with every log time made relative to t0 (a log second: x - t0; a log
+    time text: ('log', its second - t0)) and the passes' clock members left out: what the pass READ, comparable between
+    two rigs."""
+    if isinstance(x, dict):
+        return {k: read_as(v, t0) for k, v in x.items() if k not in CLOCK}
+    if isinstance(x, list):
+        return [read_as(v, t0) for v in x]
+    if isinstance(x, str) and re.fullmatch(r'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d', x):
+        return ('log', calendar.timegm(time.strptime(x, '%Y-%m-%d %H:%M:%S')) - t0)
+    if isinstance(x, int) and not isinstance(x, bool) and abs(x - t0) < 10 ** 6:
+        return x - t0
+    return x
+
+
+@needs_container
+class UpdaterPass(unittest.TestCase):
+    """RS_USER's pass over runner.log in one release's level column (WIDTH 5: v0.12.0; 4: its v0.9.5 twin), on
+    test_updater's Rig (production on the old image, a fake clock, ON) with a candidate on config.toml's own lines set
+    by hand (test_updater.Would's: the first pass opens its evidence window; no switch kept a config.toml.prev, so R1's
+    rollback holds STOP ROLLBACK FAILED and starts no window). After that pass: two start failures (ERROR, the main
+    set), a job that succeeded (INFO, on SET), and the first part of a third failure, up to CUT_AT (pass B: its
+    position cuts that record); then the rest of it, the disk guard's WARN (global) 160 s after the first failure, and
+    a scale-up a second later (the record a pass always holds) (pass C, at the clock C_AT sets). Returns, per pass: R1's
+    and KEEP's family answers and r1's state of the family (read_as), and the carry."""
+
+    def passes(self, width, s, c_at=None):
+        g = Rig(self, on=True)
+        g.put({'format': 1, 'on': True, 'families': {FAM: {'candidate': candidate(g.p.clock() - 60)}}})
+        t = int(time.time()) + 100
+        out = []
+
+        def one():
+            r = g.ok('pass')
+            r1, keep = g.out('r1'), g.out('keep')
+            out.append({'r1': read_as(r1['families'][FAM], t), 'keep': read_as(keep['families'][FAM], t),
+                        'state': read_as(r1['state']['families'][FAM], t), 'carry': r1['state']['carry'],
+                        'stdout': r.stdout})
+        one()
+        third = records(start_failed(t + 20), width)
+        head = third[:third.index(CUT_AT) + len(CUT_AT)]
+        g.append(records(start_failed(t) + start_failed(t + 10) + job_done(t + 15, s), width) + head)
+        one()
+        g.append(third[len(head):] + records(guard_warn(t + 160) + scale_up(t + 161), width))
+        if c_at:
+            g.p.clock(now=c_at(g))
+        one()
+        return out, head, records(scale_up(t + 161), width)
+
+    def twins(self, s, check, c_at=None):
+        """passes() in v0.9.5's column (the control), then in v0.12.0's, each a subtest: CHECK(its passes) asserts its
+        own verdicts and reading, and the v0.12.0 one is read as its twin was, pass for pass."""
+        seen = {}
+        for width, name in ((4, 'v0.9.5'), (5, 'v0.12.0')):
+            with self.subTest(column=name):
+                out, head, held = self.passes(width, s, c_at)
+                seen[width] = out
+                check(*out)
+                self.assertEqual([p['carry'] for p in out[1:]], [head, held],
+                                 'pass B holds the cut record from its header, pass C the last record')
+                if width == 5 and 4 in seen:
+                    self.assertEqual([{k: p[k] for k in ('r1', 'keep', 'state')} for p in out],
+                                     [{k: p[k] for k in ('r1', 'keep', 'state')} for p in seen[4]],
+                                     'the v0.12.0 log is read as its v0.9.5 twin')
+
+    def failures(self, p):
+        return [(f['s'], f['c'], f['x'], f['settled']) for f in p['state']['sets'].get(MAIN, {}).get('fails', [])]
+
+    def test_r1_s_rollback_from_both_columns(self):
+        """Three counted failures on the main set, no proof of life on it between them (the job ran on the small
+        set): pass B reads two (the third is held; R1 may still come: pending), pass C the third WHOLE (its error text
+        whole: the cut fell inside it) and the global WARN, 140 s past the third, which settles all three: R1's
+        rollback on the main set, KEEP held, the pass's rollback line; the success counted, a proof of the small set."""
+        def check(a, b, c):
+            self.assertEqual([(p['r1']['verdict'], p['keep']['verdict']) for p in (a, b, c)],
+                             [('none', 'observe'), ('none', 'observe'), ('rollback', 'held')])
+            self.assertEqual(self.failures(b), [(0, False, ERR, False), (10, False, ERR, False)])
+            self.assertEqual((b['state']['succeeded'], b['state']['sets'][SMALL]['proofs']), (1, [15]))
+            self.assertEqual(b['r1']['pending']['set'], MAIN)
+            self.assertEqual(self.failures(c), [(0, False, ERR, True), (10, False, ERR, True), (20, False, ERR, True)])
+            self.assertEqual((c['r1']['set'], len(c['r1']['failures']), c['state']['newest']), (MAIN, 3, 160),
+                             'the global WARN was read: it is the newest record read')
+            self.assertIn("runner-updater: pass: R1's rollback is due for hz-docker", c['stdout'])
+        self.twins(SMALL, check)
+
+    def test_keep_s_accept_from_both_columns(self):
+        """The job that succeeded ran on the main set, between the second and the third failure (a proof of life:
+        no run of three, no R1); pass C, 72 h after the window opened: KEEP accepts (one success), and the main set
+        keeps the proof and the third failure (read whole, settled by the global WARN); the two before the proof are
+        judged and pruned."""
+        def c_at(g):
+            return g.out('r1')['families'][FAM]['since'] + 72 * 3600
+
+        def check(a, b, c):
+            self.assertEqual([(p['r1']['verdict'], p['keep']['verdict']) for p in (a, b, c)],
+                             [('none', 'observe'), ('none', 'observe'), ('none', 'accept')])
+            self.assertEqual((self.failures(b), b['state']['sets'][MAIN]['proofs']),
+                             ([(0, False, ERR, False), (10, False, ERR, False)], [15]))
+            self.assertEqual((self.failures(c), c['state']['sets'][MAIN]['proofs']), ([(20, False, ERR, True)], [15]))
+            self.assertEqual((c['keep']['succeeded'], c['state']['newest']), (1, 160))
+            self.assertIn('runner-updater: pass: would accept hz-docker', c['stdout'])
+        self.twins(MAIN, check, c_at)
 
 if __name__ == '__main__':
     unittest.main()

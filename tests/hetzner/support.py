@@ -856,9 +856,47 @@ def serving(st):
     return shown(st)[0] == 'active' and st.get('runner', 'serves') == 'serves'
 
 
+def state_key():
+    """THE STATE A CUT LEAVES, as one sha256: every file, link and folder of the home but ~/build (which nothing the
+    pool cells run writes) and runscaler's own log (its lines follow the process, which the unit's fields name): its
+    path, its kind, its bytes' sha256 and its mtime's second; the unit as systemd.json holds it (active, enabled,
+    failed, pid, start, a stop job's drain); and the bytes the running process runs (THE RUNNING BINARY). Two moments
+    of one run with the same key leave the same pair to a SIGKILL there (test_the_runscaler_step's Resume)."""
+    home = os.environ['HOME']
+    out = []
+    for d, dirs, names in os.walk(home):
+        if d == home:
+            dirs[:] = [x for x in dirs if x != 'build']
+        dirs.sort()
+        for n in sorted(dirs + names):
+            q = os.path.join(d, n)
+            rel = os.path.relpath(q, home)
+            if rel == os.path.join('.config', 'runner', 'runner.log'):
+                continue
+            st = os.lstat(q)
+            if os.path.islink(q):
+                out.append([rel, 'link', os.readlink(q)])
+            elif os.path.isdir(q):
+                out.append([rel, 'dir', int(st.st_mtime)])
+            else:
+                with open(q, 'rb') as f:
+                    out.append([rel, hashlib.sha256(f.read()).hexdigest(), int(st.st_mtime)])
+    u = load('systemd.json', {})
+    out.append(['unit'] + [u.get(k) for k in ('active', 'enabled', 'failed', 'pid', 'start', 'drain_until')])
+    exe = os.path.join(SB, 'proc', str(u.get('pid')), 'exe')
+    if os.path.exists(exe):
+        with open(exe, 'rb') as f:
+            out.append(['exe', hashlib.sha256(f.read()).hexdigest()])
+    return hashlib.sha256(json.dumps(out).encode()).hexdigest()
+
+
 def fire(at):
-    """The cell's hooks for event AT, each once: hooks.json = [{"at": AT, "do": [ACTION, ...]}]."""
+    """The cell's hooks for event AT, each once: hooks.json = [{"at": AT, "do": [ACTION, ...]}]. A hook at "*" with the
+    action mark is no hook: at EVERY event it logs `mark AT KEY` (state_key, before any hook of AT acts: the state a
+    kill there leaves), and stays."""
     hooks = load('hooks.json', [])
+    if any(h['at'] == '*' and h['do'] == ['mark'] for h in hooks):
+        event('mark %s %s' % (at, state_key()))
     todo = [h for h in hooks if h['at'] == at and not h.get('fired')]
     if not todo:
         return

@@ -44,12 +44,15 @@ subtest on a rig of its own. The pinned runscaler is Pool's substitute; the way-
 bytes), with its own download. The host before the step: Install step 3 done, so its ~/bin/runner-start is the release
 before's (no selector: old_wrapper). (Named for its CI part, test_[!a-qr][!np]*.py: .github/workflows/release-check.yml.)
 """
+import collections
 import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import tarfile
+import tempfile
 import time
 import types
 import unittest
@@ -66,7 +69,7 @@ PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 RR = os.path.join(REPO, 'linux-docker', 'setup', 'runner-release.sh')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
 PINNED, WAYBACK = '0.12.0', '0.9.5'
-V2 = digest(12)
+V2, V2V = digest(12), '2.330.1'   # on_pinned's image, and the runner version its record names
 STATE = os.path.join(Pool.STATE, 'state.json')
 WBDL = 'runner-v%s-linux-amd64.tar.gz' % WAYBACK
 URL = 'https://github.com/ysya/runscaler/releases/download/v%s/runner-linux-amd64.tar.gz'
@@ -293,6 +296,47 @@ def up_record(p, version, d):
         p.curl['served'] = p.curl['served'] + [d]
 
 
+PLAN = re.compile(r'(?i)\bplan\s*§|\bplan\s+D[0-9]')   # a section of a plan: `plan §4 B4`, `PLAN D3`
+
+
+def code_part(line):
+    """LINE less a comment: a whole-line one, or one that starts at a `#` after a blank outside quotes (a shell's word
+    that starts with #; python's comment too), a backslash escaping the next character outside single quotes."""
+    if line.lstrip().startswith('#'):
+        return ''
+    q, i = None, 0
+    while i < len(line):
+        c = line[i]
+        if q is None and c in '"\'':
+            q = c
+        elif q is None and c == '\\' or q == '"' and c == '\\':
+            i += 1
+        elif q is None and c == '#' and (i == 0 or line[i - 1] in ' \t'):
+            return line[:i]
+        elif c == q:
+            q = None
+        i += 1
+    return line
+
+
+def plan_refs(root):
+    """[(file relative to ROOT, the line stripped)] of each line of ROOT that names a plan's section (PLAN): every line
+    of a *.md file, the code part (code_part) of any other; a file that is not UTF-8 text is no text."""
+    out = []
+    for d, dirs, names in os.walk(root):
+        dirs.sort()
+        for n in sorted(names):
+            try:
+                with open(os.path.join(d, n), encoding='utf-8') as f:
+                    lines = f.read().splitlines()
+            except UnicodeDecodeError:
+                continue
+            for l in lines:
+                if PLAN.search(l if n.endswith('.md') else code_part(l)):
+                    out.append((os.path.relpath(os.path.join(d, n), root), l.strip()))
+    return out
+
+
 class Text(unittest.TestCase):
     def test_the_download_s_name_is_one_rule_in_03_and_pool_image_sh(self):
         """dl_of VERSION: the file of VERSION's download in ~/build/dl, byte for byte the same function in both (03
@@ -361,6 +405,33 @@ class Text(unittest.TestCase):
         self.assertEqual(missing, [])
         self.assertTrue({'core/README.md', 'linux-docker/README.md'} <= found, sorted(found))
 
+    def test_no_text_names_a_section_of_a_private_plan(self):
+        """Review r2, Opus F4 (the class, by plan_refs: N = 5 at 8407d35): no text of linux-docker/ names a section of a
+        plan this repository does not hold (`plan §4 B4`, `PLAN D3`): the code part of each program line (a comment,
+        whole-line or trailing, may name one: it is the maintainers' note, never printed) and every line of the
+        README. 8407d35's five: runner-start's Docker refusal (plan §2.2: now the README's seccomp text), 03's no
+        pool.env (plan §4 B4: README Install step 6) and no token (plan §4 B3: step 8), 01-users-undo.sh's token
+        file (plan §3 R1-UNDO: README "Uninstall"), pool-image.sh's unattended compare (plan D3). A line of each
+        shape planted in a COPY is found; the control: the same text as a whole-line or a trailing comment is not,
+        and a `#` inside quotes starts no comment."""
+        tree = plan_refs(os.path.join(REPO, 'linux-docker'))
+        with self.subTest('the tree'):
+            self.assertEqual(tree, [])
+        for rel, line, found in (('setup/03-runscaler.sh', '[ -e "$POOL" ] || die "no $POOL (plan §4 B4)"', True),
+                                 ('bin/runner-start', "  sys.exit(f'see PLAN D5 for {cfg}')", True),
+                                 ('setup/pool-image.sh', 'echo "a # (plan §2.2) is no comment here"', True),
+                                 ('README.md', 'Run it as plan D3 says.', True),
+                                 ('setup/03-runscaler.sh', '  # plan §4 B4: the numbers', False),
+                                 ('setup/pool-image.sh', 'DISK_PCT=10   # (plan D5 DISK)', False)):
+            with self.subTest(file=rel, line=line):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = os.path.join(tmp, 'linux-docker')
+                    shutil.copytree(os.path.join(REPO, 'linux-docker'), root)
+                    with open(os.path.join(root, rel), 'a') as f:
+                        f.write(line + '\n')
+                    added = collections.Counter(plan_refs(root)) - collections.Counter(tree)   # the planted line's own
+                    self.assertEqual(dict(added), {(rel, line.strip()): 1} if found else {})
+
 
 class Readme(unittest.TestCase):
     def section(self):
@@ -392,6 +463,20 @@ class Readme(unittest.TestCase):
         for w in ('renamed over it, so a cut never leaves a partial file', 'a `back` cut before its restart',
                   'run `pool-image.sh back` again first'):
             self.assertIn(w, sec)
+
+    def test_a_release_a_back_closed_and_the_lines_up_names_after_a_bare_03(self):
+        """Review r2, Opus F1 and F2 (PendingLines, Keep): the section's check list says a kept config that names
+        config.toml's image is a release a back closed (also after a bare 03 real changed config.toml), which the step
+        removes; the text on running 03 by hand says what `up` then names: the step (with 0.9.5 after the way back), or
+        `back` while a release is open, which puts the kept config back over a config.toml runscaler never ran."""
+        sec = self.section()
+        for w in ('names another image than config.toml', 'The kept config of a release a `back` closed names '
+                  'config.toml\'s image', 'or config.toml changed since, by a bare `03-runscaler.sh real`'):
+            self.assertIn(w, sec)
+        hand = readme().split('Do not run 03-runscaler.sh by hand on the running pool', 1)[1].split('\n', 1)[0]
+        for w in ('that `up` names the line that finishes it', '`pool-image.sh runscaler` (with `0.9.5` on a host that '
+                  'took the way back)', '`pool-image.sh back` while one is', 'over a config.toml runscaler never ran'):
+            self.assertIn(w, hand)
 
     def test_the_way_back_s_two_lines_are_the_files_the_step_reads(self):
         """The way back: its download line (v0.9.5's release asset into 03's dl_of name for it) and the step with that
@@ -782,7 +867,12 @@ class Resume(unittest.TestCase):
     VERSION's runscaler running the config it ends with, no runner.new and no DEST.new left, at most one restart. For
     each pair a cut leaves on disk (on_disk: the first boundary that leaves it), once more with a reboot before the
     rerun: runscaler started on that pair (its guard starts it), then the same line finishes. The mutant (the binary
-    renamed before config.toml) leaves the pinned runscaler with the config with no line: the guard refuses."""
+    renamed before config.toml) leaves the pinned runscaler with the config with no line: the guard refuses. ONE CUT
+    PER STATE (review r2, Opus F5): the uncut run marks the state at each boundary (support.state_key), and only the
+    first boundary of each state is cut (a later one with that state leaves the same pair: about half of them, the
+    install of a folder that is there, a rename right after its check); a boundary after a write no hook sees keeps a
+    cut of its own (the control: `mv:config.toml`, after the copy into config.toml.tmp). Fewer cuts than boundaries,
+    and fewer pairs than cuts."""
 
     def cut(self, way, at, boot):
         p, args, want, cfg = rig(self, way)
@@ -807,18 +897,34 @@ class Resume(unittest.TestCase):
 
     def matrix(self, way):
         p, args, want, cfg = rig(self, way)
+        p.hooks(('*', 'mark'))
         r = step(p, *args)
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-        at = []
+        at, keys = [], {}
         for e in p.events():
             m = re.fullmatch(r'(install|mv) (\S+)', e)
             if m and '%s:%s' % m.groups() not in at:
                 at += ['%s:%s' % m.groups(), '%s-done:%s' % m.groups()]
+            m = re.fullmatch(r'mark (\S+) ([0-9a-f]{64})', e)
+            if m and m.group(1) not in keys:      # the state at a boundary's FIRST event: where its kill hook fires
+                keys[m.group(1)] = m.group(2)
         at += ['healthz-read', 'systemctl:restart-begin', 'systemctl:restart-done']
         for name in ('install:runner.new', 'mv:runner') + (('mv:config.toml',) if way != 'the way back' else ()):
             self.assertIn(name, at)
-        pairs = set()
+        # ONE CUT PER STATE (review r2, Opus F5): the uncut run's state at each boundary (support's state_key: the
+        # home's files, the unit, the running binary); a boundary whose state an earlier one had leaves the same pair
+        # to a SIGKILL, so only the first of each state is cut
+        cuts, states = [], set()
         for a in at:
+            self.assertIn(a, keys, 'the uncut run marked each boundary')
+            if keys[a] not in states:
+                states.add(keys[a])
+                cuts.append(a)
+        self.assertLess(len(cuts), len(at), 'states repeat across boundaries: %r' % cuts)
+        if way != 'the way back':   # the control: config.toml.tmp, an unhooked copy, comes between it and the one before
+            self.assertIn('mv:config.toml', cuts)
+        pairs = set()
+        for a in cuts:
             pair = None
             with self.subTest(way=way, at=a):
                 pair = self.cut(way, a, False)
@@ -827,7 +933,7 @@ class Resume(unittest.TestCase):
                 with self.subTest(way=way, at=a, reboot=True):
                     self.cut(way, a, True)
         self.assertGreaterEqual(len(pairs), 2, 'the cuts left the pair before the step and the one after it')
-        self.assertLess(len(pairs), len(at), 'a pair is a class of the boundaries, not each one: %r' % sorted(pairs))
+        self.assertLess(len(pairs), len(cuts), 'a pair is a class of the states, not each one: %r' % sorted(pairs))
 
     def test_a_sigkill_at_each_boundary_leaves_a_pair_that_starts_and_the_same_line_finishes_it(self):
         """Forward from v0.9.5 and a config before H1 (no log-file line)."""
@@ -897,17 +1003,50 @@ class Keep(unittest.TestCase):
         self.assertEqual((ino(p, 'config.toml'), len(restarts(p))), (cfg, n))
 
     def test_control_an_open_release_refuses(self):
-        """R-4's other side: any other config.toml.pre-image is an open image release: refused ("accept, or back"),
-        nothing changed."""
+        """R-4's other side: an open image release, an `up` with neither its `accept` nor its `back`: its
+        config.toml.pre-image names another image than config.toml's (review r2, Opus F1's control): refused ("accept,
+        or back"), nothing changed. (8407d35's cell planted a rollback of config.toml's own image with other comments:
+        by accept's rule that is a release a `back` closed: the cell below.)"""
         g, p = forward(self)
-        g.put(p.rpath('config.toml.pre-image'), older(g.pre))
+        r = p.pool('up', UPV)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertNotEqual(p.images('config.toml.pre-image'), p.images())
         before = files(p)
         r = step(p)
         self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
         self.assertIn('pool-image.sh accept', r.stdout)
         self.assertIn('pool-image.sh back', r.stdout)
         self.assertEqual(files(p), before)
-        self.assertEqual((p.calls('runner'), restarts(p)), ([], []))
+        self.assertEqual(p.calls('runner'), [])
+        self.assertEqual(restarts(p), ['--user restart runscaler'], 'up\'s own restart, and no other')
+
+    def test_a_release_a_back_closed_then_a_numbers_change_is_closed_too(self):
+        """Review r2, Opus F1 (its probeA): an `up`, its `back` (config.toml.pre-image stays, config.toml byte for byte),
+        then a change of pool.env's numbers and a bare `03 real` (Install step 9), runscaler restarted on it: the
+        rollback names config.toml's image (accept's own rule: after a back there is nothing to accept), so the release
+        is closed, though the bytes differ (the numbers): the step removes it, says so, and goes on: v0.12.0 runs
+        config.toml with the new numbers. 8407d35 refused ("an image release is open"), and accept and back refused
+        too: no line cleared it."""
+        g, p = forward(self)
+        for args in (('up', UPV), ('back',)):
+            r = p.pool(*args)
+            self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        keep = p.rpath('config.toml.pre-image')
+        self.assertEqual(sha256_file(keep), sha256_file(p.rpath('config.toml')))
+        p.pool_env(CONCURRENT=3, MAX=2)
+        r = p.s03('real')
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        p.act('restart')
+        cfg = p.config()
+        self.assertIn('concurrent = 3\n', cfg)
+        self.assertEqual(p.images(), p.images('config.toml.pre-image'))
+        self.assertNotEqual(sha256_file(keep), sha256_file(p.rpath('config.toml')))
+        r = step(p)
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        self.assertIn('removed %s' % keep, r.stdout)
+        self.assertFalse(os.path.lexists(keep))
+        self.assertEqual((rb(p), p.exe(), p.config()), (g.bin, g.bin, cfg))
+        starts(self, p)
 
     def test_a_back_cut_before_its_restart_is_finished_by_back_first(self):
         """R-4, Opus r1 F1 (P2): a person's `back` cut in its idle wait (cut_back: config.toml.pre-image is config.toml
@@ -1003,7 +1142,8 @@ class UpAfterACut(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
         fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
         self.assertEqual(len(fail), 1, fail)
-        self.assertRegex(fail[0], r'(?i)\brun %s\b' % re.escape(names), 'the line to run (not a cause it names)')
+        self.assertRegex(fail[0], LINE % re.escape(names), 'the line to run (not a cause it names), and no version after it '
+                         '(review r2, Opus F2: the forward cut renamed v0.12.0, so the bare line, not the way back\'s)')
         self.assertNotIn('docs/', fail[0])
         self.assertEqual((files(p), binary(p)), (before, b0))
 
@@ -1024,6 +1164,157 @@ class UpAfterACut(unittest.TestCase):
                 r = step(p) if fix == 'pool-image.sh runscaler' else p.pool('back')
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 r = p.pool('up', version)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertIn('POOL IMAGE DONE (up)', r.stdout)
+
+
+# a FAIL line names LINE as the line to run: `run LINE`, and no version follows it (`pool-image.sh runscaler` is not
+# `pool-image.sh runscaler 0.9.5`)
+LINE = r'(?i)\brun %s(?![0-9.]| [0-9])'
+
+
+def pending(test, p, start=None):
+    """config.toml, just installed by a bare 03 real, is pending: runscaler started before it (at START, by default 5 s
+    before its install), as a real clock gives (the fake clock ran each start ahead of every real mtime: Opus r2's
+    probeC)."""
+    m = int(os.stat(p.rpath('config.toml')).st_mtime)
+    p.set_unit(start=m - 5 if start is None else start, pid=p.unit_now()['pid'])
+    test.assertLessEqual(p.unit_now()['start'], m, 'pending')
+
+
+def names_line(test, r, line):
+    """R refused (exit 1), with ONE FAIL line, which names LINE as the line to run (not a cause it names)."""
+    test.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+    fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
+    test.assertEqual(len(fail), 1, fail)
+    test.assertRegex(fail[0], LINE % re.escape(line), 'the line to run')
+    test.assertIn('nothing', fail[0])
+
+
+@needs_container
+class PendingLines(unittest.TestCase):
+    """Review r2's folds of up's pending refusals (a config.toml installed after runscaler started, in up's two branches):
+    each names a line that, run in that refusal's own state, ends with exit 0 and clears it, and the same `up` passes
+    after it. Opus F2: on a host whose ~/bin/runner is v0.9.5 (the way back) the step's line names that version
+    (`pool-image.sh runscaler 0.9.5`: the bare line would put v0.12.0 back); UpAfterACut's forward cut (v0.12.0 renamed)
+    keeps the bare line (the control). Opus F1: after a release a `back` closed (its rollback names config.toml's
+    image) and a bare `03 real` of new numbers, up's third and fourth refusals named `pool-image.sh back`, which then
+    refused (the numbers): it is no open release, so the line is the step's; and an OPEN release whose pending
+    config.toml changed in more than the image (a bare 03 real of new numbers after an up cut before its restart):
+    `back`, which puts the rollback back over a config.toml runscaler never ran (its control: one runscaler ran,
+    refused). Nothing changes at a refusal."""
+
+    def refuses(self, p, version, line):
+        before, b0, n = files(p), binary(p), len(restarts(p))
+        r = p.pool('up', version)
+        names_line(self, r, line)
+        self.assertEqual((files(p), binary(p), len(restarts(p))), (before, b0, n))
+        return r
+
+    def test_a_way_back_host_s_pending_config_names_the_step_with_v0_9_5(self):
+        """Opus F2 (its probeC): on v0.12.0, the way back (`runscaler 0.9.5`: v0.9.5 runs), then a change of pool.env's
+        numbers and a bare `03 real` (pending); `up` to another image and `up` of the running version each refuse
+        naming `pool-image.sh runscaler 0.9.5`; that line keeps v0.9.5 (and starts it on config.toml), and the same
+        up then passes on v0.9.5. 8407d35 named the bare line, which installs v0.12.0 again."""
+        for case in ('another image', 'the running version'):
+            with self.subTest(case):
+                p, wb, pin = on_pinned(self)
+                r = step(p, WAYBACK)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                p.pool_env(CONCURRENT=3, MAX=2)
+                r = p.s03('real')
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                pending(self, p)
+                p.curl['served'] = [V2]
+                up_record(p, V2V, V2)
+                up_record(p, UPV, UPNEW)
+                version = UPV if case == 'another image' else V2V
+                self.refuses(p, version, 'pool-image.sh runscaler %s' % WAYBACK)
+                r = step(p, WAYBACK)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertEqual((rb(p), p.exe()), (wb, wb))
+                r = p.pool('up', version)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertEqual((rb(p), p.exe()), (wb, wb))
+
+    def test_a_closed_release_s_pending_config_names_the_step(self):
+        """Opus F1, up's third and fourth refusals: an `up`, its `back`, a change of pool.env's numbers and a bare `03
+        real` (pending), then `up` of the running version: with the unit active (the rollback is older than the
+        process: 8407d35's third refusal) and with it down (8407d35's fourth): the rollback names config.toml's image,
+        a release a back closed, so the line is the step's (v0.9.5 here, forward()'s); run, it removes that rollback
+        and starts runscaler on config.toml, and the up then passes. 8407d35 named `pool-image.sh back`, which refused
+        (the numbers)."""
+        for unit in ('active', 'down'):
+            with self.subTest(unit=unit):
+                g, p = forward(self)
+                for args in (('up', UPV), ('back',)):
+                    r = p.pool(*args)
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                k = int(os.stat(p.rpath('config.toml.pre-image')).st_mtime)
+                while int(time.time()) <= k + 1:     # the real clock past the rollback's second and the next (a state)
+                    time.sleep(0.05)
+                p.pool_env(CONCURRENT=3, MAX=2)
+                r = p.s03('real')
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                pending(self, p, start=k + 1)        # back's restart: after the rollback was kept, before this install
+                if unit == 'down':
+                    p.set_unit(active=False, failed=True)
+                up_record(p, UPOLDV, UPOLD)
+                self.refuses(p, UPOLDV, 'pool-image.sh runscaler %s' % WAYBACK)
+                r = step(p, WAYBACK)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertFalse(os.path.lexists(p.rpath('config.toml.pre-image')))
+                r = p.pool('up', UPOLDV)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+
+    def test_an_open_release_s_pending_config_changed_in_more_than_the_image_names_back(self):
+        """Opus F1, up's fourth refusal on an OPEN release: an `up` cut in its idle wait (config.toml.pre-image kept,
+        config.toml the new image, runscaler not restarted), then a change of pool.env's numbers and a bare `03 real`
+        (config.toml the new image with the new numbers: never run); the same `up` refuses naming `pool-image.sh back`;
+        back puts the rollback back over that config.toml (runscaler never ran it) and says so; once pool.env holds the
+        numbers the pool runs again, the up passes. The control: runscaler restarted on that config.toml (it ran): back
+        refuses ("a rollback would undo that too"), nothing changed; and when its unit stopped since, the up's line is
+        the start of the unit, after which the same up passes. 8407d35's text named back only "once config.toml differs
+        from the rollback in the image alone", and back refused."""
+        for case in ('never ran', 'ran', 'ran, the unit down'):
+            with self.subTest(case):
+                g, p = forward(self)
+                p.hooks(('healthz-read', 'kill'))
+                p.write(p.path('logs', 'runner.log'), '')
+                p.unattended('up', UPV, prefix=())
+                self.assertTrue([e for e in p.events() if e.startswith('kill ')], 'the cut ran')
+                p.hooks()
+                keep = p.rpath('config.toml.pre-image')
+                self.assertEqual(p.images(), [ref(UPNEW)] * 2)
+                self.assertEqual(p.images('config.toml.pre-image'), [ref(UPOLD)] * 2)
+                p.pool_env(CONCURRENT=3, MAX=2)
+                r = p.s03('real')
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertEqual(p.images(), [ref(UPNEW)] * 2)
+                if case == 'never ran':
+                    self.assertLessEqual(p.unit_now()['start'], int(os.stat(p.rpath('config.toml')).st_mtime))
+                    self.refuses(p, UPV, 'pool-image.sh back')
+                    r = p.pool('back')
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    self.assertIn('runscaler never ran it', r.stdout)
+                    self.assertEqual(sha256_file(p.rpath('config.toml')), sha256_file(keep))
+                    p.pool_env()
+                    r = p.pool('up', UPV)
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    self.assertIn('POOL IMAGE DONE (up)', r.stdout)
+                    continue
+                p.act('restart')
+                if case == 'ran':
+                    before, n = files(p), len(restarts(p))
+                    r = p.pool('back')
+                    self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+                    self.assertIn('a rollback would undo that too', r.stdout)
+                    self.assertEqual((files(p), len(restarts(p))), (before, n))
+                    continue
+                p.act('fail')
+                self.refuses(p, UPV, 'systemctl --user start runscaler')
+                p.act('start')
+                r = p.pool('up', UPV)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 self.assertIn('POOL IMAGE DONE (up)', r.stdout)
 
@@ -1211,11 +1502,11 @@ class UpdaterAfterTheStep(unittest.TestCase):
         """Codex r1's M-6 row, MEASURED: the locks do not exclude it (the step takes pool-image.sh's own lock, a pass
         the updater lock), so the whole step runs inside a pass (support's runscaler-step action at the pass's Nth
         `systemctl show`, each N a plain pass reaches; OFF and ON). Each: the step ends with POOL RUNSCALER DONE, the
-        pass exits 0 and holds no HAND CHANGE, no candidate and no window; it holds STOP POOL DOWN when the step's
-        restart came inside its RUNS check (the measured N: 2 and 3), else nothing; the next pass holds nothing (it
-        clears POOL DOWN: runscaler RUNS). Both outcomes come out (a uniform result would be a harness that measured
-        nothing)."""
-        seen = set()
+        pass exits 0 and holds no HAND CHANGE, no candidate and no window. Per mode, by show (review r2, Codex F2):
+        shows 2 and 3 hold STOP POOL DOWN (the step's restart inside THE OUTAGE RULE's RUNS check: show 2, the process
+        changes during the /healthz reads; show 3, after RUNS's last read, which only the deciding read's final PID
+        check sees), and the next pass clears it (runscaler RUNS); every other show (1, 4, and ON's 5 and 6) holds
+        none."""
         for on in (False, True):
             g, p = forward(self)
             state(p, on)
@@ -1226,6 +1517,7 @@ class UpdaterAfterTheStep(unittest.TestCase):
             self.assertGreaterEqual(n, 4, 'a pass reads the unit 4 times or more (THE OUTAGE RULE)')
             for k in range(1, n + 1):
                 with self.subTest(on=on, show=k):
+                    want = ['POOL DOWN'] if k in (2, 3) else []
                     g, p = forward(self)
                     state(p, on)
                     p.set_unit(drain=60)
@@ -1238,20 +1530,16 @@ class UpdaterAfterTheStep(unittest.TestCase):
                     self.assertEqual(steps[0][0], 0, steps[0][1][-3000:])
                     self.assertIn('POOL RUNSCALER DONE', steps[0][1])
                     self.assertNotIn('HAND CHANGE', r.stdout)
-                    h = held(p)
-                    self.assertIn(h, ([], ['POOL DOWN']), r.stdout[-3000:])
-                    seen.add(tuple(h))
+                    self.assertEqual(held(p), want, r.stdout[-3000:])
                     self.assertIsNone(json.loads(p.read(STATE)).get('families', {}).get('hz-docker', {}).get(
                         'candidate'))
                     self.assertIsNone(p.window())
                     r = p.updater('pass')
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-                    if h:
+                    if want:
                         self.assertIn('STOP POOL DOWN is cleared: runscaler RUNS', r.stdout)
                     self.assertEqual(held(p), [])
                     self.assertEqual((rb(p), p.exe()), (g.bin, g.bin))
-        self.assertEqual(seen, {(), ('POOL DOWN',)})
-
 
 if __name__ == '__main__':
     unittest.main()

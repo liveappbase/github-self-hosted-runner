@@ -218,7 +218,7 @@ if [ -e "$WINDOW" ] || [ -L "$WINDOW" ]; then
 fi
 exec 9>&-   # no child of 03 holds the updater lock (the header)
 say "the numbers"
-[ -e "$POOL" ] || die "no $POOL: B4's numbers are not recorded, so '$MODE' is not rendered (plan §4 B4)"
+[ -e "$POOL" ] || die "no $POOL: the pool's numbers are not recorded, so '$MODE' is not rendered (README Install step 6 writes them)"
 [ "$(stat -c '%a %U' "$POOL")" = "600 $(id -un)" ] || die "$POOL is not 0600 and owned by $(id -un)"
 seen=" "
 while IFS= read -r line || [ -n "$line" ]; do
@@ -467,7 +467,7 @@ if [ ! -s "$R/${TOKEN_FILE}" ]; then
   [ "$MODE" != render ] || die "no token ($R/${TOKEN_FILE}), so the render cannot be validated: nothing staged"
   [ "$MODE" != stage ] || die "no token ($R/${TOKEN_FILE}), so the render cannot be validated: $NOTCH"
   echo; echo "03 STOPPED ($MODE): no token yet, so the render is NOT validated and NOT installed (config.toml unchanged)."
-  echo "Put the token in (plan §4 B3), then run 03 $MODE again."; exit 3
+  echo "Put the token in (README Install step 8), then run 03 $MODE again."; exit 3
 fi
 classify() {   # classify FILE: runner-start validate of FILE, its stdout AND stderr into $tmp/validate.out (a REFUSE line
   # is on stderr); prints the ONE VALIDATE RULE's class

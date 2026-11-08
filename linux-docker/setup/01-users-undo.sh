@@ -60,7 +60,7 @@ for u in $users; do
   done
 done
 t=$(ls /home/${RS_USER}/.config/runner/token-* 2>/dev/null)
-[ -z "$t" ] || refuse "a token file exists ($t): delete the scale sets first, then the token (plan §3 R1-UNDO)"
+[ -z "$t" ] || refuse "a token file exists ($t): delete the scale sets first, then the token (README Uninstall: this script's header lists what comes first, in order)"
 ok "pre-flight: nothing of$users runs, no token file"
 
 for u in ${RS_USER} ${RUN_USER}; do

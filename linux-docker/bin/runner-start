@@ -173,7 +173,7 @@ PY
 if [ "$mode" != delete ]; then   # a delete talks to GitHub only
   v=$(docker -H "$D1" version --format '{{.Server.Version}}' 2>&1) || die "D1 does not answer at $D1: $v"
   docker -H "$D1" network inspect runners >/dev/null 2>&1 || die "D1 has no network 'runners' (every job start would fail): run 02-d1.sh"
-  [ "$v" = "$PROFILE_DOCKER" ] || die "D1 runs Docker $v, the seccomp profile was cut from $PROFILE_DOCKER: regenerate it (plan §2.2) before starting"
+  [ "$v" = "$PROFILE_DOCKER" ] || die "D1 runs Docker $v, and the seccomp profile was cut from Docker $PROFILE_DOCKER: runner-start starts no other Docker version (README, the Status line); run Docker $PROFILE_DOCKER (README Install) before starting"
   curl -fs -m 5 -o /dev/null "$REGISTRY" || die "the local registry does not answer at $REGISTRY: as ${RUN_USER}, run 'docker start runner-registry'"
   [ "$mode" != run ] || { b=$(ss -ltnH "sport = :$HEALTH_PORT" 2>/dev/null); [ -z "$b" ] || die "127.0.0.1:$HEALTH_PORT (runscaler's health port) is already bound: $b"; }
 fi
