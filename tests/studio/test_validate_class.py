@@ -1,15 +1,16 @@
 """bin/validate-class RC OUTPUT_FILE: the ONE VALIDATE RULE (PLAN, PRE-VALIDATE). One validate's result is PASS,
-API-ONLY, NON-API or UNKNOWN, from runscaler's real output (cmd/runner/cmd_validate.go at v0.9.5: each `  ✗ ` print is
-followed by a return; the scaleset client logs INFO and ERRO records on the same stdout; cobra adds `Error:` and the
-usage).
+API-ONLY, NON-API or UNKNOWN, from runscaler's real output (cmd/runner/cmd_validate.go, the same four prints at v0.9.5
+and v0.12.0: each `  ✗ ` print is followed by a return; the scaleset client logs INFO and ERRO records on the same
+stdout, from 0.10.0 INFO and ERROR in a 5-wide column; cobra adds `Error:` and the usage).
 
-The fixtures in fixtures/validate/ are real outputs of the pinned runscaler v0.9.5 (darwin-arm64), made by the LIVE
-cell below with no network: api-only-real.txt (the GitHub API part fails: the proxy refuses) and non-api-real.txt (the
-same config with `runner-image = ""`). The config they ran on is config/config.toml.example with neutral names; the
-cell now also puts the example's log-file pin on the sandbox's runner.log (the committed fixtures predate that line).
-The cleaning step replaces only the refusing proxy's port. The live cell runs when RUNSCALER_TARBALL names the release
-tarball (runner-darwin-arm64.tar.gz; its sha256 must be setup/downloads.manifest's), else it skips and says so. With
-RUNSCALER_FIXTURE_OUT=DIR it also writes its two cleaned outputs into DIR, to re-make the fixtures.
+The fixtures in fixtures/validate/ are real outputs of runscaler (darwin-arm64), made by the LIVE cell below with no
+network. From the pinned v0.12.0: api-only-real-v012.txt (the GitHub API part fails: the proxy refuses) and
+non-api-real-v012.txt (the same config with `runner-image = ""`), on config/config.toml.example with neutral names and
+its log-file pin on the sandbox's runner.log. From v0.9.5, the pin before: api-only-real.txt and non-api-real.txt, the
+same two runs (kept for a way back; they predate the log-file line). The cleaning step replaces only the refusing
+proxy's port. The live cell runs when RUNSCALER_TARBALL names the pinned release tarball (runner-darwin-arm64.tar.gz;
+its sha256 must be setup/downloads.manifest's), else it skips and says so. With RUNSCALER_FIXTURE_OUT=DIR it also
+writes its two cleaned outputs into DIR, under the -v012 names, to re-make those fixtures.
 """
 import hashlib
 import os
@@ -74,6 +75,13 @@ class TestClasses(unittest.TestCase):
 
     def test_real_config_failure_is_non_api(self):
         self.assertEqual(self.r.cls(1, fixture('non-api-real.txt')), 'NON-API')
+
+    def test_real_v012_api_failure_is_api_only(self):
+        # the pinned runscaler 0.12.0: its log records in the 5-wide level column (INFO, ERROR) are ignored as well
+        self.assertEqual(self.r.cls(1, fixture('api-only-real-v012.txt')), 'API-ONLY')
+
+    def test_real_v012_config_failure_is_non_api(self):
+        self.assertEqual(self.r.cls(1, fixture('non-api-real-v012.txt')), 'NON-API')
 
     def test_each_config_check_is_non_api(self):
         for line in CONFIG_CHECKS:
@@ -276,13 +284,13 @@ class TestLiveBinary(unittest.TestCase):
         return p.returncode, text, res.stdout.strip()
 
     def test_real_binary_api_failure_is_api_only(self):
-        rc, text, cls = self.run_validate('runner-image = "liveapp-mac-golden-20261001"', 'api-only-real.txt')
+        rc, text, cls = self.run_validate('runner-image = "liveapp-mac-golden-20261001"', 'api-only-real-v012.txt')
         self.assertNotEqual(rc, 0, text)
         self.assertIn('proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused', text)
         self.assertEqual(cls, 'API-ONLY', text)
 
     def test_control_real_binary_broken_image_line_is_non_api(self):
-        rc, text, cls = self.run_validate('runner-image = ""', 'non-api-real.txt')
+        rc, text, cls = self.run_validate('runner-image = ""', 'non-api-real-v012.txt')
         self.assertNotEqual(rc, 0, text)
         self.assertEqual(cls, 'NON-API', text)
 

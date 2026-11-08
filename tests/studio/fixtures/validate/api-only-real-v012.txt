@@ -1,0 +1,24 @@
+  ✓ scaleset[0] "mac-ci-example" — provider=tart url=https://github.com/example-org/example max=2 min=0
+  ✓ Tart binary found
+2026-11-08 00:56:32 INFO  refreshing token githubConfigUrl=https://github.com/example-org/example
+2026-11-08 00:56:32 INFO  getting runner registration token registrationTokenURL=https://api.github.com/repos/example-org/example/actions/runners/registration-token
+2026-11-08 00:56:32 ERROR request failed error="Post \"https://api.github.com/repos/example-org/example/actions/runners/registration-token\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused" method=POST url=https://api.github.com/repos/example-org/example/actions/runners/registration-token
+2026-11-08 00:56:33 ERROR request failed error="Post \"https://api.github.com/repos/example-org/example/actions/runners/registration-token\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused" method=POST url=https://api.github.com/repos/example-org/example/actions/runners/registration-token
+2026-11-08 00:56:35 ERROR request failed error="Post \"https://api.github.com/repos/example-org/example/actions/runners/registration-token\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused" method=POST url=https://api.github.com/repos/example-org/example/actions/runners/registration-token
+2026-11-08 00:56:39 ERROR request failed error="Post \"https://api.github.com/repos/example-org/example/actions/runners/registration-token\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused" method=POST url=https://api.github.com/repos/example-org/example/actions/runners/registration-token
+  ✗ scaleset[0] "mac-ci-example" GitHub API: failed to create new actions service request: failed to issue update token if needed: failed to get runner registration token on refresh: failed to issue the request: request POST https://api.github.com/repos/example-org/example/actions/runners/registration-token failed: failed to send request: Post "https://api.github.com/repos/example-org/example/actions/runners/registration-token": context deadline exceeded
+    Check that your token has the correct scopes (admin:org or repo)
+Error: validation failed
+Usage:
+  runner validate [flags]
+
+Examples:
+  runner validate --config config.toml
+
+Flags:
+  -h, --help   help for validate
+
+Global Flags:
+      --config string   Path to config file (TOML)
+
+validation failed
