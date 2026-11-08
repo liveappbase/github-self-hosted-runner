@@ -24,9 +24,11 @@
 - THE ONE DOOR, over the tree (R-8; slice H2b-1): the programs of linux-docker/ write ~/bin/runner only by 03's two
   renames of ~/bin/runner.new (a fresh host's, and the stage of `pool-image.sh runscaler`), and runner.new only by 03's
   one install of a checked `runner`: THE CENSUS walks every line that names the binary, and each is one of those three
-  WRITES or a READ the cell lists by its text, so a line of any other shape is red (review r1: Codex F2, Opus F2; review
-  r2: a split path, a folder variable, python's join, the folder as a destination: Opus F3, Codex F1; a planted line in
-  a COPY of the tree, never run), and a copy of another file into the bin folder stays apart (its control). THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
+  WRITES or a READ the cell lists by its text, so a line of another shape among the spellings it walks is red (review
+  r1: Codex F2, Opus F2; review r2: a split path, a folder variable, python's join, the folder as a destination: Opus
+  F3, Codex F1; review r1 of H2c: the folder as the working folder, pathlib's joins, `bin/.`: opus F2, opus2 F3; a
+  planted line in a COPY of the tree, never run; the spellings it does not walk: THE CENSUS's comment), and a copy of
+  another file into the bin folder stays apart (its control). THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
   ~/bin/runner.new, and its log-file guard hashes that file; `validate` takes no other argument; `run` (with any
   argument, or any env var) and `delete` exec ~/bin/runner and hash it. A fresh host's 03 real that ends between the
   install into runner.new and its rename leaves neither name (H2a review r1, Opus F4: the trap's cleanup).
@@ -145,33 +147,45 @@ def code_lines(path):
         return [(i, l.rstrip('\n')) for i, l in enumerate(f, 1) if not l.lstrip().startswith('#')]
 
 
-# THE CENSUS (R-8; slice H2b-1 review r1: Codex F2, Opus F2; review r2: Opus F3, Codex F1): every line of linux-docker/
-# (but the README) that is not a whole-line comment and NAMES the binary: bin/runner (and bin/runner.new; not
-# runner-start, runner-updater), also with the path split (`"$HOME/bin"/runner`, `~/bin/'runner'`, `bin//runner`,
-# `bin/./runner`) or joined (python's `'bin', 'runner'`, or a join that ends in 'runner'); runner.new; a `runner` in a
-# folder variable (`$d/runner`, `${d}/runner`); one of the words RB, NEWBIN, RUNNER (03's and runner-start's names for
-# it) in any form ($X, ${X}, X=, python's RUNNER); a line that names RS_USER's bin FOLDER itself (`$HOME/bin`, `~/bin/`,
-# `%h/bin`, `/home/USER/bin`, quoted or not) together with a `runner` (a folder destination: `install … runner
-# "$HOME/bin/"`); and a variable set to that folder (`d=$HOME/bin`, python's `d = os.path.join(home, 'bin')`). Each is
-# one of 03's three WRITES or a READ listed here by its text (a line that reads the binary or names it in a text, and
-# 03's trap, which removes a runner.new it made): a line that is neither is red, whatever shape it has (a new writer, a
-# new reader, a new name), so a reviewer reads it before it is listed. A copy of another file into that folder (by its
-# name or by the folder) names none of these: it stays apart (APART, below).
+# THE CENSUS (R-8; slice H2b-1 review r1: Codex F2, Opus F2; review r2: Opus F3, Codex F1; review r1 of H2c: opus F2,
+# opus2 F3): every line of linux-docker/ (but the README) that is not a whole-line comment and NAMES the binary:
+# bin/runner (and bin/runner.new; not runner-start, runner-updater), also with the path split (`"$HOME/bin"/runner`,
+# `~/bin/'runner'`, `bin//runner`, `bin/./runner`) or joined (python's `'bin', 'runner'`, or a join that ends in
+# 'runner'; pathlib's `/ 'runner'`); runner.new; a `runner` in a folder variable (`$d/runner`, `${d}/runner`); one of
+# the words RB, NEWBIN, RUNNER (03's and runner-start's names for it) in any form ($X, ${X}, X=, python's RUNNER); a
+# line that names RS_USER's bin FOLDER itself (`$HOME/bin`, `~/bin/`, `bin/.`, `%h/bin`, `/home/USER/bin`, quoted or
+# not) together with a `runner` (a folder destination: `install … runner "$HOME/bin/"`); a variable set to that folder
+# (`d=$HOME/bin`, python's `d = os.path.join(home, 'bin')`, pathlib's `d = Path.home() / 'bin'`); and a line that makes
+# that folder the WORKING folder (`cd` or `pushd` into it, python's `os.chdir` of a path that ends in it: the line
+# itself is read, since what follows it may name `runner` alone). Each is one of 03's three WRITES or a READ listed here
+# by its text (a line that reads the binary or names it in a text, and 03's trap, which removes a runner.new it made):
+# a line of these spellings that is neither is red (a new writer, a new reader, a new name), so a reviewer reads it
+# before it is listed. It does NOT walk, and review reads instead: a variable that holds the home or the file name (`h=$HOME` then
+# `"$h/bin/"`; `n=runner` then `"$HOME/bin/$n"`), string concatenation (`home + '/bin/' + 'runner'`), a file name split
+# by quotes (`"$HOME/bin/run"ner`) and a glob (`~/bin/runne[r]`). A copy of another file into that folder (by its name
+# or by the folder) names none of these: it stays apart (APART, below).
 NAMES = re.compile('|'.join((
     r'bin/runner(?![-_A-Za-z0-9])|runner\.new|(?<![A-Za-z0-9_])(?:RB|NEWBIN|RUNNER)(?![A-Za-z0-9_])',
     r'bin(?:["\']|/|\./)+runner(?:\.new)?(?![-_.A-Za-z0-9])',                                   # a split path
     r'["\']bin["\']\s*,\s*["\']runner(?:\.new)?["\']|,\s*["\']runner(?:\.new)?["\']\s*\)',      # python's join
+    r'/\s*["\']runner(?:\.new)?["\']',                                                          # pathlib's join
     r'\$\{?[A-Za-z_][A-Za-z0-9_]*\}?["\']?/+(?:\./)*["\']?runner(?:\.new)?(?![-_./A-Za-z0-9])')))  # a folder variable
 BINDIR = r'(?:\$HOME|\$\{HOME\}|~|%h|/home/[^/\s"\']+)["\']?/+(?:\./)*bin'   # RS_USER's bin folder
-FOLDER = re.compile(BINDIR + r'(?:["\']?/*["\']?)(?=[\s;|&)]|$)')                  # ... as itself, not a file in it
+ITSELF = r'["\']?(?:/\.?)*["\']?(?=[\s;|&)]|$)'                                 # ... as itself (`bin/.` too), no file
+FOLDER = re.compile(BINDIR + ITSELF)
 A_RUNNER = re.compile(r'(?<![-A-Za-z0-9_.])runner(?:\.new)?(?![-A-Za-z0-9_.])')    # the file name `runner`, as a word
-ALIAS = re.compile(r'(?:^|[\s;(])[A-Za-z_][A-Za-z0-9_]*=["\']?' + BINDIR + r'/*["\']?(?=[\s;|&)]|$)'
-                   r'|[A-Za-z_][A-Za-z0-9_]*\s*=\s*os\.path\.join\([^)]*["\']bin["\']\s*\)')
+ALIAS = re.compile(r'(?:^|[\s;(])[A-Za-z_][A-Za-z0-9_]*=["\']?' + BINDIR + ITSELF
+                   + r'|[A-Za-z_][A-Za-z0-9_]*\s*=\s*os\.path\.join\([^)]*["\']bin["\']\s*\)'
+                   r'|[A-Za-z_][A-Za-z0-9_]*\s*=\s*[^=\n]*/\s*["\']bin["\']\s*(?:#.*)?$')     # pathlib's
+CHDIR = re.compile(r'(?:^|[\s;&|(])(?:cd|pushd)\s+(?:--\s+)?["\']?' + BINDIR + ITSELF)   # the working folder
+PYCHDIR = re.compile(r'\bos\.chdir\(')                                                # ... python's, of a path
+BINJOIN = re.compile(r'["\']bin["\']\s*\)|/\s*["\']bin["\'](?!\s*/)')    # that ends in it: a join, pathlib's
 
 
 def names_binary(line):
     """Does LINE (no whole-line comment) name the binary, as THE CENSUS reads it (the comment above)?"""
-    return bool(NAMES.search(line) or (FOLDER.search(line) and A_RUNNER.search(line)) or ALIAS.search(line))
+    return bool(NAMES.search(line) or (FOLDER.search(line) and A_RUNNER.search(line)) or ALIAS.search(line)
+                or CHDIR.search(line) or (PYCHDIR.search(line) and (FOLDER.search(line) or BINJOIN.search(line))))
 
 
 S03R = 'setup/03-runscaler.sh'
@@ -242,6 +256,8 @@ READS = [
      'echo; echo "03 DONE (stage): $RB is runscaler v$VERSION and config.toml is this release\'s render; the unit was NOT restarted (pool-image.sh runscaler restarts it)"'),
     ('setup/pool-image.sh',
      'runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner\'s'),
+    ('setup/pool-image.sh',   # THE CHECK's install time of v0.12.0 (review r1 of H2c, opus2 F2): its mtime, a read
+     'runner_mtime() { stat -c %Y -- "$HOME/bin/runner" 2> /dev/null; }   # its mtime: THE CHECK\'s install time of v0.12.0'),
     ('setup/pool-image.sh',
      'ok "DONE ALREADY: $HOME/bin/runner is runscaler v$RSV, its process runs config.toml, which has the log-file line: no stage, no restart"'),
     ('setup/pool-image.sh',
@@ -316,12 +332,28 @@ PLANTED = (('setup/pool-image.sh', 'if [ -s x ]; then mv -f "$tmp/runner" "$RB";
            ('setup/03-runscaler.sh', '  install -m 755 "$tmp/runner" "$HOME/bin/"'),
            ('setup/03-runscaler.sh', '  cp "$tmp/runner" ~/bin/'),
            ('setup/pool-image.sh', '  mv "$tmp/runner" "$HOME/bin"'),
-           ('setup/03-runscaler.sh', '  cd "$tmp" && install -m 755 runner "$HOME/bin/"'))
+           ('setup/03-runscaler.sh', '  cd "$tmp" && install -m 755 runner "$HOME/bin/"'),
+           # review r1 of H2c (opus F2, opus2 F3): the bin folder as the working folder (cd, pushd, python's os.chdir
+           # into it: that line is left over, the write after it names only `runner`, so the third item names the lines
+           # that must be left over), pathlib's joins, and `bin/.` as the folder
+           ('setup/pool-image.sh', '  cd "$HOME/bin" || exit 1\n  mv -f "$tmp/x" runner', ('  cd "$HOME/bin" || exit 1',)),
+           ('setup/03-runscaler.sh', '  pushd ~/bin > /dev/null\n  install -m 755 "$tmp/x" runner',
+            ('  pushd ~/bin > /dev/null',)),
+           ('bin/runner-start', "    os.chdir(os.path.join(home, 'bin')); open('runner', 'wb').write(b)"),
+           ('bin/runner-start', "    os.chdir(pathlib.Path.home() / 'bin')\n    open('runner', 'wb').write(b)",
+            ("    os.chdir(pathlib.Path.home() / 'bin')",)),
+           ('bin/runner-start', "    (pathlib.Path.home() / 'bin' / 'runner').write_bytes(b)"),
+           ('bin/runner-start', "    d = pathlib.Path.home() / 'bin'\n    (d / 'runner').write_bytes(b)"),
+           ('setup/03-runscaler.sh', '  cd "$tmp" && install -m 755 runner "$HOME/bin/."'))
 # THE CONTROL of PLANTED (Codex r2 F1): copies of OTHER files into the bin folder, as a file or as the folder, stay
-# apart: planted in a COPY, the census is the tree's (the three WRITES, every listed READ)
+# apart: planted in a COPY, the census is the tree's (the three WRITES, every listed READ). Review r1 of H2c: so do a
+# working folder that is not the bin folder, pathlib's join to another file in it, and `bin/.` for another file
 APART = (('setup/03-runscaler.sh', '  install -m 755 "$tmp/pool-ready" "$HOME/bin/"'),
          ('setup/pool-image.sh', 'cp "$B/bin/runner-start" ~/bin/'),
          ('setup/pool-image.sh', '  mv "$tmp/validate-class" "$HOME/bin"'),
+         ('setup/pool-image.sh', '  cd "$HOME/build" || exit 1'),
+         ('bin/runner-start', "    (pathlib.Path.home() / 'bin' / 'pool-ready').write_bytes(b)"),
+         ('setup/03-runscaler.sh', '  install -m 755 "$tmp/pool-ready" "$HOME/bin/."'),
          ('setup/03-runscaler.sh', '  install -m 755 "$tmp/runner-start" "$HOME/bin/runner-start"'),
          ('bin/runner-start', "    open(os.path.join(home, 'bin', 'pool-ready'), 'wb').write(b)"),
          ('setup/pool-image.sh', 'tail -n 3 "$R/runner.log"'))
@@ -354,11 +386,14 @@ class Census(unittest.TestCase):
         redirection right after the names, and missed each of the first eight (Opus r1 census_probe.txt) and both
         redirections into "$HOME/bin/runner" (Codex r1 F2); 8407d35's (bin/runner, runner.new, RB, NEWBIN, RUNNER)
         missed each of review r2's thirteen (Opus r2 F3: a split path, a folder variable, python's join; Codex r2 F1:
-        the folder as the destination)."""
-        for rel, line in PLANTED:
+        the folder as the destination), and 8b917c7's missed review r1 of H2c's seven (opus F2, opus2 F3: the bin
+        folder as the working folder by cd, pushd or os.chdir, pathlib's joins, `bin/.`). An entry with a third item
+        names the lines of it that must be left over (the working folder's line; the write after it names `runner`
+        only)."""
+        for rel, line, *must in PLANTED:
             with self.subTest(file=rel, line=line):
                 left = unread(census(planted(self, rel, line)))
-                for l in line.split('\n'):   # each line of it (a folder variable and its use: both)
+                for l in (must[0] if must else line.split('\n')):   # each line of it (a folder variable and its use)
                     self.assertIn((rel, l.strip()), left)
                 self.assertNotEqual(left, WRITES)
 

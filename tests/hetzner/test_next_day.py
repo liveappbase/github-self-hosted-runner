@@ -10,18 +10,21 @@ another), runner.log (and runner.log.1, the one older file runscaler keeps at a 
 /healthz reads 3 s apart that list both sets, the same process before and after, no file), then the unit again. It
 prints the last three records with their level column as written, v0.12.0's start WARN and its `runner update` note
 marked (never run), and, from the second after the start's (that second may hold the old process's last records, its
-drain's), the removals, the `keeping it` records, the deregister errors, the runner starts and start failures, and
-each record of a job that may have been cut.
+drain's), the removals, the `keeping it` records, the deregister errors, the runner starts and start failures (and the
+open ones), and each record of a job that may have been cut. A RESTART AFTER THE STEP (review r1 of H2c, the H2 plan's
+r5 AMENDMENT): with ~/bin/runner the pinned runscaler, the records of an earlier v0.12.0 process (five wide) from its
+mtime (the step's install) to the start are named as not counted, and read for a removal that names a job.
 
 THE ANSWERS, one per run, the first that holds in this order (the build log, fix round 1, and the README name it): no
 process; changed during the check; starting (a binary that is no runscaler yet, its unit started under a minute ago);
 v0.12.0 is not running; does not serve (THE RUNS RULE); no log; the way back (the open deregister errors of one runner
 over an hour; or, with no open error, deregister errors over an hour with no accepted removal after the first of them;
-or start failures over an hour with no runner started); a job may have been cut; look again in an hour (any other open
-error, or start failures under an hour with no runner started); the fix works (a removal at a scale-down or a drain);
-not measured yet. An ACCEPTED removal: a `Runner removed` of reason scaled-down or drain (logged only after GitHub
-accepted the DELETE) or a `keeping it` record (GitHub's answer to the DELETE); a job-completed removal is none. A
-deregister error is OPEN while its runner has no later removal (any reason) and no later `keeping it`.
+or OPEN start failures over an hour); a job may have been cut; look again in an hour (any other open error, or open
+start failures under an hour); the fix works (a removal at a scale-down or a drain); not measured yet. An ACCEPTED
+removal: a `Runner removed` of reason scaled-down or drain (logged only after GitHub accepted the DELETE) or a `keeping
+it` record (GitHub's answer to the DELETE); a job-completed removal is none. A deregister error is OPEN while its runner
+has no later removal (any reason) and no later `keeping it`; a start failure is OPEN while no `Runner started` follows
+it (r5).
 
 THE RECORDS: every fixture line is one runscaler really writes, field for field (each helper names its source line):
 v0.12.0's (charm log v2.0.1: a level column five wide, then one space; a value with a newline on lines of its own) and,
@@ -210,6 +213,22 @@ def new_start():
             + listening(1, SMALL, 1))
 
 
+def a_process(t0, form=v12, job=True, drain=None):
+    """A runscaler process that started at START + t0, before the start the check reads, in FORM (v12: an earlier
+    v0.12.0 process, five wide; v095: the v0.9.5 process before the step, four wide): its start records
+    (main.go:534-537, :673-676), runner C started (controller.go:445-449) and removed at a scale-down (controller.go
+    :717-734), while GitHub had given it a job (JOB: removed(job=True), the cut record) or not. DRAIN: the second (from
+    START) of its drain at its stop, the removal of runner A with a job (reason drain, jobId=); none by default."""
+    out = (form(t0, 'INFO', 'Starting scale sets count=2 concurrent=4')
+           + form(t0 + 1, 'INFO', 'Listening for jobs maxRunners=3 minRunners=0', MAIN)
+           + form(t0 + 600, 'INFO', 'Scaling up runner currentCount=0 desiredCount=1', MAIN)
+           + form(t0 + 603, 'INFO', 'Runner started name=%s instanceID=%s startupTime=2.104318871s' % (C, IID[3]), MAIN)
+           + removed(t0 + 900, C, IID[3], 'scaled-down', form, job=job))
+    if drain is not None:
+        out += removed(drain, A, IID[2], 'drain', form, job=True)
+    return out
+
+
 def a_job(t0, name, iid):
     """A job on a runner the new process starts: scaled up, started, the job done (reason job-completed)."""
     return scaling_up(t0) + started(t0 + 3, name, iid) + removed(t0 + 480, name, iid, 'job-completed')
@@ -284,13 +303,21 @@ def substitute(p):
         return t.extractfile('runner').read()
 
 
-def home(test, log, exe='pinned', age=DAY, rotated=None, **unit):
+def home(test, log, exe='pinned', age=DAY, rotated=None, installed=None, **unit):
     """A fixture home: runscaler's unit active and enabled, its process PID (started START) running EXE (pinned: 03's
     BIN_SHA; wayback: test_render.way_back's, 03's WAYBACK_BIN_SHA; other: bytes 03 does not name; none: no exe to
     read), runner.log LOG (None: none) and runner.log.1 ROTATED (None: none), /healthz listing both sets (support's
-    healthz()), and the fake clock at START + AGE (the next day)."""
+    healthz()), and the fake clock at START + AGE (the next day). INSTALLED: ~/bin/runner is the pinned runscaler, its
+    mtime START + INSTALLED (the step's install of v0.12.0); None: no ~/bin/runner (the check reads no install time)."""
     p = Pool(test)
     b = substitute(p)
+    if installed is not None:
+        rb = os.path.join(p.HOME, 'bin', 'runner')
+        os.makedirs(os.path.dirname(rb), exist_ok=True)
+        with open(rb, 'wb') as f:
+            f.write(b)
+        os.chmod(rb, 0o755)
+        os.utime(rb, (START + installed, START + installed))
     if exe == 'wayback':
         way_back(test, p, install=False)
         b += WAYBACK_MARK
@@ -407,6 +434,18 @@ class Readme(unittest.TestCase):
         self.assertEqual(got, ['no process', 'changed during the check', 'starting', 'v0.12.0 is not running',
                                'does not serve', 'no log', 'the way back', 'a job may have been cut',
                                'look again in an hour', 'the fix works', 'not measured yet'])
+
+    def test_step_3_names_the_rules_of_fix_round_2(self):
+        """Fix round 2 (review r1 of H2c: the H2 plan's r5 AMENDMENT): a start failure is open while no `Runner
+        started` follows it, and the way back and look again read the open ones (8b917c7's text: "with no runner
+        started", since the start); a restart after the step: the check says so, does not count the records from the
+        install of v0.12.0 to that restart, and still reads a removal among them that names a `jobId=`."""
+        s = step3()
+        for w in ('A start failure is open while no `Runner started` follows it', 'open start failures over an hour',
+                  'open start failures, not over an hour yet', 'If runscaler restarted after the step',
+                  'not counted', 'the mtime of `~/bin/runner`'):
+            self.assertIn(w, s)
+        self.assertNotIn('with no runner started', s)
 
 
 @needs_container
@@ -865,6 +904,110 @@ class Answers(unittest.TestCase):
                 self.assertRegex(answer(self, r), want)
                 if cut in (log or ''):
                     self.assertIn('\n  a job may have been cut: %s UTC, runner %s' % (at(930), C), r.stdout)
+
+    # ---- fix round 2 (review r1 of H2c: opus F1, opus2 F2; the H2 plan's r5 AMENDMENT)
+
+    def test_start_failures_with_no_runner_started_after_them(self):
+        """opus F1 (r5, NO RUNNER STARTS): a start failure is OPEN while no `Runner started` follows it, and a runner
+        started BEFORE the failures does not close them. Runner C started and removed at a scale-down in the first
+        hour, then every start fails (each 6 s while a job waits) from 4001 s: over an hour of open ones, the way back
+        (exit 1, its two lines), from the first open one; under an hour, look again in an hour (exit 1). With failures
+        before a start too (closed by it), the span is the open ones': under an hour, look again. Control 1: a runner
+        started after the last of them: the fix works (exit 0). (test_no_runner_starts keeps its controls: no earlier
+        start, the way back; then a runner starts, the fix works.) 8b917c7 counted every `Runner started` since the
+        start, so one before the failures turned the rule off: "the fix works … Nothing to do" (exit 0)."""
+        first = new_start() + scaled_down(610, C, IID[3])
+        closed = new_start() + start_failures(610, 640) + scaled_down(700, C, IID[3])
+        for name, log, want, rc in (
+                ('a runner started before them, over an hour', first + start_failures(4000, 7700),
+                 r'^ANSWER the way back: ', 1),
+                ('a runner started before them, under an hour', first + start_failures(4000, 5800),
+                 r'^ANSWER look again in an hour: ', 1),
+                ('closed ones before a start, open ones under an hour', closed + start_failures(4000, 5800),
+                 r'^ANSWER look again in an hour: ', 1),
+                ('control 1: a runner started after the last of them', first + start_failures(4000, 7700)
+                 + scaled_down(7720, A, IID[2]), r'^ANSWER the fix works: ', 0)):
+            with self.subTest(name):
+                r = check(self, home(self, log, age=7800))
+                self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+                a = answer(self, r)
+                self.assertRegex(a, want)
+                if rc:
+                    self.assertIn('start failure', a)
+                    self.assertIn(at(4001), a, 'from the first OPEN one')
+                    self.assertNotIn(at(611), a)
+                if 'way back' in want:
+                    self.assertEqual(after_answer(self, r), way_back_lines())
+                else:
+                    self.assertNotIn(way_back_lines()[1], r.stdout.splitlines())
+
+    def test_a_restart_after_the_step(self):
+        """opus2 F2 (r5, A RESTART AFTER THE STEP): the step installed v0.12.0 (~/bin/runner's mtime M, 6 h 10 min
+        before the start S) and its process ran from 6 h before S; then runscaler restarted at S (a person's up of a
+        runner release, a reboot), and the process since removed runner A at a scale-down. The check counts from S and
+        says that runscaler restarted at S after the step installed v0.12.0 at M, and that the records from M to S are
+        not counted; it reads that span for a removal at a scale-down or a drain that names a `jobId=`: the earlier
+        process's removal of runner C while it held a job reads "a job may have been cut" (exit 1, the way back's
+        lines), naming C, the job and its time, as one after S does; so does its drain's in S's own second (the new
+        process removes no runner in its first second). With no such removal: the restart line, the fix works. The
+        controls: the same records before M in v0.9.5's form (the process before the step), and v0.9.5's records
+        between M and S (the step's own restart): the fix works (exit 0), no restart line; v0.12.0's records before M
+        (an earlier v0.12.0, before a way back and the step again): the same; the cut after S, nothing between M and S:
+        still named, no restart line; ~/bin/runner not v0.12.0 (its mtime is no install of v0.12.0: a way back cut
+        after its rename of the binary, before its restart), the first input: the fix works, no restart line. 8b917c7
+        read nothing before S: "the fix works" (exit 0)."""
+        t0 = -6 * 3600
+        after = new_start() + scaled_down(120, B, IID[0])
+        cut_after = new_start() + scaling_up(600) + started(603, C, IID[3]) \
+            + removed(900, C, IID[3], 'scaled-down', job=True)
+        for name, log, installed, want, rc, cut, note in (
+                ('restarted after the step, a cut before the restart', a_process(t0) + after, t0 - 600,
+                 r'^ANSWER a job may have been cut: ', 1, (t0 + 900, C), True),
+                ('restarted after the step, its drain in the start\'s second names a job',
+                 a_process(t0, job=False, drain=0) + after, t0 - 600, r'^ANSWER a job may have been cut: ', 1, (0, A),
+                 True),
+                ('restarted after the step, no cut', a_process(t0, job=False) + after, t0 - 600,
+                 r'^ANSWER the fix works: ', 0, None, True),
+                ('control: v0.9.5\'s records before M', a_process(t0, v095) + after, -600, r'^ANSWER the fix works: ',
+                 0, None, False),
+                ('control: v0.9.5\'s records between M and S', a_process(t0, v095, drain=0) + after, t0 - 600,
+                 r'^ANSWER the fix works: ', 0, None, False),
+                ('control: v0.12.0\'s records before M', a_process(t0) + after, -600, r'^ANSWER the fix works: ', 0,
+                 None, False),
+                ('control: the cut after S', cut_after, -600, r'^ANSWER a job may have been cut: ', 1, (900, C),
+                 False),
+                ('control: ~/bin/runner is not v0.12.0', a_process(t0) + after, t0 - 600, r'^ANSWER the fix works: ', 0,
+                 None, False)):
+            with self.subTest(name):
+                p = home(self, log, installed=installed)
+                if 'not v0.12.0' in name:   # other bytes, the same mtime
+                    rb = os.path.join(p.HOME, 'bin', 'runner')
+                    with open(rb, 'ab') as f:
+                        f.write(b'# not v0.12.0\n')
+                    os.utime(rb, (START + installed, START + installed))
+                r = check(self, p)
+                self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
+                a = answer(self, r)
+                self.assertRegex(a, want)
+                lines = [l for l in r.stdout.splitlines() if l.startswith('runscaler restarted at ')]
+                if note:
+                    self.assertEqual(len(lines), 1, r.stdout)
+                    self.assertTrue(lines[0].startswith('runscaler restarted at %s UTC' % at(0)), lines[0])
+                    self.assertIn('installed v0.12.0 at %s UTC' % at(installed), lines[0])
+                    self.assertIn('not counted', lines[0])
+                else:
+                    self.assertEqual(lines, [], r.stdout)
+                if cut:
+                    self.assertIn(cut[1], a)
+                    self.assertIn(at(cut[0]), a)
+                    self.assertIn(JOBID, a)
+                    self.assertIn('lost communication', a)
+                    self.assertEqual(after_answer(self, r), way_back_lines())
+                    if note:
+                        self.assertIn('\n  a job may have been cut before that restart: %s UTC, runner %s, job %s: '
+                                      % (at(cut[0]), cut[1], JOBID), r.stdout)
+                else:
+                    self.assertNotIn(way_back_lines()[1], r.stdout.splitlines())
 
 
 if __name__ == '__main__':

@@ -467,15 +467,19 @@ class Readme(unittest.TestCase):
     def test_a_release_a_back_closed_and_the_lines_up_names_after_a_bare_03(self):
         """Review r2, Opus F1 and F2 (PendingLines, Keep): the section's check list says a kept config that names
         config.toml's image is a release a back closed (also after a bare 03 real changed config.toml), which the step
-        removes; the text on running 03 by hand says what `up` then names: the step (with 0.9.5 after the way back), or
-        `back` while a release is open, which puts the kept config back over a config.toml runscaler never ran."""
+        removes; the text on running 03 by hand says what `up` then names: the step, or on a host whose runscaler is
+        v0.9.5 both lines, each with its case (review r1 of H2c, opus F3: a host that took the way back, or a step to
+        v0.12.0 a cut stopped before it replaced the binary), or `back` while a release is open, which puts the kept
+        config back over a config.toml runscaler never ran."""
         sec = self.section()
         for w in ('names another image than config.toml', 'The kept config of a release a `back` closed names '
                   'config.toml\'s image', 'or config.toml changed since, by a bare `03-runscaler.sh real`'):
             self.assertIn(w, sec)
         hand = readme().split('Do not run 03-runscaler.sh by hand on the running pool', 1)[1].split('\n', 1)[0]
-        for w in ('that `up` names the line that finishes it', '`pool-image.sh runscaler` (with `0.9.5` on a host that '
-                  'took the way back)', '`pool-image.sh back` while one is', 'over a config.toml runscaler never ran'):
+        for w in ('that `up` names the line that finishes it', '`pool-image.sh runscaler`, or, on a host whose runscaler '
+                  'is v0.9.5, both `pool-image.sh runscaler 0.9.5` (a host that took the way back) and `pool-image.sh '
+                  'runscaler` (a step to v0.12.0 that a cut stopped before v0.12.0 replaced the binary)',
+                  '`pool-image.sh back` while one is', 'over a config.toml runscaler never ran'):
             self.assertIn(w, hand)
 
     def test_the_way_back_s_two_lines_are_the_files_the_step_reads(self):
@@ -1036,7 +1040,7 @@ class Keep(unittest.TestCase):
         p.pool_env(CONCURRENT=3, MAX=2)
         r = p.s03('real')
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-        p.act('restart')
+        ran_it(self, p)   # runscaler restarted on it, after its real install (the class of opus F5: ran_it)
         cfg = p.config()
         self.assertIn('concurrent = 3\n', cfg)
         self.assertEqual(p.images(), p.images('config.toml.pre-image'))
@@ -1144,6 +1148,8 @@ class UpAfterACut(unittest.TestCase):
         self.assertEqual(len(fail), 1, fail)
         self.assertRegex(fail[0], LINE % re.escape(names), 'the line to run (not a cause it names), and no version after it '
                          '(review r2, Opus F2: the forward cut renamed v0.12.0, so the bare line, not the way back\'s)')
+        self.assertNotIn('pool-image.sh runscaler %s' % WAYBACK, fail[0], 'v0.12.0 renamed into place: one line (the '
+                         'control of PendingLines\' cut before that rename, review r1 of H2c, opus F3)')
         self.assertNotIn('docs/', fail[0])
         self.assertEqual((files(p), binary(p)), (before, b0))
 
@@ -1182,6 +1188,17 @@ def pending(test, p, start=None):
     test.assertLessEqual(p.unit_now()['start'], m, 'pending')
 
 
+def ran_it(test, p):
+    """runscaler restarted on config.toml after its install (hzlib's `restart`: a reboot's, or systemd's own), as a real
+    clock gives, pending()'s other side: the fake clock, which gives that start, moved on past config.toml's REAL mtime
+    first. (fake_clock runs ahead of the real clock only by its own seconds, so a bare 03 real that many real seconds
+    after the rig was made read as never run: review r1 of H2c, opus F5.)"""
+    m = int(os.stat(p.rpath('config.toml')).st_mtime)
+    p.clock(now=max(p.clock(), m + 1))
+    p.act('restart')
+    test.assertGreater(p.unit_now()['start'], m, 'runscaler ran it')
+
+
 def names_line(test, r, line):
     """R refused (exit 1), with ONE FAIL line, which names LINE as the line to run (not a cause it names)."""
     test.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
@@ -1202,7 +1219,9 @@ class PendingLines(unittest.TestCase):
     refused (the numbers): it is no open release, so the line is the step's; and an OPEN release whose pending
     config.toml changed in more than the image (a bare 03 real of new numbers after an up cut before its restart):
     `back`, which puts the rollback back over a config.toml runscaler never ran (its control: one runscaler ran,
-    refused). Nothing changes at a refusal."""
+    refused). Nothing changes at a refusal. Each pair a cell says runs after its line, the INSTALLED runner-start's
+    guard starts (test_render.starts; review r1 of H2c, opus F4), and "runscaler ran it" is a start after config.toml's
+    real install (ran_it; opus F5)."""
 
     def refuses(self, p, version, line):
         before, b0, n = files(p), binary(p), len(restarts(p))
@@ -1233,9 +1252,43 @@ class PendingLines(unittest.TestCase):
                 r = step(p, WAYBACK)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 self.assertEqual((rb(p), p.exe()), (wb, wb))
+                starts(self, p)   # the pair it claims runs, by the INSTALLED guard (review r1 of H2c, opus F4)
                 r = p.pool('up', version)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 self.assertEqual((rb(p), p.exe()), (wb, wb))
+
+    def test_a_forward_step_cut_before_its_binary_rename_names_both_lines(self):
+        """Review r1 of H2c, opus F3: the forward step cut between its two renames (Resume's boundary
+        `mv-done:config.toml`: config.toml this release's render, pending; ~/bin/runner still v0.9.5, as on a host that
+        took the way back); `up` to another image and `up` of the running version each refuse, nothing changed, naming
+        BOTH lines, each with its case: `pool-image.sh runscaler 0.9.5` (a host that took the way back) and
+        `pool-image.sh runscaler` (a step to v0.12.0 a cut stopped before v0.12.0 replaced the binary). Each line, run in
+        that state, ends with exit 0, its pair starts (the INSTALLED guard), and the same up passes; the bare one
+        finishes the forward step (v0.12.0 runs). Nothing on disk tells the two hosts apart: a ~/bin/runner.new is left
+        only by a cut at which 03's EXIT trap does not run (a SIGKILL). 8b917c7 named the way back's line only, which
+        turned the forward step into the way back. UpAfterACut (the cut after that rename) names one line."""
+        for case in ('another image', 'the running version'):
+            for line in ('pool-image.sh runscaler', 'pool-image.sh runscaler %s' % WAYBACK):
+                with self.subTest(case=case, line=line):
+                    g, p = cut_step(self, at='mv-done:config.toml')
+                    self.assertEqual(rb(p), g.wb, 'the cut left v0.9.5 installed (the binary not renamed yet)')
+                    up_record(p, UPOLDV, UPOLD)
+                    version = UPV if case == 'another image' else UPOLDV
+                    r = self.refuses(p, version, 'pool-image.sh runscaler')
+                    fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')][0]
+                    self.assertRegex(fail, (LINE % re.escape('pool-image.sh runscaler %s' % WAYBACK))
+                                     + r' \(on a host that took the way back\)')
+                    self.assertRegex(fail, (LINE % re.escape('pool-image.sh runscaler'))
+                                     + r' \(to finish a step to v0\.12\.0 that a cut stopped before v0\.12\.0 replaced '
+                                       r'the binary\)')
+                    r = step(p, *line.split()[2:])
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    want = g.wb if line.endswith(WAYBACK) else g.bin
+                    self.assertEqual((rb(p), p.exe()), (want, want))
+                    starts(self, p)
+                    r = p.pool('up', version)
+                    self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                    self.assertEqual((rb(p), p.exe()), (want, want))
 
     def test_a_closed_release_s_pending_config_names_the_step(self):
         """Opus F1, up's third and fourth refusals: an `up`, its `back`, a change of pool.env's numbers and a bare `03
@@ -1264,6 +1317,7 @@ class PendingLines(unittest.TestCase):
                 r = step(p, WAYBACK)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 self.assertFalse(os.path.lexists(p.rpath('config.toml.pre-image')))
+                starts(self, p)
                 r = p.pool('up', UPOLDV)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
 
@@ -1298,12 +1352,13 @@ class PendingLines(unittest.TestCase):
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                     self.assertIn('runscaler never ran it', r.stdout)
                     self.assertEqual(sha256_file(p.rpath('config.toml')), sha256_file(keep))
+                    starts(self, p)   # the rollback (no log-file line) on v0.9.5: BACK'S PAIR GUARD's pair (opus F4)
                     p.pool_env()
                     r = p.pool('up', UPV)
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                     self.assertIn('POOL IMAGE DONE (up)', r.stdout)
                     continue
-                p.act('restart')
+                ran_it(self, p)
                 if case == 'ran':
                     before, n = files(p), len(restarts(p))
                     r = p.pool('back')
@@ -1314,6 +1369,7 @@ class PendingLines(unittest.TestCase):
                 p.act('fail')
                 self.refuses(p, UPV, 'systemctl --user start runscaler')
                 p.act('start')
+                starts(self, p)
                 r = p.pool('up', UPV)
                 self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                 self.assertIn('POOL IMAGE DONE (up)', r.stdout)

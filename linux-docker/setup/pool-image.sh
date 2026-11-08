@@ -41,8 +41,10 @@
 #       R-1; review r2): `pool-image.sh back` while a release is open (or a back was cut before its restart: the
 #       rollback is config.toml byte for byte) and no runscaler ran config.toml; `systemctl --user start runscaler`
 #       when an open release's config.toml ran before its unit stopped (a back would undo that run's change); else the
-#       step for the runscaler ~/bin/runner is (step_line: `pool-image.sh runscaler`, or `pool-image.sh runscaler
-#       0.9.5` on a host that took the way back, Opus F2: the bare line would put v0.12.0 back).
+#       step for the runscaler ~/bin/runner is (step_line: `pool-image.sh runscaler`; on a v0.9.5 host both lines, each
+#       with its case: `pool-image.sh runscaler 0.9.5` on a host that took the way back, Opus F2: the bare line would
+#       put v0.12.0 back; and the bare line to finish a step to v0.12.0 a cut stopped between its two renames, review
+#       r1 of H2c, opus F3: nothing on disk tells the two apart).
 # back: puts config.toml.pre-image back with NO 03 (no build, no GitHub), only when the image is ALL it changes (THE
 #       CONFIG COMPARE), or config.toml never ran (installed at or after runscaler's last start: a 03 run outside
 #       pool-image.sh since up, whose change pool.env and the host config keep; a WARN says so: review r2, Opus F1),
@@ -121,7 +123,14 @@
 #       start, or such a removal that names a `jobId=`. An ACCEPTED removal is one of reason scaled-down or drain
 #       (runscaler logs it only after GitHub accepted the DELETE) or a `keeping it` (GitHub's answer to the DELETE); a
 #       job-completed removal ends a runner's retries but is none. A deregister error is OPEN while no record of its
-#       runner comes after it: a removal of any reason, or a `keeping it`. THE ANSWER, one: the first that holds, in this
+#       runner comes after it: a removal of any reason, or a `keeping it`; a start failure is OPEN while no `Runner
+#       started` comes after it (the H2 plan's r5 AMENDMENT). A RESTART AFTER THE STEP (r5): when ~/bin/runner is
+#       03's PINNED, its mtime M is the step's install of it, and the records with a five-wide level column (v0.10
+#       and later; v0.9.5 writes four) from M to the start S (before S's second, and a removal in it: the new process
+#       removes no runner in its first second) are an earlier v0.12.0 process's: it says that runscaler restarted at S
+#       after the step installed v0.12.0 at M and that they are not counted, and reads them for a removal at a
+#       scale-down or a drain that names a `jobId=` (a cut, as one after S; a `Job started for unknown runner` there is
+#       not read: which process removed that runner is not known). THE ANSWER, one: the first that holds, in this
 #       order: no process (the unit not active, or MainPID 0); CHANGED DURING THE CHECK (the two unit reads differ:
 #       another process); STARTING (a binary that is neither of 03's runscalers, or one it cannot read, while the unit
 #       started under a minute ago: runner-start's checks before its exec); v0.12.0 is not running (03's PINNED is not
@@ -129,13 +138,13 @@
 #       it stays so); NO LOG (runner.log missing, not a regular file, unreadable, or no record since the start); the way
 #       back (its two lines: wayback_lines, as NEXT prints them): the open errors of one runner an hour apart or more,
 #       or, with no open error, deregister errors an hour apart or more with no accepted removal after the first of them
-#       (its runners left only by their jobs), or start failures an hour apart or more with no runner started; a job may
-#       have been cut (it names the runner, the job id when the record has one, and the log time: on GitHub, a job that
-#       ended with the runner's lost communication was cut, then the way back; one that completed, nothing to do); look
-#       again in an hour (any other open error, or start failures with no runner started, under an hour); the fix works
-#       (removals, and no open error: with one retry, or N, when there were deregister errors); not measured yet (no
-#       removal: look again the next day, no release waits on it). Exit 0 for the fix works and not measured yet, 1 for
-#       every other answer.
+#       (its runners left only by their jobs), or OPEN start failures an hour apart or more (the first open one to the
+#       last); a job may have been cut (it names the runner, the job id when the record has one, and the log time: on
+#       GitHub, a job that ended with the runner's lost communication was cut, then the way back; one that completed,
+#       nothing to do); look again in an hour (any other open error, or open start failures under an hour); the fix
+#       works (removals, and no open error: with one retry, or N, when there were deregister errors); not measured yet
+#       (no removal: look again the next day, no release waits on it). Exit 0 for the fix works and not measured yet,
+#       1 for every other answer.
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
 # Then, up, back and runscaler: the restart. restart() re-reads the start time just before it restarts, so it never
@@ -529,6 +538,7 @@ pin03() {   # NAME: 03's pin line NAME=<64 hex> (ONE DOOR, the header), read fro
   [[ $v =~ ^[0-9a-f]{64}$ ]] && echo "$v"
 }
 runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner's
+runner_mtime() { stat -c %Y -- "$HOME/bin/runner" 2> /dev/null; }   # its mtime: THE CHECK's install time of v0.12.0
 ver03() {   # NAME: 03's version line NAME=N.N.N (THE RUNSCALERS), read from $S03 as data; rc 1 unless it is there once
   local v; v=$(sed -n "s/^$1=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\$/\1/p" "$S03" 2> /dev/null)
   [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && echo "$v"
@@ -588,9 +598,16 @@ open_release() {   # AN OPEN RELEASE (the header): config.toml.pre-image is ther
   k=$(image_of "$KEEPC") && c=$(image_of "$CFG") && [ "$k" = "$c" ] && return 1
   return 0
 }
-step_line() {   # THE RUNSCALER STEP's line for the INSTALLED runscaler (review r2, Opus F2): with VERSION on a host
-  # that took the way back (v0.9.5: the bare line would put v0.12.0 back), else the bare line
-  if [ "$(runner_sha)" = "$(pin03 WAYBACK_BIN_SHA)" ]; then echo "pool-image.sh runscaler $(ver03 WAYBACK)"
+step_line() {   # THE RUNSCALER STEP's line for the INSTALLED runscaler (review r2, Opus F2): the bare line, but on a
+  # v0.9.5 host BOTH lines, each with its case (review r1 of H2c, opus F3): the step with VERSION on a host that took
+  # the way back (the bare line would put v0.12.0 back), and the bare line to finish a step to v0.12.0 that a cut
+  # stopped between its two renames (config.toml installed, the binary not yet replaced: the way back's line would turn
+  # that step into the way back). Nothing on disk tells the two hosts apart: a runner.new is left only by a cut at
+  # which 03's EXIT trap does not run (a SIGKILL; an ssh drop's SIGHUP or a ctrl-c runs it, and it removes the file)
+  local v p
+  if [ "$(runner_sha)" = "$(pin03 WAYBACK_BIN_SHA)" ]; then
+    v=$(ver03 WAYBACK) p=$(ver03 PINNED)
+    echo "pool-image.sh runscaler $v (on a host that took the way back), or run pool-image.sh runscaler (to finish a step to v$p that a cut stopped before v$p replaced the binary)"
   else echo "pool-image.sh runscaler"; fi
 }
 runs_this() {   # the restart's two shortcuts: runscaler runs this config.toml (started_after) and, in THE RUNSCALER
@@ -656,8 +673,8 @@ pins_bad() {   # the first file PINS names whose sha256 is not its PIN (rc 0), o
 rs_check() {   # THE CHECK THE NEXT DAY (the header): it reads, writes no file and takes no lock, then exits
   local pin wb rsn s a pid start now log out= l m w why name bin got=0 serves=0 rec=0 one=0 begins= rem=0 lr= keeps=0
   local errs=0 e1= e2= espan=0 accafter=0 opn=0 olast= ospan=0 orun= ocount=0 o1= o2= names= ups=0 sfs=0 sf1= sf2=
-  local sfspan=0 cuts=0 cutw=
-  local -a files=() last=() kept=() cut=()
+  local sfo=0 so1= so2= sospan=0 cuts=0 cutw= bm= mt= sp=0 pcuts=0 pcutw=
+  local -a files=() last=() kept=() cut=() pcut=()
   local svc="^[0-9-]+ [0-9:]+ WARN +Service definition predates this runner's template "
   local upd="^[0-9-]+ [0-9:]+ WARN +A newer version of runner is available .+ run 'runner update' to upgrade "
   local wbr="take the way back, as RS_USER (README \"runscaler: the release this one pins, and the way back\"):"
@@ -676,14 +693,32 @@ rs_check() {   # THE CHECK THE NEXT DAY (the header): it reads, writes no file a
   s=$(date -u -d "@$start" +'%Y-%m-%d %H:%M:%S') || die "cannot read runscaler's start time [$start]: nothing read"
   rsn=$(running_sha) || rsn=
   log=$R/runner.log
+  # A RESTART AFTER THE STEP (the header): when ~/bin/runner is 03's PINNED, its mtime is the step's install of it
+  if [ "$(runner_sha)" = "$pin" ] && bm=$(runner_mtime) && [[ $bm =~ ^[0-9]+$ ]]; then
+    mt=$(date -u -d "@$bm" +'%Y-%m-%d %H:%M:%S') || mt=
+  fi
   # the log, read ONCE: runner.log.1 (runscaler's one older file: a rotation since the start) then runner.log, their
   # records since the start (the header), then THE COUNTS from the second after the start's
   if [ -f "$log.1" ] && [ -r "$log.1" ]; then files=("$log.1"); fi
-  if [ -f "$log" ] && out=$(awk -v s="$s" -v one="$log.1" '
+  if [ -f "$log" ] && out=$(awk -v s="$s" -v one="$log.1" -v mt="$mt" '
 function rec() {   # a record: the log time, then a level column of either width (v0.9.5: four, v0.10 and later: five)
   return $1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ && $2 ~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/ &&
     $3 ~ /^(DEBUG|DEBU|INFO|WARN|ERROR|ERRO|FATAL|FATA)$/
 }
+function five() {   # a record of v0.10 and later: its level column five wide, then one space (v0.9.5 writes four)
+  return substr($0, 21, 6) ~ /^(DEBUG|INFO |WARN |ERROR|FATAL) $/
+}
+function words() {   # m, the message of this record (no level, no `SET: ` prefix), and f[1..k], its words
+  m = $0; sub(/^[^ ]+ [^ ]+ +[A-Z]+ +/, "", m); sub(/^[^ ]+: /, "", m); k = split(m, f, " ")
+}
+function removal() {   # is this record (words()) a `Runner removed`? x: its runner; f[i]: its reason= (i > k: none)
+  if (!($3 == "INFO" && f[1] == "Runner" && f[2] == "removed" && f[3] ~ /^name=/)) return 0
+  x = substr(f[3], 6)
+  for (i = 4; i <= k && f[i] !~ /^reason=/; i++) ;
+  return 1
+}
+function accepted() { return i <= k && (f[i] == "reason=scaled-down" || f[i] == "reason=drain") }   # by removal()
+function jobid() { return (i < k && f[i + 1] ~ /^jobId=./) ? substr(f[i + 1], 7) : "" }   # the job it names, or ""
 function ep(t,   y, m, d, era, yoe) {   # a log time (UTC) in epoch seconds: days from the civil date, no date call
   y = substr(t, 1, 4) + 0; m = substr(t, 6, 2) + 0; d = substr(t, 9, 2) + 0
   if (m <= 2) y--
@@ -702,17 +737,26 @@ function cutr(t, x, j, what) {   # a record of a job that may have been cut (the
   pend = ""; next
 }
 { pend = ""; t = $1 " " $2; if (first == "") first = t }
+mt != "" && t >= mt && t <= s && five() {   # A RESTART AFTER THE STEP (the header): an earlier v0.12.0 process record
+  words(); r = removal()
+  if (t < s || r) {   # in the second of that start only a removal (the new process removes no runner in its first)
+    sp++
+    if (r && accepted() && (j = jobid()) != "") {   # its cut record: the last 3 kept
+      pc++; pl[pc] = t " UTC, runner " x ", job " j ": removed at a scale-down or a drain while it held that job"
+      delete pl[pc - 3]; pw = t " UTC on runner " x " (job " j ")"
+    }
+  }
+}
 t < s { next }
 { n++; if (FILENAME == one) n1++; last[n] = $0; delete last[n - 3] }
 t == s { next }
 {
-  m = $0; sub(/^[^ ]+ [^ ]+ +[A-Z]+ +/, "", m); sub(/^[^ ]+: /, "", m); k = split(m, f, " ")   # the message, its words
-  if ($3 == "INFO" && f[1] == "Runner" && f[2] == "removed" && f[3] ~ /^name=/) {
-    x = substr(f[3], 6); shut[x] = NR   # any reason: the end of its retries, a later record of its runner
-    for (i = 4; i <= k && f[i] !~ /^reason=/; i++) ;
-    if (i <= k && (f[i] == "reason=scaled-down" || f[i] == "reason=drain")) {   # ACCEPTED: GitHub took its DELETE
+  words()   # the message, its words
+  if (removal()) {
+    shut[x] = NR   # any reason: the end of its retries, a later record of its runner
+    if (accepted()) {   # ACCEPTED: GitHub took its DELETE
       rem++; lr = t " (" x ", " f[i] ")"; acc = NR; idle[x] = 1
-      if (i < k && f[i + 1] ~ /^jobId=./) cutr(t, x, substr(f[i + 1], 7), "removed at a scale-down or a drain while it held that job")
+      if ((j = jobid()) != "") cutr(t, x, j, "removed at a scale-down or a drain while it held that job")
     }
   } else if ($3 == "INFO" && index(m, "Runner holds a job GitHub assigned before JobStarted arrived; keeping it name=") == 1) {
     x = substr(f[k], 6); shut[x] = NR; acc = NR   # ACCEPTED: GitHub answered its DELETE (the runner holds a job)
@@ -723,8 +767,9 @@ t == s { next }
     else if (!index(m, " error=")) { pend = x; pnr = NR; pt = t; pst = 0 }   # its error on lines of its own (above)
   } else if (($3 == "ERROR" || $3 == "ERRO") && index(m, "Failed to start runner, will retry") == 1) {
     sfs++; if (sfs == 1) sf1 = t; sf2 = t
+    if (++sfo == 1) so1 = t; so2 = t   # OPEN while no `Runner started` comes after it
   } else if ($3 == "INFO" && index(m, "Runner started name=") == 1) {
-    ups++
+    ups++; sfo = 0   # it closes every start failure before it
   } else if ($3 == "WARN" && index(m, "Job started for unknown runner (already removed?) runnerName=") == 1) {
     x = substr(f[k], 12)
     if (x in idle) cutr(t, x, "", "GitHub started a job on it after its removal at a scale-down or a drain")
@@ -756,10 +801,16 @@ END {
   print "names" names
   print "starts " ups + 0
   print "sfs " sfs + 0
-  if (sfs) { print "sf1 " sf1; print "sf2 " sf2; print "sfspan " ep(sf2) - ep(sf1) }
+  if (sfs) { print "sf1 " sf1; print "sf2 " sf2 }
+  print "sfo " sfo + 0
+  if (sfo) { print "so1 " so1; print "so2 " so2; print "sospan " ep(so2) - ep(so1) }
   for (i = cuts - 2; i <= cuts; i++) if (i in cl) print "cut " cl[i]
   print "cuts " cuts + 0
   if (cuts) print "cutw " cw
+  print "span " sp + 0
+  for (i = pc - 2; i <= pc; i++) if (i in pl) print "pcut " pl[i]
+  print "pcuts " pc + 0
+  if (pc) print "pcutw " pw
 }' "${files[@]}" "$log" < /dev/null); then got=1; fi
   if runs "$((start - 1))" - $SETS; then serves=1; fi   # THE RUNS RULE (runner-facts.sh): two /healthz reads, no file
   unit_read || die "runscaler's unit cannot be read (systemctl --user show runscaler): nothing read"
@@ -800,10 +851,17 @@ END {
         'sfs '*) sfs=${l#sfs } ;;
         'sf1 '*) sf1=${l#sf1 } ;;
         'sf2 '*) sf2=${l#sf2 } ;;
-        'sfspan '*) sfspan=${l#sfspan } ;;
+        'sfo '*) sfo=${l#sfo } ;;
+        'so1 '*) so1=${l#so1 } ;;
+        'so2 '*) so2=${l#so2 } ;;
+        'sospan '*) sospan=${l#sospan } ;;
         'cut '*) cut+=("${l#cut }") ;;
         'cuts '*) cuts=${l#cuts } ;;
         'cutw '*) cutw=${l#cutw } ;;
+        'span '*) sp=${l#span } ;;
+        'pcut '*) pcut+=("${l#pcut }") ;;
+        'pcuts '*) pcuts=${l#pcuts } ;;
+        'pcutw '*) pcutw=${l#pcutw } ;;
       esac
     done <<< "$out"
   fi
@@ -817,6 +875,11 @@ END {
       printf '  %s%s\n' "${l:0:500}" "$m"
     done
     [ -z "$begins" ] || echo "the log begins at $begins UTC, after that start: runner.log rotated since (runscaler keeps one older file, runner.log.1, and this check reads it too), so these records and the counts below run from $begins UTC"
+  fi
+  if [ "$sp" -gt 0 ]; then   # A RESTART AFTER THE STEP (the header)
+    echo "runscaler restarted at $s UTC, after the step installed v$PINNED at $mt UTC (the mtime of its binary): the $sp records of an earlier v$PINNED process from then to that start are not counted below; a removal among them at a scale-down or a drain that names a job is read"
+    for l in "${pcut[@]}"; do echo "  a job may have been cut before that restart: $l"; done
+    [ "$pcuts" -le 3 ] || echo "  ($pcuts such records in all, the last 3 above)"
   fi
   # THE ANSWER: the first that holds, in this order (the header)
   if [ "$rsn" != "$pin" ] && [ "$rsn" != "$wb" ] && [ $((now - start)) -lt 60 ]; then
@@ -842,7 +905,8 @@ END {
   [ "$keeps" -le 3 ] || echo "  ($keeps such records in all, the last 3 above)"
   if [ "$errs" = 1 ]; then w=", at $e1 UTC"; else w=${e1:+, from $e1 to $e2 UTC}; fi
   echo "  deregister errors: $errs$w; open (no later removal or keeping it of their runner): $opn${names:+ (runners:$names)}"
-  echo "  runners started: $ups; start failures (Failed to start runner): $sfs${sf1:+, from $sf1 to $sf2 UTC}"
+  if [ "$sfo" = 1 ]; then w=", at $so1 UTC"; else w=${so1:+, from $so1 to $so2 UTC}; fi
+  echo "  runners started: $ups; start failures (Failed to start runner): $sfs${sf1:+, from $sf1 to $sf2 UTC}; open (no Runner started after them): $sfo$w"
   for l in "${cut[@]}"; do echo "  a job may have been cut: $l"; done
   [ "$cuts" -le 3 ] || echo "  ($cuts such records in all, the last 3 above)"
   if [ "$ospan" -ge 3600 ]; then
@@ -855,13 +919,14 @@ END {
     wayback_lines
     exit 1
   fi
-  if [ "$ups" = 0 ] && [ "$sfs" -gt 0 ] && [ "$sfspan" -ge 3600 ]; then
-    echo "ANSWER the way back: $sfs start failures (Failed to start runner) from $sf1 to $sf2 UTC (over an hour), and no runner started since runscaler started: runscaler v$PINNED cannot start runners on this host. So $wbr"
+  if [ "$sfo" -gt 0 ] && [ "$sospan" -ge 3600 ]; then
+    echo "ANSWER the way back: $sfo start failures (Failed to start runner) from $so1 to $so2 UTC (over an hour) with no runner started after them: runscaler v$PINNED cannot start runners on this host. So $wbr"
     wayback_lines
     exit 1
   fi
-  if [ "$cuts" -gt 0 ]; then
-    echo "ANSWER a job may have been cut: $cuts such record(s) since the start (above), the last at $cutw: v$PINNED removed that runner at a scale-down or a drain while GitHub had given it a job. Find that job on GitHub: if it completed, nothing to do (a short job that ended before its JobStarted reached runscaler leaves the same records); if it ended with the runner's lost communication (10 min after the removal), v$PINNED cut it: re-run it, unless it already was, and $wbr"
+  if [ "$cuts" -gt 0 ] || [ "$pcuts" -gt 0 ]; then
+    w=$cutw; [ "$cuts" -gt 0 ] || w=$pcutw   # the last: one since the start, else one before that restart
+    echo "ANSWER a job may have been cut: $((cuts + pcuts)) such record(s) (above), the last at $w: v$PINNED removed that runner at a scale-down or a drain while GitHub had given it a job. Find that job on GitHub: if it completed, nothing to do (a short job that ended before its JobStarted reached runscaler leaves the same records); if it ended with the runner's lost communication (10 min after the removal), v$PINNED cut it: re-run it, unless it already was, and $wbr"
     wayback_lines
     exit 1
   fi
@@ -870,8 +935,9 @@ END {
     echo "ANSWER look again in an hour: $w with no later removal or keeping it of its runner (runscaler retries each, every 80 s at the most), none of one runner over an hour yet. Run this check again in an hour"
     exit 1
   fi
-  if [ "$ups" = 0 ] && [ "$sfs" -gt 0 ]; then
-    echo "ANSWER look again in an hour: $sfs start failure(s) (Failed to start runner) from $sf1 to $sf2 UTC, and no runner started since runscaler started, not over an hour yet. Run this check again in an hour"
+  if [ "$sfo" -gt 0 ]; then
+    if [ "$sfo" = 1 ]; then w="1 start failure (Failed to start runner) at $so1 UTC"; else w="$sfo start failures (Failed to start runner) from $so1 to $so2 UTC"; fi
+    echo "ANSWER look again in an hour: $w with no runner started after them, not over an hour yet. Run this check again in an hour"
     exit 1
   fi
   if [ "$rem" -ge 1 ]; then

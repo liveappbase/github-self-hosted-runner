@@ -15,12 +15,14 @@ pins that the reader answers both alike: each is a GUARD, green before the bump 
 - THE UPDATER'S PASS (runscaler 0.12 bump, slice H2c: the Hetzner half of the Studio's C2, core/lib/logfmt.jq reading
   both level columns): RS_USER's `runner-updater pass` (linux-docker/bin/runner-updater, the core as it ships) reads
   runner.log through runner-facts.sh's log_pos and the core state's carry, on a v0.12.0-form log and on its v0.9.5
-  twin (the same records in the four-letter column), and gives the same R1 and KEEP verdicts from the same records
-  read: the five-wide level column of a set's record (`INFO  linux-ci-main: Runner removed …`), an ERROR record (a
-  counted start failure), a global record (no set: the disk guard's WARN, the one record that settles the failures),
-  and a record cut where a pass's position falls (held as the carry, then read whole once the rest is written).
-  Unlike the cells above, this one is red before C2: on b2eb739's logfmt.jq (the pre-C2 reader) the v0.12.0 log gives
-  no R1 and no KEEP accept, while its v0.9.5 twin gives both (the control).
+  twin (the same records in the four-letter column), and gives the same R1 and KEEP verdicts, at the same times, from
+  the same records read: the five-wide level column of a set's record (`INFO  linux-ci-main: Runner removed …`), an
+  ERROR record (a counted start failure), a global record (no set: the disk guard's WARN, the one record that settles
+  the failures), and a record cut where a pass's position falls (held as the carry, then read whole once the rest is
+  written). Unlike the cells above, this one is red before C2: on b2eb739's logfmt.jq (the pre-C2 reader) the v0.12.0
+  log gives no R1 and no KEEP accept, while its v0.9.5 twin gives both (the control). The two rigs run on ONE fake
+  clock, so the compare does not depend on when each is made (review r1 of H2c; CI run 42511818282 was red when a
+  minute of the real clock fell between them): a third cell makes the second rig a minute later.
 The /healthz cell runs pool-ready in a container (support.Sandbox: the host config and the curl substitute), the pass
 cell the real scripts in one (support.Pool, a fake clock); the others run anywhere with bash 5, awk and jq.
 """
@@ -30,9 +32,11 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from tests.hetzner.support import REPO, Sandbox, bash5, needs_container
 from tests.hetzner.test_updater import FAM, Rig, candidate
@@ -253,16 +257,12 @@ def scale_up(t):
     return '%s {INFO} %s: Scaling up runner currentCount=0 desiredCount=1\n' % (stamp(t), MAIN)
 
 
-# the members of the core's state that are the passes' clock (each rig has its own), not what the log said
-CLOCK = ('seen', 'since', 'carry_at', 'closed_at', 'keep_at')
-
-
 def read_as(x, t0):
-    """X (r1's family evidence, KEEP's answer) with every log time made relative to t0 (a log second: x - t0; a log
-    time text: ('log', its second - t0)) and the passes' clock members left out: what the pass READ, comparable between
-    two rigs."""
+    """X (r1's family evidence, KEEP's answer) with every log time and every time of the passes' clock made relative
+    to t0 (a second: x - t0; a log time text: ('log', its second - t0)): what the pass READ and when, comparable between
+    two rigs that run on one clock (twins)."""
     if isinstance(x, dict):
-        return {k: read_as(v, t0) for k, v in x.items() if k not in CLOCK}
+        return {k: read_as(v, t0) for k, v in x.items()}
     if isinstance(x, list):
         return [read_as(v, t0) for v in x]
     if isinstance(x, str) and re.fullmatch(r'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d', x):
@@ -281,12 +281,12 @@ class UpdaterPass(unittest.TestCase):
     set), a job that succeeded (INFO, on SET), and the first part of a third failure, up to CUT_AT (pass B: its
     position cuts that record); then the rest of it, the disk guard's WARN (global) 160 s after the first failure, and
     a scale-up a second later (the record a pass always holds) (pass C, at the clock C_AT sets). Returns, per pass: R1's
-    and KEEP's family answers and r1's state of the family (read_as), and the carry."""
+    and KEEP's family answers and r1's state of the family (read_as), and the carry. The two rigs of a cell run on ONE
+    clock (twins: review r1 of H2c, opus F5 and opus2 F1), so no value depends on when each rig is made."""
 
-    def passes(self, width, s, c_at=None):
-        g = Rig(self, on=True)
+    def passes(self, g, t, width, s, c_at=None):
+        """The three passes on rig G (its fake clock at the cell's one epoch), the log's records from T."""
         g.put({'format': 1, 'on': True, 'families': {FAM: {'candidate': candidate(g.p.clock() - 60)}}})
-        t = int(time.time()) + 100
         out = []
 
         def one():
@@ -307,12 +307,21 @@ class UpdaterPass(unittest.TestCase):
         return out, head, records(scale_up(t + 161), width)
 
     def twins(self, s, check, c_at=None):
-        """passes() in v0.9.5's column (the control), then in v0.12.0's, each a subtest: CHECK(its passes) asserts its
-        own verdicts and reading, and the v0.12.0 one is read as its twin was, pass for pass."""
+        """passes() in v0.9.5's column (the control), then in v0.12.0's, each a subtest on a rig of its own: CHECK(its
+        passes) asserts its own verdicts and reading, and the v0.12.0 one is read as its twin was, pass for pass, the
+        passes' clock too. Both rigs run on ONE fake-clock epoch, set when the cell starts: ten minutes past the real
+        clock, so past every real install of either rig (as fake_clock's own ahead; no pass here starts a process), and
+        the log's records from 90 s after it (as each rig's own clock had them). Each rig's clock had started at the
+        real clock when it was made, and the core prints the clock to the minute in its reason texts, so the compare
+        was red whenever a minute of the real clock fell between the two rigs (CI run 42511818282: review r1 of H2c,
+        opus F5, opus2 F1). (The rigs are made one after the other: a Pool's home is the one HOME of the container.)"""
+        epoch = int(time.time()) + 600
         seen = {}
         for width, name in ((4, 'v0.9.5'), (5, 'v0.12.0')):
             with self.subTest(column=name):
-                out, head, held = self.passes(width, s, c_at)
+                g = Rig(self, on=True)
+                g.p.clock(now=epoch)
+                out, head, held = self.passes(g, epoch + 90, width, s, c_at)
                 seen[width] = out
                 check(*out)
                 self.assertEqual([p['carry'] for p in out[1:]], [head, held],
@@ -359,6 +368,24 @@ class UpdaterPass(unittest.TestCase):
             self.assertEqual((c['keep']['succeeded'], c['state']['newest']), (1, 160))
             self.assertIn('runner-updater: pass: would accept hz-docker', c['stdout'])
         self.twins(MAIN, check, c_at)
+
+    def test_the_compare_holds_when_the_second_rig_is_made_a_minute_later(self):
+        """Review r1 of H2c (opus F5, opus2 F1; CI run 42511818282): the twins' compare does not depend on when each
+        rig is made. The v0.12.0 twin's rig made a minute later: its fake clock moved on by 60 s right after it is made
+        (what a later minute of the real clock did to a clock that started at it); the R1 cell's passes (no verdict
+        asserted here: the compare is the claim) read the v0.12.0 log as its twin, reason texts and clock alike. Red on
+        8b917c7, whose rigs each ran on their own clock."""
+        made, real = [], Rig
+
+        def later(test, **kw):
+            g = real(test, **kw)
+            made.append(g)
+            if len(made) == 2:
+                g.p.clock(plus=60)
+            return g
+        with mock.patch.object(sys.modules[__name__], 'Rig', later):
+            self.twins(SMALL, lambda *a: None)
+        self.assertEqual(len(made), 2)
 
 if __name__ == '__main__':
     unittest.main()
