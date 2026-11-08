@@ -98,7 +98,7 @@ In the idle window (steps 1–2 of the idle runbook): put the new token on the M
 
 ## After runscaler changed
 
-When install printed that runscaler was replaced (a release with a new runscaler, or a rollback across one; a re-run after a failed install prints it again, until an install completes): after `runner-enable`, run the check workflow, and check that the VM of that job has an admission line in `/Users/ci/Library/Logs/mac-runner/admissions.log` (`grep runner- /Users/ci/Library/Logs/mac-runner/admissions.log | tail -3`). A job that ran without an admission line did not start through the shim: disable the agent and find out why.
+When install printed that runscaler was replaced (a release with a new runscaler, or a rollback across one; a re-run after a failed install prints it again, until an install completes): after `runner-enable`, run the check workflow, and check that the VM of that job has an admission line in `/Users/ci/Library/Logs/mac-runner/admissions.log` (`grep runner- /Users/ci/Library/Logs/mac-runner/admissions.log | tail -3`). A job that ran without an admission line did not start through the shim: disable the agent and find out why. Then check that runscaler's own log, `/Users/ci/.config/runner/runner.log`, has new lines (`tail -3 /Users/ci/.config/runner/runner.log`): a runscaler that writes elsewhere leaves the updater blind.
 
 ## When the shim refuses
 
