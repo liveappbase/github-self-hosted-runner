@@ -1634,12 +1634,12 @@ POOL_UNREAD = ('%(c)s line %(line)d: a pool-size this does not read (it reads on
 
 
 class TestWarmPool(unittest.TestCase):
-    """PLAN D6: `on` refuses a Tart set with pool-size > 0. runscaler 0.9.5 reads pool-size in the [tart] table (every
-    scale set inherits it) or in a scale set's own tart table, and its default is 0. The updater reads ONE spelling,
-    `pool-size = N` in the top-level [tart] table; any other line that names pool-size is one it does not read. While a
-    family of the families file runs a set of the config, either one makes `on` REFUSE (the state byte-equal), and a
-    pass or a report no facts (no core call). The controls: pool-size = 0, no pool-size line, the same line as a
-    comment, no family."""
+    """PLAN D6: `on` refuses a Tart set with pool-size > 0. runscaler 0.9.5 to 0.12.0 read pool-size in the [tart] table
+    (every scale set inherits it) or in a scale set's own tart table, and its default is 0. The updater reads ONE
+    spelling, `pool-size = N` in the top-level [tart] table; any other line that names pool-size is one it does not
+    read. While a family of the families file runs a set of the config, either one makes `on` REFUSE (the state
+    byte-equal), and a pass or a report no facts (no core call). The controls: pool-size = 0, no pool-size line, the
+    same line as a comment, no family."""
 
     TART = 'pool-size = 0 '   # the example's [tart] line, from its start
 

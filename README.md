@@ -253,6 +253,6 @@ sudo rm -rf /usr/local/libexec/liveapp-ci
 Nothing third-party is in this repository. install downloads each tool by digest ([setup/downloads.manifest](setup/downloads.manifest)), and golden-build downloads the GitHub runner by digest:
 
 - **Tart 2.41.1** and **softnet 0.24.1** — Functional Source License 1.1 with an Apache-2.0 future licence (FSL-1.1-ALv2). Running your own CI on your own Macs is fine. Selling hosted macOS runners to others is a competing use under that licence.
-- **runscaler 0.9.5** — MIT.
+- **runscaler 0.12.0** — MIT.
 - **GitHub Actions runner 2.338.2** — MIT.
 - The base image `ghcr.io/cirruslabs/macos-golden-gate-base`, pinned by digest, holds macOS (Apple's licence: at most two macOS VMs per Apple computer you own or control, for software development and testing, macOS Server, or personal non-commercial use) and software that Cirrus Labs installed in it (Homebrew packages, Rosetta, tart-guest-agent), each under its own licence.

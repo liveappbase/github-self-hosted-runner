@@ -1,4 +1,4 @@
-# config.toml — runscaler 0.9.5's configuration for this host. install creates /Users/ci/.config/runner/config.toml
+# config.toml — runscaler 0.12.0's configuration for this host. install creates /Users/ci/.config/runner/config.toml
 # (0600) from this example ONLY when there is none, and sets cpu and memory below from this Mac. Then fill each
 # [[scaleset]] (README: "Configure the scale sets"). Top-level keys must stay ABOVE the first [table].
 log-level = "info"
