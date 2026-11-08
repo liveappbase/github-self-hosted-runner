@@ -1,7 +1,7 @@
 # downloads.manifest — the pinned downloads, by digest. KIND URL SHA256 MEMBER DEST (KIND = file | dir).
 # bin/fetch.sh checks each tarball's SHA-256 BEFORE it extracts anything; install runs it with --replace.
-# Tart 2.41.1 is REAL (a fixed path the root shim names); runscaler 0.9.5 is /Users/ci/bin/runner; softnet 0.24.1 is
+# Tart 2.41.1 is REAL (a fixed path the root shim names); runscaler 0.12.0 is /Users/ci/bin/runner; softnet 0.24.1 is
 # staged for setup/02-wall.sh (STAGE_SOFTNET = its DEST; tools/release-check checks both and the binary's hash).
 dir  https://github.com/openai/tart/releases/download/2.41.1/tart.tar.gz e680a734febccfce7d4e910c1f7f13fc3b00f19a181c945e2d746de3214c32c2 tart.app /Users/ci/Applications/tart.app
-file https://github.com/ysya/runscaler/releases/download/v0.9.5/runner-darwin-arm64.tar.gz 87b04dbe0f38e4c04893467ad9fb84ee0926860725d333ad7bbd19a5603e4970 runner /Users/ci/bin/runner
+file https://github.com/ysya/runscaler/releases/download/v0.12.0/runner-darwin-arm64.tar.gz 563f26ba216d5bef16cf92275f6381a73f9f8ce11c439ee024feb67ea7011eeb runner /Users/ci/bin/runner
 file https://github.com/openai/softnet/releases/download/0.24.1/softnet.tar.gz 8ff8ff099c2b5ac1b1128e7999c4a730ac85f486c8a4cb0239eb98432859a0f7 softnet /Users/ci/mac-runner/downloads/softnet-0.24.1/softnet

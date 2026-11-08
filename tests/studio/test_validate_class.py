@@ -202,13 +202,13 @@ def clean(text, port):
 
 
 class TestLiveBinary(unittest.TestCase):
-    """The real runscaler v0.9.5 runs `validate` through a runner-start copy (its token files, its tart check, its
+    """The real pinned runscaler runs `validate` through a runner-start copy (its token files, its tart check, its
     exec), with HTTPS_PROXY and HTTP_PROXY at a refusing local port and NO_PROXY empty: nothing leaves the Mac."""
 
     def binary(self, sb):
         tarball = os.environ.get('RUNSCALER_TARBALL', '')
         if not tarball or not os.path.isfile(tarball):
-            self.skipTest('RUNSCALER_TARBALL is not set to the runscaler v0.9.5 darwin-arm64 tarball: the live '
+            self.skipTest('RUNSCALER_TARBALL is not set to the pinned runscaler darwin-arm64 tarball: the live '
                           'validate cell did not run (the fixtures stay as committed)')
         with open(tarball, 'rb') as f:
             self.assertEqual(hashlib.sha256(f.read()).hexdigest(), manifest_sha(),
