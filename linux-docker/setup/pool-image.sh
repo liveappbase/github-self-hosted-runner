@@ -8,6 +8,8 @@
 #           closes the release whose image config.toml RUNS, whatever build records there are by then.
 #   runscaler [VERSION]: the same line with `runscaler` — THE RUNSCALER STEP (below): runscaler v0.12.0, the one this
 #           release pins, into ~/bin/runner, at a quiet time; with VERSION 0.9.5, the way back.
+#   runscaler-check: the same line with `runscaler-check` (no ServerAliveInterval needed) — THE CHECK THE NEXT DAY
+#           (below): what runscaler did since the step. It only reads.
 # THE BUILD RECORD (02-d1.sh's header gives its form): `up VERSION` reads RUN_USER's ~/run/builds/<VERSION>-<RECIPE>,
 # RECIPE being 02-d1.sh's recipe of this release's image/ (this ~/build/image/: the same release's files as RUN_USER's
 # ~/build), ONCE: a private copy, parsed by one exact pattern of 02-d1.sh's four lines, never sourced. The recipe and
@@ -83,6 +85,29 @@
 # THE RUNNING BINARY (the H2 plan's R-6): running_sha, ONE function: systemd's MainPID of runscaler, then the sha256 of
 #       PROCFS/<pid>/exe (/proc: the binary that process runs, read through /proc also when ~/bin/runner was renamed over
 #       since and it shows "(deleted)"). The cells' copy names their own process table (PROCFS, a pin line).
+# THE CHECK THE NEXT DAY, `runscaler-check` (runscaler 0.12 bump, slice H2b-2; the H2 plan's M-5 with its r3 FOLD R-7):
+#       READ-ONLY. It runs before ONE RUN AT A TIME's lock (which it never takes, so it writes no file) and changes
+#       nothing. It reads runscaler's unit (runner-facts.sh's unit_read), THE RUNNING BINARY, and runner.log (one awk
+#       read), then the unit again: each of these is an ANSWER of its own, never a count of zero: no process (the unit
+#       not active, or MainPID 0), CHANGED DURING THE CHECK (the two unit reads differ: another process), a binary that
+#       is not 03's PINNED (v0.9.5, one this release does not know, or one it cannot read), and NO LOG (runner.log
+#       missing, not a regular file, unreadable, or with no record since the start). It prints the process (pid, start,
+#       which runscaler), the last three RECORDS since the start (a record: runscaler's log time, then a level column
+#       of either width, v0.9.5's or v0.10's and later; since the start: its time at or after the start's second, as
+#       ActiveEnterTimestamp gives it, UTC like the restart-cut scan), each as written (its level column too), the
+#       start's WARN `Service definition predates this runner's template …` marked expected (never its fix=…
+#       migrate --user, never runner update). Then THE COUNTS, from the second AFTER the start's: the log time has
+#       whole seconds, and the start's own second may hold the OLD process's last records (its drain's removals), while
+#       the new one removes no runner in its first second (it connects to GitHub first): REMOVALS, the `Runner removed`
+#       records of reason scaled-down or drain (how many, and the last); the `keeping it` records (`Runner holds a job GitHub assigned before
+#       JobStarted arrived; keeping it`), the last three printed as "protected a job GitHub had assigned (the fix at
+#       work)"; DEREGISTER ERRORS, the `Failed to remove runner, will retry` records whose error begins `deregister
+#       runner NAME:`, NAME their first name=. An error is UNRESOLVED while no `Runner removed` record of NAME (any
+#       reason) comes after it in the log. THE ANSWER, one: unresolved errors, two or more, the first and the last an
+#       hour apart or more: the way back (its two lines: wayback_lines, as NEXT prints them); any other unresolved
+#       error: look again in an hour; removals and no unresolved error: the fix works (with one retry, or N, for the
+#       errors a removal resolved); no removal: not measured yet, look again the next day (no release waits on it).
+#       Exit 0 for the fix works and not measured yet, 1 for every other answer.
 # ONE RUN AT A TIME: a lock in ~/.config/runner. An ssh drop with no pty can leave the old run alive; a new one then
 # refuses and names its pid.
 # Then, up, back and runscaler: the restart. restart() re-reads the start time just before it restarts, so it never
@@ -412,7 +437,7 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
 }
 host_conf pool-image.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME MAIN_SET SMALL_SET
 MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED=
-usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept | runscaler [VERSION]   (a person's)"
+usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept | runscaler [VERSION] | runscaler-check   (a person's)"
   echo "       pool-image.sh up --unattended RUNNER_VERSION DIGEST"
   echo "                   | back --unattended --why r1|r1-connect|back [--verdict FILE] [--old-version VERSION]"
   echo "                   | recover --unattended"
@@ -421,6 +446,7 @@ case $MODE:$# in
   up:2) VERSION=$2 ;;
   up:4) [ "$2" = --unattended ] || usage; UN=1 VERSION=$3 DIGEST=$4; [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage ;;
   back:1|accept:1|runscaler:1) ;;
+  runscaler-check:1) ;;
   runscaler:2) RSV=$2; [[ $RSV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage ;;
   back:*) [ "$2" = --unattended ] || usage; UN=1; shift 2
     while [ "$#" -gt 0 ]; do   # each option once, each with its value
@@ -481,6 +507,10 @@ ver03() {   # NAME: 03's version line NAME=N.N.N (THE RUNSCALERS), read from $S0
 }
 dl_of() {   # dl_of VERSION: its download (THE RUNSCALERS, ONE DOOR): the pinned one's is Install step 4's file
   if [ "$1" = "$PINNED" ]; then echo "$B/dl/runner-linux-amd64.tar.gz"; else echo "$B/dl/runner-v$1-linux-amd64.tar.gz"; fi
+}
+wayback_lines() {   # the way back's two lines, as RS_USER (THE RUNSCALER STEP's NEXT; THE CHECK THE NEXT DAY's way back)
+  echo "  mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/$(basename "$(dl_of "$WAYBACK")") https://github.com/ysya/runscaler/releases/download/v$WAYBACK/runner-linux-amd64.tar.gz"
+  echo "  pool-image.sh runscaler $WAYBACK"
 }
 running_sha() {   # THE RUNNING BINARY (the header): the sha256 of the binary runscaler's process runs; rc 1 when no
   # process runs or its binary cannot be read
@@ -574,6 +604,129 @@ pins_bad() {   # the first file PINS names whose sha256 is not its PIN (rc 0), o
     [ "$(sha256sum "${p%=*}" 2> /dev/null | cut -d' ' -f1)" = "${p##*=}" ] || { echo "${p%=*}"; return 0; }
   done <<< "$PINS"
   return 1
+}
+
+rs_check() {   # THE CHECK THE NEXT DAY (the header): it reads, writes no file and takes no lock, then exits
+  local pin rsn s a pid start log got=0 out= l m w why name f1= f2= rec=0 rem=0 lr= keeps=0 res=0 un=0 uf= ul= names=
+  local -a last=() kept=()
+  local svc="^[0-9-]+ [0-9:]+ WARN +Service definition predates this runner's template "
+  { pin=$(pin03 BIN_SHA) && PINNED=$(ver03 PINNED) && WAYBACK=$(ver03 WAYBACK); } \
+    || die "$S03 does not name its two runscalers (THE RUNSCALERS) once each: nothing read"
+  # shellcheck source=runner-facts.sh
+  . "$B/setup/runner-facts.sh" || die "cannot read $B/setup/runner-facts.sh (is this release's linux-docker/ ~/build?): nothing read"
+  echo "== the runscaler check (it only reads: nothing changes)"
+  unit_read || die "runscaler's unit cannot be read (systemctl --user show runscaler): nothing read"
+  if [ "$UNIT_ACTIVE" != active ] || [ "$UNIT_PID" = 0 ]; then
+    echo "ANSWER no process: runscaler's unit is $UNIT_ACTIVE, with MainPID $UNIT_PID: no runscaler process serves now. Run this check again in a few minutes; if it stays so, read journalctl --user -u runscaler, and if v$PINNED does not start, take the way back (README \"runscaler: the release this one pins, and the way back\")"
+    exit 1
+  fi
+  [[ $UNIT_START =~ ^[1-9][0-9]*$ ]] || die "runscaler's unit is active with no start time (systemctl --user show runscaler): nothing read"
+  a="$UNIT_ACTIVE $UNIT_PID $UNIT_START" pid=$UNIT_PID start=$UNIT_START
+  s=$(date -u -d "@$start" +'%Y-%m-%d %H:%M:%S') || die "cannot read runscaler's start time [$start]: nothing read"
+  rsn=$(running_sha) || rsn=
+  log=$R/runner.log
+  # the log, read ONCE: its records since the start (the header), then THE COUNTS from the second after the start's
+  if [ -f "$log" ] && out=$(awk -v s="$s" '
+function rec() {   # a record: the log time, then a level column of either width (v0.9.5: four, v0.10 and later: five)
+  return $1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ && $2 ~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]$/ &&
+    $3 ~ /^(DEBUG|DEBU|INFO|WARN|ERROR|ERRO|FATAL|FATA)$/
+}
+!rec() || ($1 " " $2) < s { next }
+{ n++; last[n] = $0; delete last[n - 3] }
+($1 " " $2) == s { next }
+{
+  m = $0; sub(/^[^ ]+ [^ ]+ +[A-Z]+ +/, "", m); sub(/^[^ ]+: /, "", m); k = split(m, f, " ")   # the message, its words
+  if ($3 == "INFO" && f[1] == "Runner" && f[2] == "removed" && f[3] ~ /^name=/) {
+    gone[substr(f[3], 6)] = NR
+    for (i = 4; i <= k && f[i] !~ /^reason=/; i++) ;
+    if (i <= k && (f[i] == "reason=scaled-down" || f[i] == "reason=drain")) { rem++; lr = $1 " " $2 " (" substr(f[3], 6) ", " f[i] ")" }
+  } else if ($3 == "INFO" && index(m, "Runner holds a job GitHub assigned before JobStarted arrived; keeping it name=") == 1) {
+    keeps++; kept[keeps] = $1 " " $2 " " substr(f[k], 6); delete kept[keeps - 3]
+  } else if (($3 == "ERROR" || $3 == "ERRO") && index(m, "Failed to remove runner, will retry name=") == 1 &&
+      index(m, " error=\"deregister runner " substr(f[7], 6) ": ")) {
+    e++; en[e] = substr(f[7], 6); el[e] = NR; et[e] = $1 " " $2
+  }
+}
+END {
+  print "records " n + 0
+  for (i = n - 2; i <= n; i++) if (i in last) print "last " last[i]
+  print "removals " rem + 0
+  if (rem) print "lastrm " lr
+  for (i = keeps - 2; i <= keeps; i++) if (i in kept) print "kept " kept[i]
+  print "keeps " keeps + 0
+  for (i = 1; i <= e; i++)
+    if ((en[i] in gone) && gone[en[i]] > el[i]) r++
+    else { u++; if (u == 1) uf = et[i]; ul = et[i]; if (!(en[i] in named) && nn < 3) { named[en[i]] = 1; nn++; names = names " " en[i] } }
+  print "resolved " r + 0
+  print "unresolved " u + 0
+  if (u) { print "first " uf; print "final " ul }
+  print "names" names
+}' "$log" < /dev/null); then got=1; fi
+  unit_read || die "runscaler's unit cannot be read (systemctl --user show runscaler): nothing read"
+  if [ "$a" != "$UNIT_ACTIVE $UNIT_PID $UNIT_START" ]; then
+    echo "ANSWER changed during the check: runscaler's process changed while this check read it (pid $pid, started $s UTC; then: the unit $UNIT_ACTIVE, pid $UNIT_PID). Run this check again"
+    exit 1
+  fi
+  if [ -n "$rsn" ]; then name=$(rs_name "$rsn"); else name="a binary this check cannot read ($PROCFS/$pid/exe)"; fi
+  echo "process: pid $pid, started $s UTC: $name${rsn:+ (sha256 ${rsn:0:12})}"
+  if [ "$got" = 1 ]; then
+    while IFS= read -r l; do
+      case $l in
+        'records '*) rec=${l#records } ;;
+        'last '*) last+=("${l#last }") ;;
+        'removals '*) rem=${l#removals } ;;
+        'lastrm '*) lr=${l#lastrm } ;;
+        'kept '*) kept+=("${l#kept }") ;;
+        'keeps '*) keeps=${l#keeps } ;;
+        'resolved '*) res=${l#resolved } ;;
+        'unresolved '*) un=${l#unresolved } ;;
+        'first '*) uf=${l#first } ;;
+        'final '*) ul=${l#final } ;;
+        names*) names=${l#names} ;;
+      esac
+    done <<< "$out"
+  fi
+  if [ "$rec" -gt 0 ]; then
+    echo "log: $log, $rec records since that start; the last ${#last[@]}, as written (their level column too):"
+    for l in "${last[@]}"; do
+      m=; [[ ! $l =~ $svc ]] || m="   <- expected (v$PINNED logs it at each start): never run its fix=… migrate --user, and never runner update"
+      printf '  %s%s\n' "${l:0:500}" "$m"
+    done
+  fi
+  [ "$rsn" = "$pin" ] || { echo "ANSWER v$PINNED is not running: its process runs $name. This check reads v$PINNED only. After the way back, v$WAYBACK is right; else, and for the way forward again, run pool-image.sh runscaler as RS_USER (README \"runscaler: the release this one pins, and the way back\")"; exit 1; }
+  if [ "$got" = 0 ] || [ "$rec" = 0 ]; then
+    if [ ! -e "$log" ] && [ ! -L "$log" ]; then why="is missing"
+    elif [ "$got" = 0 ]; then why="is not a file this check can read"
+    else why="has no record since runscaler started ($s UTC)"; fi
+    echo "ANSWER no log: $log $why. runscaler writes it (config.toml's log-file line names it), and the updater and pool-image.sh read it: read journalctl --user -u runscaler, and the log-file line of config.toml"
+    exit 1
+  fi
+  echo "since that start (from the second after $s UTC):"
+  echo "  removed at a scale-down or a drain: $rem runner(s)${lr:+, the last at $lr}"
+  for l in "${kept[@]}"; do echo "  $l: protected a job GitHub had assigned (the fix at work)"; done
+  [ "$keeps" -le 3 ] || echo "  ($keeps such records in all, the last 3 above)"
+  echo "  deregister errors: $((res + un)), $res of them followed by their runner's removal, $un with no later removal${names:+ (runners:$names)}"
+  if [ "$un" -ge 2 ]; then
+    f1=$(date -u -d "$uf" +%s) && f2=$(date -u -d "$ul" +%s) || die "cannot read the log times [$uf] [$ul]: nothing read"
+  fi
+  if [ "$un" -ge 2 ] && [ $((f2 - f1)) -ge 3600 ]; then
+    echo "ANSWER the way back: $un deregister errors from $uf to $ul UTC (over an hour) with no later removal of their runner: runscaler v$PINNED cannot remove runners on this host. Take the way back, as RS_USER (README \"runscaler: the release this one pins, and the way back\"):"
+    wayback_lines
+    exit 1
+  fi
+  if [ "$un" -ge 1 ]; then
+    if [ "$un" = 1 ]; then w="1 deregister error at $uf UTC"; else w="$un deregister errors from $uf to $ul UTC"; fi
+    echo "ANSWER look again in an hour: $w with no later removal of their runner (runscaler retries each, every 80 s at the most), not over an hour yet. Run this check again in an hour"
+    exit 1
+  fi
+  if [ "$rem" -ge 1 ]; then
+    case $res in 0) w= why="no deregister error" ;; 1) w=", with one retry" why="its one deregister error was followed by that runner's removal" ;;
+      *) w=", with $res retries" why="each of its $res deregister errors was followed by that runner's removal" ;; esac
+    echo "ANSWER the fix works$w: runscaler v$PINNED removed $rem runner(s) at a scale-down or a drain since it started, and $why. Nothing to do"
+    exit 0
+  fi
+  echo "ANSWER not measured yet: runscaler v$PINNED removed no runner at a scale-down or a drain since it started, so nothing shows yet that it can. Nothing to do: run this check again the next day"
+  exit 0
 }
 
 # ---- THE UNATTENDED MODES (the header)
@@ -1589,6 +1742,7 @@ un_recover() {   # RECOVER (the header): in order 0 closed, 1 no effect, DECIDED
 }
 
 [ "$(id -un)" = ${RS_USER} ] || die "run me as ${RS_USER}"
+[ "$MODE" != runscaler-check ] || rs_check   # THE CHECK THE NEXT DAY (the header): read-only, before the lock; it exits
 if [ "$UN" = 1 ]; then   # THE UPDATER'S CHILD first (runner-release.sh's rr_held: the updater lock on fd 9, handed down by
   # its holder, runner-updater), then this script's own lock
   # shellcheck source=runner-release.sh
@@ -1795,8 +1949,7 @@ if [ "$MODE" = runscaler ]; then
   echo "POOL RUNSCALER DONE: runscaler v$RSV runs ($HOME/bin/runner and the process, sha256 ${WANT:0:12}), on config.toml with the log-file line"
   if [ "$RSV" = "$PINNED" ]; then
     echo "NEXT the check the next day (README \"runscaler: the release this one pins, and the way back\"). The way back, if it does not serve: its download, then this step with its version (as RS_USER):"
-    echo "  mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/$(basename "$(dl_of "$WAYBACK")") https://github.com/ysya/runscaler/releases/download/v$WAYBACK/runner-linux-amd64.tar.gz"
-    echo "  pool-image.sh runscaler $WAYBACK"
+    wayback_lines
   else
     echo "NEXT the way forward again, from Install step 4's download: pool-image.sh runscaler"
   fi
