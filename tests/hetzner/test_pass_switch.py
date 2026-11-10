@@ -13,11 +13,13 @@ build record of digest D, is no longer a "would switch" line but the switch wind
   `digest`, hand `runner-updater switch-now hz-docker`), and that pass exits 0; before, "waits for idle (since ...)",
   exit 0, no journal (E-11). A cut switch's RECOVER wait keeps the journal: exit 1 (E-11).
 - THE TWO LEVELS (r3 FOLD), before the facts: a held DISK is cleared when disk_ok passes; a held NO IDLE of V is
-  dropped when the family has a candidate or runs V or newer. DISK is RAISED only when DUE finds a release due (E-9),
-  by runner-facts.sh's disk_ok (ONE copy): exactly 10 % free goes on, 10 % less 1 KiB holds it.
+  dropped when the family has a candidate or runs V or newer: config.toml on that image AND the runscaler that runs
+  started after its install (an install with no restart after it counts nothing: B4a fix 1). DISK is RAISED only when
+  DUE finds a release due (E-9), by runner-facts.sh's disk_ok (ONE copy): exactly 10 % free goes on, 10 % less 1 KiB
+  holds it.
 - E-14, the pass's side: the copy `up` reads (pass/state.json) holds THIS pass's core state: a copy an older pass, an
   OFF time or a set this host does not have left excuses nothing; a copy the pass cannot write starts no `up`. The
-  ages grown by real passes: test_ages.py.
+  ages grown by real passes: test_recurring_passes.py (24 h of passes) and test_age_reset.py (the reset).
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
 (Named for its CI part, test_[n-q]*.py: .github/workflows/release-check.yml.)
 """
@@ -162,6 +164,31 @@ class TheSwitchCaller(unittest.TestCase):
         g.p.hooks()
         self.assertIn(NOT + 'STOP check failed (runner %s): it is of the eligible release' % V, g.go().stdout)
 
+    def test_the_switched_line_says_it_runs_only_after_a_start_into_its_target(self):
+        """B4a fix 1 (Opus r1 F1): a person's `systemctl --user disable` during the switch's drain: the window closes
+        target-idle (its TARGET installed, nothing started, STOP CI DISABLED held), the candidate is set, and the pass's
+        line says the TARGET is installed and runscaler has not started into it, never "it runs". The control: the
+        uninterrupted switch (target-running) says "it runs IMAGE"."""
+        for disable in (True, False):
+            with self.subTest(disable=disable):
+                g = G(self)
+                if disable:
+                    g.p.hooks(('systemctl:stop-done', 'disable'))
+                r = g.go()
+                self.assertEqual(g.fam()['candidate']['version'], V, r.stdout[-3000:])
+                line = [l for l in r.stdout.splitlines() if l.startswith('runner-updater: pass: switched hz-docker to ')]
+                self.assertEqual(len(line), 1, r.stdout[-3000:])
+                if disable:
+                    self.assertEqual(len(g.calls('start')), 0)
+                    self.assertEqual([s['stop'] for s in g.held()], ['CI DISABLED'])
+                    self.assertNotIn('it runs', line[0])
+                    self.assertIn('runner-updater: pass: switched hz-docker to %s: %s is installed, and runscaler has '
+                                  'not started into it (the close: target-idle; the window journal ' % (V, ref(NEW)),
+                                  line[0])
+                else:
+                    self.assertTrue(line[0].startswith('runner-updater: pass: switched hz-docker to %s: it runs %s (the '
+                                                       'window journal ' % (V, ref(NEW))), line[0])
+
     def test_a_child_that_kept_no_journal_is_followed_by_the_outage_rule(self):
         """Codex r1 F2: runscaler is down when the switch starts (the unit enabled: CI down): `up` exits 3 (START
         STATE) with no journal; THE OUTAGE RULE as the pass's last step holds POOL DOWN. The control: the same exit 3
@@ -292,9 +319,10 @@ class TheTwoLevels(unittest.TestCase):
                     self.assertEqual(g.fam()['candidate']['version'], V, r.stdout[-3000:])
 
     def test_a_held_no_idle_ends_when_the_pool_runs_its_version_or_has_a_candidate(self):
-        """THE TWO LEVELS (ii), before the facts: NO IDLE of V held; config.toml on V's image (a hand switch: RUN_USER's
-        record of the running image names V) -> gone in that pass, and DUE says "not newer". A candidate -> gone too.
-        The control: the pool still on the older image -> it stays, and DUE holds at step 2."""
+        """THE TWO LEVELS (ii), before the facts: NO IDLE of V held; config.toml on V's image and runscaler restarted
+        after that install (a hand switch: RUN_USER's record of the running image names V) -> gone in that pass, and DUE
+        says "not newer". A candidate -> gone too. The control: the pool still on the older image -> it stays, and DUE
+        holds at step 2. (An install with no restart after it: the next cell.)"""
         ni = stop('NO IDLE', V, text='3 days', digest=NEW, hand='runner-updater switch-now hz-docker')
         for why in ('the pool runs V', 'a candidate', 'an older image'):
             with self.subTest(why):
@@ -306,12 +334,64 @@ class TheTwoLevels(unittest.TestCase):
                 if why == 'the pool runs V':
                     cfg = g.p.rpath('config.toml')
                     g.p.write(cfg, g.p.config().replace(ref(OLD), ref(NEW)), 0o600)
+                    g.p.clock(plus=600)
+                    g.p.act('restart')                      # the fake clock: a start after the install's second
                 r = g.go()
                 self.assertEqual(g.held('NO IDLE') == [], why != 'an older image', r.stdout[-3000:])
                 if why == 'the pool runs V':
                     self.assertIn(NOT + 'release v%s is not newer than its runner %s' % (V, V), r.stdout)
                 if why == 'an older image':
                     self.assertIn(NOT + 'STOP NO IDLE (runner %s)' % V, r.stdout)
+
+    def test_a_held_no_idle_stays_until_runscaler_restarts_into_v(self):
+        """B4a fix 1 (Codex r1 F1): NO IDLE of V held by real busy passes, no candidate; then a person's attended
+        `pool-image.sh up V` (README "A new runner release", step 2, NO IDLE's hand path) cut between its install of
+        config.toml (V's image) and its restart: the runscaler that runs started before that install, so the pool still
+        runs the image before (config.toml's install counts nothing until a restart). The next pass keeps NO IDLE (its
+        line says why), `due` {V, since} as it was, and it stops and starts nothing; DUE holds at step 2. So does a
+        runscaler stopped after that install (no process: the safe side). The control: the same, then runscaler
+        restarted after the install: that pass drops NO IDLE (DUE: not newer)."""
+        for after in ('the install alone', 'runscaler stopped', 'control: restarted'):
+            with self.subTest(after):
+                restart = after.startswith('control')
+                g = G(self, hz=BUSY)
+                g.p.docker['versions'] = {ref(OLD): CUR + '\n', ref(NEW): V + '\n'}
+                t0 = g.p.clock()
+                g.go()
+                g.p.clock(now=t0 + NO_IDLE_S)
+                r = g.go()
+                self.assertEqual(len(g.held('NO IDLE')), 1, r.stdout[-3000:])
+                self.assertIsNone(g.fam().get('candidate'))
+                g.p.hooks(('mv-done:config.toml', 'kill'))          # cut right after its install, before its restart
+                r = g.p.unattended('up', V, prefix=())
+                self.assertEqual(r.returncode, -9, r.stdout[-3000:] + r.stderr)
+                g.p.hooks()
+                self.assertIn('== 03-runscaler.sh real %s --image-only' % NEW, r.stdout)
+                self.assertEqual(g.p.images(), [ref(NEW)] * 2)
+                self.assertGreaterEqual(int(os.stat(g.p.rpath('config.toml')).st_mtime), g.p.unit_now()['start'],
+                                        'the install came after the start of the runscaler that runs')
+                if restart:
+                    g.p.clock(plus=600)
+                    g.p.act('restart')                      # the fake clock: a start after the install's second
+                if after == 'runscaler stopped':
+                    g.p.act('stop')                         # a person's plain stop: systemd shows no process
+                g.p.clock(plus=600)
+                g.p.write(g.p.path('logs', 'systemctl.log'), '')
+                r = g.go()
+                self.assertEqual((len(g.calls('stop')), len(g.calls('start')), len(g.calls('restart'))), (0, 0, 0))
+                if restart:
+                    self.assertEqual(g.held('NO IDLE'), [], r.stdout[-3000:])
+                    self.assertIn('runner-updater: pass: STOP NO IDLE (runner %s) is gone: ' % V, r.stdout)
+                    self.assertIn(NOT + 'release v%s is not newer than its runner %s' % (V, V), r.stdout)
+                    continue
+                self.assertEqual(len(g.held('NO IDLE')), 1, r.stdout[-3000:])
+                self.assertEqual(g.fam()['due'], {'version': V, 'since': t0})
+                self.assertIn('runner-updater: pass: STOP NO IDLE (runner %s) stays: config.toml names runner %s\'s '
+                              'image, but runscaler has not started since its install (%s' % (
+                                  V, V, 'no runscaler process' if after == 'runscaler stopped' else 'runscaler pid '),
+                              r.stdout)
+                self.assertIn(NOT + 'STOP NO IDLE (runner %s)' % V, r.stdout)
+                self.assertEqual(g.ups(), [])
 
 
 @needs_container
@@ -374,7 +454,9 @@ class Text(unittest.TestCase):
                   'never in a pass whose RECOVER started runscaler', '`switched hz-docker to <version>`',
                   '`accepted hz-docker`', '`STOP JOBS FAIL ON THE NEW IMAGE`', '`STOP NO EVIDENCE`',
                   'it first clears a `STOP DISK` once 10% of RUN_USER\'s filesystem is free',
-                  'a `STOP NO IDLE` once the family has a candidate or runs that release (or a newer one)',
+                  'a `STOP NO IDLE` once the family has a candidate, or runscaler runs that release (or a newer one): '
+                  'config.toml names its image and runscaler started after that file was installed (a hand switch ends '
+                  'it too, once its restart is done; an install alone does not)',
                   'After an accept: the candidate is gone and `back` still restores the previous image until 7 days '
                   'after the accept', '`config.toml.prev` stays the rollback\'s config',
                   'the runner release it first found due and when (`due`)',
@@ -388,7 +470,9 @@ class Text(unittest.TestCase):
                   "the registry serves `config.toml.prev`'s image"):
             self.assertIn(s, sw)
         rb = one(section(text, 'The rollback, and what status shows of it'))
-        for s in ('`STOP NO IDLE` names `runner-updater switch-now hz-docker`', 'the next pass drops it',
+        for s in ('`STOP NO IDLE` names `runner-updater switch-now hz-docker`',
+                  'A `STOP NO IDLE` ends when runscaler runs that release', 'the first pass after that restart drops it',
+                  'a config.toml installed without that restart (the step cut while it waits) keeps it',
                   '`systemctl --user enable runscaler`, then `systemctl --user restart runscaler` at idle',
                   '`systemctl --user enable --now runscaler`', 'its validate first'):
             self.assertIn(s, rb)
