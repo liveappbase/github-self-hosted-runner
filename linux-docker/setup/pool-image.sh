@@ -212,7 +212,7 @@
 #   ONCE after the `config-sha` line, config.toml is still `config-sha` naming DIGEST's image and runscaler RUNS since
 #   its install, else `end`); START STATE (the unit active and enabled, config.toml installed before its start: else
 #   not now), then `start-state` (config-sha runs: RECOVER may start it with no validate); DISK (RUN_USER's
-#   filesystem, D1's data and the registry, at least DISK_PCT % free: runscaler's min_free); jq (`jq --version` a core
+#   filesystem, D1's data and the registry, at least DISK_PCT % free: runscaler's min_free, runner-facts.sh's disk_ok); jq (`jq --version` a core
 #   row of ~/build/core/TESTED_JQ); the PINS; then PRE-VALIDATE: `03-runscaler.sh render
 #   DIGEST STAGED` (STAGED = ~/.config/runner/config.staged.toml; 03 refuses a rejected digest), up to 3 tries 20 s
 #   apart, each a VALIDATE TRY: exit 0 (PASS) ends them, exit 4 (API-ONLY) tries again and after the third counts as
@@ -549,7 +549,6 @@ PROCFS=/proc
 # The unattended modes' files (the header): the window journal, the closed ones, the rollback, the decision core
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
 CORECOPY=$STATE/pass/state.json   # THE CORE STATE COPY (the header): the updater's, written before its switch; up's idle pair reads it
-DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
 PINS="$S03=f30c8bc84987e82e4af860cb39e2f1a1aab9143ad8fb1064e769d589847d10c6
 $B/bin/runner-start=3eddd91d4554d652703a4713161822fa3a64e0579bbcafec82bba0c64d90d3c4
@@ -1107,14 +1106,6 @@ targets() {   # FILE: "SET=IMAGE SET=IMAGE": each set's runner-image line, in co
   awk '/^name = "/ { n = $0; sub(/^name = "/, "", n); sub(/"$/, "", n) }
        /^runner-image = "/ { i = $0; sub(/^runner-image = "/, "", i); sub(/"$/, "", i); printf "%s%s=%s", s, n, i; s = " " }' "$1"
 }
-disk_ok() {   # RUN_USER's filesystem (D1's data and the registry's volume) has DISK_PCT % or more free; DISK_WHY when not
-  local l
-  l=$(df -Pk "/home/${RUN_USER}" 2> /dev/null < /dev/null | tail -n 1)
-  [[ $l =~ ^[^\ ]+\ +([0-9]+)\ +[0-9]+\ +([0-9]+)\  ]] || { DISK_WHY="df -Pk /home/${RUN_USER} printed no size: [$l]"; return 1; }
-  (( BASH_REMATCH[2] * 100 >= BASH_REMATCH[1] * DISK_PCT )) && return 0
-  DISK_WHY="the filesystem of /home/${RUN_USER} (D1's images and the registry) has ${BASH_REMATCH[2]} KiB free of ${BASH_REMATCH[1]}, less than ${DISK_PCT}% (runscaler's min_free): free disk first (the registry grows with each release), then the updater switches at its next pass"
-  return 1
-}
 ucopy() {   # FILE: THE CORE STATE COPY (the header), read ONCE: CORECOPY copied to WDIR/idle-copy.json, then into FILE
   # only when it is one JSON object of the core's state format (core.jq's state_known) whose not_ready_since, if it has
   # one, is an object of numbers; else FILE stays empty (the empty state: no set is excused) and COPY_WHY says why
@@ -1271,7 +1262,7 @@ utargetlines() {   # the TARGET's `target` and `target-content` lines, of the va
   ujs target-content "$TCONT"
 }
 un_up() {
-  local cur new n rc cls out f p m
+  local cur new n rc cls out f p m rb rbw
   ujs process "$(proc_now)"
   cur=$(image_of "$CFG") || ustop "check failed" "config.toml does not name ONE runner image for both sets ($SETS): read $CFG"
   ujs old "$cur"
@@ -1288,10 +1279,16 @@ un_up() {
     fi
     uend "config.toml already names $new, but it is not proven to run it ($RUNS_WHY): there is nothing to switch, its rollback ($KEEPP) stays as it is, and this mode restarts nothing"
   fi
-  pulls "$cur"; case $? in
+  # the rollback this window keeps: config.toml's image, or with --keep-prev config.toml.prev's (B3 review r1, Opus F2)
+  rb=$cur rbw="the image the pool runs now"
+  if [ "$KEEPPREV" = 1 ]; then
+    rb=$(image_of "$KEEPP") || ustop "check failed" "--keep-prev: $KEEPP does not name ONE runner image for both sets ($SETS), so it is no rollback this window can keep: read it"
+    rbw="config.toml.prev's image (--keep-prev: the rollback's)"
+  fi
+  pulls "$rb"; case $? in
     0) ;;
-    1) ustop "check failed" "the registry does not serve $cur, the image the pool runs now: its rollback could not start a runner" ;;
-    *) ustop "check failed" "the registry ($REG) does not answer, so it cannot be checked that it still serves $cur, the image the pool runs now (the rollback's)" ;;
+    1) ustop "check failed" "the registry does not serve $rb, $rbw: its rollback could not start a runner" ;;
+    *) ustop "check failed" "the registry ($REG) does not answer, so it cannot be checked that it still serves $rb, $rbw (the rollback's)" ;;
   esac
   { [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && [ "$(exec 8>&- 9>&-; systemctl --user is-enabled runscaler 2> /dev/null)" = enabled ]; } \
     || unot "START STATE: runscaler is not active and enabled"
@@ -1825,17 +1822,19 @@ rc_restart() {   # SHA AFTER WHAT: RECOVER's restart at once: `from`, `stopping`
   [ "$UNIT_FILE" = enabled ] || rc_disabled
   rc_start "$1" "$2" "$3"
 }
-rc_disabled_text() {   # CLASS: the CI DISABLED text of a close with the unit not enabled (PROC: what runs)
-  local imgs
+rc_disabled_text() {   # CLASS: the CI DISABLED text of a close with the unit not enabled (PROC: what runs); its
+  # command is runner-facts.sh's ci_hand of CLASS, the ONE copy the updater's STOP hand line reads too (E-12)
+  local imgs h
   imgs=$(image_of "$CFG") || imgs="config.toml's images"
+  ci_hand "$1"; h=$REPLY
   case $1 in
-    target-idle) REPLY="runscaler is not enabled (a person's \`systemctl --user disable\`) and runs nothing: config.toml is the window's TARGET ($imgs), validated, and runs when a person starts runscaler: systemctl --user enable --now runscaler" ;;
-    target-old) REPLY="runscaler is not enabled, but a runscaler that started before the TARGET's install still runs (pid ${PROC% *}): it runs the image from before the window ($(value_of old)); config.toml, the TARGET ($imgs), runs only at its next start: systemctl --user enable runscaler, then restart it at idle" ;;
-    target-running) REPLY="runscaler is not enabled, but runs the window's TARGET ($imgs, pid ${RUN% *}): a reboot leaves CI down: systemctl --user enable runscaler" ;;
+    target-idle) REPLY="runscaler is not enabled (a person's \`systemctl --user disable\`) and runs nothing: config.toml is the window's TARGET ($imgs), validated, and runs when a person starts runscaler: $h" ;;
+    target-old) REPLY="runscaler is not enabled, but a runscaler that started before the TARGET's install still runs (pid ${PROC% *}): it runs the image from before the window ($(value_of old)); config.toml, the TARGET ($imgs), runs only at its next start (enabling alone starts nothing: it runs already): $h" ;;
+    target-running) REPLY="runscaler is not enabled, but runs the window's TARGET ($imgs, pid ${RUN% *}): a reboot leaves CI down: $h" ;;
     target-failed) if [ "$PROC" != none ]; then REPLY="runscaler is not enabled, but runs (pid ${PROC% *}): config.toml is the rollback's TARGET ($imgs), which did not run or failed its validate; the backup is $BKP. Put it back as config.toml before runscaler starts again"
-                   else REPLY="runscaler is not enabled and runs nothing: CI is down. config.toml is the rollback's TARGET ($imgs), which did not run or failed its validate; the backup is $BKP: put it back as config.toml, then systemctl --user enable --now runscaler"; fi ;;
-    pre|none) REPLY="runscaler is not enabled and runs nothing: this window changed no config: config.toml ($imgs) runs when a person starts runscaler: systemctl --user enable --now runscaler" ;;
-    *) REPLY="runscaler is not enabled, and config.toml is no file of this window's (sha256 ${NOW_SHA:0:12}…): check it, and start runscaler only once RUNNER_START_CONFIG=$CFG ~/bin/runner-start validate passes" ;;
+                   else REPLY="runscaler is not enabled and runs nothing: CI is down. config.toml is the rollback's TARGET ($imgs), which did not run or failed its validate; the backup is $BKP: $h"; fi ;;
+    pre|none) REPLY="runscaler is not enabled and runs nothing: this window changed no config: config.toml ($imgs) runs when a person starts runscaler: $h" ;;
+    *) REPLY="runscaler is not enabled, and config.toml is no file of this window's (sha256 ${NOW_SHA:0:12}…): check it, and start runscaler only once its validate passes: $h" ;;
   esac
 }
 value_of() {   # KEY: the journal's first value of KEY (rc_read's), or empty

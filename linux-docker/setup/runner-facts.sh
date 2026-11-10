@@ -67,6 +67,18 @@
 #                        NO log-file key is read: one 03 rendered before it wrote the line, which runscaler v0.9.5 logs
 #                        to the runner.log beside it, and runner-start runs it on no other runner. It reads no
 #                        pool-size (a Tart rule).
+#   disk_ok              DISK (PLAN D5; S2b-3c-2 E-9, r3 Opus F5: ONE copy, which pool-image.sh's switch and the
+#                        updater's pass both read): RUN_USER's filesystem (/home/RUN_USER: D1's images and the
+#                        registry's volume) has DISK_PCT % or more free (runscaler's min_free, 10), by one `df -Pk`:
+#                        free * 100 >= size * DISK_PCT (exactly 10 % passes). Else rc 1 and DISK_WHY (its free and its
+#                        size, and the hand step: free disk on /home/RUN_USER, the registry grows with each release).
+#                        The caller sets RUN_USER (its host config's)
+#   ci_hand CLASS        CI DISABLED's hand line by the CLASS of the close that holds it (S2b-3c-2 E-12, the r2 FOLD:
+#                        ONE copy, pool-image.sh's RECOVER texts and the updater's STOP detail.hand): REPLY. target-old
+#                        (an older runscaler still runs the file before the TARGET): enable, then a restart at idle
+#                        (`enable --now` starts nothing on an active unit); target-idle, pre and none: `enable --now`;
+#                        target-running: `enable` (it runs already); target-failed: the backup back first; any other
+#                        (a file no window wrote): its validate first
 #   install_time SHA MTIME DIR
 #                        the INSTALL TIME of a config whose sha256 is SHA and whose mtime (whole seconds) is MTIME (PLAN
 #                        D1, clocks), then the why: "EPOCH WHY". R = the `renamed` epoch of the newest closed window
@@ -310,6 +322,26 @@ end()
 print(int(st.st_mtime), hashlib.sha256(data).hexdigest())
 print(json.dumps({"sets": sets, "lines": lines}, separators=(",", ":")))
 ' "$1" "$R/runner.log" 2> /dev/null < /dev/null
+}
+
+DISK_PCT=10   # runscaler's min_free (PLAN D5 DISK): the share of RUN_USER's filesystem a switch leaves free
+disk_ok() {
+  local l
+  l=$(df -Pk "/home/${RUN_USER}" 2> /dev/null < /dev/null | tail -n 1)
+  [[ $l =~ ^[^\ ]+\ +([0-9]+)\ +[0-9]+\ +([0-9]+)\  ]] || { DISK_WHY="df -Pk /home/${RUN_USER} printed no size: [$l]"; return 1; }
+  (( BASH_REMATCH[2] * 100 >= BASH_REMATCH[1] * DISK_PCT )) && return 0
+  DISK_WHY="the filesystem of /home/${RUN_USER} (D1's images and the registry) has ${BASH_REMATCH[2]} KiB free of ${BASH_REMATCH[1]}, less than ${DISK_PCT}% (runscaler's min_free): free disk on /home/${RUN_USER} first (the registry grows with each release), then the updater switches at its next pass"
+  return 1
+}
+
+ci_hand() {
+  case $1 in
+    target-idle|pre|none) REPLY="systemctl --user enable --now runscaler" ;;
+    target-old) REPLY="systemctl --user enable runscaler, then at idle systemctl --user restart runscaler" ;;
+    target-running) REPLY="systemctl --user enable runscaler" ;;
+    target-failed) REPLY="put the rollback's backup (windows/ID.d/config.toml.backup) back as config.toml, then systemctl --user enable --now runscaler" ;;
+    *) REPLY="RUNNER_START_CONFIG=~/.config/runner/config.toml ~/bin/runner-start validate; only when it passes, systemctl --user enable --now runscaler" ;;
+  esac
 }
 
 install_time() {

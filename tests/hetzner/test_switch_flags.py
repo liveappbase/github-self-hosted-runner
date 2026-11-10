@@ -39,6 +39,7 @@ def plant_keep(g):
     text = g.old.replace(ref(OLD), ref(digest(37)))
     assert text != g.old
     g.p.write(g.prev, text, 0o600)
+    g.p.curl['served'] = g.p.curl['served'] + [digest(37)]   # the registry serves the keep (B4a item 13 (b) checks it)
     return text, os.stat(g.prev)
 
 
@@ -220,6 +221,61 @@ class CoreStateExcuse(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
         wid, lines = g.done()
         self.assertEqual(value(lines, 'idle'), 'skipped')
+
+
+
+@needs_container
+class KeepPrevRegistry(unittest.TestCase):
+    """B3 review r1, Opus F2 (B4a item 13 (b)): with --keep-prev the rollback this window keeps is config.toml.prev's
+    config, so `up`'s registry check asks for config.toml.prev's image, and its STOP names that image as the
+    rollback's, before `backup` (nothing staged is backed up, config.toml.prev byte for byte as it was). The controls:
+    the registry serves it: the window goes on; no --keep-prev with that image unserved: the window goes on (its
+    rollback is config.toml's image, which the registry serves)."""
+
+    def test_keep_prev_checks_that_the_registry_serves_config_toml_prev_s_image(self):
+        kept = ref(digest(37))
+        for name, flag, served in (('not served', True, False), ('served', True, True),
+                                   ('no --keep-prev, not served', False, False)):
+            with self.subTest(name):
+                g = Rig(self)
+                text, st = plant_keep(g)
+                if not served:
+                    g.p.curl['served'] = [OLD, NEW]
+                r = g.up('--keep-prev') if flag else g.up()
+                wid, lines = g.done()
+                if flag and not served:
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    stop = value(lines, 'stop')
+                    self.assertTrue(stop.startswith('check failed: '), lines)
+                    self.assertIn(kept, stop)
+                    self.assertIn('config.toml.prev', stop)
+                    self.assertIn("the rollback's", stop)
+                    self.assertNotIn(ref(OLD), stop, "the image config.toml runs is not this window's rollback")
+                    self.assertNotIn('backup', keys(lines))
+                    self.assertEqual(g.p.config(), g.old)
+                    self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(text), st.st_mtime_ns))
+                    continue
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertEqual(g.p.images(), [ref(NEW)] * 2)
+
+
+@needs_container
+class OneDiskCheck(unittest.TestCase):
+    """B4a item 5 (r3 Opus F5): ONE disk_ok, runner-facts.sh's, which pool-image.sh and the updater both source: the
+    switch's own check at its boundary is test_unattended.py's (Checks, test_disk_below_runscaler_s_min_free_stops);
+    the updater's DUE and its level read the same function at exactly 10 % and 10 % less 1 KiB: test_pass_switch.py."""
+
+    def test_one_copy_in_runner_facts_sh(self):
+        b = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'linux-docker')
+        texts = {}
+        for rel in ('setup/runner-facts.sh', 'setup/pool-image.sh', 'bin/runner-updater'):
+            with open(os.path.join(b, rel)) as f:
+                texts[rel] = f.read()
+        self.assertEqual(texts['setup/runner-facts.sh'].count('\ndisk_ok() {'), 1)
+        for rel in ('setup/pool-image.sh', 'bin/runner-updater'):
+            self.assertNotIn('disk_ok() {', texts[rel], rel + ' has a disk_ok of its own')
+            self.assertNotIn('DISK_PCT=', texts[rel], rel + ' has a DISK_PCT of its own')
+        self.assertIn('. "$B/setup/runner-facts.sh"', texts['bin/runner-updater'])
 
 
 if __name__ == '__main__':

@@ -547,6 +547,7 @@ class KeepPrev(unittest.TestCase):
         g.keep = g.old.replace(g.p.images()[0], ref(digest(37)))
         g.p.write(g.prev, g.keep, 0o600)
         g.keep_st = os.stat(g.prev)
+        g.p.curl['served'] = g.p.curl['served'] + [digest(37)]   # the keep's image (up's registry check: B4a 13 (b))
 
     def test_recover_ends_a_cut_keep_prev_switch_and_leaves_config_toml_prev(self):
         g = cut(self, 'up', ('journal:renamed', 'kill'), more=('--keep-prev',), before=self.keep)

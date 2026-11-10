@@ -167,6 +167,7 @@ class KillKeepPrevAndNow(unittest.TestCase):
                     keep['text'] = g.old.replace(g.p.images()[0], ref(digest(37)))
                     g.p.write(g.prev, keep['text'], 0o600)
                     keep['st'] = os.stat(g.prev)
+                    g.p.curl['served'] = g.p.curl['served'] + [digest(37)]   # the keep's image (up's check: B4a 13 (b))
                 g = cut(self, 'up', (at, 'kill'), more=more, before=before)
                 if at.startswith('journal:'):
                     self.assertEqual(keys(g.cut)[-1], at.split(':', 1)[1], 'the cut came right after its line')
