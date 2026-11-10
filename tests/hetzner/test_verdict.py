@@ -1,7 +1,7 @@
 """linux-docker/bin/runner-updater's ROLLBACK CALLER (S2b-3c-1 D-e; the r3 FOLD "THE ROLLBACK'S PRECONDITIONS"; B2b
 item 1): R1's rollback verdict for hz-docker's candidate, in a pass that is ON, starts ONE rollback window as the pass's
 CHILD, `pool-image.sh back --unattended --why r1|r1-connect --verdict PASSDIR/r1.json --old-version V` (no idle wait),
-then the apply step. (Named for its CI part, test_[!a-qr][!np]*.py: .github/workflows/release-check.yml.)
+then the apply step. (Named for its CI part, test_[sv-z]*.py: .github/workflows/release-check.yml.)
 
 - A REAL ONE (r3 Codex F2): an inherited switch journal (a 3b-3 one: no closing lines but `closed`) applied, then the
   real core's R1 verdict: one window, rolled back, the candidate's version rejected; the next pass starts none.

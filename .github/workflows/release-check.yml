@@ -68,14 +68,19 @@ jobs:
     # seven, by the first two letters of the module names; a new module is named for the part it joins. Each part's
     # estimate after B2a (24.04, the slower image: its CI job time at 26bae3f less the modules it lost, plus B2a's
     # measured local time of each new or grown module x 1.35, the CI/local ratio seen): [a-j] 8.0, [k-q] 7.6, rec 7.7,
-    # re[!c] 5.8, [!a-qr][!np] 8.1, un 11.1 and up 8.9 min. A part that nears 12 min gets a pattern more.
+    # re[!c] 5.8, [!a-qr][!np] 8.1, un 11.1 and up 8.9 min. A part that nears 12 min gets a pattern more. At 79d0140
+    # (run 42528284026) [!a-qr][!np] took 24.0 min (26.04) and un 12.9, and one MODULE alone neared 12 min:
+    # test_the_runscaler_step 12.5 (26.04), so S2b-3c-2 B3 moved its class Resume into test_step_resume.py and put its
+    # own switch cells in test_switch_flags.py, and cut ten parts. Each part's estimate (the slower image's module times
+    # in that run, plus B3's new cells' local time x 1.35, plus about 20 s of job): [a-b] 7.2, [c-m] 10.2, [n-q] 5.8,
+    # rec 7.7, re[!c] 9.3, [sv-z] 8.4, t 9.5, u[!p]a 11.3 (test_unattended alone), up 9.8 and u[!p][!a] 9.4 min.
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         image: ["ubuntu:26.04", "ubuntu:24.04"]
-        part: ["test_[a-j]*.py", "test_[k-q]*.py", "test_rec*.py", "test_re[!c]*.py", "test_[!a-qr][!np]*.py", "test_un*.py", "test_up*.py"]
+        part: ["test_[a-b]*.py", "test_[c-m]*.py", "test_[n-q]*.py", "test_rec*.py", "test_re[!c]*.py", "test_[sv-z]*.py", "test_t*.py", "test_u[!p]a*.py", "test_up*.py", "test_u[!p][!a]*.py"]
     steps:
       - name: git, python3, the image's own jq package, and curl and openssl (tests/hetzner)
         run: |

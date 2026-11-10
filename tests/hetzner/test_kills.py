@@ -7,14 +7,19 @@ class, the config.toml and the starts and stops the table below names: never a s
 back under a process that started after the rename, never a validate of the pre-window file. Then RECOVER's own lines:
 a SIGKILL after each line of an idle restart (a switch) and of THE RESTORE (a rollback whose TARGET fails its validate),
 then RECOVER again: the same end as an uncut RECOVER. The window keys are the happy path's (test_unattended.SWITCH_KEYS,
-BACK_KEYS): a key the window no longer writes fails the coverage cell. Each cell: a real window of the real scripts in a
-throwaway container (support.Pool), a fake clock; no time asserted.
+BACK_KEYS): a key the window no longer writes fails the coverage cell. S2b-3c-2 B3's rows (KillKeepPrevAndNow): a
+`--keep-prev` window cut after `keep-prev`, at its `backup` line, after THE BACKUP (into the window's folder) and after
+the rename; a `--now` window cut after `idle skipped`, and a `--now --keep-prev` one after `from`: the next RECOVER ends
+each as the table says, config.toml.prev byte for byte as it was before a keep-prev window, the window-folder backup the
+pre-window file. Each cell: a real window of the real scripts in a throwaway container (support.Pool), a fake clock; no
+time asserted.
 """
+import os
 import unittest
 
-from tests.hetzner.support import needs_container
+from tests.hetzner.support import digest, needs_container, ref, sha256_file
 from tests.hetzner.test_recover import Rec, cut, own
-from tests.hetzner.test_unattended import BACK_KEYS, NONAPI, SWITCH_KEYS, BackRig, Rig, keys, value
+from tests.hetzner.test_unattended import BACK_KEYS, NONAPI, SWITCH_KEYS, BackRig, Rig, keys, sha, value
 
 # THE DOCUMENTED END, key -> (the closing class, config.toml: the window's TARGET (new) or its pre-window file (old),
 # RECOVER's starts, RECOVER's stops)
@@ -136,6 +141,53 @@ class KillRecover(unittest.TestCase):
                 self.assertNotIn('hand-change', own(lines))
                 self.assertLessEqual(len(x.calls('start')), 1)
                 self.assertEqual(value(lines, 'restore'), value(lines, 'backup'))
+
+
+
+# S2b-3c-2 B3's rows: (up's options, the cut, the documented end: the closing class, config.toml (the TARGET: new; the
+# pre-window file: old), RECOVER's starts, RECOVER's stops)
+KEEP_NOW_END = (
+    (('--keep-prev',), 'journal:keep-prev', ('none', 'old', 0, 0)),            # 1: no config-sha yet
+    (('--keep-prev',), 'journal:backup', ('pre', 'old', 0, 0)),                # before THE BACKUP: 4
+    (('--keep-prev',), 'mv-done:config.toml.backup', ('pre', 'old', 0, 0)),    # after it, before the rename: 4
+    (('--keep-prev',), 'journal:renamed', ('target-running', 'new', 1, 1)),    # after the rename: 3c, the idle restart
+    (('--now',), 'journal:idle', ('pre', 'old', 0, 0)),                        # after `idle skipped`: 4
+    (('--now', '--keep-prev'), 'journal:from', ('target-running', 'new', 1, 1)),   # before `stopping`: 3c
+)
+
+
+@needs_container
+class KillKeepPrevAndNow(unittest.TestCase):
+    def test_each_cut_ends_right_and_a_keep_prev_window_never_touches_config_toml_prev(self):
+        for more, at, (cls, cfg, starts, stops) in KEEP_NOW_END:
+            with self.subTest(more=more, at=at):
+                keep = {}
+
+                def before(g):
+                    keep['text'] = g.old.replace(g.p.images()[0], ref(digest(37)))
+                    g.p.write(g.prev, keep['text'], 0o600)
+                    keep['st'] = os.stat(g.prev)
+                g = cut(self, 'up', (at, 'kill'), more=more, before=before)
+                if at.startswith('journal:'):
+                    self.assertEqual(keys(g.cut)[-1], at.split(':', 1)[1], 'the cut came right after its line')
+                if '--now' in more and 'idle' in keys(g.cut):
+                    self.assertEqual(value(g.cut, 'idle'), 'skipped')
+                x = Rec(self, g)
+                x.run(0)
+                lines = x.closed(cls)
+                self.assertEqual(g.p.config() == g.old, cfg == 'old', 'config.toml')
+                self.assertEqual((len(x.calls('start')), len(x.calls('stop'))), (starts, stops), lines)
+                self.assertEqual(x.calls('restart'), [])
+                if '--keep-prev' in more:
+                    self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns),
+                                     (sha(keep['text']), keep['st'].st_mtime_ns), 'config.toml.prev changed')
+                    self.assertEqual(value(lines, 'prev'), sha(keep['text']))
+                    bk = os.path.join(g.p.STATE, 'windows', value(lines, 'window') + '.d', 'config.toml.backup')
+                    if 'backup' in keys(g.cut) and at != 'journal:backup':
+                        self.assertEqual(g.p.read(bk), g.old, 'the window-folder backup is the pre-window file')
+                    else:
+                        self.assertFalse(os.path.lexists(bk))
+                self.assertEqual(g.validates(), [], 'RECOVER validated a switch\'s validated file')
 
 
 if __name__ == '__main__':

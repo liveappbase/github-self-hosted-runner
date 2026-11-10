@@ -1,7 +1,7 @@
 """The unattended modes' carry-overs of S2b-3c-1 B1 into B2a (build review r4: codex F4, F2; opus F1, F2, F3): the words
 a window or RECOVER leaves in an OPEN journal are true when written and name only steps that work while it is open,
 and no process the window waits for holds its locks. Each class names its finding and has the control that must come
-out the other way. (Named for its CI part, test_[!a-qr][!np]*.py: .github/workflows/release-check.yml.)
+out the other way. (Named for its CI part, test_u[!p][!a]*.py: .github/workflows/release-check.yml.)
 
 - A READ HOLDS NO LOCK (codex r4 F4): a shell of the window or of RECOVER that waits for a read of runscaler's unit
   (udown_word's subshell, a `$(proc_now)`) holds neither fd 8 (pool-image.sh's own lock) nor fd 9 (the updater lock):

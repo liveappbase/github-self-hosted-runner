@@ -128,8 +128,9 @@ class Rig:
         if clock:
             p.fake_clock()
 
-    def up(self, **kw):
-        return self.p.unattended('up', '--unattended', V, NEW, **kw)
+    def up(self, *more, **kw):
+        """`up --unattended V NEW`, then MORE (its options: --now, --keep-prev)."""
+        return self.p.unattended('up', '--unattended', V, NEW, *more, **kw)
 
     def back(self, *more, why='back', **kw):
         return self.p.unattended('back', '--unattended', '--why', why, *more, **kw)
@@ -616,14 +617,25 @@ class Switch(unittest.TestCase):
                      ('back', '--unattended', '--why', 'r1', '--verdict'),
                      ('back', '--unattended', '--why', 'r1', '--verdict', verdict, '--verdict', verdict),
                      ('back', '--unattended', '--why', 'r1', 'x'),
-                     ('recover', '--unattended', 'x'), ('recover',), ('recover', '--attended')):
+                     ('recover', '--unattended', 'x'), ('recover',), ('recover', '--attended'),
+                     # S2b-3c-2 B3: up's two options after DIGEST, each once, in either order; recover's --now
+                     ('up', '--unattended', V, NEW, '--now', '--now'),
+                     ('up', '--unattended', V, NEW, '--keep-prev', '--keep-prev'),
+                     ('up', '--unattended', V, NEW, '--now', '--keep-prev', '--now'),
+                     ('up', '--unattended', V, NEW, '--now', 'x'), ('up', '--unattended', V, NEW, '--later'),
+                     ('up', '--unattended', '--now', V, NEW), ('up', '--unattended', V, '--now', NEW),
+                     ('up', V, '--now'), ('back', '--unattended', '--why', 'back', '--now'),
+                     ('back', '--unattended', '--why', 'back', '--keep-prev'),
+                     ('recover', '--unattended', '--now', '--now'), ('recover', '--now', '--unattended'),
+                     ('recover', '--unattended', '--keep-prev'), ('recover', '--now')):
             with self.subTest(args=args):
                 r = g.p.unattended(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertIn('usage', r.stdout)
                 self.assertIn('--unattended', r.stdout)
                 self.assertIn('--why r1|r1-connect|back', r.stdout)
-                self.assertIn('recover --unattended', r.stdout)
+                self.assertIn('recover --unattended [--now]', r.stdout)
+                self.assertIn('up --unattended RUNNER_VERSION DIGEST [--now] [--keep-prev]', r.stdout)
                 g.unchanged(r, 2)
                 self.assertFalse(os.path.lexists(os.path.join(g.p.STATE, 'window')))
 
@@ -1557,12 +1569,18 @@ class Text(unittest.TestCase):
             return f.read().split('\nset -uo pipefail\n', 1)[0]
 
     def test_the_header_names_the_modes_their_journal_and_exit_codes(self):
+        """S2b-3c-2 B3 too: up's --now and --keep-prev, recover's --now, the journal's `keep-prev` and `idle
+        idle|skipped`, the core state copy's path, and that RECOVER excuses no set (3c-1's "the updater keeps the 24 h"
+        is gone: the switch's own pair reads the copy)."""
         h = self.header()
-        for s in ('up --unattended VERSION DIGEST', 'back --unattended --why', 'recover --unattended',
-                  '~/.local/state/runner-updater/window', 'An unfinished window the updater cannot end'):
+        for s in ('up --unattended VERSION DIGEST [--now] [--keep-prev]', 'back --unattended --why',
+                  'recover --unattended [--now]', '~/.local/state/runner-updater/window',
+                  'An unfinished window the updater cannot end', '~/.local/state/runner-updater/pass/state.json',
+                  'RECOVER excuses no set', 'idle idle|skipped', 'keep-prev P', 'windows/ID.d/config.toml.backup'):
             self.assertIn(s, h)
+        self.assertNotIn('the updater keeps the 24 h', h)
         for k in sorted(set(SWITCH_KEYS + BACK_KEYS + ['hand-change', 'stop', 'end', 'pre-close-failure',
-                                                       'recover-start', 'recover-target', 'restore'])):
+                                                       'recover-start', 'recover-target', 'restore', 'keep-prev'])):
             self.assertRegex(h, r'#\s+\[?%s[ \]]' % re.escape(k), 'the header names no journal line %s' % k)
         for code in ('0', '1', '2', '3', '4', '5', '6'):
             self.assertRegex(h, r'#\s+%s\s' % code, 'the header names no exit code %s' % code)

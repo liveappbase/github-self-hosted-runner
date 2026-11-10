@@ -3,7 +3,7 @@ the updater lock (it waits), RECOVER first (B2a's rule for every lock-taking com
 (the Studio's do_back), with a candidate (before ACCEPT) or before back_until (after ACCEPT), `pool-image.sh back
 --unattended --why back [--old-version V]` as its CHILD, then the apply step; else REFUSE "nothing to go back to".
 The unit not enabled: REFUSE with the line "rollback pending: CI disabled by a person". Exit 0 rolled back, 5 pending
-(the window's `end`: no STOP), 1 a STOP or a REFUSE, 2 usage. (Named for its CI part, test_[a-j]*.py:
+(the window's `end`: no STOP), 1 a STOP or a REFUSE, 2 usage. (Named for its CI part, test_[a-b]*.py:
 .github/workflows/release-check.yml.)
 
 - It rejects the version it leaves only when that is newer than the restored image's (the apply step's `why back`), and

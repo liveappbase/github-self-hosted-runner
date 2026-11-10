@@ -157,11 +157,30 @@
 # pinned file that changed without its PIN.
 #
 # THE UNATTENDED MODES: the runner-image updater's switch and rollback (plan D1, D5, D6; S2b-3c-1). Run from ~/build:
-#   bash ~/build/setup/pool-image.sh up --unattended VERSION DIGEST   (DIGEST: sha256:<64 hex>, of the build record of
-#                                                                     VERSION, which the updater read)
+#   bash ~/build/setup/pool-image.sh up --unattended VERSION DIGEST [--now] [--keep-prev]
+#                                     (DIGEST: sha256:<64 hex>, of the build record of VERSION, which the updater read;
+#                                     the options after it, in either order, each once)
 #   bash ~/build/setup/pool-image.sh back --unattended --why r1|r1-connect|back [--verdict FILE] [--old-version V]
 #                                                                     (no --why: usage; each option once)
-#   bash ~/build/setup/pool-image.sh recover --unattended               (RECOVER, below: ends a window a cut left open)
+#   bash ~/build/setup/pool-image.sh recover --unattended [--now]       (RECOVER, below: ends a window a cut left open)
+# THE TWO OPTIONS (S2b-3c-2 B3; the slice plan's E-3, E-7 and its r2 FOLD): the updater decides each (it owns the
+#   state); this script obeys and reads no state for them. --now (a person's `runner-updater switch-now hz-docker`):
+#   up's IDLE PAIR is not read (`idle skipped` where `idle idle` is), and the restart follows as without it (its drain
+#   lets running jobs finish); RECOVER's --now skips THE IDLE RESTART's pair alone (`idle skipped`, then the restart):
+#   every other reason RECOVER keeps a journal open, or closes it, is the same with it. A window's own `idle skipped`
+#   does not carry into a later RECOVER: a cut --now switch waits for idle as any other. --keep-prev (a window of an
+#   OPEN candidate, whose `back` config config.toml.prev must stay: PLAN D5's one exception): `keep-prev P` (P:
+#   config.toml.prev) right after `digest`, before any effect; THE BACKUP goes into windows/ID.d/config.toml.backup,
+#   never config.toml.prev, which stays byte for byte; RECOVER reads that backup as a switch's only with that line.
+# THE CORE STATE COPY (S2b-3c-2 E-14, its r3 FOLD): ~/.local/state/runner-updater/pass/state.json, the updater's copy of
+#   its core state (its pass's state.json, written before the core runs and left by it with that pass's
+#   not_ready_since; the updater writes it before each switch it runs). up's idle pair reads it ONCE (a copy into
+#   windows/ID.d) and gives it to core/idle.jq only when it is one JSON object of the core's state format whose
+#   not_ready_since, if any, is an object of numbers: a set read not ready since 24 h or more before the pair's own
+#   clock read is excused from READINESS only (its counts still count: PLAN D5 IDLE). Absent, not a readable plain
+#   file, or not a core state: the empty state, no set is excused, and the line (NOT NOW's too) says so. RECOVER
+#   excuses no set: its idle pair reads no copy (while a journal is open no pass grows an age; a set that stays not
+#   ready makes a cut switch wait for NO IDLE, then a person decides).
 # THE UPDATER'S CHILD (S2b-3c-1 D-a; PLAN D7 "the unattended modes are the updater's only"): each runs only as the
 # child of the updater lock's holder, runner-updater, which hands it the lock on fd 9: runner-release.sh's rr_held
 # (fd 9 is the lock; a FRESH open of it cannot take it; fd 9 can), else REFUSE, exit 1, nothing journaled. It never
@@ -199,11 +218,12 @@
 #   apart, each a VALIDATE TRY: exit 0 (PASS) ends them, exit 4 (API-ONLY) tries again and after the third counts as
 #   PASS, anything else (a cut try: UNKNOWN) is STOP check failed, nothing installed; then D3: STAGED names DIGEST and
 #   differs from config.toml in its runner-image lines alone (THE CONFIG COMPARE). (2) THE IDLE PAIR: two /healthz
-#   reads 3 s apart, decided by ~/build/core/idle.jq over every set config.toml names and every set the reads list (no
-#   state: no set is excused, the updater keeps the 24 h); a core that fails or answers no idle/not-idle: `end`. Not
-#   idle: STAGED removed, config.toml unchanged, the journal removed, exit 3. (3) At once: THE BACKUP to
-#   config.toml.prev (the rollback; STAGED must still be the one 03 printed first, else STOP check failed and
-#   config.toml.prev stays as it was), then THE RENAME and THE RESTART, below, unconditionally (no idle check again).
+#   reads 3 s apart, decided by ~/build/core/idle.jq over every set config.toml names and every set the reads list (its
+#   state: THE CORE STATE COPY, above); a core that fails or answers no idle/not-idle: `end`. Not idle: STAGED removed,
+#   config.toml unchanged, the journal removed, exit 3. With --now: no pair, `idle skipped`. (3) At once: THE BACKUP to
+#   config.toml.prev (the rollback; with --keep-prev to windows/ID.d/config.toml.backup; STAGED must still be the one 03
+#   printed first, else STOP check failed and config.toml.prev stays as it was), then THE RENAME and THE RESTART,
+#   below, unconditionally (no idle check again).
 # back --unattended: the rollback to config.toml.prev, the backup of the switch it undoes. First, before any effect
 #   (D-e): `why`, `verdict` (--verdict FILE copied to windows/ID.d/verdict.json, journaled by its sha256; none),
 #   `old-version` (--old-version, else none: the version this rollback leaves, the updater's to name) and
@@ -246,7 +266,8 @@
 #   after it, the journal closes only when config.toml is provably the window's own pre-window file (just checked),
 #   and else stays OPEN with `hand-change` (A HAND CHANGE: nothing restarts on that file) for the updater's RECOVER.
 # THE BACKUP: `backup P`, config.toml copied to P.tmp (0600), the copy's sha checked against `config-sha` (else STOP
-#   HAND CHANGE, P as it was), renamed to P. From then on a switch's texts say that config.toml.prev holds it.
+#   HAND CHANGE, P as it was), renamed to P. From then on a switch's texts say that config.toml.prev holds it (with
+#   --keep-prev: that the window's folder holds it, and config.toml.prev is as it was).
 # THE RENAME: `rename-start`; the INSTALL TIME: STAGED's mtime set by the clock now (`touch -c -m`), so config.toml's
 #   mtime second, which started_after reads, is rename-start's or later and renamed's or earlier (never the render or
 #   copy time: plan D1); config.toml still `config-sha` (else A HAND CHANGE: nothing renamed) and STAGED still
@@ -284,13 +305,16 @@
 #   journal names no `03-runscaler.sh` step (03 refuses while a window journal is there), only hand steps and
 #   runner-start validate. A step that FAILED (a journal write, a copy, a touch, a rename, a systemctl call) writes no
 #   such line (ufail; RECOVER's: the line printed): the next pass tries that step again.
-# RECOVER, `recover --unattended` (S2b-3c-1 D-c, D-d and its r3 FOLD; PLAN D1, D5 RECOVER): it ends a window journal a
+# RECOVER, `recover --unattended [--now]` (S2b-3c-1 D-c, D-d and its r3 FOLD; PLAN D1, D5 RECOVER; --now: THE TWO
+#   OPTIONS, above): it ends a window journal a
 #   cut left OPEN (the window's own process is gone: the updater's lock, which a window holds for its whole run, is the
 #   updater's, who runs RECOVER as its child), and leaves it CLOSED at WINDOW with THE CLOSING LINES for the updater's
 #   apply step. It reads the journal ONCE, only by the grammar below: an unterminated last line is D1's lost line,
 #   dropped (kept aside as windows/ID.d/journal.cut and cut from the journal before RECOVER's first own line); any other
 #   line no pattern reads, or a `backup` with no kind, config-sha, staged, staged-sha or target before it, is a STOP
-#   that names linux-docker/README.md "An unfinished window the updater cannot end": nothing written, exit 6. Its first
+#   that names linux-docker/README.md "An unfinished window the updater cannot end": nothing written, exit 6 (a
+#   switch's backup is config.toml.prev, or windows/ID.d/config.toml.backup with its `keep-prev` line, and only then; a
+#   `keep-prev` in a rollback journal is no line it reads either). Its first
 #   own line is `recover-start E` (once per journal). It decides by THE INSTALLED FILE (config.toml read once: its
 #   CONTENT against the TARGET's, `target-content`, or a journal with none its sha against `staged-sha`; its sha against
 #   `config-sha` and the last `recover-target`) and by THE UNIT (runner-facts.sh's unit_read, one `systemctl --user
@@ -365,11 +389,13 @@
 #      of the close's own read (a file a person put in place meanwhile: other, STOP HAND CHANGE).
 #   THE IDLE RESTART (a switch, operator (2)): each pass the validate first (when the sha needs it: a SWITCH'S FAILED
 #      VALIDATE is the ONE RULE: `hand-change`, STOP HAND CHANGE, no start, the journal open), then ONE idle pair (the
-#      window's uidle: an untested jq, or a core that cannot decide, reads as not idle and the line says so), then at
-#      once `from`, `stopping`, config.toml still that sha, the stop, `stopped`, the unit still enabled, THE START. Not
-#      idle: the journal open, "the switch waits for idle". 3 days after `recover-start`: STOP NO IDLE with the hand
-#      line (`systemctl --user restart runscaler` at a quiet moment: the next pass sees it run and closes), journaled
-#      once, printed at each pass; never an automatic restart.
+#      window's uidle, with the empty state: RECOVER excuses no set; an untested jq, or a core that cannot decide, reads
+#      as not idle and the line says so), then at once `from`, `stopping`, config.toml still that sha, the stop,
+#      `stopped`, the unit still enabled, THE START. With --now (a person's switch-now): no jq, no pair, `idle skipped`,
+#      then at once the same. Not idle: the journal open, "the switch waits for idle". 3 days after `recover-start`:
+#      STOP NO IDLE with the hand line (`systemctl --user restart runscaler` at a quiet moment, or `runner-updater
+#      switch-now hz-docker` now: the next pass sees it run and closes), journaled once, printed at each pass; never an
+#      automatic restart.
 #   THE RESTORE (a decided rollback): a copy of its `backup` (windows/ID.d/config.toml.backup) checked against
 #      `config-sha` FIRST (else STOP ROLLBACK FAILED, nothing stopped, closed); config.toml checked BEFORE the stop too:
 #      the TARGET (`staged-sha`), or the backup already (a replay); another file: the ONE RULE (step 5), nothing
@@ -388,6 +414,8 @@
 #   kind switch|rollback        ^kind (switch|rollback)$
 #   version V                   (switch)
 #   digest sha256:H             (switch)
+#   keep-prev P                 (switch, --keep-prev) P = config.toml.prev, the file this window keeps byte for byte:
+#                               right after `digest`, before any effect
 #   why r1|r1-connect|back      (rollback) why the updater rolls back: R1's verdict, R1's connect-only one, a person's
 #   verdict H|none              (rollback) the sha256 of windows/ID.d/verdict.json, the --verdict FILE's copy
 #   old-version V|none          (rollback) the version this rollback leaves (--old-version)
@@ -402,10 +430,11 @@
 #   staged-sha H                the validated STAGED: the TARGET
 #   target SET=I SET=I          the TARGET's lines, in config order
 #   target-content H            the TARGET's CONTENT sha (whole-line comments and blank lines left out)
-#   idle idle                   (switch) the idle pair said idle
+#   idle idle|skipped           (switch) the idle pair said idle, or --now skipped it (RECOVER's --now: `idle skipped`
+#                               in its own lines, right before its `from`)
 #   backup P                    before THE BACKUP: P holds config.toml as it was at the window's start (`config-sha`)
-#                               once `rename-start` follows: config.toml.prev (switch), windows/ID.d/config.toml.backup
-#                               (rollback)
+#                               once `rename-start` follows: config.toml.prev (switch; with `keep-prev`
+#                               windows/ID.d/config.toml.backup), windows/ID.d/config.toml.backup (rollback)
 #   rename-start E              before the install time and the rename
 #   renamed E                   after it: the install time
 #   [hand-change H|unreadable]  config.toml after `rename-start`, not the file the window expects: the journal stays open
@@ -442,16 +471,17 @@
 #      ended before its rename: its `stop` or `end` the last line): the updater's RECOVER ends it; or a
 #      REFUSE before any journal (not RS_USER, not the updater's child, this script's lock, a journal at WINDOW)
 #   2  usage
-#   3  not now (up): START STATE not met, or not idle; nothing staged, nothing changed, no journal kept
-# Exit codes of RECOVER (`recover --unattended`, the updater's interface):
+#   3  not now (up): START STATE not met, or not idle (never with --now); nothing staged, nothing changed, no journal
+#      kept
+# Exit codes of RECOVER (`recover --unattended [--now]`, the updater's interface):
 #   0  the journal at WINDOW is closed (by this run, or before it): the updater's apply step applies it
 #   1  a REFUSE before the journal was read (not RS_USER, not the updater's child)
 #   2  usage
 #   3  no window journal: nothing to recover
 #   4  WAIT: another pool-image.sh run (a person's) holds this script's own lock: nothing read or changed
 #   5  the journal stays OPEN: the line printed says why (a STOP: HAND CHANGE, NO IDLE, POOL DOWN of a file that does
-#      not validate or cannot be read; a wait for idle; a start not run yet; a drain, a step that failed); the
-#      updater's next pass runs RECOVER again
+#      not validate or cannot be read; a wait for idle (never with --now); a start not run yet; a drain, a step that
+#      failed); the updater's next pass runs RECOVER again
 #   6  a record RECOVER cannot read or act on: STOP, nothing written (README "An unfinished window the updater cannot
 #      end")
 set -uo pipefail
@@ -473,15 +503,24 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
 host_conf pool-image.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME MAIN_SET SMALL_SET
-MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED=
+MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED= SKIPIDLE=0 KEEPPREV=0
 usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept | runscaler [VERSION] | runscaler-check   (a person's)"
-  echo "       pool-image.sh up --unattended RUNNER_VERSION DIGEST"
+  echo "       pool-image.sh up --unattended RUNNER_VERSION DIGEST [--now] [--keep-prev]"
   echo "                   | back --unattended --why r1|r1-connect|back [--verdict FILE] [--old-version VERSION]"
-  echo "                   | recover --unattended"
-  echo "         (the updater's only, as its child holding the updater lock on fd 9; DIGEST: sha256:<64 hex>)"; exit 2; }
+  echo "                   | recover --unattended [--now]"
+  echo "         (the updater's only, as its child holding the updater lock on fd 9; DIGEST: sha256:<64 hex>; --now: no"
+  echo "          idle pair, a person's switch-now; --keep-prev: the backup into the window's folder, config.toml.prev kept)"; exit 2; }
 case $MODE:$# in
   up:2) VERSION=$2 ;;
-  up:4) [ "$2" = --unattended ] || usage; UN=1 VERSION=$3 DIGEST=$4; [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage ;;
+  up:4|up:5|up:6) [ "$2" = --unattended ] || usage; UN=1 VERSION=$3 DIGEST=$4; [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || usage
+    shift 4
+    for o in "$@"; do   # each option once, in either order
+      case $o:$SKIPIDLE:$KEEPPREV in
+        --now:0:?) SKIPIDLE=1 ;;
+        --keep-prev:?:0) KEEPPREV=1 ;;
+        *) usage ;;
+      esac
+    done ;;
   back:1|accept:1|runscaler:1) ;;
   runscaler-check:1) ;;
   runscaler:2) RSV=$2; [[ $RSV =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage ;;
@@ -498,6 +537,7 @@ case $MODE:$# in
     done
     [ -n "$WHY" ] || usage ;;
   recover:2) [ "$2" = --unattended ] || usage; UN=1 ;;
+  recover:3) [ "$2" = --unattended ] && [ "$3" = --now ] || usage; UN=1 SKIPIDLE=1 ;;
   *) usage ;;
 esac
 [ "$MODE" != up ] || [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
@@ -508,6 +548,7 @@ S03=$B/setup/03-runscaler.sh
 PROCFS=/proc
 # The unattended modes' files (the header): the window journal, the closed ones, the rollback, the decision core
 STATE=$HOME/.local/state/runner-updater; J=$STATE/window; WINDOWS=$STATE/windows; KEEPP=$R/config.toml.prev; CORE=$B/core
+CORECOPY=$STATE/pass/state.json   # THE CORE STATE COPY (the header): the updater's, written before its switch; up's idle pair reads it
 DISK_PCT=10   # runscaler's min_free (plan D5 DISK): the share of D1's filesystem a switch leaves free
 # What 03 runs, and what it installs from ~/build before it validates, by sha256 (the header says why).
 PINS="$S03=f30c8bc84987e82e4af860cb39e2f1a1aab9143ad8fb1064e769d589847d10c6
@@ -1025,6 +1066,8 @@ unothing() {   # what a window that closed before its rename changed: nothing, o
     echo "runscaler's unit is enabled (CI on) and runscaler is down: the window journal $J stays OPEN, and the updater's RECOVER starts runscaler on the config from before this window (validated first). config.toml is as it was"
   elif [ "$UOPEN" = 1 ]; then
     echo "runscaler was down when this rollback began, and its unit no longer reads down: the window journal $J stays OPEN, and the updater's RECOVER ends it. config.toml is as it was"
+  elif [ "$BACKED" = 1 ] && [ "$KIND" = switch ] && [ "$KEEPPREV" = 1 ]; then
+    echo "config.toml is as it was and nothing restarted; this window's backup of it is $BDEST (--keep-prev), and $KEEPP is as it was (the journal: $J, closed: the updater's next pass applies it)"
   elif [ "$BACKED" = 1 ] && [ "$KIND" = switch ]; then
     echo "config.toml is as it was and nothing restarted, but $KEEPP now holds this window's backup of it (the keep of an earlier switch is replaced) (the journal: $J, closed: the updater's next pass applies it)"
   else echo "Nothing changed: config.toml as it was, nothing restarted (the journal: $J, closed: the updater's next pass applies it)"; fi
@@ -1072,9 +1115,32 @@ disk_ok() {   # RUN_USER's filesystem (D1's data and the registry's volume) has 
   DISK_WHY="the filesystem of /home/${RUN_USER} (D1's images and the registry) has ${BASH_REMATCH[2]} KiB free of ${BASH_REMATCH[1]}, less than ${DISK_PCT}% (runscaler's min_free): free disk first (the registry grows with each release), then the updater switches at its next pass"
   return 1
 }
-uidle() {   # THE IDLE PAIR (the header): 0 idle; 1 not idle; 2 the core could not decide. IDLE_WHY = the core's reason
+ucopy() {   # FILE: THE CORE STATE COPY (the header), read ONCE: CORECOPY copied to WDIR/idle-copy.json, then into FILE
+  # only when it is one JSON object of the core's state format (core.jq's state_known) whose not_ready_since, if it has
+  # one, is an object of numbers; else FILE stays empty (the empty state: no set is excused) and COPY_WHY says why
+  local c=$WDIR/idle-copy.json
+  COPY_WHY=
+  if [ ! -e "$CORECOPY" ] && [ ! -L "$CORECOPY" ]; then COPY_WHY="is absent"
+  elif [ ! -f "$CORECOPY" ] || [ -L "$CORECOPY" ] || ! cp -- "$CORECOPY" "$c" 2> /dev/null < /dev/null; then
+    COPY_WHY="is not a readable plain file"
+  elif ! jq -n -e -L "$CORE/lib" --slurpfile s "$c" 'import "core" as C;
+      ($s | length) == 1 and ($s[0] | type) == "object" and ($s[0] | C::state_known)
+      and (($s[0].not_ready_since // {}) | type == "object" and all(.[]; type == "number"))' > /dev/null 2>&1 < /dev/null; then
+    COPY_WHY="is not a core state (one JSON object of the core's state format, its not_ready_since of numbers)"
+  elif ! cp -- "$c" "$1" 2> /dev/null < /dev/null; then COPY_WHY="could not be copied to $1"
+  fi
+  [ -z "$COPY_WHY" ] && return 0
+  : > "$1"
+  COPY_WHY="the core state copy $CORECOPY $COPY_WHY: no set is excused from readiness"
+  usay "$COPY_WHY"
+}
+uidle() {   # [copy]: THE IDLE PAIR (the header): 0 idle; 1 not idle; 2 the core could not decide. IDLE_WHY = the core's
+  # reason. `copy` (up's switch only): idle.jq's state is THE CORE STATE COPY (ucopy), so a set not ready for 24 h is
+  # excused from readiness only; else (RECOVER: it excuses no set) the empty state
   local h=$WDIR/idle-healthz.json f=$WDIR/idle-facts.json s=$WDIR/idle-state.json o=$WDIR/idle.json
   : > "$h" && : > "$s" || { IDLE_WHY="cannot write $WDIR"; return 2; }
+  COPY_WHY=
+  [ "${1-}" != copy ] || ucopy "$s"
   # shellcheck disable=SC2046
   jq -n -c '{format: 1, sets: $ARGS.positional}' --args $(sets_of "$CFG") > "$f" 2> /dev/null < /dev/null \
     || { IDLE_WHY="cannot write $f"; return 2; }
@@ -1082,6 +1148,8 @@ uidle() {   # THE IDLE PAIR (the header): 0 idle; 1 not idle; 2 the core could n
   jq -n -L "$CORE/lib" -f "$CORE/idle.jq" --slurpfile state "$s" --slurpfile facts "$f" --slurpfile healthz "$h" \
     --arg now "$(date +%s)" > "$o" 2> "$o.err" < /dev/null || { IDLE_WHY=$(head -n 1 "$o.err"); return 2; }
   IDLE_WHY=$(jq -r '.reason' "$o" 2> /dev/null) || { IDLE_WHY="no reason in $o"; return 2; }
+  jq -r '.lines[]? | select(test("excused from readiness only"))' "$o" 2> /dev/null | while IFS= read -r l; do usay "$l"; done
+  [ -z "$COPY_WHY" ] || IDLE_WHY="$IDLE_WHY ($COPY_WHY)"
   case $(jq -r '.verdict' "$o" 2> /dev/null) in idle) return 0 ;; not-idle) return 1 ;; *) return 2 ;; esac
 }
 ubackup() {   # DEST: THE BACKUP (the header), after its `backup DEST` line: config.toml copied to DEST.tmp (0600), the
@@ -1185,9 +1253,15 @@ unattended() {   # the window: its journal, then up or back (each ends with exit
   # STAGED, and the STOP of a failure that is no hand change: up's `check failed`, back's `ROLLBACK FAILED`
   if [ "$MODE" = up ]; then STAGED=$R/config.staged.toml UFAIL="check failed" KIND=switch
   else STAGED=$R/config.rollback.toml UFAIL="ROLLBACK FAILED" KIND=rollback; fi
+  # THE BACKUP's destination: a switch's config.toml.prev, or with --keep-prev the window's own folder (the header)
+  BDEST=$KEEPP; [ "$KEEPPREV" = 0 ] || BDEST=$WDIR/config.toml.backup
   CSHA= TSHA= TCONT= TSETS=
   ujs window "$WID"
-  if [ "$MODE" = up ]; then ujs kind switch; ujs version "$VERSION"; ujs digest "$DIGEST"; un_up; else ujs kind rollback; un_back; fi
+  if [ "$MODE" = up ]; then
+    ujs kind switch; ujs version "$VERSION"; ujs digest "$DIGEST"
+    [ "$KEEPPREV" = 0 ] || ujs keep-prev "$KEEPP"   # --keep-prev, before any effect: THE BACKUP goes to BDEST
+    un_up
+  else ujs kind rollback; un_back; fi
 }
 utargetlines() {   # the TARGET's `target` and `target-content` lines, of the validated STAGED (TSHA): TSETS, TCONT
   ujs target "$(targets "$STAGED")"
@@ -1250,17 +1324,21 @@ un_up() {
   { [ "$(image_of "$STAGED")" = "$new" ] && rr_same_but_image "$CFG" "$STAGED"; } \
     || ustop "check failed" "03's render differs from config.toml in more than the runner-image lines (pool.env's numbers are not the ones config.toml runs?): an unattended switch changes the runner version only. Compare $POOL with $CFG"
   utargetlines
-  uidle; case $? in
-    0) ;;
-    1) unot "not idle: $IDLE_WHY" ;;
-    *) uend "the decision core could not decide IDLE: $IDLE_WHY" ;;
-  esac
-  ujs idle idle
+  if [ "$SKIPIDLE" = 1 ]; then   # --now (a person's switch-now): no idle pair; the restart's drain lets jobs finish
+    ujs idle skipped
+  else
+    uidle copy; case $? in
+      0) ;;
+      1) unot "not idle: $IDLE_WHY" ;;
+      *) uend "the decision core could not decide IDLE: $IDLE_WHY" ;;
+    esac
+    ujs idle idle
+  fi
   # at once (the header, step 3): THE BACKUP, THE RENAME, THE RESTART
-  ujs backup "$KEEPP"
+  ujs backup "$BDEST"
   # STAGED first: a window that cannot rename leaves config.toml.prev (the rollback it keeps) as it was
   sha_of "$STAGED"; [ "$REPLY" = "$TSHA" ] || ustop "check failed" "$STAGED is not the file 03 validated (sha256 ${REPLY:0:12}…, 03 printed ${TSHA:0:12}…): nothing was renamed, and $KEEPP is as it was"
-  ubackup "$KEEPP"
+  ubackup "$BDEST"
   urename
   urestart
   DONE_SHA=$TSHA DONE_CONTENT=$TCONT DONE_CLASS=target-running
@@ -1368,7 +1446,7 @@ rc_pats() {   # the reader's patterns, ONE copy (rc_read reads by them; rc_targe
 }
 rc_read() {   # the journal ONCE, by the header's patterns -> RCK (keys), RCV (values), RC_KEEP (the bytes of its whole
   # lines: an unterminated last line is D1's lost line, dropped); a line no pattern reads: rc_cannot
-  local text l k v n=0 H=$RC_H E='[0-9]{1,12}' V='[0-9]+\.[0-9]+\.[0-9]+' I=$RC_I TL=$RC_TL wid=
+  local text l k v n=0 H=$RC_H E='[0-9]{1,12}' V='[0-9]+\.[0-9]+\.[0-9]+' I=$RC_I TL=$RC_TL wid= rk=
   { [ -f "$J" ] && [ ! -L "$J" ] && [ -r "$J" ]; } || rc_cannot "it is not a readable plain file"
   text=$(cat -- "$J" && echo .) || rc_cannot "it cannot be read"
   text=${text%.}
@@ -1384,7 +1462,7 @@ rc_read() {   # the journal ONCE, by the header's patterns -> RCK (keys), RCV (v
     k=${BASH_REMATCH[1]} v=${BASH_REMATCH[2]}
     case $k in
       window) [[ $v =~ ^[0-9]{14}-[0-9]+$ ]] && [ "$n" = 1 ] && wid=$v ;;
-      kind) [[ $v =~ ^(switch|rollback)$ ]] ;;
+      kind) [[ $v =~ ^(switch|rollback)$ ]] && rk=$v ;;
       version) [[ $v =~ ^$V$ ]] ;;
       digest) [[ $v =~ ^sha256:$H$ ]] ;;
       why) [[ $v =~ ^(r1|r1-connect|back)$ ]] ;;
@@ -1396,7 +1474,8 @@ rc_read() {   # the journal ONCE, by the header's patterns -> RCK (keys), RCV (v
       staged) [ "$v" = "$R/config.staged.toml" ] || [ "$v" = "$R/config.rollback.toml" ] ;;
       validate) [[ $v =~ ^(pre|recover|hand)\ [1-3]\ (PASS|API-ONLY|NON-API|UNKNOWN)$ ]] ;;
       target) [[ $v =~ ^$TL$ ]] ;;
-      idle) [ "$v" = idle ] ;;
+      idle) [[ $v =~ ^(idle|skipped)$ ]] ;;
+      keep-prev) [ "$v" = "$KEEPP" ] && [ "$rk" = switch ] ;;   # a switch's only, after its `kind`
       backup) [ "$v" = "$KEEPP" ] || [ "$v" = "$WINDOWS/$wid.d/config.toml.backup" ] ;;
       restore) [ "$v" = "$WINDOWS/$wid.d/config.toml.backup" ] ;;
       start-state|rename-start|renamed|stopping|recover-start|closed) [[ $v =~ ^$E$ ]] ;;
@@ -1421,7 +1500,7 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
   # (OPEN_SHA); a `pre-close-failure` ends the open start before it, and is the TARGET's when that start is. A `stop
   # HAND CHANGE` right after a `hand-change H` is H's STOP (HSTOP). W_RS: the window's `rename-start` (THE EFFECT: a
   # journal with none installed nothing)
-  local i k v w=1
+  local i k v w=1 kp=0
   KIND= CSHA= TSHA= TLINES= TCONT= STAGEDP= BKP= W_RN= W_RS= RSTART= RT_SHA= PCF=0 OPEN_START= OPEN_WHAT= OPEN_SHA=
   LAST_HAND= HSTOP=
   RC_VFAIL=0 RC_NONAPI=0 RC_RESTORE=0 RC_RBF=0 RC_TPCF=0 RC_NOIDLE=0 RC_SSTATE=0 RC_RN= RC_LASTV= RC_LAST=
@@ -1431,6 +1510,7 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
     RC_LAST=$k
     case $k in
       kind) [ -n "$KIND" ] || KIND=$v ;;
+      keep-prev) kp=1 ;;
       config-sha) [ -n "$CSHA" ] || CSHA=$v ;;
       start-state) [ "$w" = 0 ] || RC_SSTATE=1 ;;
       staged-sha) [ -n "$TSHA" ] || TSHA=$v ;;
@@ -1464,7 +1544,10 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
   if [ -n "$BKP" ]; then
     { [ -n "$KIND" ] && [ -n "$CSHA" ] && [ -n "$TSHA" ] && [ -n "$TLINES" ] && [ -n "$STAGEDP" ]; } \
       || rc_cannot "it names a backup, but not its kind, config-sha, staged, staged-sha and target"
-    { [ "$KIND" = switch ] && [ "$BKP" = "$KEEPP" ]; } || { [ "$KIND" = rollback ] && [ "$BKP" = "$WINDOWS/$WID.d/config.toml.backup" ]; } \
+    # a switch's backup is config.toml.prev, or with its `keep-prev` line (--keep-prev) the window's own folder, and
+    # only then; a rollback's, the window's own folder
+    { [ "$KIND:$kp" = switch:0 ] && [ "$BKP" = "$KEEPP" ]; } \
+      || { { [ "$KIND:$kp" = switch:1 ] || [ "$KIND" = rollback ]; } && [ "$BKP" = "$WINDOWS/$WID.d/config.toml.backup" ]; } \
       || rc_cannot "its backup line is not its kind's backup"
   fi
 }
@@ -1808,22 +1891,28 @@ rc_noidle() {   # WHY: THE IDLE RESTART waits: the journal stays open; 3 days af
   # hand line, journaled once, printed at each pass; no automatic restart ever
   local t
   if [ $(( $(date +%s) - RSTART )) -ge 259200 ]; then
-    t="the switch to the TARGET ($TLINES) waits for idle since $RSTART, 3 days ago: $1. At a quiet moment, systemctl --user restart runscaler: the updater's next pass sees it run and ends the window"
+    t="the switch to the TARGET ($TLINES) waits for idle since $RSTART, 3 days ago: $1. At a quiet moment, systemctl --user restart runscaler, or now: runner-updater switch-now hz-docker (its restart's drain lets running jobs finish): the updater's next pass sees it run and ends the window"
     if [ "$RC_NOIDLE" = 0 ]; then rc_stopline "NO IDLE" "$t"; else echo "STOP NO IDLE: $t"; fi
     rc_open "the switch waits for idle (STOP NO IDLE)"
   fi
   rc_open "the switch waits for idle: $1"
 }
 rc_idle_restart() {   # THE IDLE RESTART (a switch, an older runscaler runs its pre-window file): the validate first (when
-  # the sha needs it), then ONE idle pair (uidle; an untested jq or a core that cannot decide reads as not idle), then
-  # at once the stop and THE START
+  # the sha needs it), then ONE idle pair (uidle with the empty state: RECOVER excuses no set; an untested jq or a core
+  # that cannot decide reads as not idle), then at once the stop and THE START. --now (a person's switch-now) skips the
+  # pair alone: `idle skipped`, then the restart
   rc_switch_valid
-  tested_jq || rc_noidle "an untested jq (${JQV}) reads as not idle: install a jq that $CORE/TESTED_JQ lists for core"
-  uidle; case $? in
-    0) ;;
-    1) rc_noidle "$IDLE_WHY" ;;
-    *) rc_noidle "the decision core could not decide IDLE ($IDLE_WHY): read as not idle" ;;
-  esac
+  if [ "$SKIPIDLE" = 1 ]; then
+    ujs idle skipped
+    rcsay "recover --now (a person's switch-now): no idle pair; the restart now (its drain lets running jobs finish)"
+  else
+    tested_jq || rc_noidle "an untested jq (${JQV}) reads as not idle: install a jq that $CORE/TESTED_JQ lists for core"
+    uidle; case $? in
+      0) ;;
+      1) rc_noidle "$IDLE_WHY" ;;
+      *) rc_noidle "the decision core could not decide IDLE ($IDLE_WHY): read as not idle" ;;
+    esac
+  fi
   rc_restart "$NOW_SHA" "$AFTER" target
 }
 rc_installed_target() {   # step 3, INSTALLED = the TARGET, the unit enabled: 3a it RUNS since the install: closed; a

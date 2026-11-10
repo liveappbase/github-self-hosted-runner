@@ -23,11 +23,12 @@ import json
 import os
 import unittest
 
-from tests.hetzner.support import needs_container, sha256_file
+from tests.hetzner.support import Pool, digest, healthz, needs_container, ref, sha256_file
 from tests.hetzner.test_unattended import (NONAPI, PASS, UNKNOWN, BackRig, Rig, alive, content, installed, keys,
                                            sha, value)
 
 README_LINE = 'An unfinished window the updater cannot end'
+PREV = os.path.join(Pool.HOME, '.config', 'runner', 'config.toml.prev')   # the value a `keep-prev` line may have
 
 
 def own(lines):
@@ -36,12 +37,15 @@ def own(lines):
     return k[k.index('recover-start') + 1:] if 'recover-start' in k else []
 
 
-def cut(test, mode, *hooks, rc=-9, clock=True):
-    """A window of MODE (up on a Rig, back --why back on a BackRig) cut by its HOOKS (a `kill` is a SIGKILL of the
-    updater and its window); the hooks cleared, the logs emptied (so the calls counted are RECOVER's). The rig."""
+def cut(test, mode, *hooks, rc=-9, clock=True, more=(), before=None):
+    """A window of MODE (up on a Rig, back --why back on a BackRig; MORE: up's options) cut by its HOOKS (a `kill` is a
+    SIGKILL of the updater and its window); BEFORE(rig), when given, runs before the window. The hooks cleared, the
+    logs emptied (so the calls counted are RECOVER's). The rig."""
     g = Rig(test, clock) if mode == 'up' else BackRig(test, clock)
+    if before is not None:
+        before(g)
     g.p.hooks(*hooks)
-    r = g.up() if mode == 'up' else g.back()
+    r = g.up(*more) if mode == 'up' else g.back()
     test.assertEqual(r.returncode, rc, r.stdout[-3000:] + r.stderr)
     test.assertIsNotNone(g.p.window(), 'the cut window left no journal')
     test.assertNotEqual(keys(g.p.window())[-1], 'closed')
@@ -364,7 +368,8 @@ class TargetInstalled(unittest.TestCase):
         """Operator (2): an older runscaler runs the pre-window file: idle: ONE idle pair, then at once the stop and the
         start (`from`, `stopping`, `stopped`, `starting`, `running`): closed. Busy: nothing restarts, the journal stays
         open (exit 5) and the line says the switch waits for idle; 3 days after `recover-start`: STOP NO IDLE with the
-        hand line, journaled once, printed at each pass; never an automatic restart."""
+        hand line and `runner-updater switch-now hz-docker` beside it (S2b-3c-2 E-2), journaled once, printed at each
+        pass; never an automatic restart."""
         g = cut(self, 'up', ('journal:renamed', 'kill'))
         x = Rec(self, g)
         x.run(0)
@@ -381,10 +386,13 @@ class TargetInstalled(unittest.TestCase):
         r = x.run(5)
         self.assertIn('STOP NO IDLE: ', r.stdout)
         self.assertIn('systemctl --user restart runscaler', r.stdout)
+        self.assertIn('runner-updater switch-now hz-docker', r.stdout)   # S2b-3c-2 E-2: beside the hand restart
         r = x.run(5)
         self.assertIn('STOP NO IDLE: ', r.stdout)
+        self.assertIn('runner-updater switch-now hz-docker', r.stdout)
         lines = x.open()
         self.assertEqual(len([s for s in x.stops(lines) if s.startswith('NO IDLE')]), 1)
+        self.assertIn('runner-updater switch-now hz-docker', [s for s in x.stops(lines) if s.startswith('NO IDLE')][0])
         self.assertEqual(keys(lines).count('recover-start'), 1)
         self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
 
@@ -448,6 +456,162 @@ class TargetInstalled(unittest.TestCase):
                 lines = x.open()
                 self.assertEqual(keys(lines).count('hand-change'), 1)
                 self.assertEqual(keys(lines).count('validate'), 1 + 2)
+
+
+@needs_container
+class SwitchNow(unittest.TestCase):
+    """S2b-3c-2 B3: `recover --unattended --now` (E-7 (a), the r2 FOLD: a person's switch-now of a cut switch) changes
+    ONLY THE IDLE RESTART: its idle pair skipped (no /healthz pair, no core, no jq), `idle skipped` journaled, then the
+    restart at once. Every other reason RECOVER keeps a journal open, or closes it, is the same with --now. And THE
+    CORE-STATE EXCUSE is the pass's switch's only: RECOVER's idle pair reads no core state copy (the r3 FOLD)."""
+
+    def test_now_restarts_a_cut_switch_while_busy(self):
+        """A switch cut after `renamed` (the TARGET installed, the older runscaler runs it), the pool busy: without
+        --now it waits (exit 5, nothing stopped); with --now `idle skipped`, one stop, one start, closed
+        target-running."""
+        g = cut(self, 'up', ('journal:renamed', 'busy', 'kill'))
+        x = Rec(self, g)
+        r = x.run(5)
+        self.assertIn('waits for idle', r.stdout)
+        self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
+        reads = len(g.healthz_reads())
+        r = g.p.unattended('recover', '--unattended', '--now')
+        self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+        lines = x.closed('target-running')
+        self.assertEqual(own(lines)[:6], ['idle', 'from', 'stopping', 'stopped', 'starting', 'running'], lines)
+        self.assertEqual(lines[keys(lines).index('idle', keys(lines).index('recover-start'))], 'idle skipped')
+        self.assertEqual((len(x.calls('stop')), len(x.calls('start')), len(x.calls('restart'))), (1, 1, 0))
+        self.assertNotEqual(g.p.config(), g.old)
+        self.assertEqual(len(g.healthz_reads()) - reads, 2, 'only RUNS\'s pair after the start: no idle pair was read')
+
+    def test_now_changes_nothing_but_the_idle_restart(self):
+        """Each with --now, as without it: (a) the TARGET with a comment added whose copy validates NON-API: THE ONE
+        RULE (`hand-change`, STOP HAND CHANGE), the journal open, nothing stopped or started; (b) a person's file
+        installed while no runscaler runs, whose copy validates NON-API: STOP HAND CHANGE and POOL DOWN, open; (c) the
+        unit disabled: STOP CI DISABLED, closed target-old, nothing stopped or started."""
+        for why in ('a', 'b', 'c'):
+            with self.subTest(why):
+                at = 'journal:stopped' if why == 'b' else 'journal:renamed'
+                g = cut(self, 'up', (at, 'kill'))
+                if why == 'a':
+                    g.p.write(g.p.rpath('config.toml'), g.p.config() + '# a comment\n', 0o600)
+                    g.p.runner = {'seq': [NONAPI]}
+                elif why == 'b':
+                    g.p.act('hand-file')
+                    g.p.runner = {'seq': [NONAPI]}
+                else:
+                    g.p.act('disable-only')
+                x = Rec(self, g)
+                r = g.p.unattended('recover', '--unattended', '--now')
+                self.assertEqual(r.returncode, 0 if why == 'c' else 5, r.stdout[-4000:] + r.stderr)
+                self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
+                if why == 'c':
+                    lines = x.closed('target-old')
+                    self.assertTrue([s for s in x.stops(lines) if s.startswith('CI DISABLED: ')], lines)
+                else:
+                    lines = x.open()
+                    self.assertIn('hand-change', own(lines))
+                    self.assertIn('STOP HAND CHANGE: ', r.stdout)
+                    if why == 'b':
+                        self.assertIn('STOP POOL DOWN: ', r.stdout)
+                self.assertNotIn('idle', own(lines), 'an idle line on a route that is not the idle restart')
+
+    def test_recover_s_idle_pair_reads_no_core_state_copy(self):
+        """The r3 FOLD: a cut switch, the small set not ready (all its counts 0) on both reads, the main set idle, and a
+        core state copy at the pass's path that names the small set not ready for 10 days: RECOVER waits (exit 5),
+        nothing stopped. The control: the small set ready again: the restart, closed."""
+        g = cut(self, 'up', ('journal:renamed', 'kill'))
+        g.p.curl['healthz'] = healthz(**{'linux-ci-small': {'ready': False}})
+        g.p.write(os.path.join(g.p.STATE, 'pass', 'state.json'),
+                  json.dumps({'format': 1, 'not_ready_since': {'linux-ci-small': g.p.clock() - 10 * 86400}}) + '\n', 0o600)
+        x = Rec(self, g)
+        r = x.run(5)
+        self.assertIn('waits for idle', r.stdout)
+        self.assertIn('not ready', r.stdout)
+        self.assertEqual(x.calls('stop') + x.calls('start') + x.calls('restart'), [])
+        g.p.curl['healthz'] = healthz()
+        x.run(0)
+        x.closed('target-running')
+        self.assertEqual((len(x.calls('stop')), len(x.calls('start'))), (1, 1))
+
+
+@needs_container
+class KeepPrev(unittest.TestCase):
+    """S2b-3c-2 B3 (E-3): a switch journal with `keep-prev` has its backup in the window's own folder
+    (windows/ID.d/config.toml.backup), and RECOVER reads that as its kind's backup ONLY then: it ends the cut switch as
+    any other, and config.toml.prev stays byte for byte as it was. The controls: the same journal with its keep-prev line
+    taken out, and a keep-prev journal whose backup line names config.toml.prev: "its backup line is not its kind's
+    backup" (exit 6, nothing written)."""
+
+    def keep(self, g):
+        g.keep = g.old.replace(g.p.images()[0], ref(digest(37)))
+        g.p.write(g.prev, g.keep, 0o600)
+        g.keep_st = os.stat(g.prev)
+
+    def test_recover_ends_a_cut_keep_prev_switch_and_leaves_config_toml_prev(self):
+        g = cut(self, 'up', ('journal:renamed', 'kill'), more=('--keep-prev',), before=self.keep)
+        self.assertIn('keep-prev', keys(g.cut))
+        x = Rec(self, g)
+        x.run(0)
+        lines = x.closed('target-running')
+        self.assertEqual(value(lines, 'prev'), sha(g.keep))
+        self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(g.keep), g.keep_st.st_mtime_ns))
+        bk = value(lines, 'backup')
+        self.assertEqual(bk, os.path.join(g.p.STATE, 'windows', value(lines, 'window') + '.d', 'config.toml.backup'))
+        self.assertEqual(g.p.read(bk), g.old)
+
+    def test_controls_a_backup_line_that_is_not_its_kind_s(self):
+        for why in ('no keep-prev line, a window-folder backup', 'keep-prev, and config.toml.prev as the backup'):
+            with self.subTest(why):
+                if why.startswith('no'):
+                    g = cut(self, 'up', ('journal:renamed', 'kill'), more=('--keep-prev',), before=self.keep)
+                    edit = [l for l in g.cut if not l.startswith('keep-prev ')]
+                else:
+                    g = cut(self, 'up', ('journal:renamed', 'kill'))
+                    i = keys(g.cut).index('digest') + 1
+                    edit = g.cut[:i] + ['keep-prev ' + g.prev] + g.cut[i:]
+                self.assertNotEqual(edit, g.cut)
+                j = os.path.join(g.p.STATE, 'window')
+                text = '\n'.join(edit) + '\n'
+                g.p.write(j, text, 0o600)
+                r = g.p.recover()
+                self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
+                self.assertIn("its backup line is not its kind's backup", r.stdout)
+                self.assertIn(README_LINE, r.stdout)
+                self.assertEqual(g.p.read(j), text)
+                self.assertEqual([l for l in g.p.lines('systemctl') if 'show' not in l], [])
+
+    def test_a_keep_prev_or_idle_line_of_another_value_is_a_line_it_does_not_read(self):
+        """Item 5 of B3: the reader takes `keep-prev` only with config.toml.prev as its value, in a switch's journal, and
+        `idle` only as idle or skipped; another value, a misspelled key, or a keep-prev in a rollback's journal (whose
+        backup is in its window's folder: only that check stops it) is a line RECOVER does not read: STOP, exit 6,
+        nothing written.
+        (A keep-prev switch's whole journal, read and ended: the cell above.)"""
+        other = lambda v: lambda c: [('keep-prev ' + v if l.startswith('keep-prev ') else l) for l in c]
+        for why, kp, edit in (
+                ('keep-prev of another path', True, other('/tmp/config.toml.prev')),   # in a keep-prev window's journal:
+                ('keep-prev with no value', True, other('')),                          # only the value check stops it
+                ('keep-prev misspelled', False, lambda c: c[:4] + ['keep-prv ' + c[0].split()[0]] + c[4:]),
+                ('idle of another value', False, lambda c: [('idle later' if l == 'idle idle' else l) for l in c]),
+                ('keep-prev in a rollback journal', 'back', lambda c: c[:2] + ['keep-prev ' + PREV] + c[2:])):
+            with self.subTest(why):
+                if kp == 'back':   # a rollback's backup IS in its window's folder: only the kind check stops it
+                    g = cut(self, 'back', ('journal:renamed', 'kill'))
+                elif kp:
+                    g = cut(self, 'up', ('journal:renamed', 'kill'), more=('--keep-prev',), before=self.keep)
+                else:
+                    g = cut(self, 'up', ('journal:renamed', 'kill'))
+                self.assertEqual(keys(g.cut)[1], 'kind')
+                edited = edit(g.cut)
+                self.assertNotEqual(edited, g.cut)
+                j = os.path.join(g.p.STATE, 'window')
+                text = '\n'.join(edited) + '\n'
+                g.p.write(j, text, 0o600)
+                r = g.p.recover()
+                self.assertEqual(r.returncode, 6, r.stdout + r.stderr)
+                self.assertIn('STOP RECOVER cannot end', r.stdout)
+                self.assertEqual(g.p.read(j), text)
+                self.assertEqual([l for l in g.p.lines('systemctl') if 'show' not in l], [])
 
 
 @needs_container

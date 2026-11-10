@@ -1,7 +1,7 @@
 """linux-docker/bin/runner-updater's APPLY STEP and RECOVER FIRST (S2b-3c-1 D-b (b)(c), D-f, the r3 FOLD; B2a items 2
 and 3): every RS_USER run that takes the lock (a pass, on, off) runs pool-image.sh's RECOVER as its child when a window
 journal is at WINDOW, then applies a CLOSED journal by its own lines (THE CLOSE RULE, THE STOP RULE, THE OWN RESTART: one
-state write that also sets `last_window`), then archives it to windows/ID. (Named for its CI part, test_[a-j]*.py:
+state write that also sets `last_window`), then archives it to windows/ID. (Named for its CI part, test_[a-b]*.py:
 .github/workflows/release-check.yml.)
 
 - BY ITS LINES ONLY (r2 Opus F1, Codex F9): a change of config.toml after `closed` changes nothing the apply step

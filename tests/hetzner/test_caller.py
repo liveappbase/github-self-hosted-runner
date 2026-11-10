@@ -1,5 +1,5 @@
 """linux-docker/bin/runner-updater's ROLLBACK CALLER, its bounds (S2b-3c-1 D-g and D-e; the r3 FOLD "THE ROLLBACK'S
-PRECONDITIONS"; B2b review r1: Codex F1, F2, F3 and Opus F1). (Named for its CI part, test_[a-j]*.py:
+PRECONDITIONS"; B2b review r1: Codex F1, F2, F3 and Opus F1). (Named for its CI part, test_[c-m]*.py:
 .github/workflows/release-check.yml.)
 
 - ONE RESTART PER PASS, BY THE PROCESS (Codex F1): a pass whose RECOVER started or restarted runscaler starts no
