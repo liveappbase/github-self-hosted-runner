@@ -220,11 +220,16 @@ class TheCloseRule(unittest.TestCase):
     def test_a_switch_whose_backup_replaced_the_keep(self):
         """r1 Opus F19: CLASS pre, its LAST `prev` is config-sha (its backup replaced config.toml.prev), no candidate:
         previous and back_until gone, and the line says the keep is gone. The control: a `prev` of another sha (the
-        keep is as it was): previous and back_until kept. `prev` twice: the LAST counts."""
-        for prevs, gone in (([h(9), h(1)], True), ([h(1), h(9)], False)):
-            with self.subTest(prevs=prevs):
+        keep is as it was): previous and back_until kept. `prev` twice: the LAST counts. S2b-3c-2 E-10 (B2a's deferral;
+        B4a changed this cell, TheCloseRule's class-`other` rule): a close `other` (a person's file the closer found)
+        whose backup replaced the keep is the same: previous and back_until gone, and HAND CHANGE held; its control,
+        `other` with a `prev` of another sha, keeps them (test_a_switch_by_its_class's other row)."""
+        for cls, prevs, gone in (('pre', [h(9), h(1)], True), ('pre', [h(1), h(9)], False),
+                                 ('other', [h(9), h(1)], True), ('other', [h(1), h(9)], False)):
+            with self.subTest(cls=cls, prevs=prevs):
                 a = A(self, fam={'candidate': None, 'previous': PREV, 'back_until': T0 + 99})
-                lines = a.plant(lines_of(cls='pre', prev=prevs, end_before_rename=False, target=True))
+                lines = a.plant(lines_of(cls=cls, prev=prevs, end_before_rename=False, target=True,
+                                         stops=[('HAND CHANGE', 'x')] if cls == 'other' else []))
                 a.run()
                 f = a.fam()
                 if gone:
@@ -232,6 +237,8 @@ class TheCloseRule(unittest.TestCase):
                     self.assertIn('the keep', a.r.stdout)
                 else:
                     self.assertEqual((f['previous'], f['back_until']), (PREV, T0 + 99))
+                self.assertIsNone(f.get('candidate'))
+                self.assertEqual(a.held(), ['HAND CHANGE'] if cls == 'other' else [])
                 a.archived(lines)
 
     def test_a_rollback_by_its_class(self):
@@ -388,28 +395,138 @@ class Legacy(unittest.TestCase):
 
 @needs_container
 class TheStopRule(unittest.TestCase):
-    """THE STOP RULE (the Studio's runner-updater-window :127-139; D-b): each STOP name of the journal held once (its
-    LAST line of that name), replacing the family's held STOP of the same name; DISK, untested jq and NO IDLE are never
-    held (the pass checks them again; NO IDLE: the restart came); the family's other STOPs stay; a close with CLASS
-    target drops JOBS FAIL ON THE NEW IMAGE and NO EVIDENCE, a pre close keeps them (r2 Opus F2's control)."""
+    """THE STOP RULE (the Studio's runner-updater-window :127-139 and kept($W ...); D-b; S2b-3c-2 E-8 and its r2 FOLD):
+    each STOP name of the journal held once (its LAST line of that name), replacing the family's held STOP of the same
+    name; DISK, untested jq and NO IDLE are never held from a journal (the pass checks them again; NO IDLE: the restart
+    came). A close that RAN ITS RESTART (its journal has `stopping`, or it closed CLASS target-running) drops the
+    family's held WINDOW STOPs (check failed, HAND CHANGE, NO IDLE, ROLLBACK FAILED, CI DISABLED: the Studio's ru_W but
+    DISK and POOL DOWN, which this host's pass computes as levels); a close before `stopping` drops nothing but its own
+    names (r2 Opus F2's control). A close with CLASS target (a switched or rolled back candidate) also drops JOBS FAIL ON
+    THE NEW IMAGE and NO EVIDENCE; a pre close keeps them. B4a changed this cell: up to 3c-1 "a held CI DISABLED and
+    HAND CHANGE survive a target-running close" (the r2 FOLD's E-8 drops them; its control, a close before `stopping`,
+    keeps them)."""
+
+    HELD = ('HAND CHANGE', 'CI DISABLED', 'check failed', 'NO IDLE', 'ROLLBACK FAILED', 'DISK', 'POOL DOWN',
+            'JOBS FAIL ON THE NEW IMAGE')
+    WINDOW_STOPS = {'HAND CHANGE', 'CI DISABLED', 'check failed', 'NO IDLE', 'ROLLBACK FAILED'}
 
     def test_held_once_replaced_by_name_and_never_three(self):
-        held = [stopj('HAND CHANGE', 'old text'), stopj('CI DISABLED', 'stays'), stopj('JOBS FAIL ON THE NEW IMAGE')]
-        for cls in ('pre', 'target-running'):
-            with self.subTest(cls):
-                a = A(self, fam={'candidate': None, 'stops': held})
-                lines = a.plant(lines_of(cls=cls, stops=[('HAND CHANGE', 'first'), ('DISK', 'd'), ('untested jq', 'j'),
-                                                         ('NO IDLE', 'n'), ('HAND CHANGE', 'second'),
-                                                         ('POOL DOWN', 'p')]))
+        journal = [('HAND CHANGE', 'first'), ('DISK', 'd'), ('untested jq', 'j'), ('NO IDLE', 'n'),
+                   ('HAND CHANGE', 'second'), ('POOL DOWN', 'p')]
+        no_stop = lambda L: [l for l in L if not l.startswith(('stopping ', 'stopped '))]
+        for why, mk, stopping, ran, switched in (
+                ('pre, after stopping', lambda: lines_of(cls='pre', stops=journal), True, True, False),
+                ('target-running', lambda: lines_of(cls='target-running', stops=journal), True, True, True),
+                ('target-running with no stopping line (another actor\'s start)',
+                 lambda: no_stop(lines_of(cls='target-running', stops=journal)), False, True, True),
+                ('target-old, after stopping', lambda: lines_of(cls='target-old', stops=journal), True, True, True),
+                ('a close before stopping', lambda: lines_of(cls='pre', stops=journal, stop_before_rename=True),
+                 False, False, False)):
+            with self.subTest(why):
+                a = A(self, fam={'candidate': None, 'stops': [stopj(n, 'old text') for n in self.HELD]})
+                lines = a.plant(mk())
+                self.assertEqual('stopping' in [l.split(' ')[0] for l in lines], stopping, 'the premise')
                 a.run()
                 st = a.fam()['stops']
-                names = [s['stop'] for s in st]
-                self.assertEqual(sorted(names), sorted(['CI DISABLED', 'HAND CHANGE', 'POOL DOWN']
-                                                       + (['JOBS FAIL ON THE NEW IMAGE'] if cls == 'pre' else [])))
+                names = sorted(s['stop'] for s in st)
+                want = {'HAND CHANGE', 'POOL DOWN'}                       # the journal's own names
+                want |= {n for n in self.HELD if not (ran and n in self.WINDOW_STOPS)}
+                if switched:
+                    want.discard('JOBS FAIL ON THE NEW IMAGE')
+                self.assertEqual(names, sorted(want), st)
                 hc = [s for s in st if s['stop'] == 'HAND CHANGE']
                 self.assertEqual([s['detail']['text'] for s in hc], ['second'])
                 self.assertEqual(hc[0]['version'], V)
+                pd = [s for s in st if s['stop'] == 'POOL DOWN']
+                self.assertEqual([s['detail']['text'] for s in pd], ['p'], 'the journal\'s POOL DOWN replaces the held')
                 a.archived(lines)
+
+
+@needs_container
+class KeepPrevCloses(unittest.TestCase):
+    """B3's note and its review's (Codex, Opus: "Notes for B4a"; S2b-3c-2 E-3, E-10): REAL keep-prev switch windows
+    (`up --unattended V D --keep-prev`) closed through the apply step, one per CLASS. A keep-prev window's backup is
+    its own folder's file (windows/ID.d/config.toml.backup, its `backup` line), so its close keeps the family's
+    `previous` and `back_until` as they were, also when its closing `prev` equals config.toml's sha (here
+    config.toml.prev IS config.toml's bytes: the plain rule's "the backup replaced the keep" reads that shape), and
+    config.toml.prev stays byte for byte. target-*: the candidate is V on the TARGET's lines; pre, none, other: no
+    candidate change (other: HAND CHANGE). A switch's target-failed (no real switch closes it: RECOVER's class of a
+    DECIDED rollback) is a class its kind has not: a STOP, nothing written (a real keep-prev journal, its class edited).
+    The controls: the same windows with no --keep-prev (backup config.toml.prev, prev = config-sha): target-running sets
+    previous to `old` and back_until null; pre and other (E-10) drop previous and back_until."""
+
+    KEEP = {MAIN: ref('sha256:' + '36' * 32), SMALL: ref('sha256:' + '36' * 32)}
+    CAND = {'version': '2.338.9', 'lines': OLDL, 'closed_at': T0}
+
+    def window(self, how, keep_prev):
+        more = ('--keep-prev',) if keep_prev else ()
+        if how in ('target-old', 'none'):
+            at = 'journal:renamed' if how == 'target-old' else 'journal:keep-prev'
+            g = cut(self, 'up', (at, 'kill'), more=more, before=lambda g: g.p.write(g.prev, g.old, 0o600))
+            if how == 'target-old':
+                g.p.set_unit(enabled=False)                    # a person's `disable` without --now: the old one runs
+        else:
+            g = Rig(self)
+            g.p.write(g.prev, g.old, 0o600)                    # config.toml.prev = config.toml's bytes: prev = config-sha
+            g.p.hooks(*{'target-running': (), 'target-idle': (('systemctl:stop-done', 'disable'),),
+                        'pre': ((('mv-done:config.toml.backup' if keep_prev else 'mv-done:config.toml.prev'),
+                                 'edit-staged'),),
+                        'other': (('journal:backup', 'hand-file'),),
+                        'target-failed': ()}[how])
+            r = g.up(*more)
+            self.assertEqual(r.returncode, 0 if how in ('target-running', 'target-failed') else 1,
+                             r.stdout[-3000:] + r.stderr)
+            if how == 'target-failed':
+                lines = g.p.window()
+                lines[-2] = ' '.join(lines[-2].split(' ')[:-1] + ['target-failed'])
+                g.p.write(WINDOW, ''.join(l + '\n' for l in lines), 0o600)
+        return g
+
+    def test_each_class_keeps_previous_and_back_until(self):
+        rows = [('target-running', True), ('target-idle', True), ('target-old', True), ('pre', True), ('none', True),
+                ('other', True), ('target-failed', True), ('target-running', False), ('pre', False), ('other', False)]
+        for how, kp in rows:
+            with self.subTest(cls=how, keep_prev=kp):
+                g = self.window(how, kp)
+                prev_text, prev_st = g.p.read(g.prev), os.stat(g.prev)
+                os.makedirs(STATEDIR, mode=0o700, exist_ok=True)
+                g.p.write(STATE, json.dumps({'format': 1, 'on': False, 'families': {FAM: {
+                    'candidate': self.CAND if kp else None, 'previous': self.KEEP, 'back_until': T0 + 99}}}) + '\n',
+                    0o600)   # a keep-prev window is one of an OPEN candidate; a plain one has none (DUE step 1)
+                before = g.p.read(STATE)
+                lines = g.p.window()
+                self.assertEqual('keep-prev' in keys(lines), kp, 'the premise: its keep-prev line')
+                r = g.p.updater('off')
+                if how == 'target-failed':
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    self.assertIn(README_LINE, r.stdout)
+                    self.assertEqual(g.p.read(STATE), before, 'a class its kind has not: nothing written')
+                    continue
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                arch = g.p.closed()[-1][1]
+                self.assertEqual(arch[-2].split(' ')[-1], how, arch)
+                if kp and 'backup' in keys(arch):
+                    self.assertEqual(value(arch, 'backup'), os.path.join(WINDOWS, value(arch, 'window') + '.d',
+                                                                         'config.toml.backup'))
+                if 'prev' in keys(arch) and 'config-sha' in keys(arch) and how != 'none':
+                    self.assertEqual(value(arch, 'prev'), value(arch, 'config-sha'),
+                                     'the premise: prev equals config.toml\'s sha')
+                f = json.loads(g.p.read(STATE))['families'][FAM]
+                if how.startswith('target-'):
+                    self.assertEqual(f['candidate']['version'], V)
+                    self.assertEqual(f['candidate']['lines'], TL)
+                else:
+                    self.assertEqual(f.get('candidate'), self.CAND if kp else None)
+                if kp:
+                    self.assertEqual((f['previous'], f['back_until']), (self.KEEP, T0 + 99))
+                    self.assertEqual((g.p.read(g.prev), os.stat(g.prev).st_mtime_ns), (prev_text, prev_st.st_mtime_ns))
+                elif how == 'target-running':
+                    self.assertEqual((f['previous'], f['back_until']), (OLDL, None))
+                else:
+                    self.assertEqual((f['previous'], f['back_until']), (None, None), 'E-10: the keep is gone')
+                held = [s['stop'] for s in f.get('stops', [])]
+                self.assertEqual('HAND CHANGE' in held, how == 'other', held)
+                self.assertEqual('CI DISABLED' in held, how in ('target-idle', 'target-old'), held)
 
 
 @needs_container

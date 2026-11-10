@@ -13,10 +13,12 @@ AFTER ACCEPT, D7): RS_USER's pass, after its core calls, prints ONE line for hz-
   7. the latest release (rr_eligible): WAIT, or not eligible;
   8. a STOP of that version; 9. it is rejected for hz-docker; 10. it is not newer than the current version;
   11. no build record of (V, recipe): it waits for RUN_USER's build of V (rr_record);
-  12. "would switch hz-docker to V (this release takes no action)".
+  12. the switch window (S2b-3c-2 B4a: "would switch hz-docker to V" is gone): "hz-docker is due for runner V: the
+      switch window, pool-image.sh up --unattended V D (its lines follow)"; its cells are test_pass_switch.py's. Here
+      the pool is BUSY (Due), so that window ends not idle with no journal, and the pass writes only `due`.
 
 Steps 1-6 ask GitHub nothing; no step downloads a tarball (RUN_USER's build checked the digest). DUE never fails the pass
-and writes nothing into the state (NO BASELINE and recipe changed are printed, not stored). Step 10 compares versions
+and writes nothing into the state but step 12's `due` (NO BASELINE and recipe changed are printed, not stored). Step 10 compares versions
 field by field, as numbers. RUN_USER's records are HOSTILE (PLAN D1, class Hostile): a FIFO or a symlink renamed over a
 record's name while the pass reads it is no record, at once (runner-release.sh's rr_read: one open, no symlink, never
 blocks), and the pass ends as always.
@@ -29,7 +31,7 @@ import os
 import re
 import unittest
 
-from tests.hetzner.support import Pool, digest, iso, needs_container, ref, tarball
+from tests.hetzner.support import Pool, digest, healthz, iso, needs_container, ref, tarball
 
 V = '2.339.0'                 # GitHub's latest release
 CUR = '2.338.2'               # the runner of the image the pool runs: its build record's version
@@ -41,7 +43,8 @@ STATE = os.path.join(Pool.STATE, 'state.json')
 BUILDS = os.path.join(Pool.HOME, 'run', 'builds')
 DAY = 86400
 API = '/repos/actions/runner/releases/latest'
-SWITCH = 'runner-updater: pass: would switch hz-docker to %s (this release takes no action)' % V
+SWITCH = ('runner-updater: pass: hz-docker is due for runner %s: the switch window, pool-image.sh up --unattended %s %s '
+          '(its lines follow)' % (V, V, NEW))   # step 12 (B4a: the switch itself; it was "would switch ...")
 NOT = 'runner-updater: pass: hz-docker is not due: '
 
 
@@ -52,13 +55,15 @@ def stop(name, version=None, **detail):
 class Due:
     """A Pool whose production runs OLD; the updater ON, the fake clock. The BASELINE (base=True): RUN_USER's build record
     of OLD's digest, runner CUR (or cur), this release's recipe. GitHub's latest release VERSION, published AGE before
-    the fake now (STATUS: the API's answer), and its build record of NEW's digest (built=True)."""
+    the fake now (STATUS: the API's answer), and its build record of NEW's digest (built=True). The pool BUSY (B4a: step
+    12 runs the switch window, which then ends not idle, with no journal: these cells are DUE's order)."""
 
     def __init__(self, test, family=None, base=True, built=True, age=3 * DAY, status=200, version=V, cur=CUR):
         self.t = test
         self.p = p = Pool(test)
         p.curl['served'] = [OLD, NEW]
         p.production(OLD)
+        p.curl['healthz'] = healthz(**{MAIN: {'busy': 1}})
         p.fake_clock()
         self.now = p.clock()
         p.gh.release(version, tarball(version), latest=True, published=iso(self.now - age), status=status)
@@ -76,17 +81,23 @@ class Due:
         return json.loads(self.p.read(STATE))['families']
 
     def run(self):
-        """A pass: exit 0 always (DUE never fails it), and the state's families as they were (DUE writes nothing)."""
+        """A pass: exit 0 always (DUE never fails it), and the state's families as they were, but step 12's `due` (DUE
+        writes nothing else; the busy pool: no window)."""
+        def nodue(fs):
+            return {k: {m: x for m, x in v.items() if m != 'due'} if isinstance(v, dict) else v for k, v in fs.items()}
         before = self.families()
         r = self.p.updater('pass')
         self.t.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
-        self.t.assertEqual(self.families(), before, 'the pass wrote into the families')
+        after = self.families()
+        if FAM in after and after[FAM] == {'due': after[FAM].get('due')} and FAM not in before:
+            after = {k: v for k, v in after.items() if k != FAM}
+        self.t.assertEqual(nodue(after), nodue(before), 'the pass wrote into the families')
         return r
 
     def due(self, r):
         """DUE's lines: exactly one."""
-        lines = [l for l in r.stdout.splitlines() if l.startswith(NOT) or l.startswith('runner-updater: pass: would '
-                                                                                       'switch')]
+        lines = [l for l in r.stdout.splitlines() if l.startswith(NOT) or l.startswith('runner-updater: pass: hz-docker '
+                                                                                       'is due for runner ')]
         self.t.assertEqual(len(lines), 1, r.stdout[-3000:])
         return lines[0]
 
@@ -98,12 +109,12 @@ class Due:
 
 @needs_container
 class Switch(unittest.TestCase):
-    def test_every_step_passed_would_switch_and_asks_github_once(self):
+    def test_every_step_passed_starts_the_switch_and_asks_github_once(self):
         g = Due(self)
         r = g.run()
         self.assertEqual(g.due(r), SWITCH)
         self.assertEqual(g.asked(), [API])
-        self.assertNotIn('would not switch', r.stdout)
+        self.assertNotIn('would switch', r.stdout)
 
 
 @needs_container
@@ -115,8 +126,11 @@ class Steps(unittest.TestCase):
         return line
 
     def test_1_an_open_candidate(self):
-        g = Due(self, family={'candidate': {'version': '2.338.9', 'lines': {MAIN: ref(NEW), SMALL: ref(NEW)},
-                                            'closed_at': 1761955200}})
+        """Its switch closed a minute before the pass (B4a: KEEP now ACTS, so a candidate 72 h old with no evidence
+        window would hold NO EVIDENCE in this pass: a write of the families this cell does not test)."""
+        g = Due(self)
+        g.put({'format': 1, 'on': True, 'families': {FAM: {'candidate': {
+            'version': '2.338.9', 'lines': {MAIN: ref(NEW), SMALL: ref(NEW)}, 'closed_at': g.now - 60}}}})
         self.held(g, 'an open candidate (runner 2.338.9): one open release per family')
 
     def test_1_control_the_7_days_after_accept_are_no_open_release(self):
@@ -224,7 +238,7 @@ class Steps(unittest.TestCase):
         a window journal that RECOVER ends while the fake clock moves (`window ID`, the enabled unit serving: RECOVER's
         own RUNS pair moves it 3 s; it closes the journal with no STOP, and the apply step only archives it). The
         pass's ONE clock is its start, so a release 2 days - 1 s old is still younger than 2 days. The control: the
-        same journal at 2 days: would switch."""
+        same journal at 2 days: step 12."""
         wid = '20261106010000-4242'
         for age, want in ((2 * DAY - 1, 'young'), (2 * DAY, 'switch')):
             with self.subTest(age=age):
@@ -274,8 +288,8 @@ class Steps(unittest.TestCase):
                 g = Due(self, version=latest, cur=cur)
                 line = g.due(g.run())
                 if due:
-                    self.assertEqual(line, 'runner-updater: pass: would switch hz-docker to %s (this release takes no '
-                                           'action)' % latest)
+                    self.assertEqual(line, 'runner-updater: pass: hz-docker is due for runner %s: the switch window, '
+                                           'pool-image.sh up --unattended %s %s (its lines follow)' % (latest, latest, NEW))
                 else:
                     self.assertEqual(line, NOT + 'release v%s is not newer than its runner %s' % (latest, cur))
 
@@ -284,7 +298,7 @@ class Steps(unittest.TestCase):
         line = self.held(g, "it waits for root's build of runner %s (no usable build record of runner %s for this "
                             "release's image" % (V, V), network=True)
         self.assertIn(g.p.recipe()[:12], line)
-        g.p.record(V, NEW)                                        # the control: its record, then would switch
+        g.p.record(V, NEW)                                        # the control: its record, then step 12
         g.p.gh.seen.clear()
         self.assertEqual(g.due(g.run()), SWITCH)
 
@@ -310,7 +324,11 @@ class Hostile(unittest.TestCase):
         self.assertNotEqual(r.returncode, 124, 'the pass hung on a %s renamed over %s' % (kind, rec))
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
         self.assertTrue(g.p.swapped(), 'the swap did not happen: the cell proves nothing')
-        self.assertEqual(g.families(), before, 'the pass wrote into the families')
+        after = g.families()
+        if kind == 'plain':        # the control reaches step 12, whose only write is `due` (B4a: the busy pool)
+            self.assertEqual(after.pop(FAM, {}).pop('due', None)['version'], V)
+            after = {k: v for k, v in after.items() if v}
+        self.assertEqual(after, before, 'the pass wrote into the families')
         again = g.p.bounded([updater, 'pass'])
         self.assertEqual(again.returncode, 0, again.stdout[-4000:] + again.stderr)
         self.assertNotIn('another run holds the updater lock', again.stdout)
@@ -348,6 +366,8 @@ class Order(unittest.TestCase):
             with self.subTest(held_at_step_2=held):
                 g = Due(self, built=False, age=DAY,
                         family=dict({'rejected': [V]}, **({'stops': [stop('DISK', text='free disk')]} if held else {})))
+                if held:      # B4a: a pass clears a held DISK when disk_ok passes (THE TWO LEVELS): the disk stays low
+                    g.p.disk(1000, 50)
                 line = g.due(g.run())
                 if held:
                     self.assertTrue(line.startswith(NOT + 'STOP DISK'), line)

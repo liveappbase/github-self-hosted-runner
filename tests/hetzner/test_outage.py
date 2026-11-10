@@ -371,6 +371,50 @@ class PureLevel(unittest.TestCase):
                                  r.stdout[-2500:])
                 self.assertEqual(held(g), [], r.stdout[-2500:])
 
+    def test_ci_disabled_s_hand_line_is_its_close_s_class_s(self):
+        """S2b-3c-2 E-12 (the r2 FOLD; r1 Codex F5, Opus F9): CI DISABLED's hand line (what status prints after "Next, by
+        hand:") is the CLASS's own, runner-facts.sh's ci_hand, the ONE copy pool-image.sh's RECOVER texts read too: a
+        rollback closed target-old (an older runscaler still runs the file before its TARGET) names `enable`, then a
+        restart at idle; `enable` alone keeps CI DISABLED (the install boundary), and the restart clears it. The
+        control: a switch closed target-idle (a person's `disable --now` after its stop) names `enable --now` alone,
+        which clears it (the unit enabled, a runscaler started after the install)."""
+        hand = {'target-old': 'systemctl --user enable runscaler, then at idle systemctl --user restart runscaler',
+                'target-idle': 'systemctl --user enable --now runscaler'}
+        for kind, cls in (('rollback', 'target-old'), ('switch', 'target-idle')):
+            with self.subTest(cls):
+                g = Rig(self)
+                hand_install(g)
+                put(g)
+                g.p.write(STATE, json.dumps({'format': 1, 'on': False, 'families': {FAM: {'candidate': C}}}) + '\n',
+                          0o600)
+                os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+                g.p.write(WINDOW, ''.join(l + '\n' for l in lines_of(kind, cls, stops=(
+                    ('CI DISABLED', 'runscaler is not enabled'),))), 0o600)
+                if cls == 'target-old':
+                    g.p.set_unit(enabled=False)                  # `disable` without --now: the old one runs
+                else:
+                    g.p.act('disable')                           # `disable --now`: nothing runs
+                pass_(self, g)
+                st = json.loads(g.p.read(STATE))['families'][FAM]['stops']
+                cd = [s for s in st if s['stop'] == 'CI DISABLED']
+                self.assertEqual(len(cd), 1, st)
+                self.assertEqual(cd[0]['detail'].get('hand'), hand[cls])
+                s = g.p.updater('status')
+                self.assertIn('STOP CI DISABLED', s.stdout)
+                self.assertIn('Next, by hand: `%s`' % hand[cls], s.stdout)
+                if cls == 'target-old':
+                    g.p.act('enable')                            # `enable` alone: the older runscaler runs on
+                    r = pass_(self, g)
+                    self.assertEqual(len(held(g, 'CI DISABLED')), 1, r.stdout[-2500:])
+                    g.p.clock(plus=10)
+                    g.p.act('restart')                           # the restart at idle: a start after the install
+                else:
+                    g.p.act('enable')
+                    g.p.clock(plus=10)
+                    g.p.act('start')                             # `enable --now`
+                r = pass_(self, g)
+                self.assertEqual(held(g, 'CI DISABLED'), [], r.stdout[-2500:])
+
     def test_pool_down_s_text_names_readme_when_no_run_ends_the_journal(self):
         """Opus F4 (B2a review r1): POOL DOWN's text promises that a run ends the window journal only when one can: a
         journal RECOVER cannot read (exit 6), and a closed one the apply step cannot read (a switch closed

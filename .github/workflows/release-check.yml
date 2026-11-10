@@ -74,6 +74,9 @@ jobs:
     # own switch cells in test_switch_flags.py, and cut ten parts. Each part's estimate (the slower image's module times
     # in that run, plus B3's new cells' local time x 1.35, plus about 20 s of job): [a-b] 7.2, [c-m] 10.2, [n-q] 5.8,
     # rec 7.7, re[!c] 9.3, [sv-z] 8.4, t 9.5, u[!p]a 11.3 (test_unattended alone), up 9.8 and u[!p][!a] 9.4 min.
+    # S2b-3c-2 B4a's new modules (their local time x 1.35): test_pass_switch.py joins [n-q] (9.2 min), and the two
+    # E-14 cells of about 150 passes each go to two parts, test_recurring_passes.py to rec (9.6) and test_age_reset.py
+    # to [a-b] (9.9, with test_apply's real keep-prev closes); the other parts as above.
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:

@@ -366,7 +366,7 @@ class UpdaterPass(unittest.TestCase):
                              ([(0, False, ERR, False), (10, False, ERR, False)], [15]))
             self.assertEqual((self.failures(c), c['state']['sets'][MAIN]['proofs']), ([(20, False, ERR, True)], [15]))
             self.assertEqual((c['keep']['succeeded'], c['state']['newest']), (1, 160))
-            self.assertIn('runner-updater: pass: would accept hz-docker', c['stdout'])
+            self.assertIn('runner-updater: pass: accepted hz-docker: ', c['stdout'])   # KEEP acts (S2b-3c-2 E-4)
         self.twins(MAIN, check, c_at)
 
     def test_the_compare_holds_when_the_second_rig_is_made_a_minute_later(self):

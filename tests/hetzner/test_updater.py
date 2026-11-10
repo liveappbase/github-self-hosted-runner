@@ -59,7 +59,7 @@ H = 'ab' * 32
 OUTAGE = 4          # THE OUTAGE RULE's reads of the unit in a pass with the unit enabled (S2b-3c-1 B2a, its review r1):
                     # unit_read, runs' two proc_now, then the unit read again (the deciding read, after the RUNS check)
 README_LINE = 'An unfinished window the updater cannot end'   # README's section for a journal no run ends
-DUE = r'(?m)^runner-updater: pass: (hz-docker is not due: |would switch hz-docker to )'   # DUE's one line
+DUE = r'(?m)^runner-updater: pass: (hz-docker is not due: |hz-docker is due for runner )'   # DUE's one line (B4a)
 # runscaler's own records (the real log's text format; the set names are host.conf.example's)
 REAL = ('2026-10-25 20:04:01 INFO linux-ci-main: Scaling up runner currentCount=0 desiredCount=1\n'
         '2026-10-25 20:04:01 INFO linux-ci-main: refreshing token githubConfigUrl=https://github.com/example-org\n'
@@ -1453,7 +1453,8 @@ class Facts(unittest.TestCase):
             'stops': []})
 
     def test_the_family_s_candidate_back_until_and_stops_are_the_state_s(self):
-        c, s = candidate(1762156800), [stop('NO IDLE', V, text='3 days')]
+        # B4a: a STOP no level of the pass changes (a held NO IDLE goes once the family has a candidate)
+        c, s = candidate(1762156800), [stop('HAND CHANGE', V, text='checked')]
         g = Rig(self, on=True, families={FAM: {'candidate': c, 'back_until': 1762761600, 'stops': s}})
         g.ok('pass')
         f = g.facts()
@@ -1954,12 +1955,13 @@ class Would(unittest.TestCase):
         self.assertEqual(g.out('r1')['families'][FAM]['verdict'], 'none')
         self.assertNotIn("R1's rollback is due", r.stdout)
 
-    def keep(self, records, after, slow=1):
+    def keep(self, records, after, slow=1, **fam):
         """KEEP's boundary against the PASS'S START (B2a review r1, ONE CLOCK PER PASS): the fake clock set to the
         window's `since` + AFTER right before the pass, which reads its clock ONCE, first, so every decision of it
         (KEEP's deadline here) uses that value, however long its earlier steps (RECOVER, THE OUTAGE RULE's 3 s pair)
-        take. SLOW: each `sleep` of the pass moves the fake clock SLOW times its argument (a slow host)."""
-        g, t = self.armed()
+        take. SLOW: each `sleep` of the pass moves the fake clock SLOW times its argument (a slow host). FAM: more of
+        the family's members. Returns the rig, the pass and its clock (the `now` KEEP's acts use)."""
+        g, t = self.armed(**fam)
         since = g.out('r1')['families'][FAM]['since']
         g.append(records(t))
         if slow != 1:
@@ -1967,34 +1969,95 @@ class Would(unittest.TestCase):
             self.assertEqual(SLEEP_STUB.count(old), 1)
             g.p.write(g.p.path('stubs', 'sleep'), SLEEP_STUB.replace(old, "c['now'] += %d * float(a[0])" % slow)
                       .replace('@SB@', repr(g.p.root)), 0o755)
-        g.p.clock(now=since + after)
+        now = g.p.clock(now=since + after)
         r = g.ok('pass')
         self.assertGreaterEqual(g.p.clock(), since + after + 3 * slow, 'the premise: the pass slept (its RUNS pair)')
-        return g, r
+        return g, r, now
 
-    def test_72_h_after_the_window_opened_with_a_success_it_would_accept(self):
-        g, r = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600)
+    # KEEP ACTS (S2b-3c-2 E-4, the Studio's pass_keep and accept): "would accept/hold" are gone (B4a item 3)
+    def test_72_h_after_the_window_opened_with_a_success_it_accepts(self):
+        """ACCEPT: back_until = the pass's now + 7 days, no candidate, a held NO EVIDENCE gone (it healed), `previous`
+        kept (AFTER ACCEPT: `back` restores it until back_until), the family's other STOPs kept; the line names `back`
+        and its date; the pass exits 0."""
+        prev = {MAIN: ref(digest(37)), SMALL: ref(digest(37))}
+        g, r, now = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600, previous=prev,
+                              stops=[stop('NO EVIDENCE', V, text='x'), stop('check failed', '2.300.0', text='y')])
         self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'accept')
-        self.assertIn('runner-updater: pass: would accept hz-docker (this release takes no action)', r.stdout)
+        h = g.state()['families'][FAM]
+        self.assertIsNone(h['candidate'])
+        self.assertEqual(h.get('back_until'), now + 7 * 86400)
+        self.assertEqual(h['previous'], prev)
+        self.assertEqual([s['stop'] for s in h['stops']], ['check failed'])
+        self.assertNotIn('would accept', r.stdout)
+        self.assertIn('runner-updater: pass: accepted hz-docker: runner %s: 1 succeeded of 1 completed in 72 h; '
+                      '`runner-updater back hz-docker` restores %s until ' % (V, ref(digest(37))), r.stdout)
 
     def test_control_a_second_before_72_h_it_observes(self):
         """Its margin is the pass's own start (a second before the deadline, a fixed reference the pass reads first),
         and a slow host's longer steps before the core do not cross it (Codex F2: vary the preceding delay)."""
         for slow in (1, 100):
             with self.subTest(slow=slow):
-                g, r = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600 - 1, slow=slow)
+                g, r, now = self.keep(lambda t: completed(t, 'succeeded') + scaling(t + 1), 72 * 3600 - 1, slow=slow)
                 self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'observe')
-                self.assertNotIn('would accept', r.stdout)
+                self.assertNotIn('accepted', r.stdout)
+                self.assertEqual(g.state()['families'][FAM]['candidate']['version'], V)
+                self.assertNotIn('back_until', g.state()['families'][FAM])
 
-    def test_72_h_with_completions_none_succeeded_would_hold_jobs_fail(self):
-        g, r = self.keep(lambda t: completed(t, 'failed') + scaling(t + 1), 72 * 3600)
-        self.assertIn('runner-updater: pass: would hold hz-docker: STOP JOBS FAIL ON THE NEW IMAGE (this release takes '
-                      'no action)', r.stdout)
+    def test_72_h_with_completions_none_succeeded_holds_jobs_fail(self):
+        """STOP JOBS FAIL ON THE NEW IMAGE of the candidate's version, its counts in the detail (status names `back` and
+        `retry`), the candidate kept, held ONCE (the next pass: KEEP holds on it, no second one), exit 0 (E-15)."""
+        g, r, now = self.keep(lambda t: completed(t, 'failed') + scaling(t + 1), 72 * 3600)
+        self.assertIn('runner-updater: pass: hz-docker holds STOP JOBS FAIL ON THE NEW IMAGE: runner %s: 1 jobs '
+                      'completed in 72 h, none succeeded' % V, r.stdout)
+        h = g.state()['families'][FAM]
+        jf = [s for s in h['stops'] if s['stop'] == 'JOBS FAIL ON THE NEW IMAGE']
+        self.assertEqual(len(jf), 1, h)
+        self.assertEqual(jf[0]['version'], V)
+        self.assertEqual(jf[0]['detail']['counts'], {'completions': 1, 'succeeded': 0, 'failed': 1, 'canceled': 0})
+        self.assertEqual(h['candidate']['version'], V)
+        g.p.clock(plus=600)
+        g.ok('pass')
+        self.assertEqual(len([s for s in g.state()['families'][FAM]['stops']
+                              if s['stop'] == 'JOBS FAIL ON THE NEW IMAGE']), 1)
+        self.assertIn('`runner-updater back hz-docker`', g.ok('status').stdout)
 
-    def test_72_h_with_no_completion_would_hold_no_evidence(self):
-        g, r = self.keep(lambda t: scaling(t), 72 * 3600)
-        self.assertIn('runner-updater: pass: would hold hz-docker: STOP NO EVIDENCE (this release takes no action)',
-                      r.stdout)
+    def test_72_h_with_no_completion_holds_no_evidence_once(self):
+        g, r, now = self.keep(lambda t: scaling(t), 72 * 3600)
+        self.assertIn('runner-updater: pass: hz-docker holds STOP NO EVIDENCE: runner %s: no job completed in 72 h'
+                      % V, r.stdout)
+        g.p.clock(plus=600)
+        r2 = g.ok('pass')
+        self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'no-evidence', 'the premise: KEEP says it again')
+        ne = [s for s in g.state()['families'][FAM]['stops'] if s['stop'] == 'NO EVIDENCE']
+        self.assertEqual(len(ne), 1)
+        self.assertEqual(ne[0]['version'], V)
+        self.assertNotIn('holds STOP NO EVIDENCE', r2.stdout)
+
+    def test_a_disk_cleared_by_its_level_lets_keep_accept_in_that_pass(self):
+        """r3 Opus F2 (THE TWO LEVELS run before the facts): a candidate observed 72 h with one success, a held DISK, and
+        df exactly 10 % free: in that pass DISK leaves the state AND KEEP's verdict is accept (back_until = now + 7 d).
+        The control: 10 % less 1 KiB: DISK stays, KEEP held, the candidate kept."""
+        for avail, cleared in ((100000, True), (99999, False)):
+            with self.subTest(avail=avail):
+                g, t0 = self.armed()
+                st = g.state()
+                st['families'][FAM]['stops'] = [stop('DISK', text='low')]   # held after the first pass (a low disk)
+                g.put(st)
+                g.p.disk(1000000, avail)
+                since = g.out('r1')['families'][FAM]['since']
+                g.append(completed(t0, 'succeeded') + scaling(t0 + 1))
+                now = g.p.clock(now=since + 72 * 3600)
+                r = g.ok('pass')
+                h = g.state()['families'][FAM]
+                held = [s['stop'] for s in h.get('stops', [])]
+                if cleared:
+                    self.assertNotIn('DISK', held, r.stdout[-3000:])
+                    self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'accept')
+                    self.assertEqual(h.get('back_until'), now + 7 * 86400)
+                else:
+                    self.assertIn('DISK', held)
+                    self.assertEqual(g.out('keep')['families'][FAM]['verdict'], 'held')
+                    self.assertEqual(h['candidate']['version'], V)
 
     def test_the_switch_line_is_due_s_one_line(self):
         """S2b-3b-2: S2b-3a's switch line ("would switch hz-docker: the pool is idle ...", which read no release) is
@@ -2008,7 +2071,7 @@ class Would(unittest.TestCase):
                     g.p.curl['healthz'] = hz
                 r = g.ok('pass')
                 switch = [l for l in r.stdout.splitlines() if l.startswith('runner-updater: pass: ')
-                          and ('switch' in l or ' is not due: ' in l)]
+                          and (' is due for runner ' in l or ' is not due: ' in l)]
                 self.assertEqual(len(switch), 1, r.stdout[-3000:])
                 self.assertRegex(switch[0], DUE)
                 self.assertIn('idle: %s (' % ('idle' if hz is None else 'not-idle'), r.stdout)
@@ -2067,9 +2130,9 @@ class NoAction(unittest.TestCase):
     def test_control_a_planted_restart_is_seen(self):
         g = self.rig()
         text = g.program()
-        self.assertEqual(text.count('\n  would_do\n'), 1)
-        g.plant('bin/runner-updater', text.replace('\n  would_do\n', '\n  would_do\n  systemctl --user restart '
-                                                                     'runscaler\n'))
+        line = '\n  pass_rollback "$now"'    # B4a: the line after KEEP's acts (would_do is gone)
+        self.assertEqual(text.count(line), 1)
+        g.plant('bin/runner-updater', text.replace(line, '\n  systemctl --user restart runscaler' + line))
         m = self.mark(g)
         g.ok('pass')
         with self.assertRaises(AssertionError):

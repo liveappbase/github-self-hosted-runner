@@ -14,10 +14,13 @@ ExecStart=%h/bin/runner-updater pass
 # build V, as its child). 02-d1.sh's own bounded waits: 60 s (GitHub's API), 900 s (the tarball), 30 s (docker) and
 # 20 s (the registry); the build was measured on the host at 7 min 38 s from the start of its step 5 to the image
 # (2026-10-22, with the pull of the base image; 27 s with the base cached), and its checks after the build at 66 s:
-# about 26 min in all. RS_USER's pass runs RECOVER (S2b-3c-1 D-g: the pool-image.sh window a cut left open is ended by
-# its child): its longest is a drain of runscaler (TimeoutStopSec 4260 s), a start (600 s) and 3 validate tries of
-# 130 + 20 s: about 5310 s. 2 h is above both, one file for both users. At the bound systemd stops the unit: SIGTERM
-# to EVERY process of its cgroup.
+# about 26 min in all. RS_USER's pass makes at most ONE restart of runscaler (S2b-3c-1 D-g; S2b-3c-2 E-13): RECOVER's
+# (the pool-image.sh window a cut left open is ended by its child: its longest is a drain of runscaler, TimeoutStopSec
+# 4260 s, a start, 600 s, and 3 validate tries of 130 + 20 s: about 5310 s), OR one window's: R1's rollback or DUE's
+# switch (3 render or validate tries of 150 s, the drain up to 4260 s, the start's 600 s: about 5310 s); a pass whose
+# RECOVER restarted starts no window, and a window that restarted and left its journal open gets no RECOVER in that
+# pass. 2 h is above both, one file for both users. At the bound systemd stops the unit: SIGTERM to EVERY process of
+# its cgroup.
 # 02-d1.sh exits 143 (its own trap removes its build context); the updater waits for it (a TERM trap while the build
 # runs), prints its CUT line and exits 0: no STOP, and the next pass builds the release again. A TERM that comes
 # before 02-d1.sh starts is a CUT too ("no build started"). Not unconditional: systemd sends SIGKILL to what is left at

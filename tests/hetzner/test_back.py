@@ -424,7 +424,9 @@ class Text(unittest.TestCase):
         """B2a's sentences (build3c1-B2a.log :139 :143, B2a's status and off): `status` names which of three a window
         journal is, its last STOP and whether a runscaler runs, no evidence of a departed candidate, and the line of an
         unreadable verdict; `off` runs RECOVER and the apply step first, says whether its run changed something, and
-        stops a pending rollback's clock; the Files table's runner-updater row names `back hz-docker` and the rollback.
+        stops a pending rollback's clock; the Files table's runner-updater row names `back hz-docker`, the rollback, and
+        (S2b-3c-2 B4a, which changed this cell: it said "it switches nothing in this release") KEEP's accept and the
+        switch at an idle moment.
         The control: the bullets are found."""
         text = readme()
         sec = section(text, 'The updater: status, on, off, pass, build')
@@ -438,7 +440,8 @@ class Text(unittest.TestCase):
                   'its line says whether that run changed something', 'stops the clock of a pending rollback'):
             self.assertIn(s, onoff)
         row, = [l for l in text.splitlines() if l.startswith('| `bin/runner-updater` |')]
-        for s in ('`back hz-docker`', "rolls the pool back on R1's verdict", 'it switches nothing in this release'):
+        for s in ('`back hz-docker`', "rolls the pool back on R1's verdict", "accepts a candidate on KEEP's verdict",
+                  'switches the pool to a due runner release at an idle moment'):   # B4a: the pass switches
             self.assertIn(s, row)
 
     def test_the_rollback_section_is_what_status_shows_and_the_stop_s_hand_line_names_it(self):

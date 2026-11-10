@@ -763,7 +763,7 @@ class Text(unittest.TestCase):
         self.assertIn('| `bin/runner-updater` | RS_USER, RUN_USER |', text)
         sec = text.split('\n## The updater: status, on, off, pass, build\n', 1)[1].split('\n## ', 1)[0]
         for s in ("ssh <RUN_USER>@<host> '~/bin/runner-updater build <runner version>'", 'runner-updater pass',
-                  'check failed', 'would switch hz-docker to', 'cut by a signal', 'holds no STOP',
+                  'check failed', 'hz-docker is due for runner', 'cut by a signal', 'holds no STOP',
                   'clears that STOP when it finds'):
             self.assertIn(s, sec)
         self.assertRegex(text, r'(?s)\n10\. \*\*The updater \(RS_USER and RUN_USER\)\.\*\*.*Then the same line with '
