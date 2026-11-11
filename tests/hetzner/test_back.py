@@ -28,7 +28,8 @@ from tests.hetzner.test_unattended import PASS, UNKNOWN, alive, keys, value
 from tests.hetzner.test_updater import FAM, MAIN, OLD, SMALL, V, WINDOW, WINDOWS
 from tests.hetzner.test_verdict import PREV, REJECTED, Armed
 
-USAGE = 'usage: runner-updater status | on | off | pass | back hz-docker | build VERSION'
+USAGE = ('usage: runner-updater status | on | off | pass | back hz-docker | retry hz-docker | rebuild hz-docker '
+         '[VERSION] | switch-now hz-docker [VERSION] | build VERSION')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
 UPD = os.path.join(REPO, 'linux-docker', 'bin', 'runner-updater')
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
@@ -123,6 +124,36 @@ class WithACandidate(unittest.TestCase):
         with open(b.p.path('logs', 'hang.pid')) as f:
             self.assertFalse(alive(int(f.read().split()[0])), 'the cut validate still runs')
 
+    def test_a_rollback_s_line_says_it_runs_only_after_a_start_into_its_target(self):
+        """S2b-3c-2 B4b item 10 (B4a review r1 Opus F1's class; r2 Opus's probe): a person's `systemctl --user disable
+        --now` during the rollback's drain: the window closes target-idle (rolled back, nothing started, STOP CI
+        DISABLED held), and the line says the TARGET is installed and runscaler has not started into it, never "it
+        runs", for `back hz-docker` and for R1's rollback in a pass. The control: the uninterrupted rollback
+        (target-running) says "it runs PREV again". The lines that say the pool runs an image, listed by
+        `grep -n -E '\bruns\b' linux-docker/bin/runner-updater`, are each a target-running close's or a process read's."""
+        for who in ('back', 'pass'):
+            for disable in (True, False):
+                with self.subTest(who=who, disable=disable):
+                    b = B(self) if who == 'back' else Armed(self)
+                    if disable:
+                        b.p.hooks(('systemctl:stop-done', 'disable'))
+                    r = b.back(0) if who == 'back' else b.ok('pass')
+                    (wid, lines), = b.windows()
+                    self.assertEqual(lines[-2].split(' ')[-1], 'target-idle' if disable else 'target-running', lines)
+                    pre = 'runner-updater: back hz-docker: rolled back: ' if who == 'back' else \
+                        'runner-updater: pass: rolled back hz-docker: '
+                    line = [l for l in r.stdout.splitlines() if l.startswith(pre)]
+                    self.assertEqual(len(line), 1, r.stdout[-3000:])
+                    if disable:
+                        self.assertEqual(len(b.since('start')), 0)
+                        self.assertIn('CI DISABLED', b.held())   # (R1's rollback holds its ROLLED BACK too)
+                        self.assertNotIn('it runs', line[0])
+                        self.assertEqual(line[0], pre + '%s is installed again, and runscaler has not started into it (the '
+                                         'close: target-idle; status shows its STOPs) (the window journal %s)'
+                                         % (ref(PREV), wid))
+                    else:
+                        self.assertEqual(line[0], pre + 'it runs %s again (the window journal %s)' % (ref(PREV), wid))
+
 
 @needs_container
 class AfterAccept(unittest.TestCase):
@@ -162,7 +193,8 @@ class AfterAccept(unittest.TestCase):
         b.put(st)
         before = b.raw()
         r = b.back(1)
-        self.assertIn('runner-updater: REFUSE back hz-docker runs %s already' % ref(OLD), r.stdout)
+        self.assertIn('runner-updater: REFUSE back hz-docker: config.toml names %s already, its previous image: nothing '
+                      'to go back to' % ref(OLD), r.stdout)
         b.unchanged(r, before)
 
 
@@ -449,19 +481,25 @@ class Text(unittest.TestCase):
         rollback, the rejection (the rejected file), STOP ROLLED BACK and "R1's failures are not readable", the
         connect-only retry after 1 hour, each precondition's line (CI disabled by a person, HAND CHANGE, ROLLBACK
         FAILED, one restart per pass), the 2 hours of tries, THE OUTAGE RULE's POOL DOWN and CI DISABLED's install
-        boundary, and that `retry` and `rebuild` are a later release's. The updater's ROLLBACK FAILED hand line names
-        that section by its own title (HAND_OF). The control: the section is found."""
+        boundary, and (S2b-3c-2 B4b) the STOP table, each next step a command of this release, no "later release". The
+        updater's ROLLBACK FAILED hand line names that section by its own title, then `runner-updater retry hz-docker`
+        (HAND_OF; E-5's THE HAND RULE). The control: the section is found."""
         text = readme()
         sec = one(section(text, 'The rollback, and what status shows of it'))
         for s in ("R1's counted failures", "R1's failures are not readable", '~/.local/state/runner-updater/rejected',
                   'STOP ROLLED BACK', 'one retry after 1 hour', 'rollback pending: CI disabled by a person',
                   'STOP HAND CHANGE', 'STOP ROLLBACK FAILED', 'one restart per pass', '2 hours',
                   'runner-updater back hz-docker', 'STOP POOL DOWN', 'STOP CI DISABLED',
-                  'started after `config.toml` was installed', 'come in a later release'):
+                  'started after `config.toml` was installed', '| STOP | Next step |',
+                  '| `check failed` of a window, `ROLLED BACK`, `NO EVIDENCE` | `runner-updater retry hz-docker` |',
+                  '| `ROLLBACK FAILED` | fix what it names (this section), then `runner-updater retry hz-docker` |',
+                  '| `HAND CHANGE`, `NO BASELINE`, `recipe changed` | `runner-updater rebuild hz-docker [<runner version>]` |',
+                  '| `NO IDLE` | `runner-updater switch-now hz-docker` |'):
             self.assertIn(s, sec)
+        self.assertNotIn('later release', sec)
         with open(UPD) as f:
-            hand = re.search(r'"ROLLBACK FAILED" then \{hand: "read linux-docker/README\.md, \\"([^"\\]+)\\""\}',
-                             f.read())
+            hand = re.search(r'"ROLLBACK FAILED" then \{hand: "fix what it names \(linux-docker/README\.md, \\"([^"\\]+)\\"\), '
+                             r'then runner-updater retry hz-docker"\}', f.read())
         self.assertIsNotNone(hand)
         self.assertIn('\n## %s\n' % hand.group(1), text)
 

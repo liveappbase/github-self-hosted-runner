@@ -2234,8 +2234,8 @@ class Usage(unittest.TestCase):
             with self.subTest(args):
                 r = g.run(*args)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-                self.assertIn('usage: runner-updater status | on | off | pass | back hz-docker | build VERSION',
-                              r.stderr)
+                self.assertIn('usage: runner-updater status | on | off | pass | back hz-docker | retry hz-docker | '
+                              'rebuild hz-docker [VERSION] | switch-now hz-docker [VERSION] | build VERSION', r.stderr)
 
 
 # ---- the text (runs anywhere)

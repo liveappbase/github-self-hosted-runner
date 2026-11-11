@@ -38,7 +38,8 @@ STATE = os.path.join(STATEDIR, 'state.json')
 LOCK = os.path.join(STATEDIR, 'lock')
 DAY = 86400
 FAIL = 'FAIL docker build failed: no record, image.ref NOT changed\n'
-USAGE = 'usage: runner-updater status | on | off | pass | back hz-docker | build VERSION'   # its one usage line
+USAGE = ('usage: runner-updater status | on | off | pass | back hz-docker | retry hz-docker | rebuild hz-docker '
+         '[VERSION] | switch-now hz-docker [VERSION] | build VERSION')   # its one usage line
 
 
 # rm, for the TERM-window cell: an rm whose arguments name BUILDOUT (build.out: build_child's first step, right before

@@ -393,6 +393,37 @@ class TheTwoLevels(unittest.TestCase):
                 self.assertIn(NOT + 'STOP NO IDLE (runner %s)' % V, r.stdout)
                 self.assertEqual(g.ups(), [])
 
+    def test_a_start_in_the_install_s_own_second_keeps_no_idle(self):
+        """B4b item 9 (B4a review r2, Opus F1): the level's start-versus-install compare at its boundary. NO IDLE of V
+        held by real busy passes; a person's attended `pool-image.sh up V` cut right after its install; runscaler's start
+        planted at config.toml's install second: equal proves nothing (core.jq's "equal is NOT proven"): NO IDLE stays,
+        and the line says why. The control: the start one second later drops it (DUE: not newer)."""
+        for plus in (0, 1):
+            with self.subTest(plus=plus):
+                g = G(self, hz=BUSY)
+                g.p.docker['versions'] = {ref(OLD): CUR + '\n', ref(NEW): V + '\n'}
+                t0 = g.p.clock()
+                g.go()
+                g.p.clock(now=t0 + NO_IDLE_S)
+                g.go()
+                self.assertEqual(len(g.held('NO IDLE')), 1)
+                g.p.curl['healthz'] = IDLE
+                g.p.hooks(('mv-done:config.toml', 'kill'))
+                r = g.p.unattended('up', V, prefix=())
+                self.assertEqual(r.returncode, -9, r.stdout[-3000:] + r.stderr)
+                g.p.hooks()
+                m = int(os.stat(g.p.rpath('config.toml')).st_mtime)
+                g.p.set_unit(start=m + plus)
+                g.p.clock(plus=600)
+                r = g.go()
+                if plus:
+                    self.assertEqual(g.held('NO IDLE'), [], r.stdout[-3000:])
+                    self.assertIn(NOT + 'release v%s is not newer than its runner %s' % (V, V), r.stdout)
+                else:
+                    self.assertEqual(len(g.held('NO IDLE')), 1, r.stdout[-3000:])
+                    self.assertIn('runner-updater: pass: STOP NO IDLE (runner %s) stays: ' % V, r.stdout)
+                    self.assertIn('started at %d; config.toml installed at %d)' % (m, m), r.stdout)
+
 
 @needs_container
 class TheCoreStateCopy(unittest.TestCase):
@@ -470,8 +501,9 @@ class Text(unittest.TestCase):
                   "the registry serves `config.toml.prev`'s image"):
             self.assertIn(s, sw)
         rb = one(section(text, 'The rollback, and what status shows of it'))
-        for s in ('`STOP NO IDLE` names `runner-updater switch-now hz-docker`',
-                  'A `STOP NO IDLE` ends when runscaler runs that release', 'the first pass after that restart drops it',
+        for s in ('`STOP NO IDLE` names `runner-updater switch-now hz-docker`, which switches that release now',
+                  'A `STOP NO IDLE` ends when runscaler runs that release: `switch-now`\'s window drops it, and so does a '
+                  'release put in by hand at a quiet time', 'the first pass after that restart drops it',
                   'a config.toml installed without that restart (the step cut while it waits) keeps it',
                   '`systemctl --user enable runscaler`, then `systemctl --user restart runscaler` at idle',
                   '`systemctl --user enable --now runscaler`', 'its validate first'):

@@ -76,7 +76,10 @@ jobs:
     # rec 7.7, re[!c] 9.3, [sv-z] 8.4, t 9.5, u[!p]a 11.3 (test_unattended alone), up 9.8 and u[!p][!a] 9.4 min.
     # S2b-3c-2 B4a's new modules (their local time x 1.35): test_pass_switch.py joins [n-q] (9.2 min), and the two
     # E-14 cells of about 150 passes each go to two parts, test_recurring_passes.py to rec (9.6) and test_age_reset.py
-    # to [a-b] (9.9, with test_apply's real keep-prev closes); the other parts as above.
+    # to [a-b] (9.9, with test_apply's real keep-prev closes); the other parts as above. S2b-3c-2 B4b's three new
+    # modules, by the parts' CI job times at f3ad51f (run 42924900957, the slower image: [c-m] 8, re[!c] 9, [sv-z] 9 min;
+    # u[!p]a took 12 and rec 11, so they get none) plus their local time x 1.35: test_command_rebuild.py joins [c-m]
+    # (10.2 min), test_retry.py re[!c] (9.9) and test_switch_now.py [sv-z] (10.1).
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
