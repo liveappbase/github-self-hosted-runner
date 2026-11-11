@@ -88,7 +88,7 @@
 #              that version (and this release's recipe), and a `build VERSION` that passes, clear it
 #   A member it does not read (at the top, in a STOP): WAIT, exit 4, as RS_USER's.
 # DIFFERS from the Studio's state: no `images` (this host has no host pin), no `recipe` (the BASELINE is RUN_USER's
-#   build record of the image config.toml runs: DUE, step 4), no protected list (this host deletes no image), and so no
+#   build record of the image config.toml names: DUE, step 4), no protected list (this host deletes no image), and so no
 #   LOST state: a missing state is a fresh one. ONE family, hz-docker (the watchdog's name): its provider is docker and
 #   its sets are the host config's MAIN_SET and SMALL_SET; another family in the state is a member it does not read
 #   (WAIT). Two users, each with its own state, key and lock; RUN_USER builds, RS_USER switches.
@@ -195,20 +195,27 @@
 #            is emptied first, by a rename of an empty full copy (a run cut between them leaves the versions rejected in
 #            the state, and the next retry ends it); a JOBS FAIL of the candidate's version with core.jq's r1_bar null
 #            is the person's ACCEPT (KEEP ACTS' accept, in that write). Its lines: what it cleared and what stays, and per
-#            cleared release with no build record of RUN_USER, DUE's "waits for RUN_USER's build" text with RUN_USER's
-#            `build V` line. THE OUTAGE RULE after its RECOVER. Exit 0, 1 a STOP or a REFUSE, 3 untested jq.
+#            cleared release with no build record of RUN_USER that DUE would switch to (newer than the runner of RUN_USER's
+#            record of the image config.toml names: B4b fix 1), DUE's "waits for RUN_USER's build" text with RUN_USER's
+#            `build V` line (`ssh -p SSH_PORT`). THE OUTAGE RULE after its RECOVER. Exit 0, 1 a STOP or a REFUSE, 3
+#            untested jq.
 #   rebuild hz-docker [VERSION]   RS_USER's only (S2b-3c-2 E-6, its r2 and r3 FOLDs): ONE switch window (THE SWITCH'S
 #            CHILD, sw_child, with the idle pair) to RUN_USER's build record of the current version for this release's
 #            recipe (THE VERSION OF rebuild AND switch-now: cmd_target). RECOVER FIRST; OFF: REFUSE; one restart of
 #            runscaler per run (a RECOVER FIRST that started it: exit 5); DISK: a REFUSE, nothing held; never NO IDLE (its
 #            release is due from now; `due` is not touched); it writes the state's `core` to THE CORE STATE COPY before
-#            its `up` (E-14). THE OUTAGE RULE after its RECOVER and its window. Exit 0 switched (runscaler runs the
-#            TARGET), 5 not now (not idle, START STATE; or its RECOVER restarted runscaler), 1 a STOP, a REFUSE, a close
+#            its `up` (E-14). config.toml naming the target already with no runscaler proven to run it (an install with
+#            no restart: B4b fix 1): a REFUSE that names switch-now (rebuild never skips idle, so it restarts nothing).
+#            THE OUTAGE RULE after its RECOVER and its window. Exit 0 switched (runscaler runs the TARGET), 5 not now (not idle, START STATE; or its RECOVER restarted runscaler), 1 a STOP, a REFUSE, a close
 #            with no switch or a journal that stays.
 #   switch-now hz-docker [VERSION]   RS_USER's only (S2b-3c-2 E-7, its r2 and r3 FOLDs): a person's override of the
 #            idle pair for ONE window, never from a pass (do_switch_now: (a) a switch journal RECOVER keeps open:
 #            `recover --unattended --now`; (b) a held NO IDLE: `up --unattended V D --now`; (c) rebuild's target with
-#            --now). The same RECOVER FIRST, OFF, one restart, DISK and OUTAGE rules as rebuild. Exit 0 switched, or the
+#            --now). The same RECOVER FIRST, OFF, one restart, DISK and OUTAGE rules as rebuild. A VERSION must be the one
+#            it switches: in (a) the open journal's `version` (B4b fix 1, opus F2), else a REFUSE that names it, nothing
+#            restarted, the journal open. Its target named by config.toml already and run by no runscaler since its
+#            install: up's shortcut with --now restarts runscaler into it once (THE SHORTCUT'S RESTART, pool-image.sh's
+#            header; B4b fix 1, opus F1). Exit 0 switched, or the
 #            switch is done (RECOVER ended it and runscaler runs its TARGET), or nothing to switch (up's shortcut); 5 not
 #            now (START STATE; or its RECOVER restarted runscaler); 1 a STOP, a REFUSE, a journal that stays open for
 #            another reason than idle, or a close that does not run its TARGET.
@@ -454,7 +461,7 @@
 #   6. healthz: runscaler's /healthz read twice, 3 s apart (runner-facts.sh's healthz_pair), one JSON line each.
 #   A fact it cannot read: "runner-updater: REFUSE no facts: WHY", exit 1, and no core program runs.
 # DIFFERS from the Studio's pass: no protected list to rewrite, no report command and no observe file; DUE's baseline is
-#   RUN_USER's build record of the image config.toml runs (found by its digest), not a recipe in the state, and the
+#   RUN_USER's build record of the image config.toml names (found by its digest), not a recipe in the state, and the
 #   family's current version is that record's (no `images`); DUE's last check is the build record of the release, not a
 #   download of its tarball (RUN_USER's build checked its digest); the release is built by RUN_USER's own pass (THE
 #   BUILD PASS), not in a window; the process is systemd's MainPID and ActiveEnterTimestamp (one read), not ps; /healthz
@@ -553,7 +560,7 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   done < "$HOST_CONF"
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
-host_conf runner-updater RS_USER RUN_USER RS_HEALTH_PORT MAIN_SET SMALL_SET HOST_IP
+host_conf runner-updater RS_USER RUN_USER RS_HEALTH_PORT MAIN_SET SMALL_SET HOST_IP SSH_PORT
 
 say() { echo "runner-updater: $*"; }
 refuse() { echo "runner-updater: REFUSE $*"; exit 1; }
@@ -1859,7 +1866,7 @@ due() {
   base=$RR_REC_RECIPE cur=$RR_REC_VERSION brec=$RR_RECORD
   # 5. recipe changed
   if [ "$base" != "$rec" ]; then
-    dnot "STOP recipe changed: this release's image recipe is $rec, the build record of its running image ($brec) names $base (image/'s files changed); $(baseline_next "$cur")"
+    dnot "STOP recipe changed: this release's image recipe is $rec, and the build record of config.toml's image ($brec) names $base (image/'s files changed); $(baseline_next "$cur")"
     return 0
   fi
   # 6. its current version: cur, that record's. 7. the latest release (the first step that asks GitHub)
@@ -1979,12 +1986,15 @@ sw_notnow() {
 }
 # WHO V: the line of a switch window the apply step applied (A_*, AJ_*); 0 only when it switched and runscaler runs
 # its TARGET (CLASS target-running: "it runs", B4a fix 1, Opus r1 F1); its shortcut (no `target` line: config.toml
-# names that image already, and a runscaler started after its install runs it) is 0 too
+# names that image already, and a runscaler started after its install runs it) is 0 too, and so is THE SHORTCUT'S
+# RESTART (--now, B4b fix 1: no `target` line, its `stopping`, closed target-running: it restarted runscaler into it)
 sw_said() {
   if [ "$A_DONE" = 1 ] && [ "$A_CAND" = set ] && [ "$A_CLASS" = target-running ]; then
     say "$1: switched $FAMILY to $2: it runs $(rb_target) (the window journal $AJ_ID)"; return 0
   elif [ "$A_DONE" = 1 ] && [ "$A_CAND" = set ]; then   # target-idle, target-old: installed, not started into (Opus r1 F1)
     say "$1: switched $FAMILY to $2: $(rb_target) is installed, and runscaler has not started into it (the close: $A_CLASS; the window journal $AJ_ID; status shows its STOPs)"
+  elif [ -z "$WSTOP" ] && [ -z "$AJ_T" ] && [ "$A_DONE" = 1 ] && [ "$A_CLASS" = target-running ] && [ -n "$AJ_STOPPING" ]; then
+    say "$1: switched $FAMILY to $2: runscaler restarted into $AJ_OLD, which config.toml named already (installed with no restart since: the window's shortcut with --now; the window journal $AJ_ID)"; return 0
   elif [ -z "$WSTOP" ] && [ -z "$AJ_T" ] && [ "$SW_RC" = 0 ]; then
     say "$1: nothing to switch: config.toml names runner $2's image already, and a runscaler that started after its install runs it (the window's shortcut; the window journal $AJ_ID)"; return 0
   elif [ -z "$WSTOP" ]; then
@@ -1998,7 +2008,7 @@ sw_said() {
 # shortcut close: the switch it waited for is done): RUN_USER's record of config.toml's image names it AND the
 # runscaler that runs started after config.toml's install (the header: an install counts nothing until a restart)
 levels() {
-  local v l a b why p inst pw
+  local v l a b why p
   if printf '%s\n' "$ST" | jq -e --arg f "$FAMILY" 'any((.families[$f].stops // [])[]; .stop == "DISK")' > /dev/null 2>&1 \
      && disk_ok; then
     change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "DISK")]' --arg f "$FAMILY"
@@ -2016,17 +2026,29 @@ levels() {
     a=${l%% *} b=${l#* }; a=${a#*=} b=${b#*=}
     [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -n "$a" ] && [ "$a" = "$b" ] && [[ $a =~ @(sha256:[0-9a-f]{64})$ ]] \
       && rr_record_of "$BUILDS" "${BASH_REMATCH[1]}" && ! newer "$v" "$RR_REC_VERSION" || return 0
-    inst=$(install_of "$CFG")
-    if [ "$p" = none ] || [ "$inst" = none ] || [ "${p#* }" -le "$inst" ]; then
-      pw="runscaler pid ${p% *} started at ${p#* }"
-      [ "$p" != none ] || pw="no runscaler process (systemd: not active, or an answer this does not read)"
-      say "pass: STOP NO IDLE (runner $v) stays: config.toml names runner $RR_REC_VERSION's image, but runscaler has not started since its install ($pw; config.toml installed at $inst): the pool runs it only after a restart"
+    if unstarted "$p"; then
+      say "pass: STOP NO IDLE (runner $v) stays: config.toml names runner $RR_REC_VERSION's image, but runscaler has not started since its install ($REPLY): the pool runs it only after a restart"
       return 0
     fi
-    why="the pool runs runner $RR_REC_VERSION's image ($a; runscaler started at ${p#* }, after config.toml's install at $inst)"
+    why="the pool runs runner $RR_REC_VERSION's image ($a; runscaler started at ${p#* }, after config.toml's install at $UN_INST)"
   fi
   change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "NO IDLE")]' --arg f "$FAMILY"
   say "pass: STOP NO IDLE (runner $v) is gone: $why"
+}
+# P ("PID START" of runscaler, read BEFORE config.toml's install time | none): 0 when no runscaler is proven to run
+# config.toml, the header's "an install counts nothing until a restart": none runs, the install time cannot be read, or
+# P started at or before config.toml's install (install_of, read now: UN_INST); REPLY says which. 1: P started after it.
+# ONE copy: THE TWO LEVELS' NO IDLE and THE VERSION's "nothing to switch" (B4b fix 1, opus F1)
+UN_INST=
+unstarted() {
+  UN_INST=$(install_of "$CFG")
+  if [ "$1" = none ] || [ "$UN_INST" = none ] || [ "${1#* }" -le "$UN_INST" ]; then
+    REPLY="runscaler pid ${1% *} started at ${1#* }"
+    [ "$1" != none ] || REPLY="no runscaler process (systemd: not active, or an answer this does not read)"
+    REPLY="$REPLY; config.toml installed at $UN_INST"
+    return 0
+  fi
+  return 1
 }
 # [V]: the next step of NO BASELINE and recipe changed (status.jq's: `runner-updater rebuild hz-docker`), the whole
 # command, with V when it is known (the r3 FOLD, THE VERSION OF rebuild: with no baseline the version is the person's)
@@ -2034,9 +2056,10 @@ baseline_next() {
   local v=${1:-<runner version>}
   echo "\`runner-updater rebuild $FAMILY $v\` switches it to ${RUN_USER}'s build of runner $v for this release's image ($(build_line "$v") builds it), or a person's release update (linux-docker/README.md, \"A new runner release\")"
 }
-# V: RUN_USER's `build V` as the line a person runs, built from the host config's RUN_USER and HOST_IP (never a literal
-# user or host: Opus r1 F11); its ~/bin path, since an ssh command has no ~/bin on its PATH (the README's form)
-build_line() { echo "as ${RUN_USER}: \`ssh ${RUN_USER}@${HOST_IP} '~/bin/runner-updater build $1'\`"; }
+# V: RUN_USER's `build V` as the line a person runs, built from the host config's RUN_USER, HOST_IP and SSH_PORT (never
+# a literal user, host or port: Opus r1 F11, B4b review r1 opus F3); its ~/bin path, since an ssh command has no ~/bin on
+# its PATH (the README's form)
+build_line() { echo "as ${RUN_USER}: \`ssh -p ${SSH_PORT} ${RUN_USER}@${HOST_IP} '~/bin/runner-updater build $1'\`"; }
 # V REC: DUE's step 11 text, ONE copy (DUE and retry print it): RUN_USER has no usable build record of (V, REC)
 # (rr_record's RR_WHY, just set)
 build_wait() {
@@ -2181,10 +2204,11 @@ rejected_empty() {
 # core.jq's r1_bar null on the core's evidence (the ONE predicate keep.jq reads), IS the person's ACCEPT (PLAN D7 :393:
 # KEEP's accept, ACCEPT_JQ, in the same ONE state write). A STOP that names another next step (HAND CHANGE, NO IDLE,
 # DISK, CI DISABLED, POOL DOWN) stays, and connect_only is never reset. A cleared release with no build record of
-# RUN_USER for this release's image: DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line (PLAN D7
-# :384-386: retry starts nothing; DUE's next pass switches once that record is there)
+# RUN_USER for this release's image, newer than the runner of RUN_USER's record of the image config.toml names (the one
+# DUE would switch to: B4b fix 1, opus F4): DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line (PLAN
+# D7 :384-386: retry starts nothing; DUE's next pass switches once that record is there); any other: only the clear
 do_retry() {
-  local now core facts out rc n idx acc why cv vs v rec rf rej
+  local now core facts out rc n idx acc why cv vs v rec rf rej cur fl a b
   load_state
   RB_SAY="retry $FAMILY"
   ! window_open || BACK_RAN=1
@@ -2247,8 +2271,15 @@ do_retry() {
   if [ -n "$vs" ]; then
     if rr_recipe "$B/image"; then
       rec=$RR_RECIPE
+      # DUE switches only a release newer than the runner of RUN_USER's record of the image config.toml names (its
+      # steps 4 and 10; B4b fix 1, opus F4): no line promises a switch of any other (nor with no such record: NO BASELINE)
+      cur= fl=$(family_lines "$CFG") || fl=
+      a=${fl%% *} b=${fl#* }; a=${a#*=} b=${b#*=}
+      if [ -n "$a" ] && [ "$a" = "$b" ] && [[ $a =~ @(sha256:[0-9a-f]{64})$ ]] && rr_record_of "$BUILDS" "${BASH_REMATCH[1]}"; then
+        cur=$RR_REC_VERSION
+      fi
       for v in $vs; do
-        [ "$v" != "$cv" ] && [[ $v =~ ^${VERSION_RE}$ ]] || continue
+        [ "$v" != "$cv" ] && [[ $v =~ ^${VERSION_RE}$ ]] && [ -n "$cur" ] && newer "$v" "$cur" || continue
         rr_record "$BUILDS" "$v" "$rec" && continue
         say "retry $FAMILY: runner $v: $(build_wait "$v" "$rec"): retry starts nothing, and DUE's next pass switches it once that record is there; $(build_line "$v") builds it"
       done
@@ -2273,12 +2304,14 @@ do_retry() {
 # V: the open candidate's version when its lines run (config.toml's family lines are the candidate's): --keep-prev, and
 # a VERSION of another version is refused ("of it"); an open candidate whose lines do not run (a pending hand edit:
 # HAND CHANGE holds it) is refused too (a window would replace config.toml.prev, the `back` config, or that file
-# unseen); with no candidate, the version of RUN_USER's ONE build record of the image config.toml runs (DUE's step 6),
+# unseen); with no candidate, the version of RUN_USER's ONE build record of the image config.toml names (DUE's step 6),
 # and a VERSION of another version is refused (a newer one is DUE's); with none (NO BASELINE) the person's VERSION,
 # required. V must not be rejected; the target is RUN_USER's record of (V, this release's recipe) whose digest is not the
-# one config.toml runs, else a REFUSE with RUN_USER's `build V` line and the whole next command
+# one config.toml names, else a REFUSE with RUN_USER's `build V` line and the whole next command. One config.toml names
+# but no runscaler is proven to run (unstarted: B4b fix 1, opus F1): switch-now's target (up's shortcut with --now
+# restarts runscaler into it); rebuild's REFUSE names switch-now (rebuild never skips idle, so it restarts nothing)
 cmd_target() {
-  local varg=$1 cand cv cl fl a b dg=
+  local varg=$1 cand cv cl fl a b p=none dg=
   CT_V= CT_D= CT_KP=0 CT_HOW=
   fl=$(family_lines "$CFG") || fl=
   a=${fl%% *} b=${fl#* }; a=${a#*=} b=${b#*=}
@@ -2298,16 +2331,16 @@ cmd_target() {
     CT_V=$cv CT_KP=1 CT_HOW="the open candidate's version (config.toml.prev, its \`back\` config, is kept: --keep-prev)"
   elif [ -n "$dg" ] && rr_record_of "$BUILDS" "$dg"; then
     if [ -n "$varg" ] && [ "$varg" != "$RR_REC_VERSION" ]; then
-      REPLY="$cmd switches the version the pool runs, runner $RR_REC_VERSION (RUN_USER's build record of its image: \`runner-updater $cmd $FAMILY $RR_REC_VERSION\`), never runner $varg: a newer release is the pass's to switch (DUE)"
+      REPLY="$cmd switches the version config.toml names, runner $RR_REC_VERSION (RUN_USER's build record of its image: \`runner-updater $cmd $FAMILY $RR_REC_VERSION\`), never runner $varg: a newer release is the pass's to switch (DUE)"
       return 1
     fi
-    CT_V=$RR_REC_VERSION CT_HOW="the version the pool runs (RUN_USER's build record of its image: $RR_RECORD)"
+    CT_V=$RR_REC_VERSION CT_HOW="the version config.toml names (RUN_USER's build record of its image: $RR_RECORD)"
   else
     if [ -z "$varg" ]; then
-      REPLY="STOP NO BASELINE: no ONE build record of RUN_USER ($BUILDS) names the image config.toml runs (${a:-none}), so the version is yours to name: $(baseline_next)"
+      REPLY="STOP NO BASELINE: no ONE build record of RUN_USER ($BUILDS) names config.toml's image (${a:-none}), so the version is yours to name: $(baseline_next)"
       return 1
     fi
-    CT_V=$varg CT_HOW="your version (NO BASELINE: no build record of RUN_USER names the image the pool runs)"
+    CT_V=$varg CT_HOW="your version (NO BASELINE: no build record of RUN_USER names config.toml's image)"
   fi
   if printf '%s\n' "$ST" | jq -e --arg f "$FAMILY" --arg v "$CT_V" '(.families[$f].rejected // []) | any(.[]; . == $v)' > /dev/null 2>&1; then
     REPLY="runner $CT_V is rejected for $FAMILY: no window switches to it (\`runner-updater retry $FAMILY\` clears the rejection)"
@@ -2319,6 +2352,17 @@ cmd_target() {
     return 1
   fi
   CT_D=$RR_REC_DIGEST
+  [ "$CT_D" != "$dg" ] || p=$(proc_now) || p=none
+  if [ "$CT_D" = "$dg" ] && unstarted "$p"; then
+    # config.toml names it, but no runscaler is proven to run it (B4b fix 1, opus F1): switch-now restarts runscaler into
+    # it (up's shortcut with --now); rebuild never skips idle, so it restarts nothing and names switch-now
+    if [ "$cmd" = switch-now ]; then
+      CT_HOW="$CT_HOW; config.toml names its image already, and runscaler has not started since its install ($REPLY): the window restarts runscaler into it"
+      return 0
+    fi
+    REPLY="config.toml names RUN_USER's build of runner $CT_V for this release's image ($CT_D), but runscaler has not started since its install ($REPLY): rebuild waits for idle and so restarts nothing; \`runner-updater switch-now $FAMILY\` restarts runscaler into it now (its drain lets running jobs finish)"
+    return 1
+  fi
   if [ "$CT_D" = "$dg" ]; then
     REPLY="config.toml names RUN_USER's build of runner $CT_V for this release's image already ($CT_D): nothing to switch; a new image of it is RUN_USER's to build: $(build_line "$CT_V"), then \`runner-updater $cmd $FAMILY $CT_V\`"
     return 1
@@ -2376,10 +2420,12 @@ do_rebuild() {
   if [ "$CT_KP" = 1 ]; then cmd_switch --keep-prev; else cmd_switch; fi
 }
 # the switch journal RECOVER ended in this run (A_*, AJ_*; switch-now (a)): "done" only when it switched and runscaler
-# runs its TARGET (CLASS target-running), exit 0; else its close, exit 1. No `up` follows either way (r2 Opus F4)
+# runs its TARGET (CLASS target-running; THE SHORTCUT'S RESTART's TARGET, with no `target` line, is config.toml as its
+# window found it, its `old`: B4b fix 1), exit 0; else its close, exit 1. No `up` follows either way (r2 Opus F4)
 sn_ended() {
-  if [ "$A_DONE" = 1 ] && [ "$AJ_KIND" = switch ] && [ "$A_CAND" = set ] && [ "$A_CLASS" = target-running ]; then
-    say "$RB_SAY: the switch is done: RECOVER ended its window, and runscaler runs $(rb_target) (the window journal $AJ_ID)"
+  if [ "$A_DONE" = 1 ] && [ "$AJ_KIND" = switch ] && [ "$A_CLASS" = target-running ] \
+     && { [ "$A_CAND" = set ] || { [ -z "$AJ_T" ] && [ -n "$AJ_STOPPING" ]; }; }; then
+    say "$RB_SAY: the switch is done: RECOVER ended its window, and runscaler runs $(if [ -n "$AJ_T" ]; then rb_target; else echo "$AJ_OLD"; fi) (the window journal $AJ_ID)"
     exit 0
   fi
   say "$RB_SAY: RECOVER ended the window (the window journal ${AJ_ID:-?}, ${AJ_KIND:-no kind}, closed ${A_CLASS:-as applied before}$(printf '%s\n' "${A_NEW:-[]}" | jq -r '[.[].stop] | if length > 0 then "; it holds STOP " + join(", STOP ") else "" end' 2> /dev/null)): runscaler does not run a switch's TARGET, and switch-now starts nothing more; \`runner-updater status\` names the next step"
@@ -2388,14 +2434,17 @@ sn_ended() {
 # switch-now hz-docker [VERSION] (S2b-3c-2 E-7, its r2 FOLD and the r3 FOLD): a person's override of operator rule (2)
 # for ONE window (never from a pass): no idle pair, the restart's drain lets running jobs finish. RECOVER FIRST, then:
 # (a) a SWITCH journal RECOVER keeps open (its idle restart waits), with no restart by RECOVER FIRST (one per run, r3
-# Opus F1): OFF -> REFUSE; else `pool-image.sh recover --unattended --now` (THE IDLE RESTART with no pair; every other
+# Opus F1): OFF -> REFUSE; a VERSION that is not its journal's `version` -> REFUSE that names it, nothing restarted (B4b
+# fix 1, opus F2); else `pool-image.sh recover --unattended --now` (THE IDLE RESTART with no pair; every other
 # reason RECOVER keeps a journal open stays: then its line, exit 1); an open switch journal RECOVER FIRST ended: "done"
 # only when its TARGET runs (sn_ended), and no `up`. Else: one restart per run; OFF -> REFUSE; (b) a held NO IDLE of V:
 # `up --unattended V D --now` with its detail.digest (a VERSION of another version, or an open candidate: REFUSE); the
 # close drops NO IDLE (E-8); (c) else rebuild's target (cmd_target) with --now, and --keep-prev when an open
-# candidate's lines run; nothing to switch to: REFUSE "nothing waits for idle". DISK checked before a window (a REFUSE)
+# candidate's lines run; nothing to switch to: REFUSE "nothing waits for idle"; config.toml names the target already and
+# no runscaler is proven to run it: up's shortcut with --now restarts runscaler into it (B4b fix 1, opus F1). DISK
+# checked before a window (a REFUSE)
 do_switch_now() {
-  local open0= kind0= ni v d c
+  local open0= kind0= ni v d c jv
   load_state
   RB_SAY="switch-now $FAMILY"
   if window_open; then
@@ -2410,6 +2459,9 @@ do_switch_now() {
     fi
     [ "$(printf '%s\n' "$ST" | jq -r '.on')" = true ] \
       || { echo "$WSTOP"; back_refuse "$RB_SAY: the updater is OFF: switch-now runs only while it is ON (\`runner-updater on\`)"; }
+    jv=$(sn_version)   # THE VERSION (B4b fix 1, opus F2): a VERSION must be the open switch's own
+    [ -z "$VARG" ] || [ "$VARG" = "$jv" ] \
+      || { echo "$WSTOP"; back_refuse "$RB_SAY: the switch in the window journal $WINDOW is to runner ${jv:-(no version line)}: switch-now ends that switch (\`runner-updater switch-now $FAMILY${jv:+ $jv}\`), never runner $VARG; nothing was restarted, and the journal stays open"; }
     say "$RB_SAY: the switch in the window journal $WINDOW stays open: pool-image.sh recover --unattended --now (no idle pair; its lines follow)"
     WSTOP= W_HOW=
     recover_first --now
@@ -2445,6 +2497,7 @@ do_switch_now() {
 }
 sn_open() { [[ ! $(tail -c 64 -- "$WINDOW" 2> /dev/null; echo .) =~ (^|$'\n')closed\ [0-9]+$'\n'\.$ ]]; }   # 0: open
 sn_kind() { local k; k=$(grep -m 1 '^kind ' -- "$WINDOW" 2> /dev/null); echo "${k#kind }"; }
+sn_version() { local k; k=$(grep -m 1 '^version ' -- "$WINDOW" 2> /dev/null); echo "${k#version }"; }
 
 # ---- RUN_USER: THE BUILD PASS, build VERSION (the header)
 # VERSION: ~/build/setup/02-d1.sh build VERSION as this run's CHILD, on the updater lock it holds (fd 9, inherited:

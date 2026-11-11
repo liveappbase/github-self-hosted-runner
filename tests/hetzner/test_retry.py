@@ -17,9 +17,11 @@ command), while the updater is ON or OFF; it starts nothing. (Named for its CI p
   rename leaves the versions rejected in the state (DUE switches none), and the next retry ends it; a kill right after the
   state write leaves the file empty already. A file it cannot replace: a STOP, nothing written. A pass with no retry
   keeps the digests.
-- A cleared release with no build record of RUN_USER for this release's image: DUE's "waits for RUN_USER's build" text
-  and RUN_USER's `build V` line, built from the host config's RUN_USER and HOST_IP (here root and host.conf.example's
-  203.0.113.10), never a literal.
+- A cleared release with no build record of RUN_USER for this release's image, newer than the runner of RUN_USER's
+  record of the image config.toml names (B4b fix 1, opus F4: DUE switches only a newer one): DUE's "waits for RUN_USER's
+  build" text and RUN_USER's `build V` line, built from the host config's RUN_USER, HOST_IP and SSH_PORT (here root,
+  host.conf.example's 203.0.113.10 and 22; opus F3: `ssh -p`), never a literal. One that is not newer, or with no such
+  record: only the clear.
 - THE OUTAGE RULE as its last step after its RECOVER (the r2 FOLD).
 - The usage of the three commands and their user: RS_USER's only.
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
@@ -39,9 +41,10 @@ NEW_HAND = ('fix what it names (linux-docker/README.md, "The rollback, and what 
             'runner-updater retry hz-docker')
 USAGE = ('usage: runner-updater status | on | off | pass | back hz-docker | retry hz-docker | rebuild hz-docker [VERSION] '
          '| switch-now hz-docker [VERSION] | build VERSION')
-BUILD_LINE = "as root: `ssh root@203.0.113.10 '~/bin/runner-updater build %s'`"
+BUILD_LINE = "as root: `ssh -p 22 root@203.0.113.10 '~/bin/runner-updater build %s'`"
 CLEARED = ('check failed', 'ROLLED BACK', 'JOBS FAIL ON THE NEW IMAGE', 'NO EVIDENCE', 'ROLLBACK FAILED')
 KEPT = ('HAND CHANGE', 'NO IDLE', 'DISK', 'CI DISABLED', 'POOL DOWN')
+CUR = '2.338.2'   # the runner of RUN_USER's record of the image config.toml names (OLD), when a cell plants one
 
 
 def held(name, version=V):
@@ -218,25 +221,42 @@ class TheRejectedFile(unittest.TestCase):
 @needs_container
 class TheBuildRecordLine(unittest.TestCase):
     def test_a_cleared_release_with_no_build_record_names_run_user_s_build(self):
-        """PLAN D7 :384-386's words (E-5): the cleared release V has no build record of RUN_USER for this release's
-        image: DUE's "waits for RUN_USER's build" text, and RUN_USER's `build V` line from host.conf's RUN_USER and
-        HOST_IP (Opus r1 F11). The control: V's record is there: no such line."""
-        for built in (False, True):
-            with self.subTest(built=built):
-                g = R(self, {'stops': [held('ROLLED BACK')], 'rejected': [V]})
-                if built:
+        """PLAN D7 :384-386's words (E-5): the cleared release V, newer than CUR (RUN_USER's record of the image
+        config.toml names), has no build record of RUN_USER for this release's image: DUE's "waits for RUN_USER's build"
+        text, DUE's switch once that record is there, and RUN_USER's `build V` line from host.conf's RUN_USER, HOST_IP and
+        SSH_PORT (Opus r1 F11; B4b fix 1, review r1 opus F3: `ssh -p SSH_PORT`, here 22, and 2222 in a host.conf that says
+        so). B4b fix 1 (opus F4): DUE switches only a release newer than that record's, so a cleared release that is not
+        newer (2.300.0), or one with no record of config.toml's image to compare with (NO BASELINE holds DUE), gets no
+        line about a switch or a build: only the clear. The control: V's record is there: no such line."""
+        for row in ('newer', 'built', 'port 2222', 'older', 'no running record'):
+            with self.subTest(row):
+                v = '2.300.0' if row == 'older' else V
+                g = R(self, {'stops': [held('ROLLED BACK', v)], 'rejected': [v]})
+                if row != 'no running record':
+                    g.p.record(CUR, OLD)
+                if row == 'built':
                     g.p.record(V, digest(39))
+                port = '22'
+                if row == 'port 2222':
+                    port = '2222'
+                    conf = g.p.read(g.p.path('host.conf'))
+                    self.assertEqual(conf.count('\nSSH_PORT=22\n'), 1)
+                    g.p.write(g.p.path('host.conf'), conf.replace('\nSSH_PORT=22\n', '\nSSH_PORT=2222\n'), 0o644)
                 r = g.retry()
+                self.assertIn('runner-updater: retry hz-docker: cleared STOP ROLLED BACK (runner %s); rejected: %s, now '
+                              'none' % (v, v), r.stdout)
                 line = [l for l in r.stdout.splitlines() if l.startswith('runner-updater: retry hz-docker: runner %s: '
-                                                                         % V)]
-                if built:
+                                                                         % v)]
+                if row in ('built', 'older', 'no running record'):
                     self.assertEqual(line, [], r.stdout[-3000:])
+                    self.assertNotIn("DUE's next pass switches", r.stdout)
+                    self.assertNotIn('~/bin/runner-updater build', r.stdout)
                     continue
                 self.assertEqual(len(line), 1, r.stdout[-3000:])
                 self.assertIn("it waits for root's build of runner %s (no usable build record of runner %s for this "
                               "release's image, recipe " % (V, V), line[0])
                 self.assertIn("retry starts nothing, and DUE's next pass switches it once that record is there; "
-                              + BUILD_LINE % V + ' builds it', line[0])
+                              + (BUILD_LINE % V).replace('-p 22 ', '-p %s ' % port) + ' builds it', line[0])
 
 
 @needs_container
@@ -295,9 +315,23 @@ class Text(unittest.TestCase):
                   'unless R1\'s rollback is due for it', 'It starts nothing, and works while the updater is OFF',
                   "names RUN_USER's `build` line", "ssh <RS_USER>@<host> '~/bin/runner-updater retry hz-docker'",
                   '- `runner-updater rebuild hz-docker [<runner version>]` (RS_USER) is one switch window to RUN_USER\'s '
-                  'build of the runner version the pool runs',
+                  'build of the runner version config.toml names',
                   'the next step of `STOP HAND CHANGE`, `STOP NO BASELINE` and `STOP recipe changed`',
-                  'Its version is the open candidate\'s when the pool runs the candidate', '`--keep-prev`',
+                  'Its version is the open candidate\'s when config.toml names the candidate\'s lines', '`--keep-prev`',
+                  # B4b fix 1: opus F6 (rebuild's refusal of an open candidate whose lines config.toml does not name),
+                  # F4 (retry promises no switch of a release that is not newer), F1 and F2 (switch-now)
+                  'with an open candidate whose lines config.toml does not name (a hand edit: `STOP HAND CHANGE`), '
+                  'rebuild refuses: put the candidate\'s config back first, then `runner-updater rebuild hz-docker <its '
+                  'runner version>`',
+                  'When a cleared release is newer than the runner of RUN_USER\'s build record of the image config.toml '
+                  'names (a pass switches only to a newer release)',
+                  'A cleared release that is not newer gets no such line: no pass switches to it',
+                  'rebuild refuses, restarts nothing (it never skips the wait for idle) and names `runner-updater '
+                  'switch-now hz-docker`, which restarts runscaler into it',
+                  'A version you name must be the one it switches (for a waiting switch, the version of its journal): '
+                  'another is refused',
+                  'the window restarts runscaler into it once (`idle skipped`, no backup: `config.toml.prev` stays as it '
+                  'is)', 'that restart cut after its stop began waits for idle as any other switch',
                   'with none (`STOP NO BASELINE`) the version you name', 'and so is a rejected one',
                   'a pool that is not idle changes nothing (exit 5, "not now"), and it never holds `STOP NO IDLE`',
                   'it holds no `STOP DISK`', 'Exit 0 switched (the new image runs); 5 not now; 1 a STOP or a REFUSE',
@@ -310,6 +344,11 @@ class Text(unittest.TestCase):
                   '`runner-updater rebuild hz-docker <its runner version>`, below'):
             self.assertIn(s, upd)
         for s in ('come in a later release', 'in a later release the updater', '(a later release)'):
+            self.assertNotIn(s, one(readme()))
+        # opus F5: no line says the pool runs an image from config.toml alone (the README's grep: the build log)
+        for s in ('build of the version the pool runs', 'build of the runner version the pool runs',
+                  'the image the pool runs', 'when the pool runs the candidate', 'one the pool runs already',
+                  'image config.toml runs', 'the config runscaler runs'):
             self.assertNotIn(s, one(readme()))
 
     def test_the_header_and_usage_name_the_three_commands(self):

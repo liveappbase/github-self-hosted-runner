@@ -168,7 +168,9 @@
 #   up's IDLE PAIR is not read (`idle skipped` where `idle idle` is), and the restart follows as without it (its drain
 #   lets running jobs finish); RECOVER's --now skips THE IDLE RESTART's pair alone (`idle skipped`, then the restart):
 #   every other reason RECOVER keeps a journal open, or closes it, is the same with it. A window's own `idle skipped`
-#   does not carry into a later RECOVER: a cut --now switch waits for idle as any other. --keep-prev (a window of an
+#   does not carry into a later RECOVER: a cut --now switch waits for idle as any other. With --now, up's shortcut that
+#   would end with nothing restarted (config.toml names DIGEST's image, but no runscaler RUNS since its install) is THE
+#   SHORTCUT'S RESTART (below; S2b-3c-2 B4b fix 1: a B3 defect a B4b cell proved, E-7 (b)). --keep-prev (a window of an
 #   OPEN candidate, whose `back` config config.toml.prev must stay: PLAN D5's one exception): `keep-prev P` (P:
 #   config.toml.prev) right after `digest`, before any effect; THE BACKUP goes into windows/ID.d/config.toml.backup,
 #   never config.toml.prev, which stays byte for byte; RECOVER reads that backup as a switch's only with that line.
@@ -210,7 +212,7 @@
 #   FAMILY LINES (config.toml's two sets name ONE image, the old image, which the registry must still serve: the
 #   rollback's; DIGEST's image already: nothing to switch, config.toml.prev kept as it is: done, `running`, when, checked
 #   ONCE after the `config-sha` line, config.toml is still `config-sha` naming DIGEST's image and runscaler RUNS since
-#   its install, else `end`); START STATE (the unit active and enabled, config.toml installed before its start: else
+#   its install, else `end`, but with --now THE SHORTCUT'S RESTART when config.toml is still that file); START STATE (the unit active and enabled, config.toml installed before its start: else
 #   not now), then `start-state` (config-sha runs: RECOVER may start it with no validate); DISK (RUN_USER's
 #   filesystem, D1's data and the registry, at least DISK_PCT % free: runscaler's min_free, runner-facts.sh's disk_ok); jq (`jq --version` a core
 #   row of ~/build/core/TESTED_JQ); the PINS; then PRE-VALIDATE: `03-runscaler.sh render
@@ -250,6 +252,20 @@
 #   config it replaces to windows/ID.d/config.toml.backup (what the updater's RECOVER puts back when the rollback
 #   target fails validate: plan D1, RECOVER step 4), THE RENAME and THE RESTART at once (runscaler's drain lets busy
 #   runners finish).
+# THE SHORTCUT'S RESTART (up --unattended --now; S2b-3c-2 B4b fix 1, review r1 opus F1, its ruling (i): a person's
+#   switch-now ends an install that no restart followed, e.g. a release cut while it waits for idle): config.toml is
+#   still `config-sha`, names DIGEST's image and no runscaler RUNS since its install (its mtime). The unit active and
+#   enabled (else `end`, nothing restarted), the registry serves that image (else STOP check failed), then `staged`, a
+#   copy of config.toml validated by the ONE VALIDATE RULE as back's (`validate pre N CLASS`: NON-API is STOP check
+#   failed, UNKNOWN `end`, both with nothing restarted), the copy removed, `staged-sha` (= `config-sha`: the TARGET, a
+#   validated sha RECOVER may start), `idle skipped`, then THE RESTART below with config-sha as its TARGET and the
+#   file's mtime as its install time: closed target-running when the new process RUNS (THE RESTART's own ends else:
+#   CI DISABLED, a hand change, a start that did not run). No `target` line (the updater changes no candidate: a hand
+#   release is none), no backup (config.toml is the target already: config.toml.prev stays byte for byte, with
+#   --keep-prev too) and no rename. RECOVER: a switch journal with no `backup`, a window `stopping` and `staged-sha` =
+#   `config-sha` is this restart cut after its stop began: its TARGET is config-sha (step 3, by THE INSTALLED FILE: it
+#   RUNS since the install: closed target-running; an older runscaler runs: THE IDLE RESTART; none: THE START); cut
+#   before `stopping` it is NO EFFECT YET (step 1): nothing was stopped.
 # A VALIDATE TRY (D-h; r2 Codex F15, Opus F13 (b)): under `timeout -k 10 120`, in timeout's own process group (every
 #   process left in it is killed once the try ends), stdin /dev/null, fd 8 closed, and fd 9 (the updater lock) closed:
 #   back's runner-start validate gets no fd 9; 03's render gets it only for its own THE UPDATER'S CHILD check, and
@@ -324,7 +340,8 @@
 #   ONCE-LINES (review r1, codex F6): a STOP written once is keyed on the STOP line itself: a `hand-change H` whose
 #      `stop HAND CHANGE` a cut lost gets it first thing, from RECOVER (the window's marker too); other once-STOPs on
 #      their own `stop` line.
-#   1. NO EFFECT YET (no `config-sha`, or no `backup`): the window changed no config and stopped nothing. STAGED
+#   1. NO EFFECT YET (no `config-sha`, or no `backup` but in THE SHORTCUT'S RESTART after its `stopping`): the window
+#      changed no config and stopped nothing. STAGED
 #      removed; a runscaler that RUNS (whenever it started): closed (pre, other with STOP HAND CHANGE, or none); none
 #      runs and the unit is enabled (OPERATOR (1)): THE START on a proven sha (below), else once a copy validates; not
 #      enabled: STOP CI DISABLED unless one RUNS. A file with the TARGET's content is other here, and in steps 2-5 too
@@ -332,7 +349,8 @@
 #   DECIDED LINES (a ROLLBACK, right after 0 and 1; B1 DECISIONS, the Studio's runner-updater-window :298-305): lines
 #      about its TARGET only: a `validate recover N NON-API|UNKNOWN` (RECOVER's validate of the TARGET; another file's
 #      is `validate hand N`), a `restore`, a `stop ROLLBACK FAILED`, or a `pre-close-failure` of a start OF THE TARGET
-#      (the window's own `starting E`, written only after its `renamed`, or RECOVER's `starting E target`; RECOVER's
+#      (the window's own `starting E`, written only after its `renamed` or in THE SHORTCUT'S RESTART, whose TARGET is
+#      config-sha, or RECOVER's `starting E target`; RECOVER's
 #      `starting E pre` and `starting E other` decide nothing): THE RESTORE, with no new validate of the TARGET;
 #      NON-API and a TARGET start that did not run hold STOP ROLLBACK FAILED, UNKNOWN none. A close that finds the
 #      TARGET installed is target-failed (the backup fails its check; the unit not enabled with a process running).
@@ -427,7 +445,7 @@
 #                               runs
 #   staged P                    before STAGED is written
 #   validate pre N CLASS        ^validate pre [1-3] (PASS|API-ONLY|NON-API|UNKNOWN)$   (windows/ID.d/validate-pre-N.out)
-#   staged-sha H                the validated STAGED: the TARGET
+#   staged-sha H                the validated STAGED: the TARGET (THE SHORTCUT'S RESTART: = config-sha)
 #   target SET=I SET=I          the TARGET's lines, in config order
 #   target-content H            the TARGET's CONTENT sha (whole-line comments and blank lines left out)
 #   idle idle|skipped           (switch) the idle pair said idle, or --now skipped it (RECOVER's --now: `idle skipped`
@@ -442,6 +460,8 @@
 #   stopping E                  before `systemctl --user stop`: the restart's own epoch
 #   stopped INODE OFFSET H | none
 #   starting E                  before `systemctl --user start` (the window's: of its TARGET)
+#                               (THE SHORTCUT'S RESTART: `staged`, `validate`, `staged-sha`, `idle skipped`, then
+#                               `from` to `running`, with no target, backup, rename-start or renamed line)
 #   running PID START           the new process: it RUNS, started after `renamed` (with no rename: after config.toml's
 #                               install)
 #   [pre-close-failure TEXT]    the start did not RUN within 10 min (once per journal): the journal stays open
@@ -1261,6 +1281,46 @@ utargetlines() {   # the TARGET's `target` and `target-content` lines, of the va
   [ "$TCONT" != unreadable ] || ustop "$UFAIL" "could not read $STAGED's content (the TARGET's): nothing was renamed"
   ujs target-content "$TCONT"
 }
+ushortcut() {   # INSTALL IMAGE: THE SHORTCUT'S RESTART (the header; B4b fix 1): --now, and config.toml (just read: NOW_COPY)
+  # is still `config-sha`, names IMAGE (DIGEST's) and was installed at INSTALL (its mtime), and no runscaler RUNS since
+  # then. The unit active and enabled (else `end`), the registry serves IMAGE, a copy validated (`staged-sha` =
+  # config-sha: RECOVER starts it with no new validate), `idle skipped`, then THE RESTART with config-sha as its TARGET
+  # and INSTALL as its install time. No backup and no rename: config.toml.prev stays as it is. Closed target-running
+  # when the new process RUNS; else THE RESTART's own ends (CI DISABLED, a hand change, a start that did not run)
+  local n out rc cls f
+  { [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && [ "$(exec 8>&- 9>&-; systemctl --user is-enabled runscaler 2> /dev/null)" = enabled ]; } \
+    || uend "config.toml already names $2, but it is not proven to run it ($RUNS_WHY), and runscaler is not active and enabled: --now restarts only a pool that runs; nothing restarts"
+  pulls "$2"; case $? in
+    0) ;;
+    1) ustop "check failed" "the registry does not serve $2, the image config.toml names: its restart could start no runner" ;;
+    *) ustop "check failed" "the registry ($REG) does not answer, so it cannot be checked that it serves $2, the image config.toml names" ;;
+  esac
+  ujs staged "$STAGED"
+  { cp -- "$NOW_COPY" "$STAGED.tmp" && chmod 600 "$STAGED.tmp" && mv -f -- "$STAGED.tmp" "$STAGED"; } 2> /dev/null < /dev/null \
+    || { rm -f -- "$STAGED.tmp"; ustop "check failed" "could not copy config.toml to $STAGED to validate it"; }
+  sha_of "$STAGED"; [ "$REPLY" = "$CSHA" ] || ustop "check failed" "the copy $STAGED is not config.toml's config-sha (sha256 ${REPLY:0:12}…)"
+  for n in 1 2 3; do
+    out=$WDIR/validate-pre-$n.out
+    vtry - "$out" env RUNNER_START_CONFIG="$STAGED" "$HOME/bin/runner-start" validate; rc=$?
+    if vcut "$rc"; then cls=UNKNOWN
+    else cls=$("$HOME/bin/validate-class" "$rc" "$out" 2> /dev/null) || cls=UNKNOWN; fi
+    ujs validate "pre $n $cls"
+    case $cls in
+      PASS) break ;;
+      API-ONLY) [ "$n" = 3 ] && break; sleep 20 ;;
+      NON-API) f=$(grep -m 1 -E '^(runner-start: REFUSE |  ✗ )' "$out")
+               ustop "check failed" "config.toml fails validate (a copy, try $n, NON-API): $f (its whole output: $out): nothing restarts" ;;
+      *) uend "the validate of config.toml (a copy) is UNKNOWN (try $n; its whole output: $out): nothing restarts" ;;
+    esac
+  done
+  rm -f -- "$STAGED"
+  ujs staged-sha "$CSHA"
+  ujs idle skipped
+  TSHA=$CSHA TCONT=$NOW_CONTENT TSETS=$(sets_of "$NOW_COPY" | paste -sd ' ' -) RENAMED=$1
+  urestart
+  DONE_SHA=$TSHA DONE_CONTENT=$TCONT DONE_CLASS=target-running
+  udone
+}
 un_up() {
   local cur new n rc cls out f p m rb rbw
   ujs process "$(proc_now)"
@@ -1276,6 +1336,8 @@ un_up() {
       RUNS_WHY="config.toml changed after its config-sha line (sha256 ${NOW_SHA:0:12}…)"
     elif [[ $m =~ ^[0-9]+$ ]] && runs "$m" "$WDIR/runs-healthz.json" $(sets_of "$NOW_COPY"); then
       RUNNING=$RUNS_PROC; ujs running "$RUNNING"; DONE_SHA=$NOW_SHA DONE_CONTENT=$NOW_CONTENT DONE_CLASS=pre; udone
+    elif [ "$SKIPIDLE" = 1 ] && [[ $m =~ ^[0-9]+$ ]]; then
+      ushortcut "$m" "$new"   # --now: THE SHORTCUT'S RESTART (the header); it ends with exit
     fi
     uend "config.toml already names $new, but it is not proven to run it ($RUNS_WHY): there is nothing to switch, its rollback ($KEEPP) stays as it is, and this mode restarts nothing"
   fi
@@ -1498,7 +1560,7 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
   # HAND CHANGE` right after a `hand-change H` is H's STOP (HSTOP). W_RS: the window's `rename-start` (THE EFFECT: a
   # journal with none installed nothing)
   local i k v w=1 kp=0
-  KIND= CSHA= TSHA= TLINES= TCONT= STAGEDP= BKP= W_RN= W_RS= RSTART= RT_SHA= PCF=0 OPEN_START= OPEN_WHAT= OPEN_SHA=
+  KIND= CSHA= TSHA= TLINES= TCONT= STAGEDP= BKP= W_RN= W_RS= W_SP=0 RSTART= RT_SHA= PCF=0 OPEN_START= OPEN_WHAT= OPEN_SHA=
   LAST_HAND= HSTOP=
   RC_VFAIL=0 RC_NONAPI=0 RC_RESTORE=0 RC_RBF=0 RC_TPCF=0 RC_NOIDLE=0 RC_SSTATE=0 RC_RN= RC_LASTV= RC_LAST=
   RC_STOPS=$'\n'
@@ -1517,6 +1579,7 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
       backup) [ -n "$BKP" ] || BKP=$v ;;
       renamed) if [ "$w" = 1 ]; then W_RN=$v; else RC_RN=$v; fi ;;
       rename-start) [ "$w" = 0 ] || W_RS=$v ;;
+      stopping) [ "$w" = 0 ] || W_SP=1 ;;
       recover-start) [ -n "$RSTART" ] || RSTART=$v; w=0 ;;
       recover-target) RT_SHA=${v%% *} ;;
       starting) OPEN_START=${v%% *} OPEN_WHAT=target OPEN_SHA=
@@ -1537,6 +1600,10 @@ rc_facts() {   # what RECOVER decides by, from RCK/RCV (the header): the window'
     esac
   done
   TSETS=$(for v in $TLINES; do printf '%s ' "${v%%=*}"; done)
+  # THE SHORTCUT'S RESTART (B4b fix 1): a switch window with no backup that began its restart (a window `stopping`) on
+  # its validated config-sha (`staged-sha` = `config-sha`): its TARGET is config-sha, installed before the window
+  SCUT=0
+  if [ "$KIND" = switch ] && [ -z "$BKP" ] && [ "$W_SP" = 1 ] && [ -n "$CSHA" ] && [ "$TSHA" = "$CSHA" ]; then SCUT=1; fi
   # a window that made an effect journaled each line before it (the header): what that effect needs is there
   if [ -n "$BKP" ]; then
     { [ -n "$KIND" ] && [ -n "$CSHA" ] && [ -n "$TSHA" ] && [ -n "$TLINES" ] && [ -n "$STAGEDP" ]; } \
@@ -1618,7 +1685,7 @@ rc_cls() {   # CLS of that read (THE INSTALLED FILE): T (its CONTENT is the TARG
   VALID=0
   if [ "$NOW_SHA" = none ]; then CLS=NONE; return 0; fi
   ! rc_proven "$NOW_SHA" || VALID=1
-  if [ -n "$TSHA" ] && [ -n "$W_RS" ] \
+  if [ -n "$TSHA" ] && { [ -n "$W_RS" ] || [ "$SCUT" = 1 ]; } \
     && { { [ -n "$TCONT" ] && [ "$NOW_CONTENT" = "$TCONT" ]; } || { [ -z "$TCONT" ] && [ "$NOW_SHA" = "$TSHA" ]; }; }
   then CLS=T
   elif [ -n "$CSHA" ] && [ "$NOW_SHA" = "$CSHA" ] && { [ -z "$W_RN" ] || [ "$RC_RESTORE" = 1 ]; }; then CLS=PRE
@@ -1890,7 +1957,8 @@ rc_noidle() {   # WHY: THE IDLE RESTART waits: the journal stays open; 3 days af
   # hand line, journaled once, printed at each pass; no automatic restart ever
   local t
   if [ $(( $(date +%s) - RSTART )) -ge 259200 ]; then
-    t="the switch to the TARGET ($TLINES) waits for idle since $RSTART, 3 days ago: $1. At a quiet moment, systemctl --user restart runscaler, or now: runner-updater switch-now hz-docker (its restart's drain lets running jobs finish): the updater's next pass sees it run and ends the window"
+    t=$TLINES; [ -n "$t" ] || t="$(value_of old): config.toml as it was, the shortcut's restart"
+    t="the switch to the TARGET ($t) waits for idle since $RSTART, 3 days ago: $1. At a quiet moment, systemctl --user restart runscaler, or now: runner-updater switch-now hz-docker (its restart's drain lets running jobs finish): the updater's next pass sees it run and ends the window"
     if [ "$RC_NOIDLE" = 0 ]; then rc_stopline "NO IDLE" "$t"; else echo "STOP NO IDLE: $t"; fi
     rc_open "the switch waits for idle (STOP NO IDLE)"
   fi
@@ -2040,7 +2108,7 @@ un_recover() {   # RECOVER (the header): in order 0 closed, 1 no effect, DECIDED
   [ -n "$RSTART" ] || { RSTART=$(date +%s); ujs recover-start "$RSTART"; }
   rc_dangling   # A ONCE-LINE IS KEYED ON ITSELF: a `hand-change` whose STOP a cut lost gets it first
   # 1 NO EFFECT YET
-  if [ -z "$CSHA" ] || [ -z "$BKP" ]; then rc_noeffect; fi
+  if [ -z "$CSHA" ] || { [ -z "$BKP" ] && [ "$SCUT" = 0 ]; }; then rc_noeffect; fi
   # DECIDED LINES (a rollback), before the unit
   ! rc_decided || rc_restore
   # 2 THE UNIT

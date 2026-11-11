@@ -218,7 +218,7 @@ class Steps(unittest.TestCase):
         g = Due(self, base=False)
         rec = g.p.record(CUR, OLD, recipe='e' * 64)
         line = self.held(g, 'STOP recipe changed: ')
-        self.assertIn("this release's image recipe is %s, the build record of its running image (%s) names %s"
+        self.assertIn("this release's image recipe is %s, and the build record of config.toml's image (%s) names %s"
                       % (g.p.recipe(), rec, 'e' * 64), line)
 
     def test_7_the_latest_release_waits_or_is_not_eligible(self):

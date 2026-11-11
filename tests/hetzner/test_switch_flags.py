@@ -16,6 +16,10 @@ the new lines, test_kills.py's.
   more before the idle pair's own clock read is excused from READINESS only (its counts still count). The controls:
   86399 s, `busy 1` on that set, no copy, a copy that is not a core state (another format; not JSON): not idle, exit 3,
   and the NOT NOW line says why no set was excused. With `--now` no pair, so no copy matters.
+- THE SHORTCUT'S RESTART (B4b fix 1; review r1, opus F1): `--now` on a config.toml that names DIGEST's image already and
+  that no runscaler is proven to run (installed after its start): a validated copy, `idle skipped`, ONE stop and ONE
+  start, closed target-running, no backup and no rename. The control: no `--now`: B3's shortcut, `end`, no restart. A
+  SIGKILL after its new lines: test_kills.py's.
 Every cell runs a real window of the real scripts in a throwaway container (support.Pool, a fake clock: the excuse's
 age is planted against the clock the idle pair reads, which each cell checks from the substitutes' events). (Named for
 its CI part, test_[sv-z]*.py: .github/workflows/release-check.yml.)
@@ -25,7 +29,7 @@ import os
 import unittest
 
 from tests.hetzner.support import Pool, digest, healthz, needs_container, ref, sha256_file
-from tests.hetzner.test_unattended import NEW, OLD, SWITCH_KEYS, Rig, content, installed, keys, sha, value
+from tests.hetzner.test_unattended import NEW, NONAPI, OLD, SWITCH_KEYS, Rig, content, installed, keys, sha, value
 
 CORE_COPY = os.path.join(Pool.STATE, 'pass', 'state.json')
 SMALL = 'linux-ci-small'
@@ -157,6 +161,109 @@ class Now(unittest.TestCase):
                 self.assertEqual(value(lines, 'backup'), window_backup(lines))
                 self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(text), st.st_mtime_ns))
 
+
+SHORTCUT_KEYS = ['window', 'kind', 'version', 'digest', 'process', 'old', 'config-sha', 'staged', 'validate', 'staged-sha',
+                 'idle', 'from', 'stopping', 'stopped', 'starting', 'running', 'prev', 'installed', 'closed']
+
+
+def installed_unstarted(g):
+    """THE SHORTCUT'S STATE (B4b review r1, opus F1): config.toml put on NEW's image by hand and never started into (a
+    person's release cut while it waits for idle: its install a second after runscaler's start), and config.toml.prev
+    an earlier switch's keep (another image). (config.toml's text and os.stat, config.toml.prev's text and os.stat)."""
+    cfg = g.old.replace(ref(OLD), ref(NEW))
+    assert cfg != g.old
+    g.p.write(g.p.rpath('config.toml'), cfg, 0o600)
+    t = g.p.unit_now()['start'] + 1
+    os.utime(g.p.rpath('config.toml'), (t, t))
+    keep, kst = plant_keep(g)
+    return cfg, os.stat(g.p.rpath('config.toml')), keep, kst
+
+
+@needs_container
+class NowShortcut(unittest.TestCase):
+    def test_now_restarts_a_config_that_names_its_digest_and_never_ran(self):
+        """B4b fix 1 (review r1, opus F1: a B3 defect a B4b cell proved; E-7 (b), the ruling's (i)): THE SHORTCUT'S
+        RESTART. config.toml already names DIGEST's image (unchanged since `config-sha`), installed after runscaler's
+        start; the pool BUSY. `up --unattended V NEW --now`: one validate of a copy (`staged-sha` = config-sha), `idle
+        skipped`, one stop and one start, closed target-running, exit 0; no backup and no rename: config.toml and
+        config.toml.prev byte for byte (and mtime) as they were. The control: no --now: `end`, exit 1, closed pre,
+        nothing validated, stopped or started (B3's shortcut as it was)."""
+        for now in (True, False):
+            with self.subTest(now=now):
+                g = Rig(self)
+                g.p.curl['healthz'] = healthz(**{'linux-ci-main': {'busy': 1}})
+                cfg, cst, keep, kst = installed_unstarted(g)
+                g.p.hooks()
+                r = g.up('--now') if now else g.up()
+                wid, lines = g.done()
+                self.assertEqual((g.p.config(), os.stat(g.p.rpath('config.toml')).st_mtime_ns), (cfg, cst.st_mtime_ns))
+                self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(keep), kst.st_mtime_ns),
+                                 'config.toml.prev changed')
+                self.assertEqual(value(lines, 'prev'), sha(keep))
+                self.assertFalse(os.path.lexists(g.staged))
+                self.assertNotIn('backup', keys(lines))
+                self.assertNotIn('rename-start', keys(lines))
+                if not now:
+                    self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                    self.assertEqual(keys(g.body(lines))[-1], 'end', lines)
+                    self.assertEqual(installed(lines)[2], 'pre')
+                    self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+                    self.assertEqual(g.validates(), [])
+                    continue
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertEqual(keys(lines), SHORTCUT_KEYS, lines)
+                self.assertEqual(value(lines, 'idle'), 'skipped')
+                self.assertEqual(value(lines, 'config-sha'), sha(cfg))
+                self.assertEqual(value(lines, 'staged-sha'), sha(cfg))
+                self.assertEqual(value(lines, 'validate'), 'pre 1 PASS')
+                self.assertEqual(len(g.validates()), 1)
+                self.assertEqual((len(g.calls('stop')), len(g.calls('start')), len(g.calls('restart'))), (1, 1, 0))
+                self.assertEqual(installed(lines), (sha(cfg), content(cfg), 'target-running'))
+                pid, start = map(int, value(lines, 'running').split())
+                self.assertGreater(start, int(cst.st_mtime), 'the new process started after the install')
+                self.assertIn('POOL IMAGE DONE (up --unattended): %s' % ref(NEW), r.stdout)
+                ev = g.p.events()
+                self.assertNotIn('healthz read', ev[:ev.index('journal idle')], 'an idle pair was read')
+                self.assertLess(ev.index('journal staged-sha'), ev.index('journal idle'))
+                self.assertLess(ev.index('journal idle'), ev.index('journal stopping'))
+
+
+    def test_its_checks_restart_nothing(self):
+        """THE SHORTCUT'S RESTART's checks, each before `idle skipped` (nothing stopped or started, config.toml and
+        config.toml.prev as they were): the unit not active (a stopped pool: `end`, --now restarts only a pool that
+        runs), the registry not serving the image config.toml names (STOP check failed), a copy whose validate is NON-API
+        (STOP check failed, after `validate pre 1 NON-API`). The control (the cell above): all pass, one restart."""
+        for why in ('the unit stopped', 'not served', 'non-api'):
+            with self.subTest(why):
+                g = Rig(self)
+                cfg, cst, keep, kst = installed_unstarted(g)
+                if why == 'the unit stopped':
+                    g.p.set_unit(active=False, pid=0)
+                elif why == 'not served':
+                    g.p.curl['served'] = [OLD, digest(37)]
+                else:
+                    g.p.runner = {'seq': [NONAPI]}
+                r = g.up('--now')
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                wid, lines = g.done()
+                self.assertNotIn('idle', keys(lines))
+                self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [])
+                self.assertEqual(g.p.config(), cfg)
+                self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(keep), kst.st_mtime_ns))
+                self.assertFalse(os.path.lexists(g.staged))
+                self.assertEqual(installed(lines)[2], 'pre')
+                if why == 'the unit stopped':
+                    self.assertEqual(keys(g.body(lines))[-1], 'end', lines)
+                    self.assertIn('runscaler is not active and enabled', value(lines, 'end'))
+                    continue
+                stop = value(lines, 'stop') or ''
+                self.assertTrue(stop.startswith('check failed: '), lines)
+                if why == 'not served':
+                    self.assertIn('the registry does not serve %s' % ref(NEW), stop)
+                    self.assertNotIn('validate', keys(lines))
+                else:
+                    self.assertEqual(value(lines, 'validate'), 'pre 1 NON-API')
+                    self.assertNotIn('staged-sha', keys(lines))
 
 @needs_container
 class CoreStateExcuse(unittest.TestCase):

@@ -11,14 +11,19 @@ BACK_KEYS): a key the window no longer writes fails the coverage cell. S2b-3c-2 
 `--keep-prev` window cut after `keep-prev`, at its `backup` line, after THE BACKUP (into the window's folder) and after
 the rename; a `--now` window cut after `idle skipped`, and a `--now --keep-prev` one after `from`: the next RECOVER ends
 each as the table says, config.toml.prev byte for byte as it was before a keep-prev window, the window-folder backup the
-pre-window file. Each cell: a real window of the real scripts in a throwaway container (support.Pool), a fake clock; no
-time asserted.
+pre-window file. B4b fix 1's rows (KillShortcutRestart; review r1, opus F1): THE SHORTCUT'S RESTART (`--now` on a
+config.toml that names the digest's image and that no runscaler ran) cut after `idle skipped` (nothing stopped: NO EFFECT
+YET, closed pre, nothing restarted), after `stopping` (an older runscaler runs: THE IDLE RESTART; busy: the journal stays
+open and nothing restarts) and after `starting` (THE START): config.toml and config.toml.prev as they were, and no
+validate (its `staged-sha` proves config.toml). Each cell: a real window of the real scripts in a throwaway container
+(support.Pool), a fake clock; no time asserted.
 """
 import os
 import unittest
 
-from tests.hetzner.support import digest, needs_container, ref, sha256_file
+from tests.hetzner.support import digest, healthz, needs_container, ref, sha256_file
 from tests.hetzner.test_recover import Rec, cut, own
+from tests.hetzner.test_switch_flags import installed_unstarted
 from tests.hetzner.test_unattended import BACK_KEYS, NONAPI, SWITCH_KEYS, BackRig, Rig, keys, sha, value
 
 # THE DOCUMENTED END, key -> (the closing class, config.toml: the window's TARGET (new) or its pre-window file (old),
@@ -189,6 +194,47 @@ class KillKeepPrevAndNow(unittest.TestCase):
                     else:
                         self.assertFalse(os.path.lexists(bk))
                 self.assertEqual(g.validates(), [], 'RECOVER validated a switch\'s validated file')
+
+
+# B4b fix 1's rows: (the cut, the pool, the documented end: the closing class (None: the journal stays open, exit 5),
+# RECOVER's starts, RECOVER's stops)
+SHORTCUT_END = (
+    ('idle', 'idle', ('pre', 0, 0)),                     # before its stop: NO EFFECT YET, a runscaler runs: closed
+    ('stopping', 'idle', ('target-running', 1, 1)),      # its stop began, the older runscaler runs: THE IDLE RESTART
+    ('stopping', 'busy', (None, 0, 0)),                  # the same, busy: the cut --now switch waits for idle
+    ('starting', 'idle', ('target-running', 1, 0)),      # the unit stopped, its start journaled: THE START
+)
+
+
+@needs_container
+class KillShortcutRestart(unittest.TestCase):
+    def test_each_cut_of_the_shortcut_s_restart_ends_right(self):
+        for key, pool, (cls, starts, stops) in SHORTCUT_END:
+            with self.subTest(key=key, pool=pool):
+                st = {}
+
+                def before(g):
+                    st['cfg'], _, st['keep'], st['kst'] = installed_unstarted(g)
+                    if pool == 'busy':
+                        g.p.curl['healthz'] = healthz(**{'linux-ci-main': {'busy': 1}})
+                g = cut(self, 'up', ('journal:' + key, 'kill'), more=('--now',), before=before)
+                self.assertEqual(keys(g.cut)[-1], key, 'the cut came right after its line')
+                self.assertEqual(value(g.cut, 'idle'), 'skipped')
+                self.assertNotIn('backup', keys(g.cut))
+                x = Rec(self, g)
+                if cls is None:
+                    x.run(5)
+                    x.open()
+                    self.assertIn('the switch waits for idle', x.r.stdout)
+                else:
+                    x.run(0)
+                    x.closed(cls)
+                self.assertEqual(g.p.config(), st['cfg'], 'config.toml')
+                self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns),
+                                 (sha(st['keep']), st['kst'].st_mtime_ns), 'config.toml.prev changed')
+                self.assertEqual((len(x.calls('start')), len(x.calls('stop'))), (starts, stops), x.lines())
+                self.assertEqual(x.calls('restart'), [])
+                self.assertEqual(g.validates(), [], 'RECOVER validated a file the window validated')
 
 
 if __name__ == '__main__':

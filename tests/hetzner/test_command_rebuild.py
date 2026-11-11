@@ -10,7 +10,8 @@ run it (test_switch_now.py has switch-now's own).
   byte for byte, and `previous` is kept; a VERSION of another version: REFUSE, no journal); else the version of
   RUN_USER's record of the running image (another VERSION: REFUSE: a newer one is DUE's); else (NO BASELINE) the
   person's VERSION, required, not rejected, with a record. No record of (V, this recipe), or one whose digest
-  config.toml runs: REFUSE with RUN_USER's `build V` line (from host.conf's RUN_USER and HOST_IP) and the whole next
+  config.toml runs: REFUSE with RUN_USER's `build V` line (from host.conf's RUN_USER, HOST_IP and SSH_PORT: `ssh -p`,
+  B4b fix 1) and the whole next
   command; DUE's NO BASELINE and recipe changed lines name the whole command too.
 - E-14 (r3 Opus F3 (b)): rebuild writes the state's `core` to THE CORE STATE COPY before its `up`: a set the passes read
   not ready for 25 h is excused (`idle idle`, the switch); 23 h: exit 5.
@@ -28,7 +29,7 @@ from tests.hetzner.test_unattended import keys, value
 
 D2 = digest(41)          # RUN_USER's new build of V (`build V` again: the (V, recipe) record replaced)
 D3 = digest(43)          # RUN_USER's new build of CUR (it replaces the (CUR, recipe) record: NO BASELINE then)
-BUILD_LINE = "as root: `ssh root@203.0.113.10 '~/bin/runner-updater build %s'`"
+BUILD_LINE = "as root: `ssh -p 22 root@203.0.113.10 '~/bin/runner-updater build %s'`"
 KEEPP = os.path.join(Pool.HOME, '.config', 'runner', 'config.toml.prev')
 
 
@@ -135,7 +136,7 @@ class TheOpenCandidate(unittest.TestCase):
         n = C(self)
         n.mark()
         r = n.cmd('rebuild', FAM, V, rc=1)
-        self.assertIn('rebuild switches the version the pool runs, runner %s (' % CUR, r.stdout)
+        self.assertIn('rebuild switches the version config.toml names, runner %s (' % CUR, r.stdout)
         self.assertIn('never runner %s: a newer release is the pass\'s to switch (DUE)' % V, r.stdout)
         n.none(r)
 
