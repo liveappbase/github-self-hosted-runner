@@ -19,7 +19,9 @@ the new lines, test_kills.py's.
 - THE SHORTCUT'S RESTART (B4b fix 1; review r1, opus F1): `--now` on a config.toml that names DIGEST's image already and
   that no runscaler is proven to run (installed after its start): a validated copy, `idle skipped`, ONE stop and ONE
   start, closed target-running, no backup and no rename. The control: no `--now`: B3's shortcut, `end`, no restart. A
-  SIGKILL after its new lines: test_kills.py's.
+  SIGKILL after its new lines: test_kills.py's. B4b fix 2 (review r2 F1): its gate is the process's start alone, at or
+  before the install (ONE rule with the updater's, runner-facts.sh's unstarted: OneStartRule), read again right before
+  `stopping`: a start in the install's own second is restarted; a hand restart after its checks is not (`end`).
 Every cell runs a real window of the real scripts in a throwaway container (support.Pool, a fake clock: the excuse's
 age is planted against the clock the idle pair reads, which each cell checks from the substitutes' events). (Named for
 its CI part, test_[sv-z]*.py: .github/workflows/release-check.yml.)
@@ -166,14 +168,15 @@ SHORTCUT_KEYS = ['window', 'kind', 'version', 'digest', 'process', 'old', 'confi
                  'idle', 'from', 'stopping', 'stopped', 'starting', 'running', 'prev', 'installed', 'closed']
 
 
-def installed_unstarted(g):
+def installed_unstarted(g, after=1):
     """THE SHORTCUT'S STATE (B4b review r1, opus F1): config.toml put on NEW's image by hand and never started into (a
-    person's release cut while it waits for idle: its install a second after runscaler's start), and config.toml.prev
-    an earlier switch's keep (another image). (config.toml's text and os.stat, config.toml.prev's text and os.stat)."""
+    person's release cut while it waits for idle: its install AFTER seconds after runscaler's start, 1; 0: in its own
+    second), and config.toml.prev an earlier switch's keep (another image). (config.toml's text and os.stat,
+    config.toml.prev's text and os.stat)."""
     cfg = g.old.replace(ref(OLD), ref(NEW))
     assert cfg != g.old
     g.p.write(g.p.rpath('config.toml'), cfg, 0o600)
-    t = g.p.unit_now()['start'] + 1
+    t = g.p.unit_now()['start'] + after
     os.utime(g.p.rpath('config.toml'), (t, t))
     keep, kst = plant_keep(g)
     return cfg, os.stat(g.p.rpath('config.toml')), keep, kst
@@ -227,6 +230,50 @@ class NowShortcut(unittest.TestCase):
                 self.assertLess(ev.index('journal staged-sha'), ev.index('journal idle'))
                 self.assertLess(ev.index('journal idle'), ev.index('journal stopping'))
 
+    def test_a_start_in_the_install_s_own_second_is_restarted(self):
+        """B4b fix 2 (review r2 F1: THE SHORTCUT'S RESTART's gate is the process's start alone, at or before the install,
+        ONE rule with the updater's: runner-facts.sh's unstarted): runscaler started in config.toml's own second (start
+        = the install) is not proven to run it (a start in that second can come just before the install), so `up
+        --unattended V NEW --now` restarts it: one stop, one start, closed target-running, exit 0 (the safe side keeps
+        the STOP's way out, as the updater's NO IDLE level does in that second: test_pass_switch's
+        test_a_start_in_the_install_s_own_second_keeps_no_idle)."""
+        g = Rig(self)
+        g.p.curl['healthz'] = healthz(**{'linux-ci-main': {'busy': 1}})
+        cfg, cst, keep, kst = installed_unstarted(g, after=0)
+        self.assertEqual(int(cst.st_mtime), g.p.unit_now()['start'], 'the install in the start\'s own second')
+        r = g.up('--now')
+        self.assertEqual((len(g.calls('stop')), len(g.calls('start')), len(g.calls('restart'))), (1, 1, 0),
+                         r.stdout[-3000:])
+        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+        wid, lines = g.done()
+        self.assertEqual(installed(lines), (sha(cfg), content(cfg), 'target-running'))
+
+    def test_a_hand_restart_after_its_checks_is_not_restarted_again(self):
+        """B4b fix 2 (review r2 F1: the start read again right before `stopping`): THE SHORTCUT'S STATE, the pool BUSY,
+        and a person's hand restart of runscaler right after `idle skipped` (the gate read a runscaler that started
+        before the install, and the checks passed). The `from` read, right before `stopping`, finds a runscaler that
+        started after the install: it runs config.toml, so nothing is stopped or started; `end` (its line says that it
+        started after its install and that nothing restarts), closed pre, exit 1; config.toml and config.toml.prev as
+        they were. The control: test_now_restarts_a_config_that_names_its_digest_and_never_ran (no restart in between:
+        one stop, one start)."""
+        g = Rig(self)
+        g.p.curl['healthz'] = healthz(**{'linux-ci-main': {'busy': 1}})
+        cfg, cst, keep, kst = installed_unstarted(g)
+        g.p.hooks(('journal:idle', 'restart'))
+        r = g.up('--now')
+        self.assertEqual(g.calls('stop') + g.calls('start') + g.calls('restart'), [], r.stdout[-3000:])
+        self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+        wid, lines = g.done()
+        u = g.p.unit_now()
+        self.assertGreater(u['start'], int(cst.st_mtime), 'the hook restarted runscaler after the install')
+        self.assertEqual(value(lines, 'idle'), 'skipped')
+        self.assertEqual(value(lines, 'from'), '%d %d' % (u['pid'], u['start']))
+        self.assertNotIn('stopping', keys(lines))
+        self.assertEqual(keys(g.body(lines))[-1], 'end', lines)
+        self.assertIn('runscaler (%d %d) started after its install' % (u['pid'], u['start']), value(lines, 'end'))
+        self.assertEqual(installed(lines)[2], 'pre')
+        self.assertEqual(g.p.config(), cfg)
+        self.assertEqual((sha256_file(g.prev), os.stat(g.prev).st_mtime_ns), (sha(keep), kst.st_mtime_ns))
 
     def test_its_checks_restart_nothing(self):
         """THE SHORTCUT'S RESTART's checks, each before `idle skipped` (nothing stopped or started, config.toml and
@@ -383,6 +430,29 @@ class OneDiskCheck(unittest.TestCase):
             self.assertNotIn('disk_ok() {', texts[rel], rel + ' has a disk_ok of its own')
             self.assertNotIn('DISK_PCT=', texts[rel], rel + ' has a DISK_PCT of its own')
         self.assertIn('. "$B/setup/runner-facts.sh"', texts['bin/runner-updater'])
+
+
+@needs_container
+class OneStartRule(unittest.TestCase):
+    """B4b fix 2 (review r2 F1): ONE rule for "no runscaler has started since config.toml's install" (an install counts
+    nothing until a restart): runner-facts.sh's unstarted and the install time it compares with, install_of; the
+    updater's NO IDLE level and THE VERSION, and pool-image.sh's SHORTCUT'S RESTART (its gate and its re-read right
+    before `stopping`), all call it, and neither has a copy of its own. Its boundary (the same second: unstarted) is
+    pinned on both sides: test_pass_switch's test_a_start_in_the_install_s_own_second_keeps_no_idle and
+    NowShortcut.test_a_start_in_the_install_s_own_second_is_restarted."""
+
+    def test_one_copy_in_runner_facts_sh(self):
+        b = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'linux-docker')
+        texts = {}
+        for rel in ('setup/runner-facts.sh', 'setup/pool-image.sh', 'bin/runner-updater'):
+            with open(os.path.join(b, rel)) as f:
+                texts[rel] = f.read()
+        for fn in ('unstarted', 'install_of'):
+            self.assertEqual(texts['setup/runner-facts.sh'].count('\n%s() {' % fn), 1, fn)
+            for rel in ('setup/pool-image.sh', 'bin/runner-updater'):
+                self.assertNotIn('%s() {' % fn, texts[rel], '%s has a %s of its own' % (rel, fn))
+        self.assertEqual(texts['bin/runner-updater'].count('unstarted "$p" "$UN_INST"'), 2)
+        self.assertEqual(texts['setup/pool-image.sh'].count('unstarted "'), 2)
 
 
 if __name__ == '__main__':

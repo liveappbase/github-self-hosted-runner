@@ -87,6 +87,14 @@
 #                        touch comes after `rename-start`, its `renamed` after the rename): then R. An mtime AFTER R is
 #                        a later write of the same bytes (`03-runscaler.sh real DIGEST`, which restarts nothing): then
 #                        MTIME, never a time earlier than the file itself. No such journal: MTIME (a hand install)
+#   install_of FILE DIR  FILE's install time (install_time of its sha and mtime, read through ONE config_read, the
+#                        window journals in DIR) in epoch seconds, or `none` when it cannot be read
+#   unstarted P INST     AN INSTALL COUNTS NOTHING UNTIL A RESTART (S2b-3c-2 B4b fix 2, review r2 F1: ONE rule, the
+#                        updater's NO IDLE level and THE VERSION, and pool-image.sh's SHORTCUT'S RESTART, its gate and
+#                        its read again right before `stopping`): 0 when no runscaler is proven to have started since
+#                        the install INST (install_of's): P ("PID START", proc_now's, read BEFORE INST) is none, INST is
+#                        none (or not "PID START"), or P started at or before INST (its own second too: a start in that second can come
+#                        just before the install, the safe side). 1 when P started after INST. REPLY says which
 
 proc_now() {
   local o k v s= p= a=
@@ -357,4 +365,25 @@ install_time() {
   elif [ "$2" -gt "$best" ]; then
     echo "$2 its mtime: it was written again after the window journal that renamed these bytes into place at $best"
   else echo "$best the window journal that renamed it into place"; fi
+}
+
+install_of() {
+  local cr head i
+  cr=$(config_read "$1") || { echo none; return 0; }
+  head=${cr%%$'\n'*}
+  [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { echo none; return 0; }
+  i=$(install_time "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$2"); i=${i%% *}
+  [[ $i =~ ^[0-9]+$ ]] && echo "$i" || echo none
+}
+
+unstarted() {
+  local p=${1:-none} i=${2:-none}
+  if [[ ! $p =~ ^[0-9]+\ [0-9]+$ ]] || [[ ! $i =~ ^[0-9]+$ ]] || [ "${p#* }" -le "$i" ]; then
+    REPLY="runscaler pid ${p% *} started at ${p#* }"
+    [[ $p =~ ^[0-9]+\ [0-9]+$ ]] || REPLY="no runscaler process (systemd: not active, or an answer this does not read)"
+    REPLY="$REPLY; config.toml installed at $i"
+    return 0
+  fi
+  REPLY="runscaler pid ${p% *} started at ${p#* }, after config.toml's install at $i"
+  return 1
 }

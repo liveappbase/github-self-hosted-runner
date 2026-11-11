@@ -18,10 +18,11 @@ command), while the updater is ON or OFF; it starts nothing. (Named for its CI p
   state write leaves the file empty already. A file it cannot replace: a STOP, nothing written. A pass with no retry
   keeps the digests.
 - A cleared release with no build record of RUN_USER for this release's image, newer than the runner of RUN_USER's
-  record of the image config.toml names (B4b fix 1, opus F4: DUE switches only a newer one): DUE's "waits for RUN_USER's
-  build" text and RUN_USER's `build V` line, built from the host config's RUN_USER, HOST_IP and SSH_PORT (here root,
-  host.conf.example's 203.0.113.10 and 22; opus F3: `ssh -p`), never a literal. One that is not newer, or with no such
-  record: only the clear.
+  record of the image config.toml names (B4b fix 1, opus F4: DUE switches only a newer one) and the release DUE would
+  switch now (B4b fix 2, review r2 F2: the latest release the last pass read, past DUE's step 5; local state only):
+  DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line, built from the host config's RUN_USER, HOST_IP
+  and SSH_PORT (here root, host.conf.example's 203.0.113.10 and 22; opus F3: `ssh -p`), never a literal. Any other (not
+  newer, no such record, a newer release the latest, a recipe change, no pass that read the latest): only the clear.
 - THE OUTAGE RULE as its last step after its RECOVER (the r2 FOLD).
 - The usage of the three commands and their user: RS_USER's only.
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
@@ -30,7 +31,7 @@ import json
 import os
 import unittest
 
-from tests.hetzner.support import REPO, digest, needs_container, ref
+from tests.hetzner.support import REPO, digest, iso, needs_container, ref, tarball
 from tests.hetzner.test_back import one, readme, section
 from tests.hetzner.test_updater import FAM, MAIN, OLD, SMALL, STATEDIR, V, WINDOW, WINDOWS, Rig, candidate, stop
 
@@ -45,6 +46,7 @@ BUILD_LINE = "as root: `ssh -p 22 root@203.0.113.10 '~/bin/runner-updater build 
 CLEARED = ('check failed', 'ROLLED BACK', 'JOBS FAIL ON THE NEW IMAGE', 'NO EVIDENCE', 'ROLLBACK FAILED')
 KEPT = ('HAND CHANGE', 'NO IDLE', 'DISK', 'CI DISABLED', 'POOL DOWN')
 CUR = '2.338.2'   # the runner of RUN_USER's record of the image config.toml names (OLD), when a cell plants one
+W = '2.340.0'     # a release newer than V (codex r2 F2's W: U < V < W)
 
 
 def held(name, version=V):
@@ -227,13 +229,21 @@ class TheBuildRecordLine(unittest.TestCase):
         SSH_PORT (Opus r1 F11; B4b fix 1, review r1 opus F3: `ssh -p SSH_PORT`, here 22, and 2222 in a host.conf that says
         so). B4b fix 1 (opus F4): DUE switches only a release newer than that record's, so a cleared release that is not
         newer (2.300.0), or one with no record of config.toml's image to compare with (NO BASELINE holds DUE), gets no
-        line about a switch or a build: only the clear. The control: V's record is there: no such line."""
-        for row in ('newer', 'built', 'port 2222', 'older', 'no running record'):
+        line about a switch or a build: only the clear. B4b fix 2 (review r2 F2, codex and opus): DUE switches only the
+        release it chose, the latest one, past its step 5; retry reads that choice from local state only (the last
+        pass's DUE: its step 7's latest release, and its steps 4-5 on the record of config.toml's image), so a pass runs
+        first with GitHub's latest release LATEST (V; 'newer release': W > V, codex's U < V < W). No promise for V when
+        W is the latest, when that record's recipe is not this release's any more (a recipe change after the pass), or
+        when no pass read the latest release (retry itself asks GitHub nothing): none at all, or a later pass held before it
+        asked GitHub (a STOP that holds every release: the earlier pass's reading is not kept). The controls: V the latest and newer: the line
+        stays ('newer', 'port 2222'); V's record is there: no such line ('built')."""
+        for row in ('newer', 'built', 'port 2222', 'older', 'no running record', 'newer release', 'recipe changed',
+                    'no pass', 'held pass'):
             with self.subTest(row):
                 v = '2.300.0' if row == 'older' else V
                 g = R(self, {'stops': [held('ROLLED BACK', v)], 'rejected': [v]})
                 if row != 'no running record':
-                    g.p.record(CUR, OLD)
+                    rec = g.p.record(CUR, OLD)
                 if row == 'built':
                     g.p.record(V, digest(39))
                 port = '22'
@@ -242,12 +252,30 @@ class TheBuildRecordLine(unittest.TestCase):
                     conf = g.p.read(g.p.path('host.conf'))
                     self.assertEqual(conf.count('\nSSH_PORT=22\n'), 1)
                     g.p.write(g.p.path('host.conf'), conf.replace('\nSSH_PORT=22\n', '\nSSH_PORT=2222\n'), 0o644)
+                if row != 'no pass':
+                    latest = W if row == 'newer release' else V
+                    g.p.gh.release(latest, tarball(latest), latest=True, published=iso(g.p.clock() - 3 * 86400))
+                    r = g.ok('pass')
+                    if row != 'no running record':
+                        self.assertIn('runner-updater: pass: hz-docker is not due: ', r.stdout)
+                        self.assertNotIn('NO BASELINE', r.stdout)
+                if row == 'held pass':   # a later pass ends before DUE's step 7 (a STOP that holds every release)
+                    st = g.state()
+                    st['families'][FAM]['stops'].append(held('ROLLBACK FAILED'))
+                    g.put(st)
+                    g.p.clock(plus=600)
+                    r = g.ok('pass')
+                    self.assertIn('runner-updater: pass: hz-docker is not due: STOP ROLLBACK FAILED', r.stdout)
+                if row == 'recipe changed':
+                    os.remove(rec)
+                    g.p.record(CUR, OLD, recipe='e' * 64)
                 r = g.retry()
-                self.assertIn('runner-updater: retry hz-docker: cleared STOP ROLLED BACK (runner %s); rejected: %s, now '
-                              'none' % (v, v), r.stdout)
+                also = ', STOP ROLLBACK FAILED (runner %s)' % v if row == 'held pass' else ''
+                self.assertIn('runner-updater: retry hz-docker: cleared STOP ROLLED BACK (runner %s)%s; rejected: %s, now '
+                              'none' % (v, also, v), r.stdout)
                 line = [l for l in r.stdout.splitlines() if l.startswith('runner-updater: retry hz-docker: runner %s: '
                                                                          % v)]
-                if row in ('built', 'older', 'no running record'):
+                if row not in ('newer', 'port 2222'):
                     self.assertEqual(line, [], r.stdout[-3000:])
                     self.assertNotIn("DUE's next pass switches", r.stdout)
                     self.assertNotIn('~/bin/runner-updater build', r.stdout)
@@ -323,15 +351,19 @@ class Text(unittest.TestCase):
                   'with an open candidate whose lines config.toml does not name (a hand edit: `STOP HAND CHANGE`), '
                   'rebuild refuses: put the candidate\'s config back first, then `runner-updater rebuild hz-docker <its '
                   'runner version>`',
-                  'When a cleared release is newer than the runner of RUN_USER\'s build record of the image config.toml '
-                  'names (a pass switches only to a newer release)',
-                  'A cleared release that is not newer gets no such line: no pass switches to it',
+                  # B4b fix 2 (review r2 F2): the line only for the release a pass would switch to now, read locally
+                  'When a cleared release is the one a pass picks now (the latest release the last pass read',
+                  'Any other cleared release gets no such line (no pass switches to it)',
+                  'retry itself asks GitHub nothing: when the last pass did not read the latest release (it ended before it '
+                  'asked GitHub), no cleared release gets that line',
                   'rebuild refuses, restarts nothing (it never skips the wait for idle) and names `runner-updater '
                   'switch-now hz-docker`, which restarts runscaler into it',
                   'A version you name must be the one it switches (for a waiting switch, the version of its journal): '
                   'another is refused',
                   'the window restarts runscaler into it once (`idle skipped`, no backup: `config.toml.prev` stays as it '
                   'is)', 'that restart cut after its stop began waits for idle as any other switch',
+                  'when runscaler has started since that install (a restart by hand), nothing restarts, also while it '
+                  'does not serve yet (exit 1: the next pass decides)',
                   'with none (`STOP NO BASELINE`) the version you name', 'and so is a rejected one',
                   'a pool that is not idle changes nothing (exit 5, "not now"), and it never holds `STOP NO IDLE`',
                   'it holds no `STOP DISK`', 'Exit 0 switched (the new image runs); 5 not now; 1 a STOP or a REFUSE',
@@ -345,6 +377,11 @@ class Text(unittest.TestCase):
             self.assertIn(s, upd)
         for s in ('come in a later release', 'in a later release the updater', '(a later release)'):
             self.assertNotIn(s, one(readme()))
+        # B4b fix 2 (review r2 F1): pool-image.sh's `up --unattended --now` in the README: the start time alone decides
+        self.assertIn('Only runscaler\'s start time decides this (its start at or before the install, the updater\'s own '
+                      'rule): when runscaler has started since that install, nothing restarts, also while it does not '
+                      'serve yet, and when it restarts after the window\'s checks, right before its stop (exit 1, '
+                      '`end`: its line says so)', one(readme()))
         # opus F5: no line says the pool runs an image from config.toml alone (the README's grep: the build log)
         for s in ('build of the version the pool runs', 'build of the runner version the pool runs',
                   'the image the pool runs', 'when the pool runs the candidate', 'one the pool runs already',

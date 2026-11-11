@@ -169,8 +169,8 @@
 #   lets running jobs finish); RECOVER's --now skips THE IDLE RESTART's pair alone (`idle skipped`, then the restart):
 #   every other reason RECOVER keeps a journal open, or closes it, is the same with it. A window's own `idle skipped`
 #   does not carry into a later RECOVER: a cut --now switch waits for idle as any other. With --now, up's shortcut that
-#   would end with nothing restarted (config.toml names DIGEST's image, but no runscaler RUNS since its install) is THE
-#   SHORTCUT'S RESTART (below; S2b-3c-2 B4b fix 1: a B3 defect a B4b cell proved, E-7 (b)). --keep-prev (a window of an
+#   would end with nothing restarted (config.toml names DIGEST's image, but no runscaler has started since its install)
+#   is THE SHORTCUT'S RESTART (below; S2b-3c-2 B4b fix 1: a B3 defect a B4b cell proved, E-7 (b)). --keep-prev (a window of an
 #   OPEN candidate, whose `back` config config.toml.prev must stay: PLAN D5's one exception): `keep-prev P` (P:
 #   config.toml.prev) right after `digest`, before any effect; THE BACKUP goes into windows/ID.d/config.toml.backup,
 #   never config.toml.prev, which stays byte for byte; RECOVER reads that backup as a switch's only with that line.
@@ -212,7 +212,8 @@
 #   FAMILY LINES (config.toml's two sets name ONE image, the old image, which the registry must still serve: the
 #   rollback's; DIGEST's image already: nothing to switch, config.toml.prev kept as it is: done, `running`, when, checked
 #   ONCE after the `config-sha` line, config.toml is still `config-sha` naming DIGEST's image and runscaler RUNS since
-#   its install, else `end`, but with --now THE SHORTCUT'S RESTART when config.toml is still that file); START STATE (the unit active and enabled, config.toml installed before its start: else
+#   its install, else `end`, but with --now THE SHORTCUT'S RESTART when config.toml is still that file and no
+#   runscaler has started since its install); START STATE (the unit active and enabled, config.toml installed before its start: else
 #   not now), then `start-state` (config-sha runs: RECOVER may start it with no validate); DISK (RUN_USER's
 #   filesystem, D1's data and the registry, at least DISK_PCT % free: runscaler's min_free, runner-facts.sh's disk_ok); jq (`jq --version` a core
 #   row of ~/build/core/TESTED_JQ); the PINS; then PRE-VALIDATE: `03-runscaler.sh render
@@ -254,12 +255,18 @@
 #   runners finish).
 # THE SHORTCUT'S RESTART (up --unattended --now; S2b-3c-2 B4b fix 1, review r1 opus F1, its ruling (i): a person's
 #   switch-now ends an install that no restart followed, e.g. a release cut while it waits for idle): config.toml is
-#   still `config-sha`, names DIGEST's image and no runscaler RUNS since its install (its mtime). The unit active and
+#   still `config-sha`, names DIGEST's image and no runscaler has started since its install. THE GATE (B4b fix 2,
+#   review r2 F1) is the process's start alone, by the updater's ONE rule (runner-facts.sh's unstarted: none, or a
+#   start at or before the install, its own second too; the install time install_of's, the window journals'
+#   `renamed`, never earlier than the mtime), never /healthz: a runscaler that started after the install runs
+#   config.toml, and one that does not serve yet is `end` with nothing restarted (its line says so). The gate is read
+#   again right before `stopping` (the `from` read): a runscaler that started after the install meanwhile (a person's
+#   restart) is `end`, nothing stopped. The unit active and
 #   enabled (else `end`, nothing restarted), the registry serves that image (else STOP check failed), then `staged`, a
 #   copy of config.toml validated by the ONE VALIDATE RULE as back's (`validate pre N CLASS`: NON-API is STOP check
 #   failed, UNKNOWN `end`, both with nothing restarted), the copy removed, `staged-sha` (= `config-sha`: the TARGET, a
-#   validated sha RECOVER may start), `idle skipped`, then THE RESTART below with config-sha as its TARGET and the
-#   file's mtime as its install time: closed target-running when the new process RUNS (THE RESTART's own ends else:
+#   validated sha RECOVER may start), `idle skipped`, then THE RESTART below with config-sha as its TARGET and that
+#   install time as its own: closed target-running when the new process RUNS (THE RESTART's own ends else:
 #   CI DISABLED, a hand change, a start that did not run). No `target` line (the updater changes no candidate: a hand
 #   release is none), no backup (config.toml is the target already: config.toml.prev stays byte for byte, with
 #   --keep-prev too) and no rename. RECOVER: a switch journal with no `backup`, a window `stopping` and `staged-sha` =
@@ -523,7 +530,7 @@ host_conf() {   # host_conf SCRIPT KEY...: each named KEY's line in HOST_CONF se
   for k in "$@"; do [[ $seen == *" $k "* ]] || { echo "$me: REFUSE $HOST_CONF lacks $k (linux-docker/host.conf.example)" >&2; exit 1; }; done
 }
 host_conf pool-image.sh RUN_USER RS_USER REGISTRY_PORT RS_HEALTH_PORT IMAGE_NAME MAIN_SET SMALL_SET
-MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED= SKIPIDLE=0 KEEPPREV=0
+MODE=${1-} VERSION= DIGEST= UN=0 WHY= VERDICT= OLDV= RSV= WANT= DONE=0 PINNED= SKIPIDLE=0 KEEPPREV=0 USHORT=0
 usage() { echo "usage: pool-image.sh up RUNNER_VERSION (for example 2.338.2) | back | accept | runscaler [VERSION] | runscaler-check   (a person's)"
   echo "       pool-image.sh up --unattended RUNNER_VERSION DIGEST [--now] [--keep-prev]"
   echo "                   | back --unattended --why r1|r1-connect|back [--verdict FILE] [--old-version VERSION]"
@@ -1212,7 +1219,12 @@ ucidisabled() {   # TEXT: a person disabled the unit during the window (D-h), af
 urestart() {   # THE RESTART (the header): returns when the new process RUNS; else exit 1, the journal open
   local o p e
   while [ "$(date +%s)" -le "$RENAMED" ]; do sleep 0.2; done   # past the install's second: the start proves it
-  ujs from "$(proc_now)"
+  o=$(proc_now); ujs from "$o"
+  # THE SHORTCUT'S RESTART (B4b fix 2, review r2 F1): its gate read again right before `stopping`, by the same rule
+  # (unstarted): a runscaler that started after the install meanwhile (a person's restart) runs config.toml already
+  if [ "$USHORT" = 1 ] && ! unstarted "$o" "$RENAMED"; then
+    uend "runscaler ($o) started after its install at $RENAMED (a restart after this window's checks: $REPLY), so it runs config.toml ($(image_of "$CFG")) already: nothing was stopped, and nothing restarts; the updater's next pass decides"
+  fi
   ujs stopping "$(date +%s)"
   utarget "after the rename, before the stop" "nothing was stopped, and runscaler is as it was"
   systemctl --user stop runscaler < /dev/null 8>&- 9>&- || ufail "systemctl --user stop runscaler failed (journalctl --user -u runscaler): the window journal $J stays open"
@@ -1282,10 +1294,11 @@ utargetlines() {   # the TARGET's `target` and `target-content` lines, of the va
   ujs target-content "$TCONT"
 }
 ushortcut() {   # INSTALL IMAGE: THE SHORTCUT'S RESTART (the header; B4b fix 1): --now, and config.toml (just read: NOW_COPY)
-  # is still `config-sha`, names IMAGE (DIGEST's) and was installed at INSTALL (its mtime), and no runscaler RUNS since
-  # then. The unit active and enabled (else `end`), the registry serves IMAGE, a copy validated (`staged-sha` =
-  # config-sha: RECOVER starts it with no new validate), `idle skipped`, then THE RESTART with config-sha as its TARGET
-  # and INSTALL as its install time. No backup and no rename: config.toml.prev stays as it is. Closed target-running
+  # is still `config-sha`, names IMAGE (DIGEST's) and was installed at INSTALL (install_of: B4b fix 2), and no
+  # runscaler has started since then (unstarted). The unit active and enabled (else `end`), the registry serves IMAGE,
+  # a copy validated (`staged-sha` = config-sha: RECOVER starts it with no new validate), `idle skipped`, then THE
+  # RESTART with config-sha as its TARGET and INSTALL as its install time (USHORT: its `from` read is the gate read
+  # again, right before `stopping`). No backup and no rename: config.toml.prev stays as it is. Closed target-running
   # when the new process RUNS; else THE RESTART's own ends (CI DISABLED, a hand change, a start that did not run)
   local n out rc cls f
   { [ "$(exec 8>&- 9>&-; systemctl --user is-active runscaler 2> /dev/null)" = active ] && [ "$(exec 8>&- 9>&-; systemctl --user is-enabled runscaler 2> /dev/null)" = enabled ]; } \
@@ -1316,13 +1329,13 @@ ushortcut() {   # INSTALL IMAGE: THE SHORTCUT'S RESTART (the header; B4b fix 1):
   rm -f -- "$STAGED"
   ujs staged-sha "$CSHA"
   ujs idle skipped
-  TSHA=$CSHA TCONT=$NOW_CONTENT TSETS=$(sets_of "$NOW_COPY" | paste -sd ' ' -) RENAMED=$1
+  TSHA=$CSHA TCONT=$NOW_CONTENT TSETS=$(sets_of "$NOW_COPY" | paste -sd ' ' -) RENAMED=$1 USHORT=1
   urestart
   DONE_SHA=$TSHA DONE_CONTENT=$TCONT DONE_CLASS=target-running
   udone
 }
 un_up() {
-  local cur new n rc cls out f p m rb rbw
+  local cur new n rc cls out f p m rb rbw inst
   ujs process "$(proc_now)"
   cur=$(image_of "$CFG") || ustop "check failed" "config.toml does not name ONE runner image for both sets ($SETS): read $CFG"
   ujs old "$cur"
@@ -1330,14 +1343,24 @@ un_up() {
   new=localhost:${REGISTRY_PORT}/${IMAGE_NAME}@$DIGEST
   if [ "$cur" = "$new" ]; then   # nothing to switch, and its rollback ($KEEPP) stays as it is: done only if it RUNS,
     # checked ONCE, here, after the journal lines and right before `running` (D-h): config.toml still `config-sha` and
-    # naming DIGEST's image in one read, and runscaler RUNS since its install (config.toml's mtime)
+    # naming DIGEST's image in one read, and runscaler RUNS since its install. THE INSTALL COUNTS NOTHING UNTIL A RESTART
+    # (B4b fix 2, review r2 F1): the process's start alone (runner-facts.sh's unstarted, the updater's ONE rule, on the
+    # process read first and then the install time, install_of: never earlier than the mtime) decides THE SHORTCUT'S
+    # RESTART, never /healthz: a runscaler that started after the install runs config.toml, serving yet or not
+    p=$(proc_now)
     cfg_now; m=$(stat -c %Y "$CFG" 2> /dev/null)
+    inst=$(install_of "$CFG" "$WINDOWS"); [[ $inst =~ ^[0-9]+$ ]] || inst=$m   # none: the mtime, install_time's own
     if [ "$NOW_SHA" != "$CSHA" ] || [ "$(image_of "$NOW_COPY")" != "$new" ]; then
       RUNS_WHY="config.toml changed after its config-sha line (sha256 ${NOW_SHA:0:12}…)"
-    elif [[ $m =~ ^[0-9]+$ ]] && runs "$m" "$WDIR/runs-healthz.json" $(sets_of "$NOW_COPY"); then
+    elif [[ ! $inst =~ ^[0-9]+$ ]]; then
+      RUNS_WHY="its install time cannot be read"
+    elif unstarted "$p" "$inst"; then
+      RUNS_WHY="runscaler has not started since its install: $REPLY"
+      [ "$SKIPIDLE" != 1 ] || ushortcut "$inst" "$new"   # --now: THE SHORTCUT'S RESTART (the header); it ends with exit
+    elif runs "$inst" "$WDIR/runs-healthz.json" $(sets_of "$NOW_COPY"); then
       RUNNING=$RUNS_PROC; ujs running "$RUNNING"; DONE_SHA=$NOW_SHA DONE_CONTENT=$NOW_CONTENT DONE_CLASS=pre; udone
-    elif [ "$SKIPIDLE" = 1 ] && [[ $m =~ ^[0-9]+$ ]]; then
-      ushortcut "$m" "$new"   # --now: THE SHORTCUT'S RESTART (the header); it ends with exit
+    else
+      uend "config.toml already names $new, and runscaler ($p) started after its install at $inst, so it runs that file, but it is not proven to serve it yet ($RUNS_WHY): nothing restarts (an install counts at the next restart, and that one came); the updater's next pass decides"
     fi
     uend "config.toml already names $new, but it is not proven to run it ($RUNS_WHY): there is nothing to switch, its rollback ($KEEPP) stays as it is, and this mode restarts nothing"
   fi

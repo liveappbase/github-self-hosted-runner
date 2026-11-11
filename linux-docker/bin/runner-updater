@@ -173,7 +173,8 @@
 #            (below); then DUE's ONE line for hz-docker, whose step 12 is THE SWITCH CALLER (below), and after its
 #            child THE OUTAGE RULE as the pass's last step (a journal it leaves open: the STOP line, exit 1). Before the
 #            facts, THE TWO LEVELS (below). Each program's output stays in
-#            PASSDIR/PROGRAM.json, the latest release's lines in PASSDIR/release.out and .err. RUN_USER's: THE BUILD
+#            PASSDIR/PROGRAM.json, the latest release's lines in PASSDIR/release.out and .err (and its version in
+#            PASSDIR/eligible when it is eligible: DUE's choice, which retry reads). RUN_USER's: THE BUILD
 #            PASS (below).
 #   back hz-docker   RS_USER's only (a person's rollback, PLAN D7; THE ROLLBACK, below): it waits for the lock, runs
 #            RECOVER FIRST and THE APPLY STEP (a journal that stays: its STOP, exit 1), then refuses while OFF (the
@@ -195,10 +196,12 @@
 #            is emptied first, by a rename of an empty full copy (a run cut between them leaves the versions rejected in
 #            the state, and the next retry ends it); a JOBS FAIL of the candidate's version with core.jq's r1_bar null
 #            is the person's ACCEPT (KEEP ACTS' accept, in that write). Its lines: what it cleared and what stays, and per
-#            cleared release with no build record of RUN_USER that DUE would switch to (newer than the runner of RUN_USER's
-#            record of the image config.toml names: B4b fix 1), DUE's "waits for RUN_USER's build" text with RUN_USER's
-#            `build V` line (`ssh -p SSH_PORT`). THE OUTAGE RULE after its RECOVER. Exit 0, 1 a STOP or a REFUSE, 3
-#            untested jq.
+#            cleared release with no build record of RUN_USER that DUE would switch now (its own choice from local state,
+#            B4b fix 2: the latest release the last pass found eligible, past DUE's steps 4 and 5 on config.toml's
+#            image, and newer than the runner of RUN_USER's record of it), DUE's "waits for RUN_USER's build" text with
+#            RUN_USER's `build V` line (`ssh -p SSH_PORT`); when that choice cannot be read (no pass reached step 7 since
+#            the last one), only the clear: retry itself asks GitHub nothing. THE OUTAGE RULE after its RECOVER. Exit 0, 1 a
+#            STOP or a REFUSE, 3 untested jq.
 #   rebuild hz-docker [VERSION]   RS_USER's only (S2b-3c-2 E-6, its r2 and r3 FOLDs): ONE switch window (THE SWITCH'S
 #            CHILD, sw_child, with the idle pair) to RUN_USER's build record of the current version for this release's
 #            recipe (THE VERSION OF rebuild AND switch-now: cmd_target). RECOVER FIRST; OFF: REFUSE; one restart of
@@ -505,7 +508,8 @@
 #   R CFG       runscaler's folder, ~/.config/runner (runner.log, runner.log.1), and its config.toml
 #   STATEDIR    RR_LOCK's folder, ~/.local/state/runner-updater: STATE (state.json), PASSDIR (pass/: a pass's
 #               facts.json, log.txt, healthz.json, the core state copy state.json, each program's PROGRAM.json and
-#               PROGRAM.err, the latest release's release.out and release.err), WINDOW (window: pool-image.sh's open
+#               PROGRAM.err, the latest release's release.out and release.err, and eligible: its version when it was
+#               eligible, DUE's choice, which retry reads), WINDOW (window: pool-image.sh's open
 #               window journal), WINDOWS (windows/: its closed ones), BUILDOUT (build.out: RUN_USER's last 02-d1.sh
 #               build's output), REJECTED (rejected: THE REJECTED FILE, RS_USER's)
 #   RUN_STATE RUN_MAX  RUN_USER's STATE as RS_USER's status reads it: /home/RUN_USER plus this STATE's path in the home;
@@ -1438,8 +1442,8 @@ outage() {
       say "$RB_SAY: STOP POOL DOWN is cleared: runscaler RUNS (pid ${p% *}, started ${p#* })"
     fi
     if [ "$cd" = true ] && [ "$UNIT_FILE" = enabled ]; then
-      inst=$(install_of "$CFG")
-      if [ "$inst" != none ] && [ "${p#* }" -gt "$inst" ]; then
+      inst=$(install_of "$CFG" "$WINDOWS")
+      if ! unstarted "$p" "$inst"; then   # it started after config.toml's install (runner-facts.sh's ONE rule)
         change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "CI DISABLED")]' --arg f "$FAMILY"
         OUTAGE_WROTE=1
         say "$RB_SAY: STOP CI DISABLED is cleared: runscaler's unit is enabled and runscaler RUNS (pid ${p% *}, started ${p#* }, after config.toml's install at $inst)"
@@ -1471,17 +1475,6 @@ outage() {
     --arg f "$FAMILY" --arg t "${text:0:900}"
   OUTAGE_WROTE=1
   say "$RB_SAY: STOP POOL DOWN: $text"
-}
-
-# FILE -> config.toml's install time (facts 4's: runner-facts.sh's install_time of FILE's sha and mtime), or none when
-# it cannot be read
-install_of() {
-  local cr head i
-  cr=$(config_read "$1") || { echo none; return 0; }
-  head=${cr%%$'\n'*}
-  [[ $head =~ ^([0-9]+)\ ([0-9a-f]{64})$ ]] || { echo none; return 0; }
-  i=$(install_time "${BASH_REMATCH[2]}" "${BASH_REMATCH[1]}" "$WINDOWS"); i=${i%% *}
-  [[ $i =~ ^[0-9]+$ ]] && echo "$i" || echo none
 }
 
 # ---- THE ROLLBACK (the header): R1's in a pass, a person's `back hz-docker`; both by THE ROLLBACK'S PRECONDITIONS
@@ -1818,12 +1811,14 @@ newer() {
 }
 
 # NOW: the latest release (runner-release.sh's rr_eligible), its lines into PASSDIR/release.out and .err: 0 (RR_ facts
-# set), 75 or 1 + REPLY = its WAIT line, or why it is not eligible
+# set; its version also into PASSDIR/eligible, DUE'S CHOICE as this pass read it: B4b fix 2, review r2 F2), 75 or 1 +
+# REPLY = its WAIT line, or why it is not eligible
 latest() {
   local rc l
+  rm -f -- "$PASSDIR/eligible"
   rr_eligible "$1" > "$PASSDIR/release.out" 2> "$PASSDIR/release.err"
   rc=$?
-  [ "$rc" != 0 ] || return 0
+  if [ "$rc" = 0 ]; then printf '%s\n' "$RR_VERSION" > "$PASSDIR/eligible" 2> /dev/null || rm -f -- "$PASSDIR/eligible"; return 0; fi
   l=$(grep '^runner-release: ' "$PASSDIR/release.err" | tail -n 1)
   l=${l#runner-release: }
   REPLY=${l#REFUSE }
@@ -1831,10 +1826,45 @@ latest() {
   return "$rc"
 }
 
+# A B REC: DUE's steps 4 and 5 (ONE copy: DUE on its pass's facts, and retry on config.toml as it reads it: B4b fix 2,
+# review r2 F2): A and B, config.toml's lines of the family's two sets, name ONE image, ONE build record of RUN_USER has
+# its digest (NO BASELINE), and that record's recipe is REC, this release's (recipe changed): 0 + DB_CUR (its version:
+# DUE's step 6, the family's current version) and DB_RECORD; 1 + REPLY, the line of the step that holds
+DB_CUR= DB_RECORD=
+due_base() {
+  local a=$1 b=$2 rec=$3 dg
+  DB_CUR= DB_RECORD=
+  if [ "$a" = none ] || [ -z "$a" ] || [ "$a" != "$b" ]; then
+    REPLY="STOP NO BASELINE: its sets (${MAIN_SET}, ${SMALL_SET}) do not name one image in config.toml ($a, $b); $(baseline_next)"
+    return 1
+  fi
+  dg=${a##*@}
+  if [[ ! $dg =~ ^sha256:[0-9a-f]{64}$ ]] || ! rr_record_of "$BUILDS" "$dg"; then
+    if [ "${RR_COUNT:-0}" -gt 1 ]; then
+      REPLY="STOP NO BASELINE: $RR_COUNT build records of RUN_USER ($BUILDS) name its image's digest $dg: $RR_WHY; $(baseline_next)"
+    else
+      REPLY="STOP NO BASELINE: no build record of RUN_USER ($BUILDS) names its image's digest $dg ($a); $(baseline_next)"
+    fi
+    return 1
+  fi
+  if [ "$RR_REC_RECIPE" != "$rec" ]; then
+    REPLY="STOP recipe changed: this release's image recipe is $rec, and the build record of config.toml's image ($RR_RECORD) names $RR_REC_RECIPE (image/'s files changed); $(baseline_next "$RR_REC_VERSION")"
+    return 1
+  fi
+  DB_CUR=$RR_REC_VERSION DB_RECORD=$RR_RECORD
+}
+# DUE'S CHOICE as the last pass read it, from local state only (B4b fix 2, review r2 F2): REPLY = the version of the
+# latest release that pass's step 7 (latest) found eligible, PASSDIR/eligible; 1 when no such reading is there (the
+# last pass did not reach step 7, or the release was not eligible): the caller then promises nothing
+due_choice() {
+  local v
+  v=$(head -c 64 -- "$PASSDIR/eligible" 2> /dev/null) && v=${v%$'\n'} && [[ $v =~ ^${VERSION_RE}$ ]] || return 1
+  REPLY=$v
+}
 # DUE (the header): ONE line for the family, the first of the twelve steps that holds; it never fails the pass and
 # writes nothing into the state
 due() {
-  local now=$1 d=$PASSDIR v rec a b dg base cur brec rc
+  local now=$1 d=$PASSDIR v rec a b cur rc
   dnot() { say "pass: $FAMILY is not due: $1"; }
   # 0. a window ran in this pass (its facts are of the pool before it; one window per pass)
   [ -z "$RB_WINDOW" ] || { dnot "a window ran in this pass (one window per pass, and this pass's facts are of the pool before it): the next pass decides"; return 0; }
@@ -1846,29 +1876,11 @@ due() {
   # 3. this release's image recipe
   rr_recipe "$B/image" || { dnot "this release's image recipe cannot be computed: $RR_WHY"; return 0; }
   rec=$RR_RECIPE
-  # 4. NO BASELINE: the family's two lines in config.toml name ONE image, and ONE build record of RUN_USER has its
-  # digest
+  # 4. NO BASELINE and 5. recipe changed (due_base, ONE copy: DUE and retry), on this pass's facts of config.toml
   a=$(jq -r --arg s "$MAIN_SET" '.config.lines[$s] // "none"' "$d/facts.json" 2> /dev/null) || a=none
   b=$(jq -r --arg s "$SMALL_SET" '.config.lines[$s] // "none"' "$d/facts.json" 2> /dev/null) || b=none
-  if [ "$a" = none ] || [ "$a" != "$b" ]; then
-    dnot "STOP NO BASELINE: its sets (${MAIN_SET}, ${SMALL_SET}) do not name one image in config.toml ($a, $b); $(baseline_next)"
-    return 0
-  fi
-  dg=${a##*@}
-  if [[ ! $dg =~ ^sha256:[0-9a-f]{64}$ ]] || ! rr_record_of "$BUILDS" "$dg"; then
-    if [ "${RR_COUNT:-0}" -gt 1 ]; then
-      dnot "STOP NO BASELINE: $RR_COUNT build records of RUN_USER ($BUILDS) name its image's digest $dg: $RR_WHY; $(baseline_next)"
-    else
-      dnot "STOP NO BASELINE: no build record of RUN_USER ($BUILDS) names its image's digest $dg ($a); $(baseline_next)"
-    fi
-    return 0
-  fi
-  base=$RR_REC_RECIPE cur=$RR_REC_VERSION brec=$RR_RECORD
-  # 5. recipe changed
-  if [ "$base" != "$rec" ]; then
-    dnot "STOP recipe changed: this release's image recipe is $rec, and the build record of config.toml's image ($brec) names $base (image/'s files changed); $(baseline_next "$cur")"
-    return 0
-  fi
+  due_base "$a" "$b" "$rec" || { dnot "$REPLY"; return 0; }
+  cur=$DB_CUR
   # 6. its current version: cur, that record's. 7. the latest release (the first step that asks GitHub)
   latest "$now"; rc=$?
   [ "$rc" = 0 ] || { dnot "$REPLY"; return 0; }
@@ -2026,7 +2038,8 @@ levels() {
     a=${l%% *} b=${l#* }; a=${a#*=} b=${b#*=}
     [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -n "$a" ] && [ "$a" = "$b" ] && [[ $a =~ @(sha256:[0-9a-f]{64})$ ]] \
       && rr_record_of "$BUILDS" "${BASH_REMATCH[1]}" && ! newer "$v" "$RR_REC_VERSION" || return 0
-    if unstarted "$p"; then
+    UN_INST=$(install_of "$CFG" "$WINDOWS")
+    if unstarted "$p" "$UN_INST"; then
       say "pass: STOP NO IDLE (runner $v) stays: config.toml names runner $RR_REC_VERSION's image, but runscaler has not started since its install ($REPLY): the pool runs it only after a restart"
       return 0
     fi
@@ -2035,21 +2048,11 @@ levels() {
   change_state '.families[$f].stops = [.families[$f].stops[] | select(.stop != "NO IDLE")]' --arg f "$FAMILY"
   say "pass: STOP NO IDLE (runner $v) is gone: $why"
 }
-# P ("PID START" of runscaler, read BEFORE config.toml's install time | none): 0 when no runscaler is proven to run
-# config.toml, the header's "an install counts nothing until a restart": none runs, the install time cannot be read, or
-# P started at or before config.toml's install (install_of, read now: UN_INST); REPLY says which. 1: P started after it.
-# ONE copy: THE TWO LEVELS' NO IDLE and THE VERSION's "nothing to switch" (B4b fix 1, opus F1)
+# "an install counts nothing until a restart" (the header): runner-facts.sh's unstarted P INST, ONE rule with
+# pool-image.sh's SHORTCUT'S RESTART (B4b fix 2, review r2 F1), INST config.toml's install time (runner-facts.sh's
+# install_of, read after P: UN_INST). THE TWO LEVELS' NO IDLE, THE VERSION's "nothing to switch" and THE OUTAGE RULE's
+# CI DISABLED read it
 UN_INST=
-unstarted() {
-  UN_INST=$(install_of "$CFG")
-  if [ "$1" = none ] || [ "$UN_INST" = none ] || [ "${1#* }" -le "$UN_INST" ]; then
-    REPLY="runscaler pid ${1% *} started at ${1#* }"
-    [ "$1" != none ] || REPLY="no runscaler process (systemd: not active, or an answer this does not read)"
-    REPLY="$REPLY; config.toml installed at $UN_INST"
-    return 0
-  fi
-  return 1
-}
 # [V]: the next step of NO BASELINE and recipe changed (status.jq's: `runner-updater rebuild hz-docker`), the whole
 # command, with V when it is known (the r3 FOLD, THE VERSION OF rebuild: with no baseline the version is the person's)
 baseline_next() {
@@ -2080,7 +2083,8 @@ do_pass() {
   levels           # THE TWO LEVELS, before the facts (the r3 FOLD; r3 Opus F2): KEEP and DUE read what they leave
   install -d -m 700 "$PASSDIR" || refuse "cannot create $PASSDIR"
   rm -f -- "$PASSDIR"/facts.json "$PASSDIR"/log.txt "$PASSDIR"/healthz.json "$PASSDIR"/{idle,r1,keep,status}.json \
-    "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err "$PASSDIR"/switch.out
+    "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err "$PASSDIR"/eligible \
+    "$PASSDIR"/switch.out
   printf '%s\n' "$ST" | jq -c '.core // empty' > "$PASSDIR/state.json" || refuse "cannot copy the core's state into $PASSDIR"
   say "pass: one pass at $(date -u -d "@$now" '+%Y-%m-%d %H:%M:%S UTC') ($now): it acts on KEEP's and R1's verdicts and on a due runner release (at most one window)"
   collect || refuse "no facts: $REPLY"
@@ -2204,11 +2208,13 @@ rejected_empty() {
 # core.jq's r1_bar null on the core's evidence (the ONE predicate keep.jq reads), IS the person's ACCEPT (PLAN D7 :393:
 # KEEP's accept, ACCEPT_JQ, in the same ONE state write). A STOP that names another next step (HAND CHANGE, NO IDLE,
 # DISK, CI DISABLED, POOL DOWN) stays, and connect_only is never reset. A cleared release with no build record of
-# RUN_USER for this release's image, newer than the runner of RUN_USER's record of the image config.toml names (the one
-# DUE would switch to: B4b fix 1, opus F4): DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line (PLAN
-# D7 :384-386: retry starts nothing; DUE's next pass switches once that record is there); any other: only the clear
+# RUN_USER for this release's image that is the release DUE would switch now (B4b fix 2, review r2 F2: DUE's own choice,
+# read from local state: due_base, its steps 4 and 5; due_choice, the latest release the last pass's step 7 found
+# eligible; newer than the runner of RUN_USER's record of the image config.toml names, its step 10: B4b fix 1, opus F4):
+# DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line (PLAN D7 :384-386: retry starts nothing; DUE's
+# next pass switches once that record is there); any other, or when DUE's choice cannot be read: only the clear
 do_retry() {
-  local now core facts out rc n idx acc why cv vs v rec rf rej cur fl a b
+  local now core facts out rc n idx acc why cv vs v rec rf rej cur fl a b dc
   load_state
   RB_SAY="retry $FAMILY"
   ! window_open || BACK_RAN=1
@@ -2271,15 +2277,15 @@ do_retry() {
   if [ -n "$vs" ]; then
     if rr_recipe "$B/image"; then
       rec=$RR_RECIPE
-      # DUE switches only a release newer than the runner of RUN_USER's record of the image config.toml names (its
-      # steps 4 and 10; B4b fix 1, opus F4): no line promises a switch of any other (nor with no such record: NO BASELINE)
-      cur= fl=$(family_lines "$CFG") || fl=
+      # DUE switches only the release it chose (B4b fix 2, review r2 F2; B4b fix 1, opus F4): its steps 4 and 5
+      # (due_base, ONE copy, on config.toml as read now), its step 7's latest release as the last pass read it
+      # (due_choice: local state, retry itself asks GitHub nothing) and its step 10 (newer than that record's version). No line
+      # promises a switch of any other release, nor of any when one of them cannot be read: then only the clear
+      cur= dc= fl=$(family_lines "$CFG") || fl=
       a=${fl%% *} b=${fl#* }; a=${a#*=} b=${b#*=}
-      if [ -n "$a" ] && [ "$a" = "$b" ] && [[ $a =~ @(sha256:[0-9a-f]{64})$ ]] && rr_record_of "$BUILDS" "${BASH_REMATCH[1]}"; then
-        cur=$RR_REC_VERSION
-      fi
+      if due_base "${a:-none}" "${b:-none}" "$rec" && due_choice; then cur=$DB_CUR dc=$REPLY; fi
       for v in $vs; do
-        [ "$v" != "$cv" ] && [[ $v =~ ^${VERSION_RE}$ ]] && [ -n "$cur" ] && newer "$v" "$cur" || continue
+        [ "$v" != "$cv" ] && [[ $v =~ ^${VERSION_RE}$ ]] && [ -n "$cur" ] && [ "$v" = "$dc" ] && newer "$v" "$cur" || continue
         rr_record "$BUILDS" "$v" "$rec" && continue
         say "retry $FAMILY: runner $v: $(build_wait "$v" "$rec"): retry starts nothing, and DUE's next pass switches it once that record is there; $(build_line "$v") builds it"
       done
@@ -2353,7 +2359,8 @@ cmd_target() {
   fi
   CT_D=$RR_REC_DIGEST
   [ "$CT_D" != "$dg" ] || p=$(proc_now) || p=none
-  if [ "$CT_D" = "$dg" ] && unstarted "$p"; then
+  [ "$CT_D" != "$dg" ] || UN_INST=$(install_of "$CFG" "$WINDOWS")
+  if [ "$CT_D" = "$dg" ] && unstarted "$p" "$UN_INST"; then
     # config.toml names it, but no runscaler is proven to run it (B4b fix 1, opus F1): switch-now restarts runscaler into
     # it (up's shortcut with --now); rebuild never skips idle, so it restarts nothing and names switch-now
     if [ "$cmd" = switch-now ]; then
@@ -2552,7 +2559,7 @@ do_build_pass() {
   now=$(date +%s)
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
   install -d -m 700 "$PASSDIR" || refuse "cannot create $PASSDIR"
-  rm -f -- "$PASSDIR"/release.out "$PASSDIR"/release.err
+  rm -f -- "$PASSDIR"/release.out "$PASSDIR"/release.err "$PASSDIR"/eligible
   latest "$now"
   case $? in
     0) ;;

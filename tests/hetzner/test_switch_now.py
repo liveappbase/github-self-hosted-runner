@@ -20,6 +20,9 @@ never from a pass. RECOVER first; OFF: REFUSE. (Named for its CI part, test_[sv-
   nothing; switch-now's window restarts runscaler ONCE (`idle skipped`), closed target-running, no candidate (a hand
   release is none), NO IDLE dropped, exit 0. The same state with no NO IDLE: (c) restarts it the same way. That
   restart cut after its stop began, the pool busy: the next RECOVER waits for idle, and switch-now's (a) ends it.
+- B4b fix 2 (review r2, opus F1 = codex F1): that restart's gate is the process's start alone (at or before the install,
+  the updater's rule, ONE copy: runner-facts.sh's unstarted): a person's hand restart after the install, with /healthz
+  not answering or listing one set, gets no stop and no start from switch-now, and its `end` line says what is true.
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
 """
 import json
@@ -259,6 +262,54 @@ class ANoIdle(unittest.TestCase):
         lines = g.one(r)
         self.assertEqual((value(lines, 'version'), value(lines, 'digest'), value(lines, 'idle')), (V, NEW, 'skipped'))
         self.assertEqual(installed(lines)[2], 'target-running', lines)
+
+    def test_a_hand_restart_after_the_install_is_not_restarted_while_its_health_is_not_proven(self):
+        """B4b fix 2 (review r2, opus F1 = codex F1; opus's probe p1.txt, its input): NO IDLE of V by real busy passes;
+        config.toml put on V's image (NEW), then a person's hand restart of runscaler (the STOP's own hand line), so a
+        runscaler that started AFTER the install runs config.toml; when switch-now runs, its /healthz does not answer (a
+        fresh start, not yet serving), or lists one set only. THE SHORTCUT'S RESTART's gate is the process's start alone
+        (at or before the install: runner-facts.sh's unstarted, the updater's own rule), so `switch-now hz-docker`
+        stops and starts nothing: no `idle skipped`, closed with `end` (its line: runscaler started after the install
+        and is not proven to serve yet), no "installed with no restart since" line, NO IDLE still held (the next pass
+        decides), exit 1. (The hook makes /healthz answer after a stop, so a restart, were it made, would run.) The
+        controls: test_an_install_with_no_restart_is_restarted_once_and_no_idle_dropped (started before the install:
+        one stop, one start) and test_the_window_s_shortcut_after_a_hand_switch (/healthz answers: exit 0, 0/0)."""
+        for row in ('no answer', 'one set'):
+            with self.subTest(row):
+                g = C(self, hz=BUSY)
+                t0 = g.p.clock()
+                g.go()
+                g.p.clock(now=t0 + NO_IDLE_S)
+                g.go()
+                self.assertEqual(len(g.held('NO IDLE')), 1)
+                g.p.write(g.p.rpath('config.toml'), g.p.config().replace(ref(OLD), ref(NEW)), 0o600)
+                g.p.clock(plus=600)
+                g.p.act('restart')
+                pid, start = g.p.unit_now()['pid'], g.p.unit_now()['start']
+                self.assertGreater(start, int(os.stat(g.p.rpath('config.toml')).st_mtime), 'a start after the install')
+                if row == 'no answer':
+                    g.p.curl['healthz'] = None
+                else:
+                    h = json.loads(json.dumps(BUSY))
+                    h['scale_sets'] = h['scale_sets'][:1]
+                    g.p.curl['healthz'] = h
+                g.p.hooks(('systemctl:stop-done', 'busy'))
+                g.mark()
+                r = g.p.updater('switch-now', FAM)
+                self.assertEqual(calls(g, 'stop') + calls(g, 'start') + calls(g, 'restart'), [], r.stdout[-3000:])
+                self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
+                ws = g.windows()
+                self.assertEqual(len(ws), 1, r.stdout[-3000:])
+                lines = ws[0]
+                self.assertNotIn('idle', keys(lines))
+                self.assertNotIn('stopping', keys(lines))
+                end = value(lines, 'end') or ''
+                self.assertIn('runscaler (%d %d) started after its install' % (pid, start), end, lines)
+                self.assertIn('not proven to serve it yet', end)
+                self.assertNotIn('installed with no restart since', r.stdout)
+                self.assertIn('runner-updater: switch-now hz-docker: the switch window to runner %s closed with no '
+                              'switch' % V, r.stdout)
+                self.assertEqual(len(g.held('NO IDLE')), 1, r.stdout[-3000:])
 
     def test_the_window_s_shortcut_after_a_hand_switch(self):
         """Opus r1 F3: NO IDLE of V held, then a person switched by hand (config.toml on V's image, runscaler restarted
