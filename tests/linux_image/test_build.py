@@ -7,8 +7,13 @@ commands from RULES below, a substitute real-run ends when its VM is stopped. Ev
 - GitPpaKey: the key the guest fetched has another fingerprint -> the build STOPs with the fingerprint line, and no
   call after it writes the PPA's apt source, runs apt-get update or installs git. CONTROL: the pinned fingerprint ->
   it goes on, installs git from the PPA and ends DONE. A file with a second key beside the pinned one STOPs too.
-- KeyringPaths: the file the guest fetches the key into, the file whose fingerprints are checked and the file the apt
-  source's signed-by names are ONE path (the substitute tart keeps no file contents, so only the paths can say it).
+- DockerKey (--docker): Docker's key file holds a second primary key beside Docker's -> the build STOPs with the
+  fingerprint line before any call writes Docker's apt source, runs apt-get update or installs Docker. CONTROL:
+  Docker's key alone -> it goes on and installs Docker. The rule is the git-core key's: every primary key in the file
+  must be the pinned one.
+- KeyringPaths: for each pinned key (git-core's, Docker's), the file the guest fetches the key into, the file whose
+  fingerprints are checked and the file the apt source's signed-by names are ONE path (the substitute tart keeps no
+  file contents, so only the paths can say it).
 - ImageNameFromConf: with `image = NAME` the build makes NAME-tart-<date>, and with --docker NAME-docker-tart-<date>,
   and the smoke (the same conf) accepts both. CONTROL: another NAME -> other names, and the smoke refuses the first
   NAME's form. No conf, or a conf the reader refuses -> STOP before any tart call.
@@ -37,7 +42,7 @@ def colons(*fprs):
     return '\n'.join(out)
 
 
-def rules(git_fpr_out):
+def rules(git_fpr_out, docker_fpr_out=None):
     return [
         ('id -u', 0, '501'),
         ('id -un', 0, 'admin'),
@@ -55,15 +60,17 @@ def rules(git_fpr_out):
         ('*docker compose version --short', 0, '2.40.0'),
         ('df -k /', 0, 'Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/vda1 41000000 6000000 33000000 16% /'),
         ('df -h /', 0, 'Filesystem Size Used Avail Use% Mounted on\n/dev/vda1 40G 6G 33G 16% /'),
-        ('sh -c gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc*', 0, colons(DOCKER_FPR)),
+        ('sh -c gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc*', 0,
+         colons(DOCKER_FPR) if docker_fpr_out is None else docker_fpr_out),
         ('sh -c gpg --show-keys --with-colons /etc/apt/keyrings/git-core*', 0, git_fpr_out),
     ]
 
 
 class Build:
-    def __init__(self, test, script, git_fpr_out, name='linux-image-build', conf='example-linux'):
-        """CONF: the image NAME of the sandbox's linux-image.conf; None: no conf; a str with a newline: the whole file"""
-        self.sb = Sandbox(test, rules(git_fpr_out))
+    def __init__(self, test, script, git_fpr_out, name='linux-image-build', conf='example-linux', docker_fpr_out=None):
+        """CONF: the image NAME of the sandbox's linux-image.conf; None: no conf; a str with a newline: the whole file.
+        DOCKER_FPR_OUT: what gpg answers for Docker's key file (None: Docker's key alone)"""
+        self.sb = Sandbox(test, rules(git_fpr_out, docker_fpr_out))
         if conf is not None:
             self.sb.write_conf(conf if '\n' in conf else conf_text(conf))
         self.copy = self.sb.install(script, name, extra=[
@@ -134,6 +141,7 @@ class GitPpaKey(unittest.TestCase):
 
 
 KEYRING_GIT = '/etc/apt/keyrings/git-core-ppa.asc'
+KEYRING_DOCKER = '/etc/apt/keyrings/docker.asc'
 FETCHED = re.compile(r'curl [^&]* -o (\S+) ')
 CHECKED = re.compile(r'gpg --show-keys --with-colons (\S+)')
 SIGNED_BY = re.compile(r'signed-by=([^] ]+)\]')
@@ -162,6 +170,50 @@ class KeyringPaths(unittest.TestCase):
         r = b.run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.one_path(b.sb.execs(), 'keyserver.ubuntu.com', 'ppa.launchpadcontent.net/git-core/ppa/ubuntu', KEYRING_GIT)
+
+    def test_dockers_key_is_one_file(self):
+        b = Build(self, SCRIPT, colons(pinned(self)))
+        r = b.run('--docker')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.one_path(b.sb.execs(), 'download.docker.com/linux/ubuntu/gpg', 'download.docker.com/linux/ubuntu ',
+                      KEYRING_DOCKER)
+
+
+class DockerKey(unittest.TestCase):
+    def docker_check_index(self, execs):
+        at = [i for i, c in enumerate(execs) if 'gpg --show-keys' in c and 'docker' in c]
+        self.assertEqual(len(at), 1, 'one fingerprint read of Docker\'s key: %r' % execs)
+        return at[0]
+
+    def reads_dockers_repository(self, calls):
+        return [c for c in calls if 'download.docker.com/linux/ubuntu ' in c or 'docker.list' in c
+                or 'apt-get update' in c or re.search(r'apt-get install .*docker-ce', c)]
+
+    def test_a_second_key_beside_dockers_stops_before_apt_reads_its_repository(self):
+        b = Build(self, SCRIPT, colons(pinned(self)), docker_fpr_out=colons(DOCKER_FPR, WRONG_FPR))
+        r = b.run('--docker')
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn('linux-image-build: STOP Docker\'s apt key has fingerprint [%s %s], want %s'
+                      % (DOCKER_FPR, WRONG_FPR, DOCKER_FPR), r.stdout)
+        execs = b.sb.execs()
+        after = execs[self.docker_check_index(execs) + 1:]
+        self.assertEqual(self.reads_dockers_repository(after), [], after)
+        self.assertNotIn('DONE', r.stdout)
+        self.assertEqual(b.sb.vms(), [], 'the build VM is deleted, no image made')
+
+    def test_control_dockers_key_alone_goes_on_to_install_docker(self):
+        b = Build(self, SCRIPT, colons(pinned(self)), docker_fpr_out=colons(DOCKER_FPR))
+        r = b.run('--docker')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        execs = b.sb.execs()
+        after = execs[self.docker_check_index(execs) + 1:]
+        src = [i for i, c in enumerate(after) if 'docker.list' in c]
+        upd = [i for i, c in enumerate(after) if 'apt-get update' in c]
+        ins = [i for i, c in enumerate(after) if re.search(r'apt-get install .*docker-ce', c)]
+        self.assertTrue(src and upd and ins, after)
+        self.assertLess(src[0], upd[0])
+        self.assertLess(upd[0], ins[0])
+        self.assertEqual(b.sb.vms(), ['example-linux-docker-tart-' + DATE])
 
 
 class ImageNameFromConf(unittest.TestCase):

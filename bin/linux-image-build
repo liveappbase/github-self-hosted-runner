@@ -15,8 +15,8 @@
 # git comes from git's own PPA (git-core/ppa), whose apt key is checked by its fingerprint (GIT_PPA_KEY_FPR) before apt
 # trusts it, and the git it installs must be >= 2.50.
 # --docker (#621): the same image plus Docker Engine and its compose plugin from Docker's own apt repository (its key
-# checked by fingerprint), `runner` in the VM's docker group, named NAME-docker-tart-<yyyymmdd>. A Docker job's root is
-# the throwaway VM's, never the host's.
+# checked by fingerprint with the git-core key's rule: every primary key in the file), `runner` in the VM's docker
+# group, named NAME-docker-tart-<yyyymmdd>. A Docker job's root is the throwaway VM's, never the host's.
 set -u
 export LC_ALL=C
 REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
@@ -64,6 +64,12 @@ gexec() { tart exec $GOLD "$@" }
 uid=
 groot() { if [[ $uid == 0 ]]; then gexec "$@"; else gexec sudo -n "$@"; fi }   # a command as root in the guest
 asrunner() { groot runuser -u runner -- "$@" }                                  # a command as the job user
+key_pinned() { # FILE PIN WHAT: STOP unless EVERY primary key in the guest's FILE (the one apt will trust) is PIN
+  local fpr
+  fpr=$(gexec sh -c "gpg --show-keys --with-colons $1 2> /dev/null" \
+    | awk -F: '$1 == "pub" {p = 1; next} $1 == "fpr" && p {printf "%s%s", s, $10; s = " "; p = 0}')
+  [[ $fpr == $2 ]] || die "$3 has fingerprint [$fpr], want $2"
+}
 have() { (( ${${(f)"$(tart list --source local -q 2>/dev/null)"}[(Ie)$1]} )) }
 runpid= made=
 finish() {
@@ -120,9 +126,7 @@ groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-reco
   || die "installing ca-certificates, curl and gnupg failed"
 groot sh -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL --max-time 120 -o /etc/apt/keyrings/git-core-ppa.asc 'https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x$GIT_PPA_KEY_FPR' && chmod a+r /etc/apt/keyrings/git-core-ppa.asc" \
   || die "fetching the git-core PPA key failed"
-fpr=$(gexec sh -c 'gpg --show-keys --with-colons /etc/apt/keyrings/git-core-ppa.asc 2> /dev/null' \
-  | awk -F: '$1 == "pub" {p = 1; next} $1 == "fpr" && p {printf "%s%s", s, $10; s = " "; p = 0}')
-[[ $fpr == $GIT_PPA_KEY_FPR ]] || die "the git-core PPA key has fingerprint [$fpr], want $GIT_PPA_KEY_FPR"
+key_pinned /etc/apt/keyrings/git-core-ppa.asc $GIT_PPA_KEY_FPR "the git-core PPA key"
 groot sh -c '. /etc/os-release && echo "deb [signed-by=/etc/apt/keyrings/git-core-ppa.asc] https://ppa.launchpadcontent.net/git-core/ppa/ubuntu $VERSION_CODENAME main" > /etc/apt/sources.list.d/git-core-ppa.list' \
   || die "writing the git-core PPA's apt source failed"
 groot env DEBIAN_FRONTEND=noninteractive apt-get update -q > /dev/null || die "apt-get update (with the git PPA) failed"
@@ -192,12 +196,12 @@ EOF
 fi
 
 if (( DOCKER )); then
-  # Docker's apt key, checked by its fingerprint before apt trusts it.
+  # Docker's apt key, checked by its fingerprint before apt trusts it: every primary key in the file must be Docker's
+  # (the git-core key's rule, one check): a second key beside it would be trusted by apt too.
   groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends gnupg > /dev/null || die "installing gnupg failed"
   groot sh -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL --max-time 120 -o /etc/apt/keyrings/docker.asc https://download.docker.com/linux/ubuntu/gpg && chmod a+r /etc/apt/keyrings/docker.asc" \
     || die "fetching Docker's apt key failed"
-  fpr=$(gexec sh -c 'gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc 2> /dev/null' | awk -F: '$1 == "fpr" {print $10; exit}')
-  [[ $fpr == $DOCKER_KEY_FPR ]] || die "Docker's apt key has fingerprint [$fpr], want $DOCKER_KEY_FPR"
+  key_pinned /etc/apt/keyrings/docker.asc $DOCKER_KEY_FPR "Docker's apt key"
   groot sh -c '. /etc/os-release && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list' \
     || die "writing Docker's apt source failed"
   groot env DEBIAN_FRONTEND=noninteractive apt-get update -q > /dev/null || die "apt-get update (with Docker's repository) failed"
