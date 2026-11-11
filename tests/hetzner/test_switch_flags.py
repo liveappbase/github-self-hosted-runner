@@ -24,7 +24,7 @@ the new lines, test_kills.py's.
   `stopping`: a start in the install's own second is restarted; a hand restart after its checks is not (`end`).
 Every cell runs a real window of the real scripts in a throwaway container (support.Pool, a fake clock: the excuse's
 age is planted against the clock the idle pair reads, which each cell checks from the substitutes' events). (Named for
-its CI part, test_[sv-z]*.py: .github/workflows/release-check.yml.)
+its CI part, test_s*.py: .github/workflows/release-check.yml.)
 """
 import json
 import os

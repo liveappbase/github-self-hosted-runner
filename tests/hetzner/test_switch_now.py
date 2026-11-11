@@ -1,6 +1,6 @@
 """`runner-updater switch-now hz-docker [VERSION]`, a person's override of operator rule (2) for ONE window (S2b-3c-2
 B4b; the slice plan's E-7, its r2 FOLD and the r3 FOLD): no idle pair (the restart's drain lets running jobs finish),
-never from a pass. RECOVER first; OFF: REFUSE. (Named for its CI part, test_[sv-z]*.py:
+never from a pass. RECOVER first; OFF: REFUSE. (Named for its CI part, test_s*.py:
 .github/workflows/release-check.yml.)
 
 - (a) a SWITCH journal RECOVER keeps open (a cut switch's idle restart waits): `pool-image.sh recover --unattended --now`

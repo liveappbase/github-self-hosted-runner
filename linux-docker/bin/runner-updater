@@ -2073,6 +2073,9 @@ build_wait() {
 do_pass() {
   local now
   now=$(date +%s) # ONE CLOCK PER PASS (the header: pass): read once, first; RECOVER and THE OUTAGE RULE take seconds
+  # DUE'S CHOICE an earlier pass read goes before this pass's first exit (S2b-4a, review r3 opus F1, codex F3): a pass
+  # that ends before DUE's step 7 (OFF, a journal RECOVER leaves open, a REFUSE, a STOP) leaves no reading for retry
+  rm -f -- "$PASSDIR/eligible"
   load_state
   recover_first   # RECOVER FIRST and THE APPLY STEP, before ON/OFF is read (OFF too)
   outage          # THE OUTAGE RULE: every pass, ON or OFF, after them
@@ -2083,7 +2086,7 @@ do_pass() {
   levels           # THE TWO LEVELS, before the facts (the r3 FOLD; r3 Opus F2): KEEP and DUE read what they leave
   install -d -m 700 "$PASSDIR" || refuse "cannot create $PASSDIR"
   rm -f -- "$PASSDIR"/facts.json "$PASSDIR"/log.txt "$PASSDIR"/healthz.json "$PASSDIR"/{idle,r1,keep,status}.json \
-    "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err "$PASSDIR"/eligible \
+    "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err \
     "$PASSDIR"/switch.out
   printf '%s\n' "$ST" | jq -c '.core // empty' > "$PASSDIR/state.json" || refuse "cannot copy the core's state into $PASSDIR"
   say "pass: one pass at $(date -u -d "@$now" '+%Y-%m-%d %H:%M:%S UTC') ($now): it acts on KEEP's and R1's verdicts and on a due runner release (at most one window)"

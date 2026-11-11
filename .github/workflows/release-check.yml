@@ -79,14 +79,22 @@ jobs:
     # to [a-b] (9.9, with test_apply's real keep-prev closes); the other parts as above. S2b-3c-2 B4b's three new
     # modules, by the parts' CI job times at f3ad51f (run 42924900957, the slower image: [c-m] 8, re[!c] 9, [sv-z] 9 min;
     # u[!p]a took 12 and rec 11, so they get none) plus their local time x 1.35: test_command_rebuild.py joins [c-m]
-    # (10.2 min), test_retry.py re[!c] (9.9) and test_switch_now.py [sv-z] (10.1).
+    # (10.2 min), test_retry.py re[!c] (9.9) and test_switch_now.py [sv-z] (10.1). At 651178d (run 42973039558, main)
+    # [c-m] took 12 min on both images, and [n-q], rec, re[!c] and [sv-z] 11 on the slower one, so S2b-4a cut twelve
+    # parts, each estimated at 10 min or less. Each estimate (the slower image): that run's job time of the module's part,
+    # less 20 s of job, shared out among the part's modules by their local times (S2b-3c-2 B4b fix 2's run, one module
+    # per container, and test_retry's in S2b-4a; tls, users, install_runner and validate_class by their CI times in run
+    # 42528284026), plus 20 s of job: [a-b] 10.0, [c-jv-z] 7.5 (verdict and validate_class join [c-j]: alone they are
+    # 2.3 min), [k-o][!u] 9.2, [o-q][!n] 8.7, reco 8.7, re[!nt][!o] 7.1, re[nt] 6.9, s 9.0, t 10.0, u[!p]a 10.0, up 9.0
+    # and u[!p][!a] 10.0 min. Fewer parts of 10 min cannot hold these module times by name: a to q with v-z need four,
+    # re three, s and t two, and u three.
     timeout-minutes: 30
     container: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         image: ["ubuntu:26.04", "ubuntu:24.04"]
-        part: ["test_[a-b]*.py", "test_[c-m]*.py", "test_[n-q]*.py", "test_rec*.py", "test_re[!c]*.py", "test_[sv-z]*.py", "test_t*.py", "test_u[!p]a*.py", "test_up*.py", "test_u[!p][!a]*.py"]
+        part: ["test_[a-b]*.py", "test_[c-jv-z]*.py", "test_[k-o][!u]*.py", "test_[o-q][!n]*.py", "test_reco*.py", "test_re[!nt][!o]*.py", "test_re[nt]*.py", "test_s*.py", "test_t*.py", "test_u[!p]a*.py", "test_up*.py", "test_u[!p][!a]*.py"]
     steps:
       - name: git, python3, the image's own jq package, and curl and openssl (tests/hetzner)
         run: |

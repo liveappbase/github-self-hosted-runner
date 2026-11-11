@@ -2,8 +2,8 @@
 the r3 FOLD's THE VERSION OF rebuild AND switch-now): the SWITCH half (this host's build is RUN_USER's): ONE switch
 window, `pool-image.sh up --unattended V D [--keep-prev]` with the idle pair, to RUN_USER's build record of (V, this
 release's recipe) whose digest is not the one config.toml runs. RECOVER first; OFF: REFUSE; DISK: a REFUSE with its
-text, nothing held; never NO IDLE; not idle: exit 5, nothing stopped. (Named for its CI part, test_[c-m]*.py:
-.github/workflows/release-check.yml: re[!c] has no room.) Its (c) twin, switch-now with no NO IDLE, shares its version rule: some rows here
+text, nothing held; never NO IDLE; not idle: exit 5, nothing stopped. (Named for its CI part, test_[c-jv-z]*.py:
+.github/workflows/release-check.yml.) Its (c) twin, switch-now with no NO IDLE, shares its version rule: some rows here
 run it (test_switch_now.py has switch-now's own).
 
 - THE VERSION: the open candidate's when its lines run (then --keep-prev: config.toml.prev, the `back` config, stays

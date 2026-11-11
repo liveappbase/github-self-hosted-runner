@@ -32,7 +32,7 @@ for the old process before the start, v0.9.5's (charm log v2.0.0: four wide). Th
 03 run: the unit (systemd.json), the process table (proc/PID/exe: the pinned substitute is 03's BIN_SHA,
 test_render.way_back's the way-back one), runner.log, /healthz (curl.json) and the fake clock (Pool.fake_clock: the
 check's `date +%s`, and the RUNS RULE's `sleep 3`, which then returns at once and is logged). (Named for its CI part,
-test_[n-q]*.py: .github/workflows/release-check.yml.)
+test_[k-o][!u]*.py: .github/workflows/release-check.yml.)
 """
 import calendar
 import json

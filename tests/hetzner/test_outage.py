@@ -6,7 +6,7 @@ started) -> STOP POOL DOWN in the state, held once (no new STOP each pass), its 
 last line when there is one, else what the pass saw; else (a runscaler RUNS, whenever it started, or the unit not
 enabled) -> POOL DOWN cleared; the unit enabled and a runscaler that RUNS and started after config.toml's install
 clear a held CI DISABLED too (the plan's CORRECTION: it is a rollback's only line that its TARGET does not run yet).
-What a journal line said is text for the person, never the guarantee. (Named for its CI part, test_[n-q]*.py:
+What a journal line said is text for the person, never the guarantee. (Named for its CI part, test_[o-q][!n]*.py:
 .github/workflows/release-check.yml.)
 
 - Every way CI is down: an open journal with the enabled unit down (RECOVER exit 5: Codex r4 F1's input, a switch's

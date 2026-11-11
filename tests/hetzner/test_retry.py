@@ -1,6 +1,6 @@
 """`runner-updater retry hz-docker`, a person's command (S2b-3c-2 B4b; the slice plan's E-5 and its r2 FOLD; PLAN D7
 :384-393; the Studio's do_retry): as RS_USER, under the updater lock, RECOVER first (B2a's rule for every lock-taking
-command), while the updater is ON or OFF; it starts nothing. (Named for its CI part, test_re[!c]*.py:
+command), while the updater is ON or OFF; it starts nothing. (Named for its CI part, test_re[nt]*.py:
 .github/workflows/release-check.yml.)
 
 - It clears every held STOP whose status line (status.jq's, D7's) names `runner-updater retry hz-docker`: check failed
@@ -22,7 +22,8 @@ command), while the updater is ON or OFF; it starts nothing. (Named for its CI p
   switch now (B4b fix 2, review r2 F2: the latest release the last pass read, past DUE's step 5; local state only):
   DUE's "waits for RUN_USER's build" text and RUN_USER's `build V` line, built from the host config's RUN_USER, HOST_IP
   and SSH_PORT (here root, host.conf.example's 203.0.113.10 and 22; opus F3: `ssh -p`), never a literal. Any other (not
-  newer, no such record, a newer release the latest, a recipe change, no pass that read the latest): only the clear.
+  newer, no such record, a newer release the latest, a recipe change, no pass that read the latest, a later pass that
+  ended before it asked GitHub: held, OFF or at an open journal, S2b-4a): only the clear.
 - THE OUTAGE RULE as its last step after its RECOVER (the r2 FOLD).
 - The usage of the three commands and their user: RS_USER's only.
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
@@ -236,9 +237,13 @@ class TheBuildRecordLine(unittest.TestCase):
         W is the latest, when that record's recipe is not this release's any more (a recipe change after the pass), or
         when no pass read the latest release (retry itself asks GitHub nothing): none at all, or a later pass held before it
         asked GitHub (a STOP that holds every release: the earlier pass's reading is not kept). The controls: V the latest and newer: the line
-        stays ('newer', 'port 2222'); V's record is there: no such line ('built')."""
+        stays ('newer', 'port 2222'); V's record is there: no such line ('built'). S2b-4a (review r3 opus F1, codex F3:
+        review r3's probe input): a pass that reads V, then W the latest and a later pass that ends before DUE's step 7
+        at an early exit, the OFF exit ('off pass': `off` first) or the open-journal exit ('open journal': a window
+        journal RECOVER cannot read; the person then puts a journal RECOVER closes): no promise for V (the earlier
+        reading is not kept); the control, that later pass ON ('on pass'): it reads W, so V gets only the clear too."""
         for row in ('newer', 'built', 'port 2222', 'older', 'no running record', 'newer release', 'recipe changed',
-                    'no pass', 'held pass'):
+                    'no pass', 'held pass', 'off pass', 'open journal', 'on pass'):
             with self.subTest(row):
                 v = '2.300.0' if row == 'older' else V
                 g = R(self, {'stops': [held('ROLLED BACK', v)], 'rejected': [v]})
@@ -266,6 +271,23 @@ class TheBuildRecordLine(unittest.TestCase):
                     g.p.clock(plus=600)
                     r = g.ok('pass')
                     self.assertIn('runner-updater: pass: hz-docker is not due: STOP ROLLBACK FAILED', r.stdout)
+                if row in ('off pass', 'open journal', 'on pass'):   # a later pass, W the latest (S2b-4a)
+                    if row == 'off pass':
+                        g.ok('off')
+                    g.p.clock(plus=4 * 86400)
+                    g.p.gh.release(W, tarball(W), latest=True, published=iso(g.p.clock() - 3 * 86400))
+                    if row == 'open journal':
+                        os.makedirs(WINDOWS, mode=0o700, exist_ok=True)
+                        g.p.write(WINDOW, 'window 20261103080000-42\na line no pattern reads\n', 0o600)
+                    r = g.run('pass')
+                    self.assertEqual(r.returncode, 1 if row == 'open journal' else 0, r.stdout[-3000:] + r.stderr)
+                    self.assertIn({'off pass': 'runner-updater: pass: the updater is OFF: nothing to do',
+                                   'open journal': 'runner-updater: STOP RECOVER cannot read or act on the window '
+                                                   'journal %s' % WINDOW,
+                                   'on pass': "runner-updater: pass: hz-docker is not due: it waits for root's build of "
+                                              "runner %s" % W}[row], r.stdout)
+                    if row == 'open journal':   # the person's fix: a journal RECOVER closes (retry's RECOVER FIRST)
+                        g.p.write(WINDOW, 'window 20261103080000-42\n', 0o600)
                 if row == 'recipe changed':
                     os.remove(rec)
                     g.p.record(CUR, OLD, recipe='e' * 64)

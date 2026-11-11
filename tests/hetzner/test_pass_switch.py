@@ -21,7 +21,7 @@ build record of digest D, is no longer a "would switch" line but the switch wind
   OFF time or a set this host does not have left excuses nothing; a copy the pass cannot write starts no `up`. The
   ages grown by real passes: test_recurring_passes.py (24 h of passes) and test_age_reset.py (the reset).
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
-(Named for its CI part, test_[n-q]*.py: .github/workflows/release-check.yml.)
+(Named for its CI part, test_[o-q][!n]*.py: .github/workflows/release-check.yml.)
 """
 import json
 import os

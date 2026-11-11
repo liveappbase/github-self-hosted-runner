@@ -2,7 +2,7 @@
 step of a rollback's closed journal that ROLLED BACK (CLASS target-running or target-idle) rejects by the journal's
 own `why`, `old-version`, `target-version`, `verdict` and `old` lines (it reads no config.toml, no build record and no
 clock).
-(Named for its CI part, test_re[!c]*.py: .github/workflows/release-check.yml.)
+(Named for its CI part, test_re[!nt][!o]*.py: .github/workflows/release-check.yml.)
 
 - `why r1`: old-version V rejected (the state's `rejected`, and the digest of `old` in ~/.local/state/runner-updater/
   rejected, 03-runscaler.sh's reader: one `sha256:<64 hex>` per line), STOP ROLLED BACK of V whose detail is R1's

@@ -9,7 +9,7 @@ not ready (the passes before it end at DUE's step 7, which keeps them cheap); th
 - r3 Opus F3 (c), the reset (the ready read that starts the age again): test_age_reset.py (its own CI part: each cell
   is about 150 passes).
 Every cell runs the real scripts (support.Pool, a throwaway container) and the updater as RS_USER on the fake clock.
-(Named for its CI part, test_rec*.py: .github/workflows/release-check.yml.)
+(Named for its CI part, test_re[!nt][!o]*.py: .github/workflows/release-check.yml.)
 """
 import unittest
 

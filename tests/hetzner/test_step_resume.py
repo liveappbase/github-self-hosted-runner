@@ -7,7 +7,7 @@ after a reboot (runscaler started again on the pair on disk) for each pair a cut
 refuses at the stage's compare. The class moved here unchanged from test_the_runscaler_step.py (S2b-3c-2 B3: that
 module alone took 12.5 min of its CI part, run 42528284026), and uses that module's helpers. Every Pool cell runs the
 real scripts (support.Pool; a fake clock) in a throwaway container, each subtest on a rig of its own. (Named for its CI
-part, test_[sv-z]*.py: .github/workflows/release-check.yml.)
+part, test_s*.py: .github/workflows/release-check.yml.)
 """
 import os
 import re
