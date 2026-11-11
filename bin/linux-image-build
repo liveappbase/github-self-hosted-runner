@@ -1,0 +1,237 @@
+#!/bin/zsh -f
+# linux-image-build [--docker] — build the Linux arm64 runner image for runscaler's Tart provider from the pinned Cirrus
+# Ubuntu base, named from the host's linux-image.conf: its image line NAME (read by bin/linux-image-lib, the reader the
+# smoke uses too) gives NAME-tart-<yyyymmdd>, and with --docker NAME-docker-tart-<yyyymmdd>. No conf, or one the reader
+# refuses, STOPs before any tart call. Design: docs/operations.md ("Building the Linux images"). Run as ci on the
+# Studio (the Tart host): /Users/ci/mac-runner/current/bin/linux-image-build (what a release install makes; the
+# Studio's wiring links it into /Users/ci/bin later), then linux-image-smoke beside it.
+# The shape of golden-build: it holds the runner lock for its whole run (so runscaler cannot start), refuses while the
+# agent is enabled (before the lock and again under it), and boots the build VM only through real-run (the wall's
+# flags). The work happens in gold-<kind>-<date>, which is cloned to the final name only after a clean stop, then
+# deleted. It deletes ONLY the one VM it names, never a pattern. Its output is also appended to
+# LOGDIR/<kind>-image-<yyyymmdd>.log; the build VM's console log is LOGDIR/<kind>-image-<yyyymmdd>-vm.log.
+# What it records: U1 (the guest agent answers), U2 (the exec user), U6 (bwrap user namespaces, with the control BEFORE
+# the fix), U8 (the image's size).
+# git comes from git's own PPA (git-core/ppa), whose apt key is checked by its fingerprint (GIT_PPA_KEY_FPR) before apt
+# trusts it, and the git it installs must be >= 2.50.
+# --docker (#621): the same image plus Docker Engine and its compose plugin from Docker's own apt repository (its key
+# checked by fingerprint), `runner` in the VM's docker group, named NAME-docker-tart-<yyyymmdd>. A Docker job's root is
+# the throwaway VM's, never the host's.
+set -u
+export LC_ALL=C
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+REALRUN=/Users/ci/bin/real-run
+BASE=ghcr.io/cirruslabs/ubuntu@sha256:3acc11bebedcbcb813fb17dd0a4671a8c2e6baed537f3caa7922e170ed8a04ed  # :24.04 = :latest, 2026-10-25
+RUNNER_URL=https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-arm64-2.338.2.tar.gz
+RUNNER_SHA=670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945  # release notes + API asset digest agree (#914)
+RUNNER_VERSION=2.338.2
+RDIR=/home/runner/actions-runner   # the runner itself, owned by the job user `runner` (no sudo)
+WRAP=/opt/liveapp-runner           # the Linux set's runner-dir: run.sh here drops to `runner` (the runner refuses root)
+LOCK=/tmp/runner.lock
+FLAG=/Users/ci/.config/runner/enabled
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+FLOOR_GIB=200
+DISK_GB=40
+DOCKER_KEY_FPR=9DC858229FC7DD38854AE2D88D81803C0EBFCD88   # Docker's apt signing key (docs.docker.com, Ubuntu install)
+GIT_PPA_KEY_FPR=F911AB184317630C59970973E363C90F8F1B6217  # git-core/ppa's signing key: Launchpad's API and keyserver.ubuntu.com agree (2026-11-11)
+
+die() { print -r -- "linux-image-build: STOP $*"; exit 1 }
+say() { print -r -- "linux-image-build: $(date '+%H:%M:%S') $*" }
+DOCKER=0 LOCKED=0
+for a in "$@"; do
+  case $a in (--docker) DOCKER=1 ;; (--locked) LOCKED=1 ;; (*) die "unknown argument [$a] (usage: linux-image-build [--docker])" ;; esac
+done
+KIND=linux; (( DOCKER )) && KIND=linux-docker
+source ${0:A:h}/linux-image-lib || die "cannot load ${0:A:h}/linux-image-lib (the reader of the host's linux-image.conf)"
+linux_image_conf
+if (( ! LOCKED )); then
+  [[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): this host is in production"
+  [[ -d $LOGDIR ]] || die "no log folder $LOGDIR"
+  log=$LOGDIR/$KIND-image-$(date +%Y%m%d).log
+  inner=(--locked); (( DOCKER )) && inner+=(--docker)
+  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} $inner 2>&1 | /usr/bin/tee -i -a $log
+  rc=$pipestatus[1]
+  (( rc != 75 )) || die "the runner lock is held: runscaler, wall-check or a build is running"
+  print -r -- "linux-image-build: this output is also in $log"
+  exit $rc
+fi
+[[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): this host is in production"
+
+DATE=$(date +%Y%m%d) GOLD=gold-$KIND-$(date +%Y%m%d) OUT=$IMAGE-tart-$(date +%Y%m%d)
+(( DOCKER )) && OUT=$IMAGE-docker-tart-$DATE
+tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
+gexec() { tart exec $GOLD "$@" }
+uid=
+groot() { if [[ $uid == 0 ]]; then gexec "$@"; else gexec sudo -n "$@"; fi }   # a command as root in the guest
+asrunner() { groot runuser -u runner -- "$@" }                                  # a command as the job user
+have() { (( ${${(f)"$(tart list --source local -q 2>/dev/null)"}[(Ie)$1]} )) }
+runpid= made=
+finish() {
+  [[ -n $runpid ]] && kill $runpid 2>/dev/null
+  if [[ -n $made ]] && have $GOLD; then tart stop $GOLD > /dev/null 2>&1; tart delete $GOLD && say "deleted $GOLD"; fi
+}
+trap finish EXIT
+trap 'trap "" PIPE; exit 130' INT
+trap 'trap "" PIPE; exit 143' TERM
+trap 'trap "" PIPE; exit 129' HUP
+
+say "start: $OUT from $BASE"
+have $OUT && die "$OUT already exists: delete it by name first"
+have $GOLD && die "$GOLD already exists (an earlier run): delete it by name first"
+free=$(/bin/df -Pk /Users/ci/.tart | /usr/bin/awk 'NR==2 {print int($4/1048576)}')
+[[ $free =~ '^[0-9]+$' ]] || die "cannot read the free disk"
+(( free >= FLOOR_GIB )) || die "free disk ${free} GiB < ${FLOOR_GIB} GiB"
+tart pull $BASE > /dev/null || die "tart pull failed"
+tart clone $BASE $GOLD || die "tart clone failed"
+made=1
+tart set $GOLD --cpu 4 --memory 8192 --disk-size $DISK_GB || die "tart set failed"
+say "cloned $GOLD (4 cpu, 8192 MB, disk $DISK_GB GB); booting it behind the wall (real-run)"
+$REALRUN $GOLD > $LOGDIR/$KIND-image-$DATE-vm.log 2>&1 &
+runpid=$!
+say "real-run pid $runpid"
+n=0; until gexec true > /dev/null 2>&1; do
+  kill -0 $runpid 2>/dev/null || die "real-run ended before the VM answered tart exec: read $LOGDIR/$KIND-image-$DATE-vm.log"
+  (( n++ < 60 )) || die "U1 FAIL: the VM did not answer tart exec within 180 s (no guest agent?)"
+  sleep 3
+done
+say "U1 OK: the VM answers tart exec"
+uid=$(gexec id -u) || die "id in the guest failed"
+say "U2: tart exec runs as $(gexec id -un) (uid $uid)"
+[[ $uid == 0 ]] || gexec sudo -n true || die "U2: exec user is not root and has no passwordless sudo"
+say "guest: $(gexec uname -m) $(gexec sh -c '. /etc/os-release; echo $PRETTY_NAME')"
+
+# DNS first: the wall blocks the host, and the guest's DHCP DNS server IS the host (vmnet's gateway).
+groot sh -c 'systemctl disable --now systemd-resolved > /dev/null 2>&1; rm -f /etc/resolv.conf && printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" > /etc/resolv.conf' \
+  || die "setting DNS failed"
+gexec getent hosts github.com > /dev/null || die "DNS does not resolve github.com behind the wall"
+say "DNS: static 1.1.1.1 8.8.8.8 (systemd-resolved disabled); github.com resolves"
+# Without systemd-resolved nothing answers for the guest's own name (every sudo warns, into the runner's log too).
+groot sh -c 'h=$(hostname) && { grep -qw "$h" /etc/hosts || printf "127.0.1.1 %s\n" "$h" >> /etc/hosts; }' 2> /dev/null \
+  || die "adding the hostname to /etc/hosts failed"
+gexec getent hosts $(gexec hostname) > /dev/null || die "the guest's own hostname does not resolve"
+say "own hostname $(gexec hostname) resolves (/etc/hosts)"
+
+groot env DEBIAN_FRONTEND=noninteractive apt-get update -q > /dev/null || die "apt-get update failed"
+# git from git's own PPA, as the Linux pool's image has it (the actions-runner base): Ubuntu 24.04's git 2.43 lacks what
+# the gate's state-config cells use (the incremental multi-pack-index: exit 129), measured on the first Studio gate.
+# The PPA's apt key is checked by its fingerprint before apt trusts it (as Docker's below): the key is fetched from the
+# keyserver by GIT_PPA_KEY_FPR, every primary key in the file must be that one, and only then is the source written.
+groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl gnupg > /dev/null \
+  || die "installing ca-certificates, curl and gnupg failed"
+groot sh -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL --max-time 120 -o /etc/apt/keyrings/git-core-ppa.asc 'https://keyserver.ubuntu.com/pks/lookup?op=get&options=mr&search=0x$GIT_PPA_KEY_FPR' && chmod a+r /etc/apt/keyrings/git-core-ppa.asc" \
+  || die "fetching the git-core PPA key failed"
+fpr=$(gexec sh -c 'gpg --show-keys --with-colons /etc/apt/keyrings/git-core-ppa.asc 2> /dev/null' \
+  | awk -F: '$1 == "pub" {p = 1; next} $1 == "fpr" && p {printf "%s%s", s, $10; s = " "; p = 0}')
+[[ $fpr == $GIT_PPA_KEY_FPR ]] || die "the git-core PPA key has fingerprint [$fpr], want $GIT_PPA_KEY_FPR"
+groot sh -c '. /etc/os-release && echo "deb [signed-by=/etc/apt/keyrings/git-core-ppa.asc] https://ppa.launchpadcontent.net/git-core/ppa/ubuntu $VERSION_CODENAME main" > /etc/apt/sources.list.d/git-core-ppa.list' \
+  || die "writing the git-core PPA's apt source failed"
+groot env DEBIAN_FRONTEND=noninteractive apt-get update -q > /dev/null || die "apt-get update (with the git PPA) failed"
+groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+  ca-certificates curl git jq unzip xz-utils zstd build-essential bubblewrap gh locales python3 procps apparmor > /dev/null \
+  || die "apt-get install failed"
+groot locale-gen en_US.UTF-8 > /dev/null || die "locale-gen failed"
+say "packages installed; en_US.UTF-8: $(gexec locale -a | grep -ci '^en_US.utf8$')"
+gitv="$(gexec git --version | awk '{print $3}')"   # quoted: the CLT census reads X=$(cmd as an assignment before cmd
+[[ $gitv =~ '^2\.([0-9]+)' ]] && (( match[1] >= 50 )) || die "git $gitv in the image: want >= 2.50 (the pool has 2.55)"
+say "git $gitv (from ppa:git-core/ppa)"
+
+gexec id runner > /dev/null 2>&1 || groot useradd -m -s /bin/bash runner || die "useradd runner failed"
+groot sh -c "curl -fsSL --max-time 600 -o /tmp/runner.tgz $RUNNER_URL && echo '$RUNNER_SHA  /tmp/runner.tgz' | sha256sum -c - > /dev/null && rm -rf $RDIR && mkdir -p $RDIR && tar -xzf /tmp/runner.tgz -C $RDIR && rm -f /tmp/runner.tgz && chown -R runner:runner /home/runner" \
+  || die "runner $RUNNER_VERSION download/check/unpack failed"
+groot sh -c "cd $RDIR && ./bin/installdependencies.sh" > /dev/null || die "the runner's installdependencies.sh failed"
+v=$(asrunner $RDIR/config.sh --version) || die "runner --version failed"
+[[ $v == $RUNNER_VERSION ]] || die "runner version $v, want $RUNNER_VERSION"
+say "runner $v in $RDIR"
+
+# runscaler runs <runner-dir>/run.sh through the guest agent, with ACTIONS_RUNNER_INPUT_JITCONFIG in the environment.
+# TWO stages: run.sh (the agent's user) drops to `runner`; as-runner.sh, already `runner`, sets the job's umask and execs
+# the runner. The umask must be set AFTER sudo: Ubuntu's PAM session (pam_umask, USERGROUPS_ENAB) gives a user with its
+# own group 002, whatever the caller set (measured: probe-tart saw 0002 with a umask in run.sh alone). runuser and sudo
+# keep the JIT variable in the environment (never in argv). _diag points at the runner's own, for runscaler's tail.
+# A file goes in as base64 in argv: `tart exec` without -i does not pass stdin.
+b64=$(/usr/bin/base64 <<'EOF'
+#!/bin/sh
+# liveapp: runscaler starts this through the Tart guest agent; the job runs as `runner`, which has no sudo.
+set -eu
+S=/opt/liveapp-runner/as-runner.sh
+if [ "$(id -u)" = 0 ]; then exec runuser -u runner -- "$S"; fi
+exec sudo -n --preserve-env=ACTIONS_RUNNER_INPUT_JITCONFIG -u runner -- "$S"
+EOF
+)
+b64r=$(/usr/bin/base64 <<'EOF'
+#!/bin/sh
+# liveapp: already the job user `runner`. The job's umask, as on the Linux pool; then the runner itself.
+umask 022
+exec /home/runner/actions-runner/run.sh
+EOF
+)
+groot sh -c "mkdir -p $WRAP && echo $b64 | base64 -d > $WRAP/run.sh && echo $b64r | base64 -d > $WRAP/as-runner.sh && chmod 755 $WRAP/run.sh $WRAP/as-runner.sh && ln -sfn $RDIR/_diag $WRAP/_diag" \
+  || die "writing the run.sh wrappers failed"
+say "wrapper $WRAP/run.sh: $(gexec test -x $WRAP/run.sh && echo executable)"
+asrunner sudo -n true > /dev/null 2>&1 && die "the job user runner has sudo"
+say "the job user runner: no sudo"
+
+# U6 — the CONTROL first: bwrap with a user namespace as the job user, before any change.
+restrict=$(gexec sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null)
+if asrunner bwrap --unshare-user --ro-bind / / /bin/true > /dev/null 2>&1; then
+  say "U6: bwrap userns works as runner WITHOUT a change (restrict_unprivileged_userns=$restrict): no profile added"
+else
+  say "U6 control: bwrap userns REFUSED as runner (restrict_unprivileged_userns=$restrict); adding an AppArmor profile for /usr/bin/bwrap"
+  b64=$(/usr/bin/base64 <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile liveapp-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+EOF
+)
+  groot sh -c "echo $b64 | base64 -d > /etc/apparmor.d/liveapp-bwrap && apparmor_parser -r /etc/apparmor.d/liveapp-bwrap" \
+    || die "the bwrap AppArmor profile failed"
+  asrunner bwrap --unshare-user --ro-bind / / /bin/true > /dev/null 2>&1 || die "U6: bwrap userns still refused after the profile"
+  say "U6 OK: bwrap userns works as runner with the profile"
+fi
+
+if (( DOCKER )); then
+  # Docker's apt key, checked by its fingerprint before apt trusts it.
+  groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends gnupg > /dev/null || die "installing gnupg failed"
+  groot sh -c "install -m 0755 -d /etc/apt/keyrings && curl -fsSL --max-time 120 -o /etc/apt/keyrings/docker.asc https://download.docker.com/linux/ubuntu/gpg && chmod a+r /etc/apt/keyrings/docker.asc" \
+    || die "fetching Docker's apt key failed"
+  fpr=$(gexec sh -c 'gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc 2> /dev/null' | awk -F: '$1 == "fpr" {print $10; exit}')
+  [[ $fpr == $DOCKER_KEY_FPR ]] || die "Docker's apt key has fingerprint [$fpr], want $DOCKER_KEY_FPR"
+  groot sh -c '. /etc/os-release && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" > /etc/apt/sources.list.d/docker.list' \
+    || die "writing Docker's apt source failed"
+  groot env DEBIAN_FRONTEND=noninteractive apt-get update -q > /dev/null || die "apt-get update (with Docker's repository) failed"
+  groot env DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null \
+    || die "installing Docker failed"
+  groot systemctl enable docker.service containerd.service > /dev/null 2>&1 || die "enabling docker.service failed"
+  groot usermod -aG docker runner || die "adding runner to the docker group failed"
+  # The CONTROL first: a user outside the docker group is refused, so the group is what lets `runner` in.
+  groot runuser -u nobody -- docker info > /dev/null 2>&1 && die "docker answers a user outside the docker group: the group cell measures nothing"
+  asrunner docker info > /dev/null 2>&1 || die "runner cannot reach the Docker daemon"
+  asrunner docker run --rm hello-world > /dev/null 2>&1 || die "runner cannot run a container (hello-world, pulled through the wall)"
+  groot docker system prune -af > /dev/null 2>&1 || die "removing the test image failed"
+  say "Docker $(asrunner docker version --format '{{.Server.Version}}'), compose $(asrunner docker compose version --short): runner runs containers (control: nobody is refused)"
+fi
+
+for svc in ssh.socket ssh.service; do groot systemctl disable --now $svc > /dev/null 2>&1; done
+gexec systemctl is-active ssh.service ssh.socket > /dev/null 2>&1 && die "guest SSH is still active"
+groot passwd -l admin > /dev/null || die "locking admin's password failed"
+say "guest SSH disabled; admin's password locked"
+
+say "record: $(gexec sh -c 'git --version; gh --version | head -1; bwrap --version; curl --version | head -1; python3 --version' | tr '\n' ' ')"
+say "record: cloud-init $(gexec sh -c 'command -v cloud-init > /dev/null && echo present || echo absent')"
+say "record: disk $(gexec df -h / | sed -n 2p)"
+gfree=$(gexec df -k / | awk 'NR==2 {print int($4/1048576)}')
+(( gfree >= 15 )) || die "guest free disk ${gfree} GiB < 15"
+
+# Clones must not share a machine-id: systemd-networkd derives the DHCP client id from it.
+groot sh -c 'apt-get clean && rm -rf /var/lib/apt/lists/* && truncate -s 0 /etc/machine-id && rm -f /var/lib/dbus/machine-id && sync' \
+  || die "the final clean (apt, machine-id, sync) failed: no image was made"
+say "apt cleaned; machine-id emptied; sync done"
+
+tart stop $GOLD || die "tart stop failed"
+n=0; while kill -0 $runpid 2>/dev/null; do (( n++ < 60 )) || die "the VM did not stop"; sleep 2; done
+runpid=
+tart clone $GOLD $OUT || die "clone to $OUT failed"
+say "U8: $(tart list --source local | awk -v n=$OUT '$2 == n')"
+say "DONE: $OUT (runner-dir for the set: $WRAP)"

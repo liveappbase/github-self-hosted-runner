@@ -1,0 +1,143 @@
+#!/bin/zsh -f
+# linux-image-smoke IMAGE — boot a CLONE of a Linux runner image that linux-image-build made, behind the wall, and run
+# runscaler's own runner-start commands (src v0.9.5 internal/provider/tart.go runRunner) with a DUMMY JIT config.
+# Nothing registers with GitHub. Design: docs/operations.md ("Building the Linux images"). Run as ci on the Studio (the
+# Tart host): /Users/ci/mac-runner/current/bin/linux-image-smoke IMAGE (what a release install makes; the Studio's
+# wiring links it into /Users/ci/bin later), with IMAGE as linux-image-build's DONE line names it.
+# THE HOST'S VALUES come from the host's linux-image.conf, read by bin/linux-image-lib (its header: the file's lines),
+# the reader linux-image-build uses too: IMAGE must be one of the two names the build makes from the conf's image line,
+# and the wall cells probe its wall-targets. A conf the reader refuses, or none, STOPs before any tart call.
+# Holds the runner lock; refuses while the agent is enabled; boots only s1-linux-<date> through real-run and deletes
+# only that name. Each cell prints ok/BAD; exit 1 on any BAD.
+# The JIT cells: WITH the variable the runner must get past "Not configured" (it reads the dummy and refuses it);
+# the CONTROL starts the same wrapper WITHOUT the variable and must say "Not configured". If both say the same, the
+# wrapper drops the variable and the cell measured nothing.
+set -u
+export LC_ALL=C
+REAL=/Users/ci/Applications/tart.app/Contents/MacOS/tart
+REALRUN=/Users/ci/bin/real-run
+LOCK=/tmp/runner.lock
+FLAG=/Users/ci/.config/runner/enabled
+LOGDIR=/Users/ci/Library/Logs/mac-runner
+WRAP=/opt/liveapp-runner
+
+die() { print -r -- "linux-image-smoke: STOP $*"; exit 1 }
+say() { print -r -- "linux-image-smoke: $(date '+%H:%M:%S') $*" }
+source ${0:A:h}/linux-image-lib || die "cannot load ${0:A:h}/linux-image-lib (the reader of the host's linux-image.conf)"
+linux_image_conf
+IMG=${1-}
+[[ $IMG =~ '^'$IMAGE'(-docker)?-tart-[0-9]{8}$' ]] || die "usage: linux-image-smoke ${IMAGE}[-docker]-tart-<yyyymmdd>"
+if [[ ${2-} != --locked ]]; then
+  [[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists): this host is in production"
+  /usr/bin/lockf -k -t 0 $LOCK /bin/zsh -f ${0:A} $IMG --locked 2>&1 | /usr/bin/tee -i -a $LOGDIR/linux-smoke-$(date +%Y%m%d).log
+  rc=$pipestatus[1]
+  (( rc != 75 )) || die "the runner lock is held"
+  exit $rc
+fi
+[[ ! -e $FLAG ]] || die "the agent is enabled ($FLAG exists)"
+
+VM=s1-linux-$(date +%Y%m%d)
+tart() { /usr/bin/env -i HOME=/Users/ci PATH=/usr/bin:/bin:/usr/sbin:/sbin $REAL "$@" }
+gexec() { tart exec $VM "$@" }
+have() { (( ${${(f)"$(tart list --source local -q 2>/dev/null)"}[(Ie)$1]} )) }
+bad=0
+ok() { say "ok   $*" }
+no() { say "BAD  $*"; bad=1 }
+runpid= made=
+finish() {
+  [[ -n $runpid ]] && kill $runpid 2>/dev/null
+  if [[ -n $made ]] && have $VM; then tart stop $VM > /dev/null 2>&1; tart delete $VM && say "deleted $VM"; fi
+}
+trap finish EXIT
+trap 'trap "" PIPE; exit 130' INT
+trap 'trap "" PIPE; exit 143' TERM
+trap 'trap "" PIPE; exit 129' HUP
+
+have $IMG || die "no image $IMG"
+have $VM && die "$VM already exists: delete it by name first"
+tart clone $IMG $VM || die "clone failed"
+made=1
+tart set $VM --cpu 4 --memory 8192 --random-mac || die "tart set failed"
+$REALRUN $VM > $LOGDIR/linux-smoke-$(date +%Y%m%d)-vm.log 2>&1 &
+runpid=$!
+say "booting $VM (real-run pid $runpid)"
+n=0; until gexec true > /dev/null 2>&1; do
+  kill -0 $runpid 2>/dev/null || die "real-run ended before the VM answered"
+  (( n++ < 60 )) || die "no tart exec answer in 180 s"
+  sleep 3
+done
+say "answers tart exec after ~$(( n * 3 )) s"
+
+[[ $(gexec id -un) == admin ]] && ok "exec user admin" || no "exec user $(gexec id -un)"
+mid=$(gexec cat /etc/machine-id)
+[[ $mid =~ '^[0-9a-f]{32}$' ]] && ok "machine-id regenerated ($mid)" || no "machine-id [$mid]"
+say "resolv.conf: $(gexec grep -v '^#' /etc/resolv.conf | tr '\n' ' ')"
+gexec getent hosts github.com > /dev/null && ok "DNS github.com" || no "DNS github.com"
+h=$(gexec hostname)
+gexec getent hosts $h > /dev/null && ok "own hostname $h resolves" || no "own hostname $h does not resolve (sudo warns)"
+say "cloud-init: $(gexec sh -c 'cloud-init status 2>&1 | head -1')"
+say "ip: $(gexec sh -c "ip -4 -o addr show scope global | awk '{print \$2, \$4}'")"
+
+# runscaler's own sequence, as the exec user, with a dummy JIT config
+gexec test -x $WRAP/run.sh && ok "test -x $WRAP/run.sh" || no "test -x $WRAP/run.sh"
+gexec sh -c "umask 077; printf %s 'bm90LWEtcmVhbC1qaXQtY29uZmln' > /tmp/jitconfig" || no "write /tmp/jitconfig"
+gexec sh -c "JIT=\$(cat /tmp/jitconfig); rm -f /tmp/jitconfig; ACTIONS_RUNNER_INPUT_JITCONFIG=\"\$JIT\" nohup '$WRAP/run.sh' > /tmp/runner.log 2>&1 &" \
+  || no "runscaler's start command failed"
+sleep 15
+say "runner.log WITH the variable: $(gexec sh -c 'tr "\n" " " < /tmp/runner.log | cut -c1-400')"
+users=$(gexec sh -c 'ps -eo user=,args= | grep -E "[R]unner.Listener|[r]un-helper|actions-runner/run.sh" | awk "{print \$1}" | sort -u | tr "\n" " "')
+say "runner processes' users (while running, if any): [$users]"
+with=$(gexec cat /tmp/runner.log)
+gexec sh -c "nohup sudo -n -u runner /home/runner/actions-runner/run.sh > /tmp/runner-ctl.log 2>&1 &"   # CONTROL: no variable
+sleep 15
+ctl=$(gexec cat /tmp/runner-ctl.log)
+say "runner-ctl.log WITHOUT the variable: $(print -r -- $ctl | tr '\n' ' ' | cut -c1-400)"
+if [[ $ctl == *"Not configured"* && $with != *"Not configured"* ]]; then
+  ok "the wrapper passes ACTIONS_RUNNER_INPUT_JITCONFIG (control says Not configured; the run with it does not)"
+else
+  no "JIT cells: with=[$(print -r -- $with | tr '\n' ' ' | cut -c1-200)] control=[$(print -r -- $ctl | tr '\n' ' ' | cut -c1-200)]"
+fi
+gexec sh -c 'ls -ld /tmp/runner.log; ls /home/runner/actions-runner/_diag 2>/dev/null | head -3' | while IFS= read -r l; do say "  $l"; done
+
+# the wall, from the job user. CONTROL: github.com:22 must connect.
+conn() { gexec sudo -n -u runner timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" > /dev/null 2>&1 }
+conn github.com 22 && ok "github.com:22 connects (control)" || no "github.com:22 does not connect: the wall cells measure nothing"
+gw=$(gexec sh -c "ip route | awk '/^default/ {print \$3; exit}'")
+for hp in $gw:22 $TARGETS; do
+  conn ${hp%:*} ${hp#*:}; rc=$?
+  case $rc in
+    (0) no "reached $hp" ;;
+    (124) ok "$hp dropped (timeout)" ;;
+    (*) no "$hp answered (rc $rc: refused, not dropped)" ;;
+  esac
+done
+gexec sudo -n -u runner bwrap --unshare-user --ro-bind / / /bin/true && ok "bwrap userns as runner" || no "bwrap userns as runner"
+
+if [[ $IMG == ${IMAGE}-docker-* ]]; then   # #621: Docker after a fresh boot, as the job user, through the wall
+  gexec sudo -n -u nobody docker info > /dev/null 2>&1 && no "docker answers nobody (outside the group): the next cells measure nothing" || ok "control: nobody is refused by docker"
+  gexec sudo -n -u runner docker info > /dev/null 2>&1 && ok "runner reaches the Docker daemon after boot" || no "runner cannot reach the Docker daemon"
+  gexec sudo -n -u runner docker run --rm hello-world > /dev/null 2>&1 && ok "runner runs a container (hello-world, pulled through the wall)" || no "runner cannot run hello-world"
+  cv=$(gexec sudo -n -u runner docker compose version --short 2> /dev/null)
+  [[ -n $cv ]] && ok "docker compose $cv" || no "no docker compose plugin"
+  # the wall, from a CONTAINER: Docker NATs a container's traffic to the VM's own address, so the host's wall must drop
+  # it the same way it drops the VM's. The same targets as above, from the default bridge network a job's container
+  # uses, in the base image the Docker jobs build from. CONTROL: github.com:22 from the same container must connect,
+  # or every "dropped" below means only that the container has no network.
+  cimg=node:22.23.4-bookworm-slim@sha256:5991875dfb80938dd8a6ba3fe3e96fd04929e70792762b3319d8caadbbe229bc
+  gexec sudo -n -u runner docker pull -q $cimg > /dev/null 2>&1 && ok "runner pulls the jobs' base image" || no "runner cannot pull $cimg"
+  cconn() { gexec sudo -n -u runner docker run --rm $cimg timeout 6 bash -c "exec 3<>/dev/tcp/$1/$2" > /dev/null 2>&1 }
+  cconn github.com 22 && ok "container: github.com:22 connects (control)" || no "container: github.com:22 does not connect: the container wall cells measure nothing"
+  for hp in $gw:22 $TARGETS; do
+    cconn ${hp%:*} ${hp#*:}; rc=$?
+    case $rc in
+      (0) no "container reached $hp" ;;
+      (124) ok "container: $hp dropped (timeout)" ;;
+      (*) no "container: $hp answered (rc $rc: refused or unreachable, not dropped)" ;;
+    esac
+  done
+else
+  gexec sh -c 'command -v docker' > /dev/null 2>&1 && no "docker is in an image without -docker in its name" || ok "no docker in this image (the gate's image)"
+fi
+
+(( bad == 0 )) && say "SMOKE PASS" || say "SMOKE FAIL"
+exit $bad

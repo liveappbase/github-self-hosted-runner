@@ -1,0 +1,42 @@
+#!/bin/zsh -f
+# linux-image-lib — the ONE reader of the host's linux-image.conf, the values this repository does not hold for the
+# Linux images. zsh, SOURCED, never run: bin/linux-image-build sources it (the name of the images it makes) and so does
+# bin/linux-image-smoke (the names it accepts and the wall's fixed targets). One reader, so the two cannot disagree on
+# what the file says. Design: docs/operations.md ("Building the Linux images").
+#
+# LINUXCONF holds two lines, which the operator writes on the host (this repository holds no host's value):
+#   image = NAME                    the build makes NAME-tart-<yyyymmdd>, and with --docker NAME-docker-tart-<yyyymmdd>;
+#                                   the smoke accepts only those two forms. NAME: lowercase letters, digits and -.
+#   wall-targets = HOST:PORT ...    the fixed targets the wall must DROP (a timeout), from the job user and, on a -docker
+#                                   image, from a container; the smoke probes them after the VM's own gateway on 22, in
+#                                   this order
+# One line of each; blank lines and # comments are skipped; anything else, or no readable file, STOPs.
+#
+#   linux_image_conf   sets IMAGE (NAME) and TARGETS (the targets, in order) from LINUXCONF, or calls the caller's die
+#                      (which must exit) with why. It runs no other command and writes nothing.
+
+LINUXCONF=/Users/ci/.config/runner/linux-image.conf
+
+linux_image_conf() {
+  local l t ni=0 nt=0
+  [[ -f $LINUXCONF && -r $LINUXCONF ]] || die "no readable $LINUXCONF: write its image and wall-targets lines (docs/operations.md, \"Building the Linux images\")"
+  IMAGE= TARGETS=()
+  while IFS= read -r l || [[ -n $l ]]; do
+    [[ $l =~ '^[[:space:]]*(#.*)?$' ]] && continue
+    if [[ $l =~ '^image[[:space:]]*=[[:space:]]*([a-z0-9][-a-z0-9]*)[[:space:]]*$' ]]; then
+      (( ni++ == 0 )) || die "$LINUXCONF has more than one image line"
+      IMAGE=$match[1]
+    elif [[ $l =~ '^wall-targets[[:space:]]*=[[:space:]]*([^[:space:]].*)$' ]]; then
+      (( nt++ == 0 )) || die "$LINUXCONF has more than one wall-targets line"
+      TARGETS=(${=match[1]})
+      for t in $TARGETS; do
+        [[ $t =~ '^[A-Za-z0-9][-A-Za-z0-9.]*:[1-9][0-9]{0,4}$' ]] && (( ${t##*:} <= 65535 )) \
+          || die "$LINUXCONF: wall target '$t' is not HOST:PORT"
+      done
+    else
+      die "$LINUXCONF does not parse: want the lines 'image = NAME' and 'wall-targets = HOST:PORT ...'; got: $l"
+    fi
+  done < $LINUXCONF
+  [[ -n $IMAGE ]] || die "$LINUXCONF has no image line"
+  (( ${#TARGETS} )) || die "$LINUXCONF has no wall-targets line"
+}

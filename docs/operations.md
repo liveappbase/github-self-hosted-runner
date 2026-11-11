@@ -36,6 +36,10 @@ When: the host moved onto a release that pins a new runner or base image (README
 
 The pinned base image could one day leave its registry; a release then pins another one.
 
+## Building the Linux images
+
+On a host that runs Linux jobs in Tart VMs, as ci, with the agent disabled (the idle runbook steps 1–2): `/Users/ci/mac-runner/current/bin/linux-image-build` (add `--docker` for the image with Docker Engine) prints `DONE: <image>`, then `/Users/ci/mac-runner/current/bin/linux-image-smoke <image>` must end `SMOKE PASS`. These are the paths a release install makes: `install` does not link them into `/Users/ci/bin`; the Studio's wiring does that later. Both hold the runner lock and keep their output in `/Users/ci/Library/Logs/mac-runner/`. The build installs git from git's own PPA only after the PPA's key has the fingerprint pinned in the script (`GIT_PPA_KEY_FPR`). Both read this host's values from `/Users/ci/.config/runner/linux-image.conf` (one reader, `bin/linux-image-lib`), which the operator writes once: a line `image = NAME` (the build names its images `NAME-tart-<yyyymmdd>`, and with `--docker` `NAME-docker-tart-<yyyymmdd>`; the smoke accepts only those) and a line `wall-targets = HOST:PORT HOST:PORT …` (the fixed addresses the wall must drop, besides the VM's own gateway). With no such file, or one the reader refuses, both stop before they boot anything.
+
 ## The host eMudhra deny (this fleet's hand step)
 
 This is NOT an adopter step in v0.1. The README promises ONE root step, and [../SECURITY.md](../SECURITY.md) says a root line comes only from a release's assets; no asset holds this line. This fleet does it by hand, from a copy the maintainer reviewed. A published asset may come in a later release if adopters need it.
