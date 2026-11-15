@@ -1,0 +1,7 @@
+  ✓ scaleset[0] "linux-ci-main" — provider=docker url=https://github.com/your-org max=3 min=0
+  ✓ scaleset[1] "linux-ci-small" — provider=docker url=https://github.com/your-org max=1 min=0
+  ✓ Docker is reachable at /home/ci-run/run/docker.sock
+  ✓ scaleset[0] "linux-ci-main" GitHub API is reachable; scale set registered
+  ✓ scaleset[1] "linux-ci-small" GitHub API is reachable; scale set registered
+
+All checks passed.

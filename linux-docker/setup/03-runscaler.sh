@@ -28,11 +28,10 @@
 # touched. It does not start or restart runscaler (a running pool is fine: validate takes no lock). A config that
 # registers a NEW set is rendered only with the unit stopped (a crash restart must not register it before the
 # operator's go).
-# THE RUNSCALERS (runscaler 0.12 bump, slice H2a; the H2 plan's M-2): the two this release knows, in ONE block (below):
-# PINNED (v0.12.0: TGZ_SHA, its release tarball's sha256, ~/build/dl/runner-linux-amd64.tar.gz of Install step 4;
-# BIN_SHA, its `runner`'s) and WAY-BACK (v0.9.5, the release before: WAYBACK_TGZ_SHA, WAYBACK_BIN_SHA), which
-# runner-start's V095_SHA names too (tests/hetzner/test_render.py binds the two). pool-image.sh reads BIN_SHA and
-# WAYBACK_BIN_SHA from this file as data.
+# THE RUNSCALERS (runscaler 0.12 bump, slice H2a; the H2 plan's M-2; runscaler 0.22 bump H3, D1): the two this
+# release knows, in ONE block (below): PINNED (v0.22.0: TGZ_SHA, its release tarball's sha256,
+# ~/build/dl/runner-linux-amd64.tar.gz of Install step 4; BIN_SHA, its `runner`'s) and WAY-BACK (v0.12.0, the release
+# before: WAYBACK_TGZ_SHA, WAYBACK_BIN_SHA). pool-image.sh reads BIN_SHA and WAYBACK_BIN_SHA from this file as data.
 # ONE DOOR (the H2 plan's M-1, R-8): ~/bin/runner is written only by a rename of ~/bin/runner.new, which holds a
 # VERSION's `runner` from its download (dl_of: Install step 4's file for the pinned one, the way back's own name), the
 # tarball by its TGZ_SHA, the `runner` in it by its BIN_SHA and again once it is ~/bin/runner.new (a cut leaves no
@@ -41,7 +40,7 @@
 # one, real leaves it as it is and validates with it. real and render REFUSE, before anything changes, a ~/bin/runner
 # that is neither the pinned runscaler (BIN_SHA) nor the way-back one (WAYBACK_BIN_SHA), by sha256, naming
 # `pool-image.sh runscaler`, the one step that changes it: an image switch (a person's up, the updater's switch) runs
-# on v0.12.0, or after a way back on v0.9.5.
+# on v0.22.0, or after a way back on v0.12.0.
 # THE STAGE (runscaler 0.12 bump, slice H2b-1; the H2 plan's M-3 (c) and (d), R-1, R-2): `stage VERSION RULE`, run by
 # `pool-image.sh runscaler` under its lock, after its preconditions (it restarts runscaler itself, after this). VERSION
 # is PINNED or WAYBACK (else usage, or REFUSE). In order: config.toml must name ONE image (the image the render names:
@@ -58,7 +57,7 @@
 # and run ~/bin/runner.new). PASS only: config.real.toml and config.toml (each one rename) only when the render is not
 # config.toml already (else config.toml keeps its mtime), THEN the rename of runner.new over ~/bin/runner. Every pair
 # a restart can meet starts: the old binary and the old config; the old binary and the render (it has the line, which
-# v0.9.5 honours and v0.12.0 needs); the new binary and the render. The INSTALLED binary may be any (unknown too): the
+# every runscaler since v0.10 needs); the new binary and the render. The INSTALLED binary may be any (unknown too): the
 # stage replaces it.
 # THE PUBLISH (slice H2b-1 review r1, Codex F1): real and the stage install each of runner-start, pool-ready,
 # validate-class and the unit as DEST.new in DEST's own folder, check it (the stage: its PIN; real: its ~/build source,
@@ -76,7 +75,8 @@
 # host config's RS_USER as runner-start builds it: the runner.log the updater (runner-facts.sh's log_pos) and
 # pool-image.sh's restart-cut scan read. runscaler v0.10 and later, with no log-file key, write their log elsewhere
 # (~/.local/state/runner/runner.log), and the runner.log the readers read stays and never grows: a quiet log that looks
-# healthy. runner-start runs a config only when its log-file is LOGF, or, with no log-file key, on the v0.9.5 runner.
+# healthy. runner-start runs a config only when its log-file is LOGF (H3 D2: a config with no log-file key under no
+# runscaler).
 # render DIGEST STAGED: renders real's sets with that image into STAGED (a .toml file in ~/.config/runner, other than
 # config.toml and config.real.toml) and validates it. It INSTALLS NOTHING and runs none of real's refusal controls: it
 # refuses when a file real installs is not, as installed, the one this release pins (each one's PIN is read from ONE
@@ -142,18 +142,18 @@ B=$HOME/build; POOL=$R/pool.env
 D1=unix:///home/${RUN_USER}/run/docker.sock
 LOGF=/home/${RS_USER}/.config/runner/runner.log   # RUNSCALER'S LOG (the header): what the render's log-file names
 # THE RUNSCALERS (the header): PINNED, then WAY-BACK
-PINNED=0.12.0
-TGZ_SHA=76a8130fd553cfff5437fe70dd6ec1badd723469ea13e1679958d0200b67794c
-BIN_SHA=4b8b45ae91430bd20391837955d0e44a90127ae8383710930596c302b2ffae74
-WAYBACK=0.9.5
-WAYBACK_TGZ_SHA=f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f
-WAYBACK_BIN_SHA=d9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948
+PINNED=0.22.0
+TGZ_SHA=b37e6d4c27d937b6e2c9f7fefb3f1f0cbf0391896dbc9f943e81698556316b27
+BIN_SHA=4ae4b0f34d9736e8ae0f68afbb8a4f83e3350b1804ec63bb37490e3ed0c9082e
+WAYBACK=0.12.0
+WAYBACK_TGZ_SHA=76a8130fd553cfff5437fe70dd6ec1badd723469ea13e1679958d0200b67794c
+WAYBACK_BIN_SHA=4b8b45ae91430bd20391837955d0e44a90127ae8383710930596c302b2ffae74
 RB=$HOME/bin/runner   # ONE DOOR (the header)
 dl_of() {   # dl_of VERSION: its download (THE RUNSCALERS, ONE DOOR): the pinned one's is Install step 4's file
   if [ "$1" = "$PINNED" ]; then echo "$B/dl/runner-linux-amd64.tar.gz"; else echo "$B/dl/runner-v$1-linux-amd64.tar.gz"; fi
 }
 BIN=$BIN_SHA TGZ=$TGZ_SHA DL=$(dl_of "$PINNED")   # what a binary install reads: real's the pinned one, THE STAGE's VERSION's
-VSEL=   # runner-start validate's selector: --staged in THE STAGE (the header), so it hashes and runs ~/bin/runner.new
+VSEL=   # runner-start validate's selector: --staged in THE STAGE (the header), so it runs ~/bin/runner.new
 NOTCH="config.toml NOT changed"   # what a refusal after the render leaves
 KEYS="CONCURRENT CPU MEMORY MAX SMALL_CPU SMALL_MEMORY"
 PIMG=$B/setup/pool-image.sh   # its PINS are the ONE copy of the pins: render compares the installed files with them

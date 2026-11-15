@@ -1,0 +1,2 @@
+  ✗ invalid global capacity: concurrent (1) must be >= the sum of min-runners (2)
+validation failed

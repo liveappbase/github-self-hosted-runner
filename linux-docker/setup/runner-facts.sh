@@ -64,8 +64,8 @@
 #                        quiet log would look like a healthy one); a top-level log-level other than "info" (what 03
 #                        renders) or "debug": runscaler accepts debug, info, warn and error, and at warn or error it
 #                        writes no INFO record, so no job-completed (the proof of life R1 and KEEP read). A config with
-#                        NO log-file key is read: one 03 rendered before it wrote the line, which runscaler v0.9.5 logs
-#                        to the runner.log beside it, and runner-start runs it on no other runner. It reads no
+#                        NO log-file key is read: one 03 rendered before it wrote the line, which runscaler v0.9.5
+#                        logged to the runner.log beside it (runner-start runs it on no runscaler since H3). It reads no
 #                        pool-size (a Tart rule).
 #   disk_ok              DISK (PLAN D5; S2b-3c-2 E-9, r3 Opus F5: ONE copy, which pool-image.sh's switch and the
 #                        updater's pass both read): RUN_USER's filesystem (/home/RUN_USER: D1's images and the

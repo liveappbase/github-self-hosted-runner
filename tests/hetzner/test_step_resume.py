@@ -98,15 +98,17 @@ class Resume(unittest.TestCase):
         self.assertLess(len(pairs), len(cuts), 'a pair is a class of the states, not each one: %r' % sorted(pairs))
 
     def test_a_sigkill_at_each_boundary_leaves_a_pair_that_starts_and_the_same_line_finishes_it(self):
-        """Forward from v0.9.5 and a config before H1 (no log-file line)."""
-        self.matrix('pre-H1 forward')
+        """Forward from v0.12.0 and the release before's config (the line, its header: the step installs config.toml
+        for a comment). Before H3: from v0.9.5 and a config before H1 (no log-file line), a pair runner-start starts on no
+        runscaler since H3 D2."""
+        self.matrix('forward')
 
     def test_the_same_forward_from_h1_s_config(self):
-        """Forward from v0.9.5 and H1's config (the line, H1's header: the step installs config.toml for a comment)."""
+        """Forward from v0.12.0 and H1's config (the line, H1's header: the step installs config.toml for a comment)."""
         self.matrix('H1 forward')
 
     def test_the_same_on_the_way_back(self):
-        """The way back from v0.12.0 (config.toml already the render: not installed again)."""
+        """The way back from v0.22.0 (config.toml already the render: not installed again)."""
         self.matrix('the way back')
 
     def test_a_config_a_bare_03_real_installed_goes_live_with_this_restart(self):

@@ -1,25 +1,24 @@
 """ONE DOOR FOR THE BINARY (runscaler 0.12 bump, Hetzner slice H2a; the H2 plan's M-1, M-2, R-8, H2-7 and R-4's belt).
 
-- THE RUNSCALERS (M-2): 03-runscaler.sh names, in ONE block, the two runscalers this release knows: PINNED v0.12.0
-  (TGZ_SHA, the release tarball's sha256; BIN_SHA, its `runner`'s) and WAY-BACK v0.9.5 (WAYBACK_TGZ_SHA,
-  WAYBACK_BIN_SHA), each by its constant (the builder re-derived v0.12.0's from the release tarball). runner-start's
-  V095_SHA is the way-back BIN_SHA (test_render's Text binds the two). README Install step 4 downloads the pinned one.
+- THE RUNSCALERS (M-2; H3 D1): 03-runscaler.sh names, in ONE block, the two runscalers this release knows: PINNED
+  v0.22.0 (TGZ_SHA, the release tarball's sha256; BIN_SHA, its `runner`'s: the H3 builder re-derived both from the
+  release tarball) and WAY-BACK v0.12.0 (WAYBACK_TGZ_SHA, WAYBACK_BIN_SHA: the pins of the release before), each by its
+  constant. README Install step 4 downloads the pinned one.
 - ONE DOOR (M-1, H2a's half; R-8): `03 real` installs ~/bin/runner only on a fresh host (none there), through
   ~/bin/runner.new and a rename once its sha256 is checked (no partial binary under the name); on a host with one it
   leaves it as it is (bytes, inode, mtime) and validates with it. `03 real` (bare, or from a person's `up`), `03 render`
   (the updater's D3) and a person's `up` REFUSE, before any change, an installed runscaler that is neither the pinned
   nor the way-back one, naming `pool-image.sh runscaler` (the one step that changes it). The way-back one stages and
-  switches images as the pinned one does (an image switch runs on v0.12.0, or after a way back on v0.9.5).
+  switches images as the pinned one does (an image switch runs on v0.22.0, or after a way back on v0.12.0).
 - NO EXPOSURE BEFORE THE COMPARE (H2-7): a person's `up` runs `03 real DIGEST --image-only`, and 03 then refuses, after
   its validate and before it installs config.real.toml or config.toml, a render that differs from config.toml in more
   than the runner-image lines (runner-release.sh's rr_same_but_image: comments and the log-file key line aside): a
   drifted host value never reaches config.toml, not for a moment (no rename onto it at any point, its sha, mtime and
   inode as they were), and nothing restarts. A bare `03 real` (Install step 9, a pool.env change) keeps its rule: it
   installs what it renders.
-- BACK'S PAIR GUARD (R-4's belt): a person's `back` refuses, before any put, a kept config.toml.pre-image with no
-  log-file key while ~/bin/runner is not the way-back runscaler (03's WAYBACK_BIN_SHA): runner-start would refuse that
-  pair at the restart, and CI would be down. On the way-back runscaler, or with a kept config that has the key, it
-  rolls back as before. Each cell that claims a pair starts, or not, runs the INSTALLED runner-start's guard on it
+- BACK'S PAIR GUARD (R-4's belt; H3 R-5): a person's `back` refuses, before any put, a kept config.toml.pre-image with
+  no log-file key, under every runscaler (runner-start refuses that config under every binary since H3 D2, so it would
+  refuse it at the restart, and CI would be down). With a kept config that has the key, it rolls back as before. Each cell that claims a pair starts, or not, runs the INSTALLED runner-start's guard on it
   (test_render.guard: the systemctl substitute runs no runner-start; H2a review r1, Opus F3).
 - THE ONE DOOR, over the tree (R-8; slice H2b-1): the programs of linux-docker/ write ~/bin/runner only by 03's two
   renames of ~/bin/runner.new (a fresh host's, and the stage of `pool-image.sh runscaler`), and runner.new only by 03's
@@ -29,12 +28,12 @@
   F3, Codex F1; review r1 of H2c: the folder as the working folder, pathlib's joins, `bin/.`: opus F2, opus2 F3; a
   planted line in a COPY of the tree, never run; the spellings it does not walk: THE CENSUS's comment), and a copy of
   another file into the bin folder stays apart (its control). THE STAGED SELECTOR (R-2): `runner-start validate --staged` validates with
-  ~/bin/runner.new, and its log-file guard hashes that file; `validate` takes no other argument; `run` (with any
-  argument, or any env var) and `delete` exec ~/bin/runner and hash it. A fresh host's 03 real that ends between the
+  ~/bin/runner.new; `validate` takes no other argument; `run` (with any argument, or any env var) and `delete` exec
+  ~/bin/runner (H3 D2: runner-start hashes no runner any more). A fresh host's 03 real that ends between the
   install into runner.new and its rename leaves neither name (H2a review r1, Opus F4: the trap's cleanup).
 The Text cells run anywhere; the others run the real scripts (pin lines rewritten) in a container (support.Pool). The
 pool's PINNED runscaler is Pool's substitute (03's BIN_SHA rewritten to it); the WAY-BACK one is test_render.way_back's
-(the same program, other bytes; 03's WAYBACK_BIN_SHA and runner-start's V095_SHA rewritten to it). An UNKNOWN one is
+(the same program, other bytes; 03's WAYBACK_BIN_SHA rewritten to it). An UNKNOWN one is
 the pinned substitute with a line more.
 """
 import os
@@ -50,12 +49,12 @@ S03 = os.path.join(REPO, 'linux-docker', 'setup', '03-runscaler.sh')
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
 V2, X = digest(12), digest(20)
-RUNSCALERS = (('PINNED', '0.12.0'),
-              ('TGZ_SHA', '76a8130fd553cfff5437fe70dd6ec1badd723469ea13e1679958d0200b67794c'),
-              ('BIN_SHA', '4b8b45ae91430bd20391837955d0e44a90127ae8383710930596c302b2ffae74'),
-              ('WAYBACK', '0.9.5'),
-              ('WAYBACK_TGZ_SHA', 'f0e024d181954fb6d29d254b43907152be0f5fa8f91b3e054e9e199be29ec25f'),
-              ('WAYBACK_BIN_SHA', 'd9d1e5779ad5c7220dddcba1a2464f50f680f9d8102f784da63f15a052523948'))
+RUNSCALERS = (('PINNED', '0.22.0'),
+              ('TGZ_SHA', 'b37e6d4c27d937b6e2c9f7fefb3f1f0cbf0391896dbc9f943e81698556316b27'),
+              ('BIN_SHA', '4ae4b0f34d9736e8ae0f68afbb8a4f83e3350b1804ec63bb37490e3ed0c9082e'),
+              ('WAYBACK', '0.12.0'),
+              ('WAYBACK_TGZ_SHA', '76a8130fd553cfff5437fe70dd6ec1badd723469ea13e1679958d0200b67794c'),
+              ('WAYBACK_BIN_SHA', '4b8b45ae91430bd20391837955d0e44a90127ae8383710930596c302b2ffae74'))
 DOOR = '`pool-image.sh runscaler`'
 
 
@@ -91,8 +90,9 @@ def files(p):
 
 class Pins(unittest.TestCase):
     def test_03_names_the_pinned_and_the_way_back_runscaler_in_one_block(self):
-        """M-2: the six lines, each once, one after the other, in this order: the pinned runscaler (v0.12.0: the
-        tarball's and its runner's sha256, the builder's evidence in the build log) and the way-back one (v0.9.5)."""
+        """M-2 (H3 D1): the six lines, each once, one after the other, in this order: the pinned runscaler (v0.22.0:
+        the tarball's and its runner's sha256, the builder's evidence in the build log) and the way-back one (v0.12.0,
+        the pins of the release before)."""
         for name, value in RUNSCALERS:
             self.assertEqual(assignment(S03, name), [value], name)
         with open(S03) as f:
@@ -113,17 +113,17 @@ class Pins(unittest.TestCase):
 
     def test_the_readme_says_what_03_does_with_the_runscaler(self):
         """M-1 as a person reads it: Install step 4 says 03 installs the download on a fresh host only, and step 9 that
-        03 keeps a runscaler that is there (v0.12.0, or v0.9.5, the way back), refuses any other before it changes
+        03 keeps a runscaler that is there (v0.22.0, or v0.12.0, the way back), refuses any other before it changes
         anything, and names the one step that changes it. The Files table says it too: what each of 03's modes does
         with ~/bin/runner (real: a fresh host's only, and keeps one that is there; render: installs nothing; stage, from
         `pool-image.sh runscaler`: replaces it), and that an image operation keeps it (slice H2b-1 review r1, Codex F4:
         49a2004's row said 03 "never replaces one that is there", which its stage does). "The log-file line" no longer
-        says that 03 installs v0.9.5, and says a `back` to a config with no line needs the way-back runscaler."""
+        says that 03 installs v0.9.5, and says a `back` to a config with no line refuses (H3 R-5)."""
         text = readme()
         s4, s9 = step(text, 4), step(text, 9)
-        for w in ('v0.12.0', 'fresh host', DOOR):
+        for w in ('v0.22.0', 'fresh host', DOOR):
             self.assertIn(w, s4)
-        for w in ('fresh host', '`~/bin/runner.new`', 'v0.12.0', 'v0.9.5', 'the way back', DOOR,
+        for w in ('fresh host', '`~/bin/runner.new`', 'v0.22.0', 'v0.12.0', 'the way back', DOOR,
                   'before it changes anything'):
             self.assertIn(w, s9)
         row = [l for l in text.splitlines() if l.startswith('| `setup/03-runscaler.sh` |')]
@@ -137,7 +137,7 @@ class Pins(unittest.TestCase):
         self.assertNotIn('never replaces one that is there', row[0])
         sec = text.split('\n## The log-file line\n', 1)[1].split('\n## ', 1)[0]
         self.assertNotIn('the release 03 installs', sec)
-        for w in ('comment', 'way back', '`back` refuses'):
+        for w in ('comment', 'way back', 'a `back` to a kept config with no line refuses'):
             self.assertIn(w, sec)
 
 
@@ -193,17 +193,9 @@ WRITES = [(S03R, 'install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN"')
           (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN='), (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN=')]
 READS = [
     ('bin/runner-start',
-     'RUNNER=/home/${RS_USER}/bin/runner   # the file the guard hashes and exec runs: ~/bin/runner, or runner.new (--staged)'),
+     'RUNNER=/home/${RS_USER}/bin/runner   # the file exec runs: ~/bin/runner, or runner.new (--staged)'),
     ('bin/runner-start',
      'validate) case $#:${2-} in 1:) ;; 2:--staged) RUNNER=$RUNNER.new ;; *) die "usage: runner-start run|validate [--staged]|delete NAME" ;; esac; args=(validate) ;;'),
-    ('bin/runner-start',
-     'v095=0; s=$(sha256sum < "$RUNNER" 2> /dev/null) && [ "${s%% *}" = "$V095_SHA" ] && v095=1   # RUNSCALER\'S LOG (the header)'),
-    ('bin/runner-start',
-     'names=$(python3 - "$CONFIG" "$SOCK" runners "$LOGF" "$v095" "$RUNNER" 2>&1 <<\'PY\''),
-    ('bin/runner-start',
-     'cfg, SOCK, NET, LOGF, V095, RUNNER = sys.argv[1:7]'),
-    ('bin/runner-start',
-     'sys.exit(f"the config has no log-file key, and {RUNNER} is not runscaler v0.9.5\'s runner, the one release that then "'),
     ('bin/runner-start',
      'exec "$RUNNER" "${args[@]}" --config "$CONFIG"'),
     ('setup/03-runscaler.sh',
@@ -213,7 +205,7 @@ READS = [
     ('setup/03-runscaler.sh',
      'RB=$HOME/bin/runner   # ONE DOOR (the header)'),
     ('setup/03-runscaler.sh',
-     "VSEL=   # runner-start validate's selector: --staged in THE STAGE (the header), so it hashes and runs ~/bin/runner.new"),
+     "VSEL=   # runner-start validate's selector: --staged in THE STAGE (the header), so it runs ~/bin/runner.new"),
     ('setup/03-runscaler.sh',
      'say "runscaler: ~/bin/runner (ONE DOOR: 03 installs one on a fresh host, and in THE STAGE)"'),
     ('setup/03-runscaler.sh',
@@ -256,8 +248,6 @@ READS = [
      'echo; echo "03 DONE (stage): $RB is runscaler v$VERSION and config.toml is this release\'s render; the unit was NOT restarted (pool-image.sh runscaler restarts it)"'),
     ('setup/pool-image.sh',
      'runner_sha() { local s; s=$(sha256sum < "$HOME/bin/runner" 2> /dev/null) && echo "${s%% *}"; }   # ~/bin/runner\'s'),
-    ('setup/pool-image.sh',   # THE CHECK's install time of v0.12.0 (review r1 of H2c, opus2 F2): its mtime, a read
-     'runner_mtime() { stat -c %Y -- "$HOME/bin/runner" 2> /dev/null; }   # its mtime: THE CHECK\'s install time of v0.12.0'),
     ('setup/pool-image.sh',
      'ok "DONE ALREADY: $HOME/bin/runner is runscaler v$RSV, its process runs config.toml, which has the log-file line: no stage, no restart"'),
     ('setup/pool-image.sh',
@@ -268,8 +258,6 @@ READS = [
      '[ "$(runner_sha)" = "$WANT" ] || die "03 said DONE, but $HOME/bin/runner is not runscaler v$RSV: read it; nothing restarted"'),
     ('setup/pool-image.sh',
      '[ "$rs" = "$pin" ] || [ "$rs" = "$wb" ] || die "$HOME/bin/runner (sha256 ${rs:0:12}) is neither of the two runscalers this release knows (03-runscaler.sh\'s BIN_SHA and WAYBACK_BIN_SHA): an image switch never changes it, and only pool-image.sh runscaler does; nothing changed"'),
-    ('setup/pool-image.sh',
-     '[ "$rs" = "$wb" ] || die "the rollback $KEEPC has no log-file key, and $HOME/bin/runner (sha256 ${rs:0:12}) is not the way-back runscaler (v0.9.5, 03-runscaler.sh\'s WAYBACK_BIN_SHA), the one that runs such a config: runner-start would refuse it at the restart, and CI would be down. The steps of this release do not make this pair (pool-image.sh runscaler refuses while a release is open, and removes the rollback of one a back closed): read $HOME/bin/runner and $KEEPC. To keep the image config.toml runs, run pool-image.sh accept; nothing changed"'),
     ('setup/pool-image.sh',
      'case $MODE in up|back) holds="config.toml runs the $MODE image" ;; *) holds="$HOME/bin/runner is runscaler v$RSV" ;; esac'),
     ('setup/pool-image.sh',
@@ -515,7 +503,7 @@ class Door(unittest.TestCase):
 
     def test_render_stages_with_the_way_back_runscaler(self):
         """M-1: the updater's D3 (`03 render`) on a host that runs the way-back runscaler stages and validates (an image
-        switch runs on v0.9.5 after a way back). b2eb739 refused every runscaler but its BIN_SHA."""
+        switch runs on v0.12.0 after a way back). b2eb739 refused every runscaler but its BIN_SHA."""
         p = Pool(self)
         p.production(V2)
         way_back(self, p)
@@ -597,35 +585,36 @@ class NoExposure(unittest.TestCase):
 
 @needs_container
 class Belt(unittest.TestCase):
-    def test_back_refuses_a_rollback_with_no_log_file_key_off_the_way_back_runscaler(self):
-        """R-4's belt: after an up from a config with no log-file line (config.toml.pre-image has none), ~/bin/runner
-        is not the way-back runscaler (here the pinned one): `back` refuses before any put, naming what is wrong, and
-        changes no file; nothing restarts. b2eb739 put it back and restarted into a pair runner-start refuses."""
-        g = Before(self)
-        g.after_up('config.toml.pre-image')
+    def back_refuses(self, g):
+        """`back` refuses before any put, naming what is wrong, and changes no file; nothing restarts; and the belt's
+        premise, by the INSTALLED guard: that pair (~/bin/runner, the kept config) is refused."""
         before = files(g.p)
         r = g.p.pool('back')
         self.assertEqual(r.returncode, 1, r.stdout[-3000:] + r.stderr)
-        self.assertIn('no log-file key', r.stdout)
-        self.assertIn('the way-back runscaler', r.stdout)
+        self.assertIn('the rollback %s has no log-file key: runner-start runs no such config under any runscaler'
+                      % g.p.rpath('config.toml.pre-image'), r.stdout)
         self.assertEqual(files(g.p), before)
         self.assertEqual(g.restarts(), [])
-        # the belt's premise, by the INSTALLED guard: that pair (the pinned substitute, the kept config) is refused
         rg, ran = guard(g.p, g.p.rpath('config.toml.pre-image'))
         self.assertIn('runner-start: REFUSE the config has no log-file key', rg.stderr)
         self.assertEqual(ran, [])
 
-    def test_control_on_the_way_back_runscaler_it_rolls_back(self):
-        """The belt's control: the same back on the way-back runscaler (v0.9.5, which runs a config with no line) puts
-        the kept config back and restarts once, as before."""
+    def test_back_refuses_a_rollback_with_no_log_file_key(self):
+        """R-4's belt (H3 R-5; was test_back_refuses_a_rollback_with_no_log_file_key_off_the_way_back_runscaler): after
+        an up from a config with no log-file line (config.toml.pre-image has none), on the pinned runscaler: `back`
+        refuses. b2eb739 put it back and restarted into a pair runner-start refuses."""
+        g = Before(self)
+        g.after_up('config.toml.pre-image')
+        self.back_refuses(g)
+
+    def test_on_the_way_back_runscaler_it_refuses_too(self):
+        """H3 R-5 (A1's twin of D2; was test_control_on_the_way_back_runscaler_it_rolls_back, whose v0.9.5 ran a config
+        with no line): the same back on the way-back runscaler refuses too, as runner-start refuses that pair now. Red on
+        79cd257, which put the kept config back there."""
         g = Before(self)
         g.after_up('config.toml.pre-image')
         g.way_back()
-        r = g.p.pool('back')
-        self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
-        self.assertEqual(g.p.config(), g.pre)
-        self.assertEqual(g.p.unit_now()['restarts'], 1)
-        starts(self, g.p)    # the INSTALLED guard starts that pair (v0.9.5, the config with no line)
+        self.back_refuses(g)
 
     def test_control_a_rollback_with_the_key_rolls_back_on_any_runscaler(self):
         """The belt's other control: a kept config WITH the log-file key (03's render of the old image) goes back on
@@ -642,9 +631,9 @@ class Belt(unittest.TestCase):
 
 @needs_container
 class Selector(unittest.TestCase):
-    """R-2: ~/bin/runner is the pinned substitute (not v0.9.5's), ~/bin/runner.new the way-back one (runner-start's
-    V095_SHA, as installed). A config with no log-file key tells which file the guard hashed: on v0.9.5's it runs, on
-    any other it is refused. runscaler's log names the file that ran (support.POOL_RUNNER's exe)."""
+    """R-2: ~/bin/runner is the pinned substitute, ~/bin/runner.new the way-back one. runscaler's log names the file
+    that ran (support.POOL_RUNNER's exe). A config with no log-file key is refused whichever file the selector names
+    (H3 D2: runner-start hashes no runner any more), and runs nothing."""
 
     def rig(self):
         p = Pool(self)
@@ -666,19 +655,21 @@ class Selector(unittest.TestCase):
                   env=dict(p.env(), RUNNER_START_CONFIG=cfg, **(env or {})))
         return r, [c['exe'] for c in p.calls('runner')]
 
-    def test_validate_staged_validates_with_runner_new_and_hashes_it(self):
-        """`validate --staged` hashes ~/bin/runner.new (v0.9.5's here: the config with no key passes the guard) and
-        execs it; `validate` alone hashes ~/bin/runner (not v0.9.5's: refused) and execs nothing. b2eb739's and
-        3c0e0aa's runner-start ignore the selector (Opus r3 F2, measured)."""
+    def test_validate_staged_validates_with_runner_new(self):
+        """`validate --staged` execs ~/bin/runner.new; `validate` alone execs ~/bin/runner; each refuses the config
+        with no key and execs nothing. b2eb739's and 3c0e0aa's runner-start ignore the selector (Opus r3 F2, measured).
+        (Was test_validate_staged_validates_with_runner_new_and_hashes_it: the hash was the v0.9.5 case, gone in H3 D2.)"""
         p, bare = self.rig()
-        r, ran = self.start(p, bare, 'validate', '--staged')
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(ran, [os.path.join(p.HOME, 'bin', 'runner.new')])
-        r, ran = self.start(p, bare, 'validate')
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn('the config has no log-file key, and %s is not' % os.path.join(p.HOME, 'bin', 'runner'),
-                      r.stderr)
-        self.assertEqual(ran, [])
+        cfg = p.rpath('config.toml')
+        for args, exe in ((('validate', '--staged'), 'runner.new'), (('validate',), 'runner')):
+            with self.subTest(args=args):
+                r, ran = self.start(p, cfg, *args)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertEqual(ran, [os.path.join(p.HOME, 'bin', exe)])
+                r, ran = self.start(p, bare, *args)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn('runner-start: REFUSE the config has no log-file key', r.stderr)
+                self.assertEqual(ran, [])
 
     def test_validate_takes_no_other_argument(self):
         """The selector names the staged file and no other path: any other argument of validate is a usage refusal
@@ -691,10 +682,10 @@ class Selector(unittest.TestCase):
                 self.assertIn('runner-start: REFUSE usage', r.stderr)
                 self.assertEqual(ran, [])
 
-    def test_run_with_any_argument_execs_bin_runner_and_hashes_it(self):
-        """`run` with the selector (or any argument, or an env var naming another runner) execs ~/bin/runner, and its
-        v0.9.5 rule hashes ~/bin/runner: the config with no key is refused (~/bin/runner is not v0.9.5's), the config
-        with the line runs on ~/bin/runner."""
+    def test_run_with_any_argument_execs_bin_runner(self):
+        """`run` with the selector (or any argument, or an env var naming another runner) execs ~/bin/runner: the
+        config with the line runs on ~/bin/runner, the config with no key is refused. (Was
+        test_run_with_any_argument_execs_bin_runner_and_hashes_it: the hash was the v0.9.5 case, gone in H3 D2.)"""
         p, bare = self.rig()
         cfg = p.rpath('config.toml')
         for args, env in ((('run', '--staged'), None), (('run', 'x', 'y'), None),
@@ -706,8 +697,7 @@ class Selector(unittest.TestCase):
                 self.assertEqual(ran, [os.path.join(p.HOME, 'bin', 'runner')])
                 r, ran = self.start(p, bare, *args, env=env)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn('the config has no log-file key, and %s is not' % os.path.join(p.HOME, 'bin', 'runner'),
-                              r.stderr)
+                self.assertIn('runner-start: REFUSE the config has no log-file key', r.stderr)
                 self.assertEqual(ran, [])
 
 

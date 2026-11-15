@@ -20,6 +20,7 @@ BASH_COPY = os.path.join(REPO, 'linux-docker', 'bin', 'validate-class')
 ZSH_COPY = os.path.join(REPO, 'bin', 'validate-class')
 ZSH = '/bin/zsh'
 FIX = os.path.join(REPO, 'tests', 'studio', 'fixtures', 'validate')
+FIX22 = os.path.join(REPO, 'tests', 'hetzner', 'fixtures', 'validate-v022')   # H3 R-4: v0.22.0's, from its source
 CLASSES = {'pass': 'PASS', 'api-only': 'API-ONLY', 'non-api': 'NON-API', 'unknown': 'UNKNOWN'}
 X = '  ✗ '
 OK = '  ✓ '
@@ -128,6 +129,30 @@ class Copies(unittest.TestCase):
             with self.subTest(why):
                 got = self.classes(rc, text)
                 self.assertEqual(set(got.values()), {want}, got)
+
+    def test_each_v0_22_0_output_gets_the_class_the_studio_s_copy_gives(self):
+        """H3 R-4 (the one class rule on both hosts): runscaler v0.22.0's outputs of `runner validate`, from its source
+        (tag 7245c058a; tests/hetzner/fixtures/validate-v022/, the class first in each name): a PASS (cmd_validate.go
+        :174-176 the sets, :94 Docker, :211 the GitHub API probe, :140 the PASS line); a GitHub API failure (:194-205:
+        the API line, its hint; main.go:131-135 prints the error alone, "validation failed", no cobra usage): API-ONLY;
+        the Docker API version check (:88-91, image_preflight.go:25-36), the capacity check (main.go:833-835,
+        config.go:707-719) and the duplicate name check (main.go:839-849): UNKNOWN, as the Studio's copy gives them today
+        (its S2 split, config-shaped lines NON-API, is the Studio's change, and this copy follows it in that change).
+        Both copies where zsh exists, each output at its own code and at the other; the mutant (API-ONLY widened to
+        `  ✗ Docker`) reads the Docker output API-ONLY. Green on 79cd257 (no change of the rule: these pin it)."""
+        names = sorted(os.listdir(FIX22))
+        self.assertEqual(len(names), 5, names)
+        for n in names:
+            with self.subTest(n):
+                kind = next(k for k in sorted(CLASSES, key=len, reverse=True) if n.startswith(k + '-'))
+                rc = 0 if kind == 'pass' else 1
+                with open(os.path.join(FIX22, n), encoding='utf-8') as f:
+                    text = f.read()
+                got = self.classes(rc, text)
+                self.assertEqual(set(got.values()), {CLASSES[kind]}, got)
+                if self.zsh:
+                    other = self.classes(1 - rc, text)
+                    self.assertEqual(other['bash'], other['zsh'], other)
 
     def test_usage_errors(self):
         p = os.path.join(self.d, 'v.txt')

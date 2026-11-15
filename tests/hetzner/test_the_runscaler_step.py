@@ -1,7 +1,8 @@
 """`pool-image.sh runscaler [VERSION]`, THE ONE DOOR FOR THE BINARY (runscaler 0.12 bump, Hetzner slice H2b-1; the H2
 plan's M-3 with its r3 FOLD R-1 to R-6, and M-6). It changes ~/bin/runner, and only it (03's ONE DOOR: test_one_door):
 
-- VERSION: 03's PINNED (the default, v0.12.0) or its WAYBACK (v0.9.5); any other refuses. Under the ONE RUN AT A TIME
+- VERSION: 03's PINNED (the default, v0.22.0) or its WAYBACK (v0.12.0); any other (v0.9.5, the way back before H3,
+  among them) refuses. Under the ONE RUN AT A TIME
   lock. (a) Each precondition refuses with nothing changed and names its fix: pool-image.sh's PINS, VERSION, no
   updater window journal, no open image release (a config.toml.pre-image byte-equal to config.toml is one a `back`
   closed: removed, and said so, once every other check passed, when runscaler started after config.toml's install or
@@ -49,12 +50,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import time
 import types
 import unittest
 
+from tests.hetzner import test_next_day as nd   # the check the next day, as its README line runs it (Stamp)
 from tests.hetzner.support import REPO, Pool, digest, healthz, needs_container, ref, sha256_file
 from tests.hetzner.test_one_door import binary, files, unknown
 from tests.hetzner.test_render import (H1HEAD, UPOLD, UPOLDV, UPNEW, UPV, WAYBACK_MARK, Before, assignment, fixture,
@@ -66,11 +69,13 @@ S03 = os.path.join(REPO, 'linux-docker', 'setup', '03-runscaler.sh')
 PIMG = os.path.join(REPO, 'linux-docker', 'setup', 'pool-image.sh')
 RR = os.path.join(REPO, 'linux-docker', 'setup', 'runner-release.sh')
 README = os.path.join(REPO, 'linux-docker', 'README.md')
-PINNED, WAYBACK = '0.12.0', '0.9.5'
+PINNED, WAYBACK = '0.22.0', '0.12.0'
 V2, V2V = digest(12), '2.330.1'   # on_pinned's image, and the runner version its record names
 STATE = os.path.join(Pool.STATE, 'state.json')
 WBDL = 'runner-v%s-linux-amd64.tar.gz' % WAYBACK
 URL = 'https://github.com/ysya/runscaler/releases/download/v%s/runner-linux-amd64.tar.gz'
+KEPT_LINE = ("  use the kept copy: ~/build/dl/%s is v%s's download (its sha256 checked), so no download"
+             % (WBDL, WAYBACK))   # THE KEPT TARBALL's line (pool-image.sh's wayback_lines)
 H1_CASE = '  run|validate) args=("$mode") ;;\n'   # b2eb739's runner-start: it reads no selector (the plan's r3, Opus F2)
 
 
@@ -91,9 +96,9 @@ def old_wrapper(text):
 
 
 def wb_download(test, p):
-    """The way back's download: a tarball of the way-back substitute (way_back's: 03's WAYBACK_BIN_SHA and runner-start's
-    V095_SHA name it) at ~/build/dl/runner-v0.9.5-linux-amd64.tar.gz, 03's WAYBACK_TGZ_SHA its sha256 (PINS follow).
-    Returns the way-back runner's sha256."""
+    """The way back's download: a tarball of the way-back substitute (way_back's: 03's WAYBACK_BIN_SHA names it) at
+    ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz, 03's WAYBACK_TGZ_SHA its sha256 (PINS follow). Returns the way-back
+    runner's sha256."""
     s = way_back(test, p, install=False)
     with tarfile.open(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz')) as t:
         wb = t.extractfile('runner').read() + WAYBACK_MARK
@@ -116,13 +121,20 @@ def plant_old_wrapper(p):
     p.write(rs, old_wrapper(p.read(rs)), 0o755)
 
 
+H2HEAD = '# runscaler v0.12.0 config, MODE real, rendered by 03-runscaler.sh. 0600.\n'   # 79cd257's header line
+
+
 def forward(test):
-    """THE HOST BEFORE THE STEP: a pool of the release before (test_render.Before: config.toml with no log-file line,
-    image UPOLD) on the way-back runscaler v0.9.5 (~/bin/runner and the running process), this release's ~/build
-    (Install step 3) with runner-start still the release before's (old_wrapper), the way back's download too; a fake
-    clock; the substitutes that log every install and mv (hooks)."""
+    """THE HOST BEFORE THE STEP (H3): a pool of the release before on the way-back runscaler v0.12.0 (~/bin/runner and
+    the running process): config.toml its render (test_render.Before's h1, image UPOLD, with the log-file line), whose
+    first line, 03's header comment, names v0.12.0 (H2HEAD: the one line that differs, so the step installs config.toml
+    for a comment), in the second it was installed (runscaler runs it); this release's ~/build (Install step 3) with
+    runner-start still the release before's (old_wrapper), the way back's download too; a fake clock; the substitutes
+    that log every install and mv (hooks). (Before H3 its config had no log-file line, on v0.9.5: a pair runner-start
+    starts on no runscaler since H3 D2.)"""
     g = Before(test)
     p = g.p
+    g.put(p.rpath('config.toml'), H2HEAD + g.h1.split('\n', 1)[1])
     g.wb = wb_download(test, p)
     g.way_back()
     plant_old_wrapper(p)
@@ -133,7 +145,7 @@ def forward(test):
 
 
 def on_pinned(test):
-    """THE HOST AFTER THE STEP: a fresh host's 03 real (runscaler v0.12.0, the pinned substitute; config.toml this
+    """THE HOST AFTER THE STEP: a fresh host's 03 real (runscaler v0.22.0, the pinned substitute; config.toml this
     release's render, with the line) running, the way back's download in ~/build/dl; a fake clock; hooks."""
     p = Pool(test)
     p.production(V2)
@@ -191,7 +203,7 @@ def forward_h1(test):
     return g, p
 
 
-WAYS = ('pre-H1 forward', 'H1 forward', 'the way back')
+WAYS = ('forward', 'H1 forward', 'the way back')
 
 
 def rig(test, way):
@@ -200,7 +212,7 @@ def rig(test, way):
     if way == 'the way back':
         p, wb, pin = on_pinned(test)
         return p, (WAYBACK,), wb, p.config()
-    g, p = (forward if way == 'pre-H1 forward' else forward_h1)(test)
+    g, p = (forward if way == 'forward' else forward_h1)(test)
     return p, (), g.bin, g.h1
 
 
@@ -466,8 +478,8 @@ class Readme(unittest.TestCase):
         """Review r2, Opus F1 and F2 (PendingLines, Keep): the section's check list says a kept config that names
         config.toml's image is a release a back closed (also after a bare 03 real changed config.toml), which the step
         removes; the text on running 03 by hand says what `up` then names: the step, or on a host whose runscaler is
-        v0.9.5 both lines, each with its case (review r1 of H2c, opus F3: a host that took the way back, or a step to
-        v0.12.0 a cut stopped before it replaced the binary), or `back` while a release is open, which puts the kept
+        v0.12.0 both lines, each with its case (review r1 of H2c, opus F3: a host that took the way back, or a step to
+        v0.22.0 a cut stopped before it replaced the binary), or `back` while a release is open, which puts the kept
         config back over a config.toml runscaler never ran."""
         sec = self.section()
         for w in ('names another image than config.toml', 'The kept config of a release a `back` closed names '
@@ -475,26 +487,31 @@ class Readme(unittest.TestCase):
             self.assertIn(w, sec)
         hand = readme().split('Do not run 03-runscaler.sh by hand on the running pool', 1)[1].split('\n', 1)[0]
         for w in ('that `up` names the line that finishes it', '`pool-image.sh runscaler`, or, on a host whose runscaler '
-                  'is v0.9.5, both `pool-image.sh runscaler 0.9.5` (a host that took the way back) and `pool-image.sh '
-                  'runscaler` (a step to v0.12.0 that a cut stopped before v0.12.0 replaced the binary)',
+                  'is v0.12.0, both `pool-image.sh runscaler 0.12.0` (a host that took the way back) and `pool-image.sh '
+                  'runscaler` (a step to v0.22.0 that a cut stopped before v0.22.0 replaced the binary)',
                   '`pool-image.sh back` while one is', 'over a config.toml runscaler never ran'):
             self.assertIn(w, hand)
 
     def test_the_way_back_s_two_lines_are_the_files_the_step_reads(self):
-        """The way back: its download line (v0.9.5's release asset into 03's dl_of name for it) and the step with that
-        version; the way forward again: the step with no version, from Install step 4's download."""
+        """The way back: the download Install step 4 kept (M-D: 03's dl_of name for v0.12.0), or its download line
+        (v0.12.0's release asset into that name) only when step 4 kept none, and the step with that version; the way
+        forward again: the step with no version, from Install step 4's download."""
         sec = self.section()
+        self.assertIn('from the download Install step 4 kept (`~/build/dl/%s`' % WBDL, sec)
         dl = "mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/%s %s'" % (WBDL, URL % WAYBACK)
         self.assertIn(dl, sec)
+        self.assertLess(sec.index('Install step 4 kept'), sec.index(dl))
         self.assertIn("'bash -s -- runscaler %s' < linux-docker/setup/pool-image.sh" % WAYBACK, sec)
         self.assertEqual(readme().count(URL % WAYBACK), 1)
 
     def test_the_warn_is_expected_and_its_fix_is_never_run(self):
-        """F7: v0.12.0's start WARN is expected; its `fix=… migrate --user` and `runner update` are never run."""
+        """F7 (H3 D3d): v0.22.0's start WARN is expected; its fix (v0.22.0: `runner service install … --force`;
+        v0.12.0's `migrate --user`) and `runner update` are never run."""
         sec = self.section()
         self.assertIn('`Service definition predates this runner\'s template', sec)
         self.assertIn('expected', sec)
-        self.assertRegex(sec, r'(?i)never run its `fix=[^`]*migrate --user`')
+        self.assertIn('`fix=… runner service install … --force`', sec)
+        self.assertRegex(sec, r'(?i)never run its `fix=`')
         self.assertRegex(sec, r'(?i)never `runner update`')
 
     def test_the_updater_after_the_step_as_measured(self):
@@ -526,12 +543,14 @@ class Readme(unittest.TestCase):
 
 @needs_container
 class Forward(unittest.TestCase):
-    def test_from_v0_9_5_and_a_config_before_the_line_it_installs_the_line_then_the_binary(self):
-        """M-3 (b) of the plan's acceptance: config.toml and config.real.toml become this release's render (the line),
-        THEN ~/bin/runner the pinned runscaler (by a rename of runner.new: the mv log's order), one restart at idle
-        (two /healthz reads before it), the running process runs the pinned bytes; the stage ran the staged binary
-        under THIS release's runner-start (the old one ignores the selector: R-2); the pair starts under the installed
-        guard; NEXT names the way back's two lines."""
+    def test_from_v0_12_0_it_installs_this_release_s_render_then_the_binary(self):
+        """M-3 (b) of the plan's acceptance (H3 A1: from v0.12.0 to v0.22.0's stub; was
+        test_from_v0_9_5_and_a_config_before_the_line_it_installs_the_line_then_the_binary): config.toml and
+        config.real.toml become this release's render (its header comment), THEN ~/bin/runner the pinned runscaler (by a
+        rename of runner.new: the mv log's order), one restart at idle (two /healthz reads before it), the running
+        process runs the pinned bytes; the stage ran the staged binary under THIS release's runner-start (the old one
+        ignores the selector: R-2); the pair starts under the installed guard; NEXT names the way back's two lines,
+        the kept copy first (M-D: wb_download's file, by its sha256), with no download line."""
         g, p = forward(self)
         r = step(p)
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
@@ -550,8 +569,10 @@ class Forward(unittest.TestCase):
         self.assertEqual(sha256_file(os.path.join(p.HOME, 'bin', 'runner-start')),
                          sha256_file(os.path.join(p.build, 'bin', 'runner-start')))
         self.assertIn('POOL RUNSCALER DONE: runscaler v%s runs' % PINNED, r.stdout)
-        self.assertIn("curl -fsSL -o ~/build/dl/%s %s" % (WBDL, URL % WAYBACK), r.stdout)
-        self.assertIn('pool-image.sh runscaler %s' % WAYBACK, r.stdout)
+        out = r.stdout.splitlines()
+        i = next(n for n, l in enumerate(out) if l.startswith('NEXT '))
+        self.assertEqual(out[i + 1:i + 3], [KEPT_LINE, '  pool-image.sh runscaler %s' % WAYBACK])
+        self.assertNotIn('curl -fsSL -o ~/build/dl/%s' % WBDL, r.stdout)
         starts(self, p)
 
     def test_a_drifted_host_value_refuses_before_anything_is_installed(self):
@@ -631,9 +652,9 @@ class Forward(unittest.TestCase):
         self.assertEqual(left_new(p), [])
 
     def test_r_3_forward_with_a_down_unit(self):
-        """R-3 forward (Opus r1 F5; Codex's coverage table): runscaler v0.9.5's unit enabled and failed (or crash-looping):
-        the step compares with config.toml, installs v0.12.0 and starts it with no idle wait (no /healthz read before
-        the start), and v0.12.0 runs. (Green on 49a2004: a cell it lacked; its red is the mutants of R-3, P6 and P7.)"""
+        """R-3 forward (Opus r1 F5; Codex's coverage table): runscaler v0.12.0's unit enabled and failed (or crash-looping):
+        the step compares with config.toml, installs v0.22.0 and starts it with no idle wait (no /healthz read before
+        the start), and v0.22.0 runs. (Green on 49a2004: a cell it lacked; its red is the mutants of R-3, P6 and P7.)"""
         for how in ('failed', 'crash loop'):
             with self.subTest(how):
                 g, p = forward(self)
@@ -652,7 +673,7 @@ class Forward(unittest.TestCase):
 
     def test_a_fail_after_the_restart_names_the_other_way_s_lines(self):
         """(e), Opus r3 F3 (r1 F5): a pool that is not READY after the restart: FAIL, exit 1, and its line names the way
-        back's two lines (its download, then `pool-image.sh runscaler 0.9.5`); on the way back, the way forward's
+        back's two lines (H3 F-6: the kept copy, then `pool-image.sh runscaler 0.12.0`); on the way back, the way forward's
         (`pool-image.sh runscaler`). 49a2004's again() named only the README section."""
         for way in ('forward', 'the way back'):
             with self.subTest(way):
@@ -668,21 +689,23 @@ class Forward(unittest.TestCase):
                 fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
                 self.assertEqual(len(fail), 1, fail)
                 self.assertIn('not READY', fail[0])
-                if way == 'forward':
-                    self.assertIn('mkdir -p ~/build/dl && curl -fsSL -o ~/build/dl/%s %s' % (WBDL, URL % WAYBACK),
-                                  fail[0])
+                if way == 'forward':   # F-6: the kept copy first (wb_download's file), no download
+                    self.assertIn('take the way back (as RS_USER): use the kept copy, ~/build/dl/%s' % WBDL, fail[0])
+                    self.assertNotIn('curl', fail[0])
                     self.assertIn('pool-image.sh runscaler %s' % WAYBACK, fail[0])
                 else:
                     self.assertRegex(fail[0], r'the way forward again: pool-image\.sh runscaler(?! ?[0-9])')
 
     def test_a_restart_that_leaves_the_old_binary_running_is_a_fail(self):
         """(e): after READY the step reads the running binary: the restart's stop did not stop the old process (it
-        runs again: the hook `revive` at the restart's end), so the process runs v0.9.5's bytes: FAIL naming
-        journalctl, exit 1, no DONE line."""
+        runs again: the hook `revive` at the restart's end), so the process runs v0.12.0's bytes: FAIL naming
+        journalctl, exit 1, no DONE line; and no stamp (fix round 1: the step writes it before READY, only while the
+        process runs v0.22.0's binary)."""
         g, p = forward(self)
         p.hooks(('systemctl:restart-done', 'revive'))
         r = step(p)
         self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+        self.assertFalse(os.path.lexists(STAMP), 'a stamp of v0.22.0 while v0.12.0 runs')
         self.assertIn('FAIL the runscaler that runs is not v%s: its process runs runscaler v%s' % (PINNED, WAYBACK),
                       r.stdout)
         self.assertIn('journalctl --user -u runscaler', r.stdout)
@@ -718,11 +741,11 @@ class Forward(unittest.TestCase):
 
 @needs_container
 class TheWayBack(unittest.TestCase):
-    def test_the_way_back_installs_v0_9_5_the_same_way_and_restarts(self):
-        """M-3's control: `runscaler 0.9.5` on the pinned host: the way-back runner from its own download, through the
+    def test_the_way_back_installs_v0_12_0_the_same_way_and_restarts(self):
+        """M-3's control: `runscaler 0.12.0` on the pinned host: the way-back runner from its own download, through the
         staged binary; config.toml is already this step's render (no rename onto it: its mtime as it was), so
         runscaler started after its install, and the old binary still runs: one restart (R-6's control; the mutant of
-        the outer shortcut says "no restart"), then v0.9.5 runs that config with the line (the installed guard
+        the outer shortcut says "no restart"), then v0.12.0 runs that config with the line (the installed guard
         starts it). NEXT names the way forward."""
         p, wb, pin = on_pinned(self)
         cfg = ino(p, 'config.toml')
@@ -738,9 +761,9 @@ class TheWayBack(unittest.TestCase):
         starts(self, p)
 
     def test_the_way_back_works_with_a_down_pool(self):
-        """R-3: v0.12.0 cannot run (its unit failed, or crash-loops: activating, MainPID 0, between 1-s starts); the
-        unit is enabled: `runscaler 0.9.5` compares with config.toml, installs v0.9.5 and starts it with no idle wait
-        (no /healthz read before the start), and v0.9.5 runs."""
+        """R-3: v0.22.0 cannot run (its unit failed, or crash-loops: activating, MainPID 0, between 1-s starts); the
+        unit is enabled: `runscaler 0.12.0` compares with config.toml, installs v0.12.0 and starts it with no idle wait
+        (no /healthz read before the start), and v0.12.0 runs."""
         for how in ('failed', 'crash loop'):
             with self.subTest(how):
                 p, wb, pin = on_pinned(self)
@@ -792,7 +815,7 @@ class Publish(unittest.TestCase):
             self.assertIn(now[k], (before[k], srcs[k]), 'the live %s is not whole' % k)
 
     def test_a_copy_cut_midway_leaves_each_live_file_whole_and_the_same_line_finishes(self):
-        """Each of the four, forward (from v0.9.5 and a config before H1) and on the way back (from v0.12.0): the step
+        """Each of the four, forward (from v0.12.0 and a config before H1) and on the way back (from v0.22.0): the step
         cut inside the copy of that file: each live file whole; after a reboot (runscaler started again on the pair on
         disk) the INSTALLED runner-start's guard starts that pair; the same line then finishes (VERSION's runscaler
         runs, the four are this release's, no DEST.new left)."""
@@ -819,10 +842,7 @@ class Publish(unittest.TestCase):
         same `up` line then ends with POOL IMAGE DONE, the four this release's, no DEST.new left."""
         for s, d in PUBLISHED:
             with self.subTest(file=d):
-                g = Before(self)
-                g.way_back()
-                p = g.p
-                p.fake_clock()
+                g, p = forward(self)   # H3: the release before's render on v0.12.0 (a pre-H1 config starts nowhere)
                 cfg = ino(p, 'config.toml')
                 self.cut_copy(p, s, lambda: p.unattended('up', UPV, prefix=()))
                 self.assertEqual(ino(p, 'config.toml'), cfg)
@@ -863,11 +883,11 @@ class Publish(unittest.TestCase):
 @needs_container
 class Keep(unittest.TestCase):
     def test_a_release_closed_by_back_is_removed_first_and_said_so(self):
-        """R-4: config.toml.pre-image byte-equal to config.toml (an image release `back` closed; it has no line): the
-        step removes it, says so, and goes on; v0.12.0 runs. A later person's `back` then has nothing to put back (no
-        config with no line under v0.12.0), and refuses before any put."""
+        """R-4: config.toml.pre-image byte-equal to config.toml (an image release `back` closed): the step removes it,
+        says so, and goes on; v0.22.0 runs. A later person's `back` then has nothing to put back, and refuses before any
+        put."""
         g, p = forward(self)
-        g.put(p.rpath('config.toml.pre-image'), g.pre)
+        g.put(p.rpath('config.toml.pre-image'), p.config())
         r = step(p)
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
         self.assertIn('removed %s' % p.rpath('config.toml.pre-image'), r.stdout)
@@ -901,7 +921,7 @@ class Keep(unittest.TestCase):
         """Review r2, Opus F1 (its probeA): an `up`, its `back` (config.toml.pre-image stays, config.toml byte for byte),
         then a change of pool.env's numbers and a bare `03 real` (Install step 9), runscaler restarted on it: the
         rollback names config.toml's image (accept's own rule: after a back there is nothing to accept), so the release
-        is closed, though the bytes differ (the numbers): the step removes it, says so, and goes on: v0.12.0 runs
+        is closed, though the bytes differ (the numbers): the step removes it, says so, and goes on: v0.22.0 runs
         config.toml with the new numbers. 8407d35 refused ("an image release is open"), and accept and back refused
         too: no line cleared it."""
         g, p = forward(self)
@@ -931,7 +951,7 @@ class Keep(unittest.TestCase):
         the step refuses before any change (the rollback and config.toml keep sha256 and mtime: every file of the home
         as it was), runs no runscaler, restarts nothing, and its line names `pool-image.sh back`, which finishes it.
         Then `back`: exit 0, one restart; then the step: the rollback removed (runscaler now started after config.toml's
-        install), exit 0, v0.12.0 runs. 49a2004 removed the rollback and then refused at its stage: `back` and `up`
+        install), exit 0, v0.22.0 runs. 49a2004 removed the rollback and then refused at its stage: `back` and `up`
         refused too."""
         g, p, keep = cut_back(self)
         before, b0, n = files(p), binary(p), len(restarts(p))
@@ -958,9 +978,9 @@ class Keep(unittest.TestCase):
     def test_control_a_down_unit_s_byte_equal_rollback_is_removed(self):
         """R-4's control for a down unit (Opus r1 F1): config.toml.pre-image byte-equal to config.toml, the unit enabled
         and failed: nothing runs, so the step's own start runs config.toml: the rollback is removed, said so, and the
-        step goes on; v0.12.0 runs."""
+        step goes on; v0.22.0 runs."""
         g, p = forward(self)
-        g.put(p.rpath('config.toml.pre-image'), g.pre)
+        g.put(p.rpath('config.toml.pre-image'), p.config())
         p.set_unit(active=False, failed=True)
         r = step(p)
         self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
@@ -974,7 +994,7 @@ class Keep(unittest.TestCase):
         refuses with every file of the home as it was, the rollback too. The mutant (the removal above the download
         check) removes it."""
         g, p = forward(self)
-        g.put(p.rpath('config.toml.pre-image'), g.pre)
+        g.put(p.rpath('config.toml.pre-image'), p.config())
         os.remove(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz'))
         before = files(p)
         r = step(p)
@@ -984,9 +1004,9 @@ class Keep(unittest.TestCase):
         self.assertTrue(os.path.lexists(p.rpath('config.toml.pre-image')))
 
     def test_r_4_on_the_way_back(self):
-        """R-4 on the way back (Opus r3 F4, r1 F5): on v0.12.0, an image `up`, then its `back` (config.toml.pre-image
-        stays, byte-equal to config.toml, and runscaler restarted on it), then `runscaler 0.9.5`: the rollback is
-        removed, said so, exit 0, v0.9.5 runs config.toml."""
+        """R-4 on the way back (Opus r3 F4, r1 F5): on v0.22.0, an image `up`, then its `back` (config.toml.pre-image
+        stays, byte-equal to config.toml, and runscaler restarted on it), then `runscaler 0.12.0`: the rollback is
+        removed, said so, exit 0, v0.12.0 runs config.toml."""
         p, wb, pin = on_pinned(self)
         p.curl['served'] = [V2]           # the registry serves the image the pool runs (the rollback's): back needs it
         up_record(p, UPV, UPNEW)
@@ -1020,8 +1040,8 @@ class UpAfterACut(unittest.TestCase):
         fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
         self.assertEqual(len(fail), 1, fail)
         self.assertRegex(fail[0], LINE % re.escape(names), 'the line to run (not a cause it names), and no version after it '
-                         '(review r2, Opus F2: the forward cut renamed v0.12.0, so the bare line, not the way back\'s)')
-        self.assertNotIn('pool-image.sh runscaler %s' % WAYBACK, fail[0], 'v0.12.0 renamed into place: one line (the '
+                         '(review r2, Opus F2: the forward cut renamed v0.22.0, so the bare line, not the way back\'s)')
+        self.assertNotIn('pool-image.sh runscaler %s' % WAYBACK, fail[0], 'v0.22.0 renamed into place: one line (the '
                          'control of PendingLines\' cut before that rename, review r1 of H2c, opus F3)')
         self.assertNotIn('docs/', fail[0])
         self.assertEqual((files(p), binary(p)), (before, b0))
@@ -1048,7 +1068,7 @@ class UpAfterACut(unittest.TestCase):
 
 
 # a FAIL line names LINE as the line to run: `run LINE`, and no version follows it (`pool-image.sh runscaler` is not
-# `pool-image.sh runscaler 0.9.5`)
+# `pool-image.sh runscaler 0.12.0`)
 LINE = r'(?i)\brun %s(?![0-9.]| [0-9])'
 
 
@@ -1085,8 +1105,8 @@ def names_line(test, r, line):
 class PendingLines(unittest.TestCase):
     """Review r2's folds of up's pending refusals (a config.toml installed after runscaler started, in up's two branches):
     each names a line that, run in that refusal's own state, ends with exit 0 and clears it, and the same `up` passes
-    after it. Opus F2: on a host whose ~/bin/runner is v0.9.5 (the way back) the step's line names that version
-    (`pool-image.sh runscaler 0.9.5`: the bare line would put v0.12.0 back); UpAfterACut's forward cut (v0.12.0 renamed)
+    after it. Opus F2: on a host whose ~/bin/runner is v0.12.0 (the way back) the step's line names that version
+    (`pool-image.sh runscaler 0.12.0`: the bare line would put v0.22.0 back); UpAfterACut's forward cut (v0.22.0 renamed)
     keeps the bare line (the control). Opus F1: after a release a `back` closed (its rollback names config.toml's
     image) and a bare `03 real` of new numbers, up's third and fourth refusals named `pool-image.sh back`, which then
     refused (the numbers): it is no open release, so the line is the step's; and an OPEN release whose pending
@@ -1103,11 +1123,11 @@ class PendingLines(unittest.TestCase):
         self.assertEqual((files(p), binary(p), len(restarts(p))), (before, b0, n))
         return r
 
-    def test_a_way_back_host_s_pending_config_names_the_step_with_v0_9_5(self):
-        """Opus F2 (its probeC): on v0.12.0, the way back (`runscaler 0.9.5`: v0.9.5 runs), then a change of pool.env's
+    def test_a_way_back_host_s_pending_config_names_the_step_with_v0_12_0(self):
+        """Opus F2 (its probeC): on v0.22.0, the way back (`runscaler 0.12.0`: v0.12.0 runs), then a change of pool.env's
         numbers and a bare `03 real` (pending); `up` to another image and `up` of the running version each refuse
-        naming `pool-image.sh runscaler 0.9.5`; that line keeps v0.9.5 (and starts it on config.toml), and the same
-        up then passes on v0.9.5. 8407d35 named the bare line, which installs v0.12.0 again."""
+        naming `pool-image.sh runscaler 0.12.0`; that line keeps v0.12.0 (and starts it on config.toml), and the same
+        up then passes on v0.12.0. 8407d35 named the bare line, which installs v0.22.0 again."""
         for case in ('another image', 'the running version'):
             with self.subTest(case):
                 p, wb, pin = on_pinned(self)
@@ -1132,19 +1152,19 @@ class PendingLines(unittest.TestCase):
 
     def test_a_forward_step_cut_before_its_binary_rename_names_both_lines(self):
         """Review r1 of H2c, opus F3: the forward step cut between its two renames (test_step_resume's boundary
-        `mv-done:config.toml`: config.toml this release's render, pending; ~/bin/runner still v0.9.5, as on a host that
+        `mv-done:config.toml`: config.toml this release's render, pending; ~/bin/runner still v0.12.0, as on a host that
         took the way back); `up` to another image and `up` of the running version each refuse, nothing changed, naming
-        BOTH lines, each with its case: `pool-image.sh runscaler 0.9.5` (a host that took the way back) and
-        `pool-image.sh runscaler` (a step to v0.12.0 a cut stopped before v0.12.0 replaced the binary). Each line, run in
+        BOTH lines, each with its case: `pool-image.sh runscaler 0.12.0` (a host that took the way back) and
+        `pool-image.sh runscaler` (a step to v0.22.0 a cut stopped before v0.22.0 replaced the binary). Each line, run in
         that state, ends with exit 0, its pair starts (the INSTALLED guard), and the same up passes; the bare one
-        finishes the forward step (v0.12.0 runs). Nothing on disk tells the two hosts apart: a ~/bin/runner.new is left
+        finishes the forward step (v0.22.0 runs). Nothing on disk tells the two hosts apart: a ~/bin/runner.new is left
         only by a cut at which 03's EXIT trap does not run (a SIGKILL). 8b917c7 named the way back's line only, which
         turned the forward step into the way back. UpAfterACut (the cut after that rename) names one line."""
         for case in ('another image', 'the running version'):
             for line in ('pool-image.sh runscaler', 'pool-image.sh runscaler %s' % WAYBACK):
                 with self.subTest(case=case, line=line):
                     g, p = cut_step(self, at='mv-done:config.toml')
-                    self.assertEqual(rb(p), g.wb, 'the cut left v0.9.5 installed (the binary not renamed yet)')
+                    self.assertEqual(rb(p), g.wb, 'the cut left v0.12.0 installed (the binary not renamed yet)')
                     up_record(p, UPOLDV, UPOLD)
                     version = UPV if case == 'another image' else UPOLDV
                     r = self.refuses(p, version, 'pool-image.sh runscaler')
@@ -1152,7 +1172,7 @@ class PendingLines(unittest.TestCase):
                     self.assertRegex(fail, (LINE % re.escape('pool-image.sh runscaler %s' % WAYBACK))
                                      + r' \(on a host that took the way back\)')
                     self.assertRegex(fail, (LINE % re.escape('pool-image.sh runscaler'))
-                                     + r' \(to finish a step to v0\.12\.0 that a cut stopped before v0\.12\.0 replaced '
+                                     + r' \(to finish a step to v0\.22\.0 that a cut stopped before v0\.22\.0 replaced '
                                        r'the binary\)')
                     r = step(p, *line.split()[2:])
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
@@ -1167,7 +1187,7 @@ class PendingLines(unittest.TestCase):
         """Opus F1, up's third and fourth refusals: an `up`, its `back`, a change of pool.env's numbers and a bare `03
         real` (pending), then `up` of the running version: with the unit active (the rollback is older than the
         process: 8407d35's third refusal) and with it down (8407d35's fourth): the rollback names config.toml's image,
-        a release a back closed, so the line is the step's (v0.9.5 here, forward()'s); run, it removes that rollback
+        a release a back closed, so the line is the step's (v0.12.0 here, forward()'s); run, it removes that rollback
         and starts runscaler on config.toml, and the up then passes. 8407d35 named `pool-image.sh back`, which refused
         (the numbers)."""
         for unit in ('active', 'down'):
@@ -1225,7 +1245,7 @@ class PendingLines(unittest.TestCase):
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
                     self.assertIn('runscaler never ran it', r.stdout)
                     self.assertEqual(sha256_file(p.rpath('config.toml')), sha256_file(keep))
-                    starts(self, p)   # the rollback (no log-file line) on v0.9.5: BACK'S PAIR GUARD's pair (opus F4)
+                    starts(self, p)   # the rollback (no log-file line) on v0.12.0: BACK'S PAIR GUARD's pair (opus F4)
                     p.pool_env()
                     r = p.pool('up', UPV)
                     self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
@@ -1279,8 +1299,8 @@ class DoneAlready(unittest.TestCase):
                     self.assertIn('not READY', r.stdout)
 
     def test_a_config_installed_after_runscaler_started_is_never_done_already(self):
-        """R-1 and R-5 (a builder's choice, Opus r1 F5 and its ProbePendingOnPinned): on the pinned host (v0.12.0 runs,
-        ~/bin/runner v0.12.0), a bare `03 real` installs config.toml again after runscaler started: the step is not
+        """R-1 and R-5 (a builder's choice, Opus r1 F5 and its ProbePendingOnPinned): on the pinned host (v0.22.0 runs,
+        ~/bin/runner v0.22.0), a bare `03 real` installs config.toml again after runscaler started: the step is not
         DONE ALREADY: its stage (rule bytes: config.toml is its render, not installed again) and ONE restart, exit 0, so
         that config goes live with this restart. The mutant (DONE ALREADY with no started_after) restarts nothing."""
         p, wb, pin = on_pinned(self)
@@ -1298,6 +1318,236 @@ class DoneAlready(unittest.TestCase):
         self.assertGreater(p.unit_now()['start'], int(os.stat(p.rpath('config.toml')).st_mtime))
 
 
+STAMP = os.path.join(Pool.HOME, '.local', 'state', 'runscaler-step')
+
+
+def starting_times(p):
+    """The log times of the `Starting scale sets` records in runscaler's runner.log, in order (hzlib.start writes one
+    at each process start, and Pool.production one for its process)."""
+    with open(p.rpath('runner.log')) as f:
+        return [l[:19] for l in f if ' Starting scale sets ' in l]
+
+
+@needs_container
+class Stamp(unittest.TestCase):
+    """THE STEP'S STAMP (H3 F-4): ~/.local/state/runscaler-step, 0600, one line `VERSION BIN_SHA T`, T the log time of
+    the first `Starting scale sets` record of the process the step started (after its restart), so the check the next
+    day counts from v0.22.0's first start whatever restarts came later. DONE ALREADY writes it only when there is none
+    of VERSION's binary. Red on 79cd257 (no stamp)."""
+
+    def stamp(self):
+        self.assertTrue(os.path.lexists(STAMP), 'no stamp')
+        st = os.stat(STAMP)
+        self.assertEqual(st.st_mode & 0o777, 0o600)
+        with open(STAMP) as f:
+            return f.read()
+
+    def test_the_step_writes_the_stamp_of_its_new_process(self):
+        for way in ('forward', 'the way back'):
+            with self.subTest(way):
+                p, args, want, cfg = rig(self, way)
+                before = starting_times(p)
+                r = step(p, *args)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                new = starting_times(p)[len(before):]
+                self.assertEqual(len(new), 1, 'the one restart wrote one record')
+                version = WAYBACK if args else PINNED
+                self.assertEqual(self.stamp(), '%s %s %s\n' % (version, want, new[0]))
+                self.assertIn('wrote %s' % STAMP, r.stdout)
+
+    def test_done_already_writes_a_missing_stamp_and_keeps_one_of_its_binary(self):
+        """On the pinned host (on_pinned: its process started after config.toml's install, Pool.production's log): no
+        stamp -> DONE ALREADY writes it from that process's first `Starting scale sets`; one of another binary is
+        written again; one of the running binary (an older T: a restart since) is kept as it is, so a later restart
+        never moves the check's start (the control)."""
+        for case in ('none', 'another binary', 'its binary'):
+            with self.subTest(case):
+                p, wb, pin = on_pinned(self)
+                t0 = starting_times(p)
+                self.assertEqual(len(t0), 1)
+                if case != 'none':
+                    os.makedirs(os.path.dirname(STAMP), exist_ok=True)
+                    p.write(STAMP, '%s %s 2026-11-01 00:00:00\n' % (PINNED, wb if case == 'another binary' else pin),
+                            0o600)
+                r = step(p)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertIn('DONE ALREADY', r.stdout)
+                self.assertEqual(restarts(p), [])
+                want = '2026-11-01 00:00:00' if case == 'its binary' else t0[0]
+                self.assertEqual(self.stamp(), '%s %s %s\n' % (PINNED, pin, want))
+
+    def test_done_already_reads_the_start_record_in_runner_log_1(self):
+        """Fix round 1 (codex r1 F2, opus r1 F1 (a)): runner.log rotated since the running process started (runscaler
+        keeps one older file, runner.log.1: v0.22.0 internal/logfile/logfile.go:20), so that process's first `Starting
+        scale sets` (cmd/runner/main.go:529) is in runner.log.1, after an older process's start record (an hour before
+        the unit's ActiveEnterTimestamp): DONE ALREADY writes the stamp with the running process's record's time, no
+        restart, and the check the next day passes the stamp gate (not measured yet: no removal). The control:
+        runner.log.1 holds only the older process's record: no stamp (the WARN), and the check names the step again.
+        Red on 3f4b4ac (stamp_write read runner.log only: the WARN, no stamp)."""
+        for case in ('rotated', 'control: only an older process'):
+            with self.subTest(case):
+                p, wb, pin = on_pinned(self)
+                t0 = starting_times(p)
+                self.assertEqual(len(t0), 1)
+                start = p.unit_now()['start']
+                older = '%s INFO Starting scale sets count=2 concurrent=4\n' % time.strftime(
+                    '%Y-%m-%d %H:%M:%S', time.gmtime(start - 3600))
+                log = p.read(p.rpath('runner.log'))
+                if case != 'rotated':
+                    log = ''.join(l for l in log.splitlines(True) if ' Starting scale sets ' not in l)
+                p.write(p.rpath('runner.log.1'), older + log, 0o600)
+                p.write(p.rpath('runner.log'), '%s INFO linux-ci-main: Listening for jobs maxRunners=3 minRunners=0\n'
+                        % time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(start + 5)), 0o600)
+                self.assertEqual(starting_times(p), [])
+                r = step(p)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertIn('DONE ALREADY', r.stdout)
+                self.assertEqual(restarts(p), [])
+                os.remove(p.rpath('pool-image.lock'))   # the step's lock file: nd.check asserts the check makes none
+                c = nd.check(self, p)
+                if case == 'rotated':
+                    self.assertEqual(self.stamp(), '%s %s %s\n' % (PINNED, pin, t0[0]))
+                    self.assertIn('wrote %s' % STAMP, r.stdout)
+                    self.assertEqual(c.returncode, 0, c.stdout[-4000:] + c.stderr)
+                    self.assertRegex(nd.answer(self, c), r'^ANSWER not measured yet: ')
+                else:
+                    self.assertFalse(os.path.lexists(STAMP))
+                    self.assertIn('WARN no stamp: ', r.stdout)
+                    self.assertRegex(nd.answer(self, c), r"^ANSWER the step's start is not known: there is no ")
+
+    def test_a_step_that_dies_at_ready_leaves_its_stamp(self):
+        """Fix round 1 (opus r1 F1 (b), codex r1 F2): the step writes its stamp as soon as the new process's first
+        `Starting scale sets` is there, before it waits for READY: a pool that never is READY after the restart (the
+        main set not ready, as v0.22.0 under a GitHub outage) fails the step as before (FAIL not READY, exit 1) AND
+        leaves the new process's stamp; the check the next day on that home, its log then the readiness takeovers of
+        a never-ready pool over an hour (test_next_day.takeovers: readiness_test.go:174-195), gives the way back, not
+        "the step's start is not known". The control: a new process that logs no `Starting scale sets` (hzlib.start's
+        no_start_record): no stamp (the WARN), the step fails as before. Red on 3f4b4ac (the stamp only after READY)."""
+        for case in ('never ready', 'control: no start record'):
+            with self.subTest(case):
+                g, p = forward(self)
+                if case != 'never ready':
+                    p.set_unit(no_start_record=True)
+                p.curl['healthz'] = healthz(**{'linux-ci-main': {'ready': False}})
+                before = starting_times(p)
+                r = step(p)
+                self.assertEqual(r.returncode, 1, r.stdout[-4000:] + r.stderr)
+                fail = [l for l in r.stdout.splitlines() if l.startswith('FAIL ')]
+                self.assertEqual(len(fail), 1, fail)
+                self.assertIn('not READY', fail[0])
+                self.assertEqual(restarts(p), ['--user restart runscaler'])
+                self.assertEqual(p.exe(), g.bin)
+                new = starting_times(p)[len(before):]
+                if case != 'never ready':
+                    self.assertEqual(new, [])
+                    self.assertFalse(os.path.lexists(STAMP))
+                    self.assertIn('WARN no stamp: ', r.stdout)
+                    continue
+                self.assertEqual(len(new), 1, 'the one restart wrote one record')
+                self.assertEqual(self.stamp(), '%s %s %s\n' % (PINNED, g.bin, new[0]))
+                start = p.unit_now()['start']
+                with open(p.rpath('runner.log'), 'a') as f:
+                    f.write(nd.takeovers(start - nd.START + 600, start - nd.START + 600 + 3700))
+                p.clock(now=start + nd.DAY)
+                os.remove(p.rpath('pool-image.lock'))   # the step's lock file: nd.check asserts the check makes none
+                c = nd.check(self, p)
+                self.assertEqual(c.returncode, 1, c.stdout[-4000:] + c.stderr)
+                self.assertRegex(nd.answer(self, c), r'^ANSWER the way back: set %s has [0-9]+ open start failures '
+                                 % MAIN)
+
+
+@needs_container
+class NoIdleWhileProvisioning(unittest.TestCase):
+    def test_a_provisioning_runner_is_no_idle_moment(self):
+        """H3 R-6: the restart at idle (counts()) reads v0.22.0's `provisioning` (a Docker runner not ready yet, which
+        GitHub may have given a job) as no calm moment, as the core's idle pass does: with provisioning 1, idle 0,
+        busy 0 on a set, the quiet wait and the idle-phase wait both run out (their WAIT lines) before the restart.
+        Control: every count 0: the restart follows the first two reads, with no WAIT line. Red on 79cd257 (it
+        restarted at once)."""
+        for case, main in (('provisioning 1', {'provisioning': 1}), ('control: all zero', {})):
+            with self.subTest(case):
+                p, wb, pin = on_pinned(self)
+                p.curl['healthz'] = healthz(**{'linux-ci-main': main})
+                r = step(p, WAYBACK)
+                self.assertEqual(r.returncode, 0, r.stdout[-4000:] + r.stderr)
+                self.assertEqual(restarts(p), ['--user restart runscaler'])
+                waits = [l for l in r.stdout.splitlines() if l.startswith('WAIT ')]
+                if main:
+                    self.assertEqual([w[:30] for w in waits], ['WAIT jobs still run after 10 m',
+                                                               'WAIT no moment without a runne'])
+                else:
+                    self.assertEqual(waits, [])
+                    ev = p.events()
+                    first = next(i for i, e in enumerate(ev) if re.fullmatch(r'process [0-9]+ stopped', e))
+                    self.assertEqual(ev[:first].count('healthz read'), 2, ev)
+
+
+@needs_container
+class KeptTarball(unittest.TestCase):
+    """THE KEPT TARBALL (H3 M-D, F-6): the README line of Install step 4 copies the newest
+    ~/build.prev.*/dl/runner-linux-amd64.tar.gz (step 3 moved the old ~/build aside) to the way back's name,
+    ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz, only when its sha256 is 03's WAYBACK_TGZ_SHA (read from this release's
+    ~/build); else it says so and copies nothing. Run as written, on a scratch HOME, after step 3's own remote command
+    fed a tar of this release's linux-docker/ (opus r2's measure). Red on 79cd257 (no such line)."""
+
+    def lines(self):
+        with open(README) as f:
+            text = f.read()
+        ins = text.split('\n## Install\n', 1)[1].split('\n## ', 1)[0]
+        s3 = ins.split('\n3. ', 1)[1].split('\n4. ', 1)[0]
+        s4 = ins.split('\n4. ', 1)[1].split('\n5. ', 1)[0]
+        three = [m for m in re.findall(r"(?m)^   .*\| ssh <RUN_USER>@<host> '(.*)'$", s3)]
+        keep = [m for m in re.findall(r"(?m)^   ssh <RS_USER>@<host> '(.*WAYBACK_TGZ_SHA.*)'$", s4)]
+        self.assertEqual(len(three), 1, 'step 3 has one install line')
+        self.assertEqual(len(keep), 1, 'step 4 has one line that keeps the way back\'s download')
+        self.assertLess(s4.index('WAYBACK_TGZ_SHA'), s4.index('/download/v%s/' % PINNED), 'before the download')
+        return three[0], keep[0]
+
+    def run_it(self, pin_matches):
+        three, keep = self.lines()
+        tmp = tempfile.mkdtemp(prefix='kept-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        home = os.path.join(tmp, 'home')
+        os.makedirs(os.path.join(home, 'build', 'dl'))
+        old = b'the v0.12.0 tarball of the release before (a substitute)\n'
+        with open(os.path.join(home, 'build', 'dl', 'runner-linux-amd64.tar.gz'), 'wb') as f:
+            f.write(old)
+        src = os.path.join(tmp, 'src')
+        shutil.copytree(os.path.join(REPO, 'linux-docker'), src)
+        if pin_matches:
+            s03 = os.path.join(src, 'setup', '03-runscaler.sh')
+            with open(s03) as f:
+                t = f.read()
+            pins = re.findall(r'(?m)^WAYBACK_TGZ_SHA=[0-9a-f]{64}$', t)
+            self.assertEqual(len(pins), 1)
+            with open(s03, 'w') as f:
+                f.write(t.replace(pins[0], 'WAYBACK_TGZ_SHA=' + hashlib.sha256(old).hexdigest()))
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as t:
+            t.add(src, arcname='.')
+        env = {'HOME': home, 'PATH': '/usr/bin:/bin'}
+        r = subprocess.run(['bash', '-c', three], input=buf.getvalue(), env=env, cwd=home, capture_output=True,
+                           timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        prev = [d for d in os.listdir(home) if d.startswith('build.prev.')]
+        self.assertEqual(len(prev), 1, os.listdir(home))
+        self.assertFalse(os.path.exists(os.path.join(home, 'build', 'dl')), 'step 3 moved the old dl/ aside')
+        r = subprocess.run(['bash', '-c', keep], env=env, cwd=home, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return home, old, r.stdout
+
+    def test_the_line_keeps_the_way_back_s_download(self):
+        home, old, out = self.run_it(True)
+        self.assertTrue(out.startswith('KEPT '), out)
+        with open(os.path.join(home, 'build', 'dl', WBDL), 'rb') as f:
+            self.assertEqual(f.read(), old)
+
+    def test_control_another_sha_copies_nothing(self):
+        home, old, out = self.run_it(False)
+        self.assertTrue(out.startswith('NOT KEPT: '), out)
+        self.assertFalse(os.path.lexists(os.path.join(home, 'build', 'dl', WBDL)))
+
+
 @needs_container
 class Refusals(unittest.TestCase):
     def test_each_precondition_refuses_naming_its_fix_and_changes_nothing(self):
@@ -1311,6 +1561,8 @@ class Refusals(unittest.TestCase):
                  ('a pinned file changed', lambda g, p: append(os.path.join(p.build, 'bin', 'pool-ready'), b'#\n'),
                   (), 'Install step 3'),
                  ('a version this release does not know', None, ('0.10.0',), 'v%s' % WAYBACK),
+                 # H3 A1: v0.9.5, the way back before H3, is one no more (red on 79cd257, whose WAYBACK it was)
+                 ('v0.9.5', None, ('0.9.5',), 'runscaler v0.9.5 is not one this release knows: v%s' % PINNED),
                  ('no download', lambda g, p: os.remove(os.path.join(p.build, 'dl', 'runner-linux-amd64.tar.gz')),
                   (), URL % PINNED),
                  ('a download of other bytes',

@@ -1,0 +1,2 @@
+  ✗ scaleset[1] "linux-ci-main" duplicates scaleset[0] name; names must be unique for lifecycle and health tracking
+validation failed

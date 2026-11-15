@@ -699,7 +699,7 @@ def say(text, rc):
 
 
 if a[:1] == ['version']:
-    say('runscaler v0.9.5 (a test substitute)\n', 0)
+    say('runscaler (a test substitute)\n', 0)
 if a[:1] == ['validate']:
     with open(conf) as f:
         if 'log-level = "liveapp-bogus"' in f.read():
@@ -812,6 +812,8 @@ def start(st):
     event('process %d started %d' % (st['pid'], st['start']))
     ran(st['pid'])
     runlog('runscaler started pid=%d' % st['pid'])
+    if not st.get('no_start_record'):   # a cell's process that logs none (test_the_runscaler_step's Stamp control)
+        runlog('Starting scale sets count=2 concurrent=4')   # cmd/runner/main.go:529 (v0.22.0): THE STEP'S STAMP reads it
 
 
 def advance(to):
@@ -1698,10 +1700,16 @@ class Pool(Sandbox):
         m = int(os.stat(self.rpath('config.toml')).st_mtime)
         while int(time.time()) <= m:     # the start comes after the install's second, and is never in the future:
             time.sleep(0.05)              # wait for the clock (a state), never for a set time
-        self.set_unit(active=True, enabled=True, start=int(time.time()), pid=100)
+        start = int(time.time())
+        self.set_unit(active=True, enabled=True, start=start, pid=100)
         self.ran(100)
-        self.write(self.rpath('runner.log'), '%s INFO runscaler started pid=100\n' % time.strftime(
-            '%Y-%m-%d %H:%M:%S', time.gmtime()), 0o600)
+        # its start's records (hzlib.start's two), stamped from THE SAME clock read as the start: time.gmtime() with no
+        # argument reads C's time(NULL), Linux's coarse clock, which can still be in the second before int(time.time())
+        # (measured in both CI images: about 1 read in 1,000), so a record could precede its start and THE STEP'S STAMP
+        # (at or after the start's second) find none: the Stamp cells' race of CI runs 43659554634 and 43662836134
+        t = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(start))
+        self.write(self.rpath('runner.log'), '%s INFO runscaler started pid=100\n%s INFO Starting scale sets count=2 '
+                   'concurrent=4\n' % (t, t), 0o600)
         return r
 
     def ran(self, pid=None):
