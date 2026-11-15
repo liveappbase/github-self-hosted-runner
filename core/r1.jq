@@ -9,7 +9,9 @@
 # ORDER of log time: one that a `Job started|completed for unknown runner` naming the runner still takes back holds the start it
 # took back, a proof for R1 until the exit is final; one taken back already is `taken`, and every later line naming its
 # runner is a proof too), unknowns (those unknown-runner lines, within SETTLE + ORDER of log time, that named no such
-# removal yet: one may still come and finds them all), ns (NOT SERVING), completed.
+# removal yet: one may still come and finds them all), ns (NOT SERVING), completed. An exited removal is also, on a
+# family whose provider is not "tart" (classify's $p), runscaler v0.22.0's `Runner removed reason=readiness-failed` with
+# no jobId (a Docker runner that never got ready): read exactly as `reason=exited` with no jobId (H3).
 import "core" as C;
 import "logfmt" as L;
 
@@ -74,15 +76,19 @@ def first_line: split("\n")[0] | .[0:200];
 
 # the classification table (core/README.md, PLAN D6 with its AMENDMENT); $p = the family's provider, $refused = VMs
 # the shim refused. -> k: completed (proof of life; KEEP's counts) | exited (`Runner removed reason=exited` with no
-# jobId: a counted failure, unless an unknown-runner line naming that runner comes within SETTLE - ORDER before or after
-# it, see apply) |
+# jobId, and on a family whose provider is not "tart" `Runner removed reason=readiness-failed` with no jobId, runscaler
+# v0.22.0's Docker readiness removal (controller/state.go:29, :130-145): a counted failure, unless an unknown-runner line
+# naming that runner comes within SETTLE - ORDER before or after it, see apply) |
 # unknown (`Job started|completed for unknown runner`: proof of life for the set when it names such a runner) |
 # removed (confirms a Tart start) | start (Tart: proof unless taken back) | fail (c = connect-class) | retired | shim |
 # refused | paired | none
 def classify($p; $refused):
   if .msg == "Runner removed" then
     if .attrs.reason == "job-completed" then {k: "completed", name: .attrs.name, result: (.attrs.result // "")}
-    elif .attrs.reason == "exited" and .attrs.jobId == null then {k: "exited", name: .attrs.name}
+    elif .attrs.reason == "exited" and .attrs.jobId == null then {k: "exited", name: .attrs.name, r: "exited"}
+    # runscaler v0.22.0's Docker readiness removal (H3): read exactly as `exited` with no jobId; Tart never logs it
+    elif $p != "tart" and .attrs.reason == "readiness-failed" and .attrs.jobId == null
+    then {k: "exited", name: .attrs.name, r: "readiness-failed"}
     else {k: "removed", name: .attrs.name} end
   elif .msg == "Runner started" then (if $p == "tart" then {k: "start", name: .attrs.name} else {k: "none"} end)
   elif .msg == "Job started for unknown runner (already removed?)"
@@ -127,7 +133,7 @@ def apply($ev; $s; $t; $sec; $seen):
                         | .unknowns |= map(select((.n == $ev.name and in_window(.s; $sec)) | not))
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st, taken: true}]
                    else (if $counts then .fails += [{t: $t, s: $sec, c: false,
-                                                    x: "Runner removed reason=exited, no job: \($ev.name)", seen: $seen,
+                                                    x: "Runner removed reason=\($ev.r), no job: \($ev.name)", seen: $seen,
                                                     settled: false, n: $ev.name}] else . end)
                         | .exits += [{n: $ev.name, s: $sec, seen: $seen, start: $st}]
                    end
