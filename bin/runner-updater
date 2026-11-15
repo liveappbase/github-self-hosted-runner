@@ -198,7 +198,7 @@
 #   CONFIG       runscaler's config; RUNLOG, runscaler's own log, is runner.log beside the config: the config pins
 #                it there (`log-file`; ru_config refuses any other spelling, and a config with none: runscaler 0.10.0
 #                and later write elsewhere without it); at 10 MiB runscaler renames it to runner.log.1, one backup
-#                (0.9.5, 0.12.0 and 0.22.0 alike)
+#                (0.9.5, 0.12.0, 0.22.0 and 0.22.1 alike)
 #   STATEDIR     the updater's state folder; in it: STATE (state.json, above); REPORT = report/ (report's own state and
 #                pass folder); PASSDIR = pass/ (a pass's facts, log text, /healthz reads, core state copy and each
 #                program's output); LOCKFILE = lock (the updater lock); PROTECTED = protected (golden-prune reads it);

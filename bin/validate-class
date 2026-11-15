@@ -16,7 +16,7 @@
 #             column), the token-scopes hint, cobra's "Error:" and its usage. The API part reads only the URLs and the
 #             tokens, which an image switch never changes. BUT from v0.22.0 validate checks the Tart image, detects its
 #             guest and checks the macOS limits only AFTER the API answers (cmd/runner/cmd_validate.go:118-141): there,
-#             three API-ONLY results do not cover the image, so the updater stays OFF on v0.22.0 until its window checks
+#             three API-ONLY results do not cover the image, so the updater stays OFF on v0.22.1 until its window checks
 #             the image itself.
 #   NON-API   RC not 0 and a line that starts with "runner-start: REFUSE " (anywhere), or a FIRST "  ✗ " line that is
 #             one of runscaler's config checks: "  ✗ config: ", "  ✗ global config: ", `  ✗ scaleset[N] "NAME": `,

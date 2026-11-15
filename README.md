@@ -190,7 +190,7 @@ Run them as ci, in this order:
    ```
    /Users/ci/bin/runner-start validate > /Users/ci/validate.out 2>&1; /bin/zsh -f /Users/ci/mac-runner/current/bin/validate-class $? /Users/ci/validate.out
    ```
-   `PASS`: go to step 8. `API-ONLY` (GitHub's API did not answer): validate again, 20 s apart, up to 3 times; the third `API-ONLY` counts as a pass. `NON-API` or `UNKNOWN`: the NEXT choice. On runscaler v0.22.0, three `API-ONLY` do not cover the image: its validate checks the image only after GitHub's API answers. That is why the updater stays OFF on v0.22.0 until its window checks the image itself.
+   `PASS`: go to step 8. `API-ONLY` (GitHub's API did not answer): validate again, 20 s apart, up to 3 times; the third `API-ONLY` counts as a pass. `NON-API` or `UNKNOWN`: the NEXT choice. On runscaler v0.22.1 (as on v0.22.0), three `API-ONLY` do not cover the image: its validate checks the image only after GitHub's API answers. That is why the updater stays OFF on v0.22.1 until its window checks the image itself.
    1. The file with the last `installed` line's SHA, when the record is `kind rollback`, or has a `state-write switched` or `state-write rolled` line, or a `hand-change` line whose SHA is that SHA. It is the config itself when the config's sha is that SHA; else it is in the window's work folder, `/Users/ci/.local/state/runner-updater/windows/<the record's window ID>.d/`: the one `config.toml.*` file there whose sha (`shasum -a 256 …/config.toml.*`) is that SHA.
    2. The backup (the record's `backup` path), when its sha is the record's `config-sha`.
    3. The config as found (the copy of step 6).
@@ -253,6 +253,6 @@ sudo rm -rf /usr/local/libexec/liveapp-ci
 Nothing third-party is in this repository. install downloads each tool by digest ([setup/downloads.manifest](setup/downloads.manifest)), and golden-build downloads the GitHub runner by digest:
 
 - **Tart 2.41.1** and **softnet 0.24.1** — Functional Source License 1.1 with an Apache-2.0 future licence (FSL-1.1-ALv2). Running your own CI on your own Macs is fine. Selling hosted macOS runners to others is a competing use under that licence.
-- **runscaler 0.22.0** — MIT.
+- **runscaler 0.22.1** — MIT.
 - **GitHub Actions runner 2.338.2** — MIT.
 - The base image `ghcr.io/cirruslabs/macos-golden-gate-base`, pinned by digest, holds macOS (Apple's licence: at most two macOS VMs per Apple computer you own or control, for software development and testing, macOS Server, or personal non-commercial use) and software that Cirrus Labs installed in it (Homebrew packages, Rosetta, tart-guest-agent), each under its own licence.

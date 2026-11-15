@@ -10,9 +10,10 @@ each file's `# ` header cites the source lines (file:line at the v0.22.0 tag); s
 the real v0.22.0 outputs as *-v022* beside them.
 
 The other fixtures in fixtures/validate/ are real outputs of runscaler (darwin-arm64), made by the LIVE cell below
-with no network. From the pinned v0.22.0: api-only-real-v022.txt (the GitHub API part fails: the proxy closes each
-connection) and non-api-real-v022.txt (the same config with `runner-image = ""`), on config/config.toml.example with
-neutral names and its log-file pin on the sandbox's runner.log. From v0.12.0 and v0.9.5, the pins before (kept for a
+with no network. From v0.22.0 and the pinned v0.22.1 (they print the same bytes): api-only-real-v022.txt (the
+GitHub API part fails: the proxy closes each connection) and non-api-real-v022.txt (the same config with
+`runner-image = ""`), on config/config.toml.example with neutral names and its log-file pin on the sandbox's
+runner.log. From v0.12.0 and v0.9.5, the pins before (kept for a
 way back): api-only-real-v012.txt and non-api-real-v012.txt (the proxy port refused), api-only-real.txt and
 non-api-real.txt (they predate the log-file line). The cleaning step replaces only the proxy's port. The live cell
 runs when RUNSCALER_TARBALL names the pinned release tarball (runner-darwin-arm64.tar.gz; its sha256 must be
@@ -85,7 +86,7 @@ class TestClasses(unittest.TestCase):
         self.assertEqual(self.r.cls(1, fixture('non-api-real.txt')), 'NON-API')
 
     def test_real_v012_api_failure_is_api_only(self):
-        # runscaler 0.12.0 (the pin before v0.22.0: a way back): its log records in the 5-wide level column (INFO,
+        # runscaler 0.12.0 (the pin before v0.22.1: a way back): its log records in the 5-wide level column (INFO,
         # ERROR) are ignored as well
         self.assertEqual(self.r.cls(1, fixture('api-only-real-v012.txt')), 'API-ONLY')
 
@@ -93,7 +94,8 @@ class TestClasses(unittest.TestCase):
         self.assertEqual(self.r.cls(1, fixture('non-api-real-v012.txt')), 'NON-API')
 
     def test_real_v022_api_failure_is_api_only(self):
-        # the pinned runscaler 0.22.0: its API line is a fixed category (safeAPIError, cmd/runner/scaleset.go:87-121)
+        # the pinned runscaler 0.22.1 (as 0.22.0): its API line is a fixed category (safeAPIError,
+        # cmd/runner/scaleset.go:87-121)
         self.assertEqual(self.r.cls(1, fixture('api-only-real-v022.txt')), 'API-ONLY')
 
     def test_real_v022_config_failure_is_non_api(self):
@@ -402,7 +404,8 @@ class TestLiveBinary(unittest.TestCase):
         rc, text, cls, lines = self.run_validate('runner-image = "liveapp-mac-golden-20261001"',
                                                  'api-only-real-v022.txt')
         self.assertNotEqual(rc, 0, text)
-        # MEASURED on v0.22.0: the first ✗ line is this fixed category (safeAPIError's last branch, scaleset.go:121)
+        # MEASURED on v0.22.0 and v0.22.1: the first ✗ line is this fixed category (safeAPIError's last branch,
+        # scaleset.go:121)
         first = next((l for l in text.splitlines() if l.startswith(X)), None)
         self.assertEqual(first, X + 'scaleset[0] "mac-ci-example" GitHub API: request failed', text)
         self.assertGreaterEqual(len(lines), 1, text)
