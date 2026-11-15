@@ -136,10 +136,11 @@ class Copies(unittest.TestCase):
         :174-176 the sets, :94 Docker, :211 the GitHub API probe, :140 the PASS line); a GitHub API failure (:194-205:
         the API line, its hint; main.go:131-135 prints the error alone, "validation failed", no cobra usage): API-ONLY;
         the Docker API version check (:88-91, image_preflight.go:25-36), the capacity check (main.go:833-835,
-        config.go:707-719) and the duplicate name check (main.go:839-849): UNKNOWN, as the Studio's copy gives them today
-        (its S2 split, config-shaped lines NON-API, is the Studio's change, and this copy follows it in that change).
+        config.go:707-719) and the duplicate name check (main.go:839-849): NON-API, config-shaped lines a person fixes in
+        config.toml (the Studio's runscaler v0.22.0 slice R1 made them NON-API in both copies, in one change: H3 R-4);
+        the Docker API version check: UNKNOWN (a host fact).
         Both copies where zsh exists, each output at its own code and at the other; the mutant (API-ONLY widened to
-        `  ✗ Docker`) reads the Docker output API-ONLY. Green on 79cd257 (no change of the rule: these pin it)."""
+        `  ✗ Docker`) reads the Docker output API-ONLY. Red on 13012fc for the two renamed NON-API outputs (bash read them UNKNOWN)."""
         names = sorted(os.listdir(FIX22))
         self.assertEqual(len(names), 5, names)
         for n in names:

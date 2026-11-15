@@ -194,10 +194,10 @@ class TestV022Source(unittest.TestCase):
 
     def test_a_set_detected_only_at_startup_is_not_pass(self):
         # tart_guests.go:120: the image is not local, so validate did not detect its guest; rc 0 all the same
-        self.assertEqual(self.r.cls(0, src_fixture('pass-not-pulled-v022-src.txt')), 'UNKNOWN')
+        self.assertEqual(self.r.cls(0, src_fixture('unknown-not-pulled-v022-src.txt')), 'UNKNOWN')
 
     def test_control_the_not_pulled_line_with_rc_not_0_keeps_the_first_failure_line(self):
-        out = src_fixture('pass-not-pulled-v022-src.txt').replace('\nAll checks passed.\n', '') + API + '\n'
+        out = src_fixture('unknown-not-pulled-v022-src.txt').replace('\nAll checks passed.\n', '') + API + '\n'
         self.assertEqual(self.r.cls(1, out), 'API-ONLY')
 
     def test_each_new_config_line_is_non_api(self):

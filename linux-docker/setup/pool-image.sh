@@ -606,7 +606,7 @@ CORECOPY=$STATE/pass/state.json   # THE CORE STATE COPY (the header): the update
 PINS="$S03=de341a27e410de4bd7563623afc187527d0aaec5253ccf15e5e83fd9e1716b77
 $B/bin/runner-start=7f93c453b8ec359f2b2e980371c79636b8b5c0caf31c587a9025bbd2a6941ed3
 $B/bin/pool-ready=e6559491799be657c22fe196df119b3a051622ef99020496f92d10635ef1d22f
-$B/bin/validate-class=19cbaff190e1121bab12a0d033389e3c99005222252a69774d91dffe9562b986
+$B/bin/validate-class=08fc9691e1d34ff941a8e0c3e965509486e8d24423609ca3fc4413e49d0bac69
 $B/config/runscaler.service=1f23a5c0f78c7fa6e7c8ddf0e9092c188666729177dce19ff1a8fe149e498565"
 SETS="${MAIN_SET} ${SMALL_SET}"
 IMGRE='^localhost:'"${REGISTRY_PORT}"'/'"${IMAGE_NAME}"'@sha256:[0-9a-f]{64}$'   # the image reference a config names
