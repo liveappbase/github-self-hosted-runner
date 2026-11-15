@@ -190,7 +190,7 @@ Run them as ci, in this order:
    ```
    /Users/ci/bin/runner-start validate > /Users/ci/validate.out 2>&1; /bin/zsh -f /Users/ci/mac-runner/current/bin/validate-class $? /Users/ci/validate.out
    ```
-   `PASS`: go to step 8. `API-ONLY` (GitHub's API did not answer): validate again, 20 s apart, up to 3 times; the third `API-ONLY` counts as a pass. `NON-API` or `UNKNOWN`: the NEXT choice.
+   `PASS`: go to step 8. `API-ONLY` (GitHub's API did not answer): validate again, 20 s apart, up to 3 times; the third `API-ONLY` counts as a pass. `NON-API` or `UNKNOWN`: the NEXT choice. On runscaler v0.22.0, three `API-ONLY` do not cover the image: its validate checks the image only after GitHub's API answers. That is why the updater stays OFF on v0.22.0 until its window checks the image itself.
    1. The file with the last `installed` line's SHA, when the record is `kind rollback`, or has a `state-write switched` or `state-write rolled` line, or a `hand-change` line whose SHA is that SHA. It is the config itself when the config's sha is that SHA; else it is in the window's work folder, `/Users/ci/.local/state/runner-updater/windows/<the record's window ID>.d/`: the one `config.toml.*` file there whose sha (`shasum -a 256 …/config.toml.*`) is that SHA.
    2. The backup (the record's `backup` path), when its sha is the record's `config-sha`.
    3. The config as found (the copy of step 6).

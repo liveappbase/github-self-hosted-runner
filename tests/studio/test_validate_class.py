@@ -1,7 +1,12 @@
 """bin/validate-class RC OUTPUT_FILE: the ONE VALIDATE RULE (PLAN, PRE-VALIDATE). One validate's result is PASS,
 API-ONLY, NON-API or UNKNOWN, from runscaler's real output (cmd/runner/cmd_validate.go, the same four prints at v0.9.5
 and v0.12.0: each `  ✗ ` print is followed by a return; the scaleset client logs INFO and ERRO records on the same
-stdout, from 0.10.0 INFO and ERROR in a 5-wide column; cobra adds `Error:` and the usage).
+stdout, from 0.10.0 INFO and ERROR in a 5-wide column; cobra adds `Error:` and the usage). From v0.22.0 validate prints
+every local config problem before it returns, and the first `  ✗ ` line still decides (TestV022Source).
+
+The *-v022-src* fixtures are NOT real outputs: they are built by hand from runscaler v0.22.0's print statements, and
+each file's `# ` header cites the source lines (file:line at the v0.22.0 tag); src_fixture strips that header. R2 adds
+the real v0.22.0 outputs as *-v022* beside them.
 
 The fixtures in fixtures/validate/ are real outputs of runscaler (darwin-arm64), made by the LIVE cell below with no
 network. From the pinned v0.12.0: api-only-real-v012.txt (the GitHub API part fails: the proxy refuses) and
@@ -161,6 +166,69 @@ class TestClasses(unittest.TestCase):
                      X + 'Docker client for /var/run/docker.sock: bad'):
             with self.subTest(line):
                 self.assertEqual(self.r.cls(1, line + '\n' + COBRA), 'UNKNOWN')
+
+
+def src_fixture(name):
+    """A v0.22.0 SOURCE fixture (fixtures/validate/*-v022-src*): built by hand from runscaler v0.22.0's print
+    statements, not a real output. Its header lines (each starts with "# ") cite the source lines and are stripped."""
+    lines = fixture(name).splitlines(keepends=True)
+    n = next(i for i, l in enumerate(lines) if not l.startswith('# '))
+    head = ''.join(lines[:n])
+    if 'v0.22.0 SOURCE fixture, NOT a real output' not in head or 'file:line at v0.22.0' not in head:
+        raise AssertionError('%s: no v0.22.0 source header' % name)
+    return ''.join(lines[n:])
+
+
+class TestV022Source(unittest.TestCase):
+    """The v0.22.0 forms (PLAN D4, census B6), from the v0.22.0 source (each fixture's header cites its lines).
+    v0.22.0 prints EVERY local config problem (cmd/runner/cmd_validate.go:152-177) and every macOS limit problem
+    (tart_guests.go:123-126) before it returns; the first `  ✗ ` line still decides. Its validate also runs, after the
+    GitHub API check, the Tart image check, the guest detection and the macOS limits (cmd_validate.go:118-141)."""
+
+    def setUp(self):
+        self.r = Rig(self)
+
+    def test_pass_with_the_guest_lines(self):
+        # `level=INFO msg="Detected Tart guest"` (tart_guests.go:33) and `  ✓ … Tart guest: macos|linux` (:118)
+        self.assertEqual(self.r.cls(0, src_fixture('pass-v022-src.txt')), 'PASS')
+
+    def test_a_set_detected_only_at_startup_is_not_pass(self):
+        # tart_guests.go:120: the image is not local, so validate did not detect its guest; rc 0 all the same
+        self.assertEqual(self.r.cls(0, src_fixture('pass-not-pulled-v022-src.txt')), 'UNKNOWN')
+
+    def test_control_the_not_pulled_line_with_rc_not_0_keeps_the_first_failure_line(self):
+        out = src_fixture('pass-not-pulled-v022-src.txt').replace('\nAll checks passed.\n', '') + API + '\n'
+        self.assertEqual(self.r.cls(1, out), 'API-ONLY')
+
+    def test_each_new_config_line_is_non_api(self):
+        # red before R1: main.go:834, main.go:844, tart_guests.go:67, tart_guests.go:70
+        for name in ('non-api-v022-src-capacity.txt', 'non-api-v022-src-duplicate.txt',
+                     'non-api-v022-src-combined-min.txt', 'non-api-v022-src-combined-pool.txt'):
+            with self.subTest(name):
+                self.assertEqual(self.r.cls(1, src_fixture(name)), 'NON-API')
+
+    def test_control_a_macos_set_limit_line_is_non_api(self):
+        # tart_guests.go:57, :61: today's `scaleset[N] "NAME": ` pattern matches them already (review r1 F11)
+        for name in ('non-api-v022-src-macos-min.txt', 'non-api-v022-src-macos-pool.txt'):
+            with self.subTest(name):
+                self.assertEqual(self.r.cls(1, src_fixture(name)), 'NON-API')
+
+    def test_control_detect_guest_and_the_image_check_are_unknown(self):
+        # a host fact (a missing image, a failed clone), not a config fact: tart_guests.go:30,110 and :102
+        self.assertEqual(self.r.cls(1, src_fixture('unknown-v022-src-detect.txt')), 'UNKNOWN')
+        line = X + 'scaleset[0] "mac-ci-example" Tart image check: exit status 1\nvalidation failed\n'
+        self.assertEqual(self.r.cls(1, line), 'UNKNOWN')
+
+    def test_control_the_new_line_texts_need_their_place(self):
+        # a duplicates text that is not the name check, and a capacity text inside another check: UNKNOWN
+        for line in (X + 'scaleset[1] "a" duplicates scaleset[x] name; y', X + 'Tart: invalid global capacity: x',
+                     X + 'other combined min-runners of macOS guest scale sets is 4'):
+            with self.subTest(line):
+                self.assertEqual(self.r.cls(1, line + '\nvalidation failed\n'), 'UNKNOWN')
+
+    def test_control_a_fixture_without_its_header_is_refused(self):
+        with self.assertRaises(AssertionError):
+            src_fixture('non-api-real-v012.txt')
 
 
 class TestUsage(unittest.TestCase):

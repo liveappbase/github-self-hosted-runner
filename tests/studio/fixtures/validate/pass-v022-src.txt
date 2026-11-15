@@ -1,0 +1,21 @@
+# v0.22.0 SOURCE fixture, NOT a real output: built by hand from the print statements of runscaler v0.22.0
+# (git show v0.22.0:<file>); R2 adds the real v0.22.0 outputs as *-v022* beside it. The test strips these # lines.
+# Lines used, file:line at v0.22.0:
+#   cmd/runner/cmd_validate.go:179  "  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d"
+#   cmd/runner/cmd_validate.go:105  "  ✓ Tart binary found"
+#   cmd/runner/cmd_validate.go:211  "  ✓ scaleset[%d] %q GitHub API is reachable; scale set %s"
+#   cmd/runner/tart_guests.go:33 + cmd_validate.go:121  slog TextHandler: level=INFO msg="Detected Tart guest" image= os=
+#   cmd/runner/tart_guests.go:118  "  ✓ scaleset[%d] %q Tart guest: %s"  (%s: internal/provider/tart_guest.go:22-27, macos|linux)
+#   cmd/runner/cmd_validate.go:143  "\nAll checks passed."
+# Expected class: rc 0: PASS
+  ✓ scaleset[0] "mac-ci-example" — provider=tart url=https://github.com/example-org/example max=2 min=0
+  ✓ scaleset[1] "linux-ci-example" — provider=tart url=https://github.com/example-org/example max=2 min=0
+  ✓ Tart binary found
+  ✓ scaleset[0] "mac-ci-example" GitHub API is reachable; scale set registered
+  ✓ scaleset[1] "linux-ci-example" GitHub API is reachable; scale set registered
+time=2026-11-15T10:00:00.000Z level=INFO msg="Detected Tart guest" image=liveapp-mac-golden-20261001 os=macos
+time=2026-11-15T10:00:04.000Z level=INFO msg="Detected Tart guest" image=liveapp-linux-tart-20261001 os=linux
+  ✓ scaleset[0] "mac-ci-example" Tart guest: macos
+  ✓ scaleset[1] "linux-ci-example" Tart guest: linux
+
+All checks passed.
