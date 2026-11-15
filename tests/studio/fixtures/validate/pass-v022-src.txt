@@ -14,7 +14,7 @@
   ✓ scaleset[0] "mac-ci-example" GitHub API is reachable; scale set registered
   ✓ scaleset[1] "linux-ci-example" GitHub API is reachable; scale set registered
 time=2026-11-15T10:00:00.000Z level=INFO msg="Detected Tart guest" image=liveapp-mac-golden-20261001 os=macos
-time=2026-11-15T10:00:04.000Z level=INFO msg="Detected Tart guest" image=liveapp-linux-tart-20261001 os=linux
+time=2026-11-15T10:00:04.000Z level=INFO msg="Detected Tart guest" image=example-linux-tart-20261001 os=linux
   ✓ scaleset[0] "mac-ci-example" Tart guest: macos
   ✓ scaleset[1] "linux-ci-example" Tart guest: linux
 

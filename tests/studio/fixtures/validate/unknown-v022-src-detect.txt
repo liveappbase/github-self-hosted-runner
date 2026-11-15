@@ -16,5 +16,5 @@
   ✓ scaleset[0] "mac-ci-example" GitHub API is reachable; scale set registered
   ✓ scaleset[1] "linux-ci-example" GitHub API is reachable; scale set registered
 time=2026-11-15T10:00:00.000Z level=INFO msg="Detected Tart guest" image=liveapp-mac-golden-20261001 os=macos
-  ✗ detect guest OS of Tart image "liveapp-linux-tart-20261001": detect guest of Tart image "liveapp-linux-tart-20261001": unknown guest OS "windows" in VM config
+  ✗ detect guest OS of Tart image "example-linux-tart-20261001": detect guest of Tart image "example-linux-tart-20261001": unknown guest OS "windows" in VM config
 validation failed
