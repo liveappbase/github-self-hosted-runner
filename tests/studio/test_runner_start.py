@@ -6,6 +6,8 @@ A copy runs with its host paths rewritten into a sandbox. Its PATH starts with a
 rewritten SHIM path; that stub lists the images of a scenario file. The RUNNER stub logs its argv.
 """
 import os
+import pwd
+import subprocess
 import unittest
 
 from tests.studio.support import Sandbox
@@ -40,6 +42,7 @@ class Rig:
             ('STAMP=/Users/ci/.config/runner/wall-stamp', 'STAMP=' + os.path.join(self.cfgdir, 'wall-stamp')),
             ('export PATH=/usr/local/libexec/liveapp-ci:/Users/ci/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
              'export PATH=%s:/usr/bin:/bin:/usr/sbin:/sbin' % shimdir),
+            ('export HOME=/Users/ci', 'export HOME=' + sb.mkdir('cihome')),
             ('/usr/bin/sw_vers', os.path.join(fake, 'sw_vers')),
         ], allow=['Run /Users/ci/bin/runner-disable, then /Users/ci/bin/wall-check, then /Users/ci/bin/runner-enable'])
         sb.write(os.path.join(self.cfgdir, 'wall-stamp'), 'macos %s\n' % BUILD)
@@ -161,6 +164,43 @@ class TestTimeZone(unittest.TestCase):
         stub = r.sb.path('fake', 'runner')
         self.assertEqual(r.sb.run([stub], extra_env={'TZ': 'Europe/London'}).stdout, 'TZ=Europe/London\n')
         self.assertEqual(r.sb.run([stub]).stdout, 'TZ=unset\n')
+
+
+class TestHome(unittest.TestCase):
+    """runscaler v0.22.0 reads its guest-detection clones' config.json from $HOME/.tart (tart_guest.go TartHomeDir),
+    and the shim runs tart with HOME=/Users/ci (bin/tart-shim). So runner-start runs runscaler with HOME=/Users/ci, for
+    `run` and for `validate`, whatever HOME it was given (PLAN D3). The rig rewrites that line to its own ci home."""
+
+    def rig(self):
+        r = Rig(self)
+        r.sb.stub('runner', 'print -r -- "HOME=$HOME"', folder=r.sb.path('fake'))
+        return r
+
+    def test_runscaler_runs_with_the_ci_home(self):
+        for args in (['run'], ['validate'], ['validate', None]):
+            for given in ('/tmp/x', None):
+                with self.subTest(args=args, given=given):
+                    r = self.rig()
+                    argv = ['/bin/zsh', '-f', r.script] + [a if a else r.temp_config(config(HAVE)) for a in args]
+                    env = r.sb.env()
+                    if given is None:
+                        del env['HOME']
+                    else:
+                        env['HOME'] = given
+                    res = subprocess.run(argv, env=env, cwd=r.sb.tmp, stdin=subprocess.DEVNULL, capture_output=True,
+                                         text=True, timeout=120)
+                    self.assertEqual((res.returncode, res.stdout), (0, 'HOME=%s\n' % r.sb.path('cihome')), res.stderr)
+
+    def test_control_the_stub_prints_the_home_it_is_given(self):
+        # the harness: the stub runner, run straight, prints the HOME of its environment; without one, zsh sets HOME
+        # from the user database (so the cell's unset case would see this user's home, never the rig's ci home)
+        r = self.rig()
+        stub = r.sb.path('fake', 'runner')
+        self.assertEqual(r.sb.run([stub], extra_env={'HOME': '/tmp/x'}).stdout, 'HOME=/tmp/x\n')
+        env = r.sb.env()
+        del env['HOME']
+        self.assertEqual(subprocess.run([stub], env=env, capture_output=True, text=True).stdout,
+                         'HOME=%s\n' % pwd.getpwuid(os.getuid()).pw_dir)
 
 
 class TestRun(unittest.TestCase):

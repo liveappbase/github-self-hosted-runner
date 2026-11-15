@@ -12,6 +12,9 @@
 # (a file over it is cut to empty as runscaler starts). `validate` never cuts a log: the updater validates while
 # runscaler runs and writes to runscaler.log. Both run runscaler with TZ=UTC, whatever zone the Mac has: runscaler
 # stamps its log in local time with no zone, and the updater's core reads those times as UTC (core/README.md).
+# Both run it with HOME set to the ci user's home, whatever HOME they were given: the shim runs tart with that
+# HOME, and runscaler reads the config.json of Tart's VMs under $HOME/.tart (from v0.22.0 its guest detection
+# does, and fails `run` when the file is not there). TART_HOME is left as given: the shim forwards it.
 umask 077
 RUNNER=/Users/ci/bin/runner
 CONFIG=/Users/ci/.config/runner/config.toml
@@ -22,6 +25,7 @@ OUTLOG=$LOGDIR/runscaler.log   # runscaler logs to stdout
 SHIM=/usr/local/libexec/liveapp-ci/tart
 STAMP=/Users/ci/.config/runner/wall-stamp
 export PATH=/usr/local/libexec/liveapp-ci:/Users/ci/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export HOME=/Users/ci   # the shim's tart HOME (bin/tart-shim): runscaler reads Tart's VM files under $HOME/.tart
 export LC_ALL=C
 export TZ=UTC   # runscaler stamps local time with no zone; the updater's core requires UTC (core/README.md, TZ)
 die() { print -u2 -r -- "runner-start: REFUSE $*"; exit 1 }

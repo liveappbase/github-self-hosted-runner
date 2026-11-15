@@ -326,6 +326,7 @@ class TestLiveBinary(unittest.TestCase):
             ('STAMP=/Users/ci/.config/runner/wall-stamp', 'STAMP=' + os.path.join(cfgdir, 'wall-stamp')),
             ('export PATH=/usr/local/libexec/liveapp-ci:/Users/ci/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin',
              'export PATH=%s:/usr/bin:/bin:/usr/sbin:/sbin' % shimdir),
+            ('export HOME=/Users/ci', 'export HOME=' + sb.home),
         ], allow=['Run /Users/ci/bin/runner-disable, then /Users/ci/bin/wall-check, then /Users/ci/bin/runner-enable'])
         port = refusing_port()
         with self.assertRaises(ConnectionRefusedError):   # the control on the proxy: it refuses
