@@ -21,15 +21,17 @@
 #   NON-API   RC not 0 and a line that starts with "runner-start: REFUSE " (anywhere), or a FIRST "  ✗ " line that is
 #             one of runscaler's config checks: "  ✗ config: ", "  ✗ global config: ", `  ✗ scaleset[N] "NAME": `,
 #             "  ✗ scale set collection: " (cmd/runner/cmd_validate.go; runscaler v0.9.5 and v0.12.0: the same four
-#             prints); from v0.22.0 also "  ✗ invalid global capacity: " (main.go:834), `  ✗ scaleset[N] "NAME"
-#             duplicates scaleset[M] name; ` (main.go:844), "  ✗ combined min-runners of macOS " and "  ✗ combined tart
-#             pool-size of macOS " (tart_guests.go:67,70; the per-set limit lines, :57,61, are `scaleset[N] "NAME": `).
+#             prints; v0.22.0 prints no "scale set collection: " line); from v0.22.0 also "  ✗ invalid global
+#             capacity: " (main.go:834), `  ✗ scaleset[N] "NAME" duplicates scaleset[M] name; ` (main.go:844),
+#             "  ✗ combined min-runners of macOS " and "  ✗ combined tart pool-size of macOS " (tart_guests.go:67,70;
+#             the per-set limit lines, :57,61, are `scaleset[N] "NAME": `).
 #   UNKNOWN   anything else: RC 0 without the PASS line, an empty OUTPUT_FILE, RC not 0 with no "  ✗ " line (cobra's
 #             error alone: a config file that does not parse), or a first "  ✗ " line of another check (the Docker
 #             client, Docker connectivity, the Tart binary; from v0.22.0 the Tart image check and "  ✗ detect guest OS of
 #             Tart image ": they test the host, not the config).
-# The FIRST "  ✗ " line decides. runscaler v0.12.0 returns after its first ✗ line; v0.22.0 prints every local config
-# problem (cmd_validate.go:152-177) and every macOS limit problem (tart_guests.go:123-126) before it returns.
+# The FIRST "  ✗ " line decides. runscaler v0.12.0 prints every "  ✗ config: " warning, then returns; after any other
+# ✗ line it returns at once (cmd_validate.go:31-35 at v0.12.0). v0.22.0 prints every local config problem
+# (cmd_validate.go:152-177) and every macOS limit problem (tart_guests.go:123-126) before it returns.
 # Exit: 0 with the class on stdout. 2 on a usage error (not two arguments, RC not a whole number 0-255 without a
 # leading zero, OUTPUT_FILE not a readable regular file): "validate-class: usage: ..." on stderr, nothing on stdout.
 # It reads OUTPUT_FILE and nothing else, and runs no other program (no jq). It has no constant.

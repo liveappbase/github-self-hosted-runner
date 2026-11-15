@@ -5,7 +5,7 @@ Why the host is built the way it is. The code headers point at the sections belo
 ## Decisions, each with its reason
 
 1. **Every job in a fresh VM, behind a mandatory wall.** A persistent runner keeps a credential on the host for jobs to find. Here the token stays on the host and VMs never receive it (`tart exec` forwards no environment; only the runner's one-job configuration enters a VM; the shim starts Tart with an empty environment). That choice holds ONLY with the wall, which is why the wall sits on the VM launch path itself.
-2. **No warm pool** (`pool-size = 0`). With a pool, a scale set takes VMs only from its own pool, and an idle warm VM holds one of the 2 slots. The cost is a cold boot per job (about 25 s).
+2. **No warm pool** (`pool-size = 0`). With a pool, a scale set takes VMs only from its own pool, and an idle warm VM holds one of the `concurrent` slots. The cost is a cold boot per job (about 25 s).
 3. **Everything pinned by digest.** Tart, runscaler, softnet, the GitHub runner and the base image are fixed versions, each checked against a sha256 written in this repository before anything is extracted. An upgrade is a release of this repository. One exception: with `disable-update = false`, GitHub can replace the runner with a download that is not checked by digest.
 4. **Our own LaunchAgent, a wrapper, and a root-owned `tart` shim** that is the per-VM admission point. The shim has no setting the environment can relax and reads no path from the environment.
 5. **One launchd mechanism: PathState.** The agent runs while a flag file exists; `runner-enable` writes the flag after its checks. Nothing needs `launchctl` from an SSH session after install.
@@ -15,7 +15,7 @@ Why the host is built the way it is. The code headers point at the sections belo
 
 ## The CI shape
 
-- runscaler runs ONE process with one `[[scaleset]]` per repository (or organization), `concurrent = 2`, `pool-size = 0`. It names each VM `runner-<8 hex>` and starts it with exactly `tart run runner-<8 hex> --no-graphics`.
+- runscaler runs ONE process with one `[[scaleset]]` per repository (or organization), `concurrent = 2` (from runscaler v0.22.0 the limit of all VMs at once, macOS and Linux; runscaler itself runs at most 2 macOS VMs), `pool-size = 0`. It names each VM `runner-<8 hex>` and starts it with exactly `tart run runner-<8 hex> --no-graphics`.
 - Each VM is an APFS copy-on-write clone of the golden image, deleted after its job.
 - One host user, `ci`, runs Tart and runscaler and holds the token. Jobs never run as a host user.
 - runscaler holds `flock(2)` on `/tmp/runner.lock` while it runs. Every script that boots a VM outside runscaler (golden-build, golden-gate, wall-check) holds the same lock for its whole run, with the agent disabled, so runscaler cannot start under it.

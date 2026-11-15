@@ -1,7 +1,8 @@
 """bin/validate-class RC OUTPUT_FILE: the ONE VALIDATE RULE (PLAN, PRE-VALIDATE). One validate's result is PASS,
 API-ONLY, NON-API or UNKNOWN, from runscaler's real output (cmd/runner/cmd_validate.go, the same four prints at v0.9.5
-and v0.12.0: each `  ✗ ` print is followed by a return; the scaleset client logs INFO and ERRO records on the same
-stdout, from 0.10.0 INFO and ERROR in a 5-wide column; cobra adds `Error:` and the usage). From v0.22.0 validate prints
+and v0.12.0: each `  ✗ ` print is followed by a return, but the `  ✗ config: ` warnings: it prints them all, then
+returns, cmd_validate.go:31-35 at v0.12.0; the scaleset client logs INFO and ERRO records on the same stdout, from
+0.10.0 INFO and ERROR in a 5-wide column; cobra adds `Error:` and the usage). From v0.22.0 validate prints
 every local config problem before it returns, and the first `  ✗ ` line still decides (TestV022Source).
 
 The *-v022-src* fixtures are NOT real outputs: they are built by hand from runscaler v0.22.0's print statements, and
@@ -84,7 +85,8 @@ class TestClasses(unittest.TestCase):
         self.assertEqual(self.r.cls(1, fixture('non-api-real.txt')), 'NON-API')
 
     def test_real_v012_api_failure_is_api_only(self):
-        # the pinned runscaler 0.12.0: its log records in the 5-wide level column (INFO, ERROR) are ignored as well
+        # runscaler 0.12.0 (the pin before v0.22.0: a way back): its log records in the 5-wide level column (INFO,
+        # ERROR) are ignored as well
         self.assertEqual(self.r.cls(1, fixture('api-only-real-v012.txt')), 'API-ONLY')
 
     def test_real_v012_config_failure_is_non_api(self):
