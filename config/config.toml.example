@@ -13,7 +13,10 @@ max-runners = 2
 runner-dir = "/Users/admin/actions-runner"   # in the guest: where golden-build put the GitHub runner
 cpu = 4                           # install: max(2, floor((ncpu - 2) / 2))
 memory = 8192                     # install: MB, max(4096, floor((RAM GB - 8) / 2) x 1024)
-pool-size = 0                     # no warm pool: an idle warm VM of one scale set would hold one of the `concurrent` slots
+pool-size = 0                     # no warm pool. An idle warm macOS VM holds one of runscaler's 2 macOS slots
+                                  # (provider/tart.go:126-190, :397-416 at v0.22.1). A Linux one holds only its own
+                                  # set's slot (:279-281). Neither holds a `concurrent` slot: only the controller
+                                  # takes one, when it starts a runner (controller/controller.go:257, :382-400).
 cache-budget = 60                 # GB for Tart's image cache
 dns = ["1.1.1.1", "8.8.8.8"]
 
