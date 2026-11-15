@@ -8,14 +8,15 @@ The *-v022-src* fixtures are NOT real outputs: they are built by hand from runsc
 each file's `# ` header cites the source lines (file:line at the v0.22.0 tag); src_fixture strips that header. R2 adds
 the real v0.22.0 outputs as *-v022* beside them.
 
-The fixtures in fixtures/validate/ are real outputs of runscaler (darwin-arm64), made by the LIVE cell below with no
-network. From the pinned v0.12.0: api-only-real-v012.txt (the GitHub API part fails: the proxy refuses) and
-non-api-real-v012.txt (the same config with `runner-image = ""`), on config/config.toml.example with neutral names and
-its log-file pin on the sandbox's runner.log. From v0.9.5, the pin before: api-only-real.txt and non-api-real.txt, the
-same two runs (kept for a way back; they predate the log-file line). The cleaning step replaces only the refusing
-proxy's port. The live cell runs when RUNSCALER_TARBALL names the pinned release tarball (runner-darwin-arm64.tar.gz;
-its sha256 must be setup/downloads.manifest's), else it skips and says so. With RUNSCALER_FIXTURE_OUT=DIR it also
-writes its two cleaned outputs into DIR, under the -v012 names, to re-make those fixtures.
+The other fixtures in fixtures/validate/ are real outputs of runscaler (darwin-arm64), made by the LIVE cell below
+with no network. From the pinned v0.22.0: api-only-real-v022.txt (the GitHub API part fails: the proxy closes each
+connection) and non-api-real-v022.txt (the same config with `runner-image = ""`), on config/config.toml.example with
+neutral names and its log-file pin on the sandbox's runner.log. From v0.12.0 and v0.9.5, the pins before (kept for a
+way back): api-only-real-v012.txt and non-api-real-v012.txt (the proxy port refused), api-only-real.txt and
+non-api-real.txt (they predate the log-file line). The cleaning step replaces only the proxy's port. The live cell
+runs when RUNSCALER_TARBALL names the pinned release tarball (runner-darwin-arm64.tar.gz; its sha256 must be
+setup/downloads.manifest's), else it skips and says so. With RUNSCALER_FIXTURE_OUT=DIR it also writes its two cleaned
+outputs into DIR, under the -v022 names, to re-make those fixtures.
 """
 import hashlib
 import os
@@ -23,6 +24,7 @@ import re
 import socket
 import subprocess
 import tarfile
+import threading
 import unittest
 
 from tests.studio.support import REPO, Sandbox
@@ -87,6 +89,13 @@ class TestClasses(unittest.TestCase):
 
     def test_real_v012_config_failure_is_non_api(self):
         self.assertEqual(self.r.cls(1, fixture('non-api-real-v012.txt')), 'NON-API')
+
+    def test_real_v022_api_failure_is_api_only(self):
+        # the pinned runscaler 0.22.0: its API line is a fixed category (safeAPIError, cmd/runner/scaleset.go:87-121)
+        self.assertEqual(self.r.cls(1, fixture('api-only-real-v022.txt')), 'API-ONLY')
+
+    def test_real_v022_config_failure_is_non_api(self):
+        self.assertEqual(self.r.cls(1, fixture('non-api-real-v022.txt')), 'NON-API')
 
     def test_each_config_check_is_non_api(self):
         for line in CONFIG_CHECKS:
@@ -262,24 +271,56 @@ def manifest_sha():
     raise AssertionError('setup/downloads.manifest has no runscaler row')
 
 
-def refusing_port():
-    """A local port that refuses: bound, then closed; the cell checks it refuses before it uses it."""
-    s = socket.socket()
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+class Listener:
+    """The proxy: a local listener that, for each connection, reads up to the first CRLF (at most 4 KiB, 5 s), records
+    that line, and closes the connection; it keeps accepting until stop(). Each request line it records is the
+    witness of where the binary tried to go; it answers none, so nothing leaves the Mac."""
+
+    def __init__(self, test):
+        self.lines = []
+        self.s = socket.socket()
+        self.s.bind(('127.0.0.1', 0))
+        self.s.listen(16)
+        self.port = self.s.getsockname()[1]
+        self.t = threading.Thread(target=self.serve, daemon=True)
+        self.t.start()
+        test.addCleanup(self.stop)
+
+    def serve(self):
+        while True:
+            try:
+                c, _ = self.s.accept()
+            except OSError:   # stop() closed the socket
+                return
+            with c:
+                c.settimeout(5)
+                data = b''
+                try:
+                    while b'\r\n' not in data and len(data) < 4096:
+                        b = c.recv(4096 - len(data))
+                        if not b:
+                            break
+                        data += b
+                except OSError:
+                    pass
+                self.lines.append(data.split(b'\r\n', 1)[0].decode('latin-1'))
+
+    def stop(self):
+        self.s.close()
+        self.t.join(10)
 
 
 def clean(text, port):
-    """The cleaning step: only the refusing proxy's port changes (to 9). The config the binary ran on has neutral
-    names only; the cell asserts that no other host value is in the output."""
+    """The cleaning step: only the proxy's port changes (to 9). The config the binary ran on has neutral names only;
+    the cell asserts that no other host value is in the output."""
     return text.replace('127.0.0.1:%d' % port, '127.0.0.1:9')
 
 
 class TestLiveBinary(unittest.TestCase):
     """The real pinned runscaler runs `validate` through a runner-start copy (its token files, its tart check, its
-    exec), with HTTPS_PROXY and HTTP_PROXY at a refusing local port and NO_PROXY empty: nothing leaves the Mac."""
+    exec), with HTTPS_PROXY and HTTP_PROXY at a local Listener and NO_PROXY empty: nothing leaves the Mac. The SDK
+    honours HTTPS_PROXY and retries a transport error, so the API cell asserts AT LEAST one request line, each a CONNECT
+    to api.github.com:443 (the witness); the config cell asserts none (validate stops before the API check)."""
 
     def binary(self, sb):
         tarball = os.environ.get('RUNSCALER_TARBALL', '')
@@ -328,9 +369,9 @@ class TestLiveBinary(unittest.TestCase):
              'export PATH=%s:/usr/bin:/bin:/usr/sbin:/sbin' % shimdir),
             ('export HOME=/Users/ci', 'export HOME=' + sb.home),
         ], allow=['Run /Users/ci/bin/runner-disable, then /Users/ci/bin/wall-check, then /Users/ci/bin/runner-enable'])
-        port = refusing_port()
-        with self.assertRaises(ConnectionRefusedError):   # the control on the proxy: it refuses
-            socket.create_connection(('127.0.0.1', port), timeout=2).close()
+        proxy_l = Listener(self)
+        port = proxy_l.port
+        self.assertEqual(proxy_l.lines, [])   # the control: the witness holds nothing before the run
         proxy = 'http://127.0.0.1:%d' % port
         out = sb.path('out.txt')
         with open(out, 'w') as f:
@@ -338,6 +379,7 @@ class TestLiveBinary(unittest.TestCase):
                                stderr=subprocess.STDOUT, cwd=sb.tmp, timeout=120,
                                env=sb.env({'HTTPS_PROXY': proxy, 'HTTP_PROXY': proxy, 'NO_PROXY': '',
                                            'https_proxy': proxy, 'http_proxy': proxy, 'no_proxy': ''}))
+        proxy_l.stop()
         with open(out, encoding='utf-8') as f:
             text = clean(f.read(), port)
         self.assertNotIn(sb.root, text)
@@ -350,17 +392,26 @@ class TestLiveBinary(unittest.TestCase):
         cleaned = sb.write(sb.path('cleaned.txt'), text)
         res = sb.run(['/bin/zsh', '-f', sb.copy_script(SCRIPT, []), str(p.returncode), cleaned])
         self.assertEqual((res.returncode, res.stderr), (0, ''))
-        return p.returncode, text, res.stdout.strip()
+        # runner-start's own image check is the only tart call: validate stops at the API, before guest detection
+        self.assertEqual(sb.calls('tart'), [['list', '--source', 'local', '-q']], text)
+        return p.returncode, text, res.stdout.strip(), proxy_l.lines
 
     def test_real_binary_api_failure_is_api_only(self):
-        rc, text, cls = self.run_validate('runner-image = "liveapp-mac-golden-20261001"', 'api-only-real-v012.txt')
+        rc, text, cls, lines = self.run_validate('runner-image = "liveapp-mac-golden-20261001"',
+                                                 'api-only-real-v022.txt')
         self.assertNotEqual(rc, 0, text)
-        self.assertIn('proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused', text)
+        # MEASURED on v0.22.0: the first ✗ line is this fixed category (safeAPIError's last branch, scaleset.go:121)
+        first = next((l for l in text.splitlines() if l.startswith(X)), None)
+        self.assertEqual(first, X + 'scaleset[0] "mac-ci-example" GitHub API: request failed', text)
+        self.assertGreaterEqual(len(lines), 1, text)
+        for line in lines:
+            self.assertRegex(line, r'^CONNECT api\.github\.com:443 HTTP/1\.[01]$', lines)
         self.assertEqual(cls, 'API-ONLY', text)
 
     def test_control_real_binary_broken_image_line_is_non_api(self):
-        rc, text, cls = self.run_validate('runner-image = ""', 'non-api-real-v012.txt')
+        rc, text, cls, lines = self.run_validate('runner-image = ""', 'non-api-real-v022.txt')
         self.assertNotEqual(rc, 0, text)
+        self.assertEqual(lines, [], text)   # the control: a local config failure reaches no network
         self.assertEqual(cls, 'NON-API', text)
 
 
