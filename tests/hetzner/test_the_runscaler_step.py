@@ -1484,11 +1484,13 @@ class NoIdleWhileProvisioning(unittest.TestCase):
 
 @needs_container
 class KeptTarball(unittest.TestCase):
-    """THE KEPT TARBALL (H3 M-D, F-6): the README line of Install step 4 copies the newest
-    ~/build.prev.*/dl/runner-linux-amd64.tar.gz (step 3 moved the old ~/build aside) to the way back's name,
-    ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz, only when its sha256 is 03's WAYBACK_TGZ_SHA (read from this release's
-    ~/build); else it says so and copies nothing. Run as written, on a scratch HOME, after step 3's own remote command
-    fed a tar of this release's linux-docker/ (opus r2's measure). Red on 79cd257 (no such line)."""
+    """THE KEPT TARBALL (H3 M-D, F-6; H4 S-2): the README line of Install step 4 copies, from ~/build.prev.* (step 3
+    moved the old ~/build aside), the newest of dl/runner-v0.12.0-linux-amd64.tar.gz and dl/runner-linux-amd64.tar.gz
+    whose sha256 is 03's WAYBACK_TGZ_SHA (read from this release's ~/build) to the way back's name,
+    ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz; else it says so and copies nothing. Both names: before H3 the way
+    back's v0.12.0 was the plain name; after H3 the plain name is v0.22.0 and v0.12.0 is the versioned one. Run as
+    written, on a scratch HOME, after step 3's own remote command fed a tar of this release's linux-docker/ (opus r2's
+    measure). Red on 79cd257 (no such line); the after-H3 row red on f9ef8dd (the line read the plain name only)."""
 
     def lines(self):
         with open(README) as f:
@@ -1503,15 +1505,22 @@ class KeptTarball(unittest.TestCase):
         self.assertLess(s4.index('WAYBACK_TGZ_SHA'), s4.index('/download/v%s/' % PINNED), 'before the download')
         return three[0], keep[0]
 
-    def run_it(self, pin_matches):
+    def run_it(self, pin_matches, shape='before H3'):
+        """SHAPE of the old ~/build/dl: 'before H3' (v0.12.0 under the plain name), 'after H3' (v0.22.0 plain, v0.12.0
+        versioned) or 'after H3, corrupted' (the versioned file one byte longer)."""
         three, keep = self.lines()
         tmp = tempfile.mkdtemp(prefix='kept-')
         self.addCleanup(shutil.rmtree, tmp, True)
         home = os.path.join(tmp, 'home')
         os.makedirs(os.path.join(home, 'build', 'dl'))
         old = b'the v0.12.0 tarball of the release before (a substitute)\n'
-        with open(os.path.join(home, 'build', 'dl', 'runner-linux-amd64.tar.gz'), 'wb') as f:
-            f.write(old)
+        files = {'before H3': {'runner-linux-amd64.tar.gz': old},
+                 'after H3': {'runner-linux-amd64.tar.gz': b'the v0.22.0 tarball (a substitute)\n', WBDL: old},
+                 'after H3, corrupted': {'runner-linux-amd64.tar.gz': b'the v0.22.0 tarball (a substitute)\n',
+                                         WBDL: old + b'x'}}[shape]
+        for n, data in files.items():
+            with open(os.path.join(home, 'build', 'dl', n), 'wb') as f:
+                f.write(data)
         src = os.path.join(tmp, 'src')
         shutil.copytree(os.path.join(REPO, 'linux-docker'), src)
         if pin_matches:
@@ -1544,6 +1553,21 @@ class KeptTarball(unittest.TestCase):
 
     def test_control_another_sha_copies_nothing(self):
         home, old, out = self.run_it(False)
+        self.assertTrue(out.startswith('NOT KEPT: '), out)
+        self.assertFalse(os.path.lexists(os.path.join(home, 'build', 'dl', WBDL)))
+
+    def test_after_h3_the_line_keeps_the_versioned_download(self):
+        """S-2: the after-H3 shape (what H4's step 3 moves aside): KEPT, from the versioned name, its bytes."""
+        home, old, out = self.run_it(True, 'after H3')
+        self.assertTrue(out.startswith('KEPT '), out)
+        self.assertIn('/dl/%s as ' % WBDL, out)
+        with open(os.path.join(home, 'build', 'dl', WBDL), 'rb') as f:
+            self.assertEqual(f.read(), old)
+
+    def test_control_after_h3_a_corrupted_versioned_download_is_not_kept(self):
+        """S-2's control: the versioned file's sha256 is not the way back's (and the plain one is v0.22.0): NOT KEPT,
+        nothing copied (the way back's download line is then needed)."""
+        home, old, out = self.run_it(True, 'after H3, corrupted')
         self.assertTrue(out.startswith('NOT KEPT: '), out)
         self.assertFalse(os.path.lexists(os.path.join(home, 'build', 'dl', WBDL)))
 

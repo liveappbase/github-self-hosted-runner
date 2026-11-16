@@ -36,6 +36,12 @@
 #   check, a version mismatch or a digest mismatch writes no record. The recipe and the reader are ONE copy each,
 #   runner-release.sh's rr_recipe, rr_record and rr_record_of: this script, pool-image.sh's `up` and both users'
 #   updaters (RS_USER's DUE finds the record of the image config.toml runs by its digest: its baseline) use them.
+# THE gh FLOOR (step 6 (b), both modes): the image prints `gh=<version>` (the first line of its `gh --version`); exactly
+#   one such line whose version is N.N.N and at or above image/gh-floor passes, by image/gh-floor-ok.sh, the one compare
+#   the Dockerfile's gh RUN ran at build time; both files are read from the build context, the recipe this build hashed
+#   (never ~/build/image/ again), so the context stays until that check. No marker, two, another form, a lower version or
+#   a floor file of another form: no record (and no image.ref). Why: Ubuntu noble's gh is under most of gh's published
+#   security advisories; the image takes gh from GitHub's own apt repository (image/Dockerfile's header).
 # Exit: 0 done; 1 FAIL or REFUSE (the line says why; nothing a pool runs changed); 2 usage; 75 WAIT (GitHub answered
 # 403 or 429, a rate limit: run it again later). No secret here.
 set -euo pipefail
@@ -156,7 +162,6 @@ ok "the recipe: image/ ($(paste -sd' ' - <<< "$RR_NAMES")): sha256 $RECIPE"
 rr_release tag "$VERSION" || { [ $? != 75 ] || wait_ "GitHub's rate limit: nothing was built; run it again later"; die "release v$VERSION: nothing was built (the REFUSE line above says why)"; }
 rr_tarball "$CTX/runner.tar.gz" || die "release v$VERSION: nothing was built (the REFUSE line above says why)"
 iid=$(docker build -q --no-cache -t "$TAG" "$CTX") || die "docker build failed: no record, image.ref NOT changed"
-rm -rf -- "${CTX:?}"; trap - EXIT
 [ "$(docker inspect -f '{{.Id}}' "$TAG")" = "$iid" ] || die "the tag does not point at the image just built"
 docker push -q "$TAG" >/dev/null || die "docker push failed: no record, image.ref NOT changed"
 IMAGE=$(docker inspect --format '{{index .RepoDigests 0}}' "$TAG") || die "cannot read the digest of $TAG"
@@ -176,11 +181,19 @@ out=$(docker run --rm --network runners "$IMAGE" bash -c '
   python3 -c "import ctypes; l=ctypes.CDLL(None,use_errno=True); r=l.syscall(250,0,-4,0); print(\"keyctl\", \"EPERM\" if r==-1 and ctypes.get_errno()==1 else \"ALLOWED\")"
   sudo -n true 2>/dev/null && echo sudo=YES || echo sudo=refused
   cd / && bwrap --unshare-user --unshare-net --ro-bind / / /bin/true && echo bwrap=ok
-  locale -a | grep -qi "^en_US.utf8$" && echo locale=ok; true' 2>&1) || true
+  locale -a | grep -qi "^en_US.utf8$" && echo locale=ok
+  gh --version 2> /dev/null | sed -n "1s/^gh version \([^ ]*\).*/gh=\1/p"; true' 2>&1) || true
 echo "$out"
 for w in "Seccomp: 2" "NoNewPrivs: 1" "pid1=docker-init" "umask=0022" "keyctl EPERM" "sudo=refused" "bwrap=ok" "locale=ok"; do
   case "$out" in *"$w"*) ok "$w" ;; *) die "missing: $w (no record, image.ref NOT changed)" ;; esac
 done
+# THE gh FLOOR (the header): one gh= line, its version at or above the floor, by the context's copies of image/
+n=$(grep -c '^gh=' <<< "$out" || true)
+[ "$n" = 1 ] || die "the image printed $n gh= lines, want 1 [$(sed -n 's/^gh=//p' <<< "$out" | paste -sd' ' -)] (no record, image.ref NOT changed)"
+v=$(sed -n 's/^gh=//p' <<< "$out")
+f=$(bash "$CTX/gh-floor-ok.sh" "$CTX/gh-floor" "$v" 2>&1) || die "the gh of $IMAGE: $f (no record, image.ref NOT changed)"
+ok "$f"
+rm -rf -- "${CTX:?}"; trap - EXIT
 say "6. controls: unconfined lets keyctl through; Docker's default profile stops bwrap"
 c1=$(docker run --rm --security-opt seccomp=unconfined "$IMAGE" python3 -c "import ctypes; l=ctypes.CDLL(None,use_errno=True); print('ALLOWED' if l.syscall(250,0,-4,0)>0 else 'EPERM')" 2>&1 || true)
 [ "$c1" = ALLOWED ] && ok "control: unconfined -> keyctl ALLOWED" || die "control: unconfined keyctl [$c1] (the EPERM check proves nothing)"

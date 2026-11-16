@@ -41,12 +41,13 @@ import unittest
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUN_LINE = ('docker run --rm --network none -v "$PWD":/w:ro -w /w IMAGE python3 -I -B -m unittest discover -s '
-            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl, jq and ca-certificates; '
+            'tests/hetzner -t .   (IMAGE: an Ubuntu 24.04 or 26.04 with python3, openssl, curl, jq, gnupg and ca-certificates; '
             'the hetzner jobs of .github/workflows/release-check.yml run them so too, in parts)')
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 SYSTEM_BUNDLE = '/etc/ssl/certs/ca-certificates.crt'
 OPENSSL = '/usr/bin/openssl'
 REAL_CURL = '/usr/bin/curl'
+GPG = '/usr/bin/gpg'                 # H4: the key cells (test_gh_image.py) run gpg; the hetzner jobs install gnupg
 RS_USER = 'ci-rs'                    # host.conf.example's RS_USER
 REGISTRY_PORT = '27500'              # host.conf.example's REGISTRY_PORT
 IMAGE_NAME = 'linux-runner'          # host.conf.example's IMAGE_NAME
@@ -88,7 +89,7 @@ needs_container = contained(verdict())
 
 
 def require_tools(test):
-    for p in (OPENSSL, REAL_CURL, SYSTEM_BUNDLE, '/usr/bin/sha256sum', '/usr/bin/python3', '/usr/bin/jq'):
+    for p in (OPENSSL, REAL_CURL, SYSTEM_BUNDLE, '/usr/bin/sha256sum', '/usr/bin/python3', '/usr/bin/jq', GPG):
         if not os.path.exists(p):
             test.fail('this container lacks %s, which these cells need (%s)' % (p, RUN_LINE))
 
@@ -307,6 +308,9 @@ if cmd == 'build':
     files = {n: hashlib.sha256(open(os.path.join(ctx, n), 'rb').read()).hexdigest() for n in names}
     iid = new_id(json.dumps(files, sort_keys=True))
     st['tags'][a[a.index('-t') + 1]] = iid
+    for p, text in cfg.get('after_build', {}).items():   # a file changed while the image builds (after the hash)
+        with open(p, 'w') as f:
+            f.write(text)
     with open(SB + '/logs/build-ctx.json', 'a') as f:
         f.write(json.dumps({'argv': a, 'files': files, 'mode': oct(os.stat(ctx).st_mode & 0o777), 'id': iid}) + '\n')
     out(iid + '\n')
@@ -437,8 +441,9 @@ sys.stderr.write('curl stub: no answer for: %s\n' % ' '.join(a))
 sys.exit(99)
 '''
 
+# step 6 (b)'s answer that passes; its last line is H4's gh marker (the gh of GitHub's repository, at its floor or above)
 GOOD_MAIN = ('Seccomp: 2\nNoNewPrivs: 1\npid1=docker-init umask=0022\nkeyctl EPERM\nsudo=refused\nbwrap=ok\n'
-             'locale=ok\n')
+             'locale=ok\ngh=2.104.0\n')
 
 
 class Sandbox:

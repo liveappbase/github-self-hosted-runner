@@ -52,7 +52,9 @@ class Dockerfile(unittest.TestCase):
         self.assertIn('RUN bash /tmp/runner/install-runner.sh /tmp/runner/runner.tar.gz /home/runner '
                       '&& rm -rf /tmp/runner', lines)
         self.assertEqual([l for l in lines if l.startswith('USER')][-1], 'USER runner')
-        self.assertEqual(sorted(os.listdir(IMAGE)), ['Dockerfile', 'install-runner.sh'])
+        # H4: gh's key, its check and its floor are files of the recipe too (test_gh_image.py pins them)
+        self.assertEqual(sorted(os.listdir(IMAGE)), ['Dockerfile', 'apt-key-pinned.sh', 'gh-floor', 'gh-floor-ok.sh',
+                                                     'githubcli-archive-key.asc', 'install-runner.sh'])
 
 
 @needs_container

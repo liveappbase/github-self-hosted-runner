@@ -25,7 +25,10 @@ Status: these scripts run one host (Ubuntu 26.04, x86_64, Docker 29.9.0). They m
 | `bin/runner-start` | RS_USER | The unit's start command: checks the config, D1, the registry and the token files, then starts runscaler. |
 | `bin/validate-class` | RS_USER | The class of one `runner-start validate` result (PASS, API-ONLY, NON-API or UNKNOWN): the same rule as the Mac's `bin/validate-class`. |
 | `bin/pool-ready` | RS_USER | Is runscaler serving exactly the named sets, each ready? |
-| `image/Dockerfile` | RUN_USER | The runner image: GitHub's runner image by digest (the pinned base), the runner of the release 02-d1.sh fetched, plus bubblewrap, gh, a locale and build tools. |
+| `image/Dockerfile` | RUN_USER | The runner image: GitHub's runner image by digest (the pinned base), the runner of the release 02-d1.sh fetched, plus bubblewrap, a locale and build tools, and gh from GitHub's own apt repository (cli.github.com), never Ubuntu's ("gh from GitHub's apt repository: this release's image, and the way back", below). |
+| `image/githubcli-archive-key.asc` | (the build) | The key of GitHub's gh repository: GitHub CLI's public key as keyserver.ubuntu.com serves it under its fingerprint. A file of the recipe: the build fetches no key. |
+| `image/apt-key-pinned.sh` | (the build) | Run inside the image build, before apt reads GitHub's repository: the keyring apt trusts for it must hold one primary key, the fingerprint the Dockerfile names (the Mac's `bin/linux-image-build` checks its apt keys by the same rule). |
+| `image/gh-floor`, `image/gh-floor-ok.sh` | (the build) | The lowest gh the image may have (one line, a version), and the one compare of a gh version with it: run inside the image build, and again by 02-d1.sh step 6 (b) on the built image (below it, no build record). |
 | `image/install-runner.sh` | (the build) | Run inside the image build: puts the fetched runner in place of the base image's runner. |
 | `../setup/tls-excluded-spki` | — | The CA keys no download trusts (the repository's top-level `setup/`; the install puts it into `~/build/setup/`). |
 | `../core/` | RS_USER | The updater's decision core, the same files as the Mac's (the repository's top-level `core/`; the install puts it into `~/build/core/`): the unattended switch asks its `idle.jq` whether the pool is idle, under a jq that `core/TESTED_JQ` lists. |
@@ -63,9 +66,9 @@ git clone --branch v<version> --depth 1 https://github.com/liveappbase/github-se
    ```
    ssh <RS_USER>@<host> '~/bin/runner-updater pass; ~/bin/runner-updater status'
    ```
-4. **runscaler's download (RS_USER).** runscaler v0.22.0, the release this one pins. On a fresh host (no `~/bin/runner` yet) 03-runscaler.sh installs it, and checks its sha256 before it extracts anything. A host that runs runscaler already keeps the one it has: only `pool-image.sh runscaler` changes it, from this download ("runscaler: the release this one pins, and the way back", below). First, on a host that ran the release before, keep its v0.12.0 download, which step 3 moved aside with the old `~/build`: it is the way back's, so the way back then needs no download. The line copies it only when its sha256 is the way back's (03-runscaler.sh's `WAYBACK_TGZ_SHA`), and else says so and copies nothing:
+4. **runscaler's download (RS_USER).** runscaler v0.22.0, the release this one pins. On a fresh host (no `~/bin/runner` yet) 03-runscaler.sh installs it, and checks its sha256 before it extracts anything. A host that runs runscaler already keeps the one it has: only `pool-image.sh runscaler` changes it, from this download ("runscaler: the release this one pins, and the way back", below). First, on a host that ran the release before, keep its v0.12.0 download, which step 3 moved aside with the old `~/build`: it is the way back's, so the way back then needs no download. The line copies it only when its sha256 is the way back's (03-runscaler.sh's `WAYBACK_TGZ_SHA`), and else says so and copies nothing. It looks under both names that download has had, the newest `~/build.prev.*` first: `dl/runner-v0.12.0-linux-amd64.tar.gz` (a release that pins v0.22.0, this one among them) and `dl/runner-linux-amd64.tar.gz` (a release that pinned v0.12.0):
    ```
-   ssh <RS_USER>@<host> 'w=$(sed -n "s/^WAYBACK_TGZ_SHA=\([0-9a-f]\{64\}\)$/\1/p" ~/build/setup/03-runscaler.sh); f=$(ls -1d ~/build.prev.*/dl/runner-linux-amd64.tar.gz 2> /dev/null | tail -n 1); if [ -n "$w" ] && [ -n "$f" ] && [ "$(sha256sum < "$f" | cut -d" " -f1)" = "$w" ]; then mkdir -p ~/build/dl && cp "$f" ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz && echo "KEPT $f as ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz"; else echo "NOT KEPT: no v0.12.0 download in ~/build.prev.*/dl (${f:-none}): the way back downloads it"; fi'
+   ssh <RS_USER>@<host> 'w=$(sed -n "s/^WAYBACK_TGZ_SHA=\([0-9a-f]\{64\}\)$/\1/p" ~/build/setup/03-runscaler.sh); k=; for f in $(ls -1d ~/build.prev.*/dl/runner-v0.12.0-linux-amd64.tar.gz ~/build.prev.*/dl/runner-linux-amd64.tar.gz 2> /dev/null | LC_ALL=C sort -r); do if [ -n "$w" ] && [ "$(sha256sum < "$f" | cut -d" " -f1)" = "$w" ]; then k=$f; break; fi; done; if [ -n "$k" ]; then mkdir -p ~/build/dl && cp "$k" ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz && echo "KEPT $k as ~/build/dl/runner-v0.12.0-linux-amd64.tar.gz"; else echo "NOT KEPT: no v0.12.0 download in ~/build.prev.*/dl (none has the way back sha256): the way back downloads it"; fi'
    ```
    Then the download:
    ```
@@ -126,6 +129,38 @@ A host installed from a release before this one: do "Upgrading from a release be
 **The build record.** Each build that passed every check writes `~/run/builds/<version>-<recipe>` as RUN_USER (0640, so RS_USER, a member of RUN_USER's group, can read it): exactly four lines, `format 1`, `version <version>`, `digest sha256:<the image's digest in the local registry>`, `recipe <the sha256 of image/'s files>`. There is one record per version and recipe; building the same version again replaces it. It is written under a temporary name and renamed, so a cut-off run leaves no partial record. A failed check, a version mismatch or a digest mismatch writes none. `pool-image.sh up <version>` reads the record of its own release's recipe, as untrusted data: once, each line by its pattern, never sourced. RS_USER's updater reads records the same way: the one whose digest is the image config.toml names is that image's record (its runner version and recipe), and the one of a new release and this release's recipe tells it RUN_USER has built that release.
 
 **The trust of the downloads.** Every download of the build path (GitHub's API and the runner tarball) uses `curl --cacert` with a filtered CA bundle (the system's bundle, without the certificates whose public key `setup/tls-excluded-spki` names) and `--capath` with an empty folder, so curl's built-in CA folder adds nothing back. That file's header gives its format; a file that breaks it, or names no key at all, stops the build before any download.
+
+## gh from GitHub's apt repository: this release's image, and the way back
+
+This release's runner image installs gh from GitHub's own apt repository (cli.github.com), not Ubuntu's: Ubuntu's gh (2.45.0 on noble) is under most of gh's published security advisories. The repository's key is a file of `image/`, `githubcli-archive-key.asc`, which the build checks by its fingerprint before apt reads the repository (`image/apt-key-pinned.sh`), and the gh it installs must be at least the version in `image/gh-floor` (`image/gh-floor-ok.sh`; 02-d1.sh step 6 (b) checks the built image again, and writes no build record below it). So this release has a new image recipe, and the updater does not switch the pool to a new recipe by itself: every pass of RS_USER's updater prints `STOP recipe changed`, with the runner version the pool runs, until you do these steps (`status` does not show that line: the pass prints it). Go on with each step only once the one before it ended as it says:
+
+1. Install step 3 for both users, then Install step 4 (both of its lines, the one that keeps the v0.12.0 download first).
+2. Build that runner version with this release's recipe, as RUN_USER (`<runner version>` is the one the `STOP recipe changed` line names: the version the pool runs). It must end with `build: built runner <runner version>`:
+   ```
+   ssh <RUN_USER>@<host> '~/bin/runner-updater build <runner version>'
+   ```
+3. Switch the pool to it, as RS_USER, at a quiet time. It must end with `switched hz-docker to <runner version>` (exit 0). Exit 5 is "not now" (the pool is busy): run it again later. A line that names RUN_USER's `build` line means step 2 did not pass:
+   ```
+   ssh <RS_USER>@<host> '~/bin/runner-updater rebuild hz-docker <runner version>'
+   ```
+4. Check it, as RS_USER. It is done when the family line shows `candidate runner <runner version>` on the new image (the digest of step 2's build record), and the next pass prints no `STOP recipe changed`. The updater then observes the candidate for 72 hours, as after any switch ("The updater: status, on, off, pass, build", below):
+   ```
+   ssh <RS_USER>@<host> '~/bin/runner-updater status'
+   ```
+
+The way back, to the release before (its image has Ubuntu's gh). Check each line's result as above. Which lines you run depends on what runs now:
+
+- The new image still runs (you decide to go back): Install step 3 with the release before's files for both users, then Install step 4 with this release's lines (the release before's keep line reads only one name of the v0.12.0 download), then, as RS_USER, the switch back. The release before's build record of that runner version still names its image, so it needs no build. It must end with `switched hz-docker to <runner version>`:
+   ```
+   ssh <RS_USER>@<host> '~/bin/runner-updater rebuild hz-docker <runner version>'
+   ```
+- R1 has rolled the new image back already (the old image runs, and `status` shows that version rejected and `STOP ROLLED BACK`): Install step 3 with the release before's files for both users, then Install step 4 with this release's lines, then this line, only when `status` names it as a STOP's next step:
+   ```
+   ssh <RS_USER>@<host> '~/bin/runner-updater retry hz-docker'
+   ```
+   Do not run `rebuild`: the old image runs already, so it refuses (nothing to switch).
+
+In both cases the next pass prints no `STOP recipe changed`.
 
 ## runscaler: the release this one pins, and the way back
 

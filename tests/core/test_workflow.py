@@ -273,7 +273,7 @@ CHECKOUT = '          git -C src checkout -q --detach FETCH_HEAD\n'
 FETCH = {   # each job's whole fetch step, as it is written (the step before it keeps the two shallow ones apart)
     'release-check': '      - name: Fetch the commit and its history\n' + GET
                      + '          git -C src fetch -q --no-tags origin "$SHA"\n' + CHECKOUT,
-    'hetzner': 'curl git jq openssl python3\n      - name: Fetch the commit\n' + GET
+    'hetzner': 'curl git gnupg jq openssl python3\n      - name: Fetch the commit\n' + GET
                + '          git -C src fetch -q --no-tags --depth 1 origin "$SHA"\n' + CHECKOUT,
     'jq-linux': 'ca-certificates git jq python3\n      - name: Fetch the commit\n' + GET
                 + '          git -C src fetch -q --no-tags --depth 1 origin "$SHA"\n' + CHECKOUT,
@@ -347,9 +347,10 @@ class Workflow(unittest.TestCase):
         self.assertIn('    container: ${{ matrix.image }}\n', j)
         self.assertIn("        run: python3 -I -m unittest discover -s tests/hetzner -t . -p '${{ matrix.part }}' -v\n",
                       j)
-        # what those cells need beyond the tests' own: jq, curl, openssl and the system's CA bundle (support.py)
+        # what those cells need beyond the tests' own: jq, curl, openssl, gpg (H4's key cells) and the system's CA
+        # bundle (support.py's require_tools)
         self.assertIn('DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ca-certificates curl git '
-                      'jq openssl python3\n', j)
+                      'gnupg jq openssl python3\n', j)
 
     def test_the_parts_run_every_module_of_tests_hetzner_exactly_once(self):
         parts = hetzner_matrix('part')
