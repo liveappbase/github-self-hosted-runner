@@ -493,10 +493,11 @@ class Text(unittest.TestCase):
                   'started after `config.toml` was installed', '| STOP | Next step |',
                   '| `check failed` of a window, `ROLLED BACK`, `NO EVIDENCE` | `runner-updater retry hz-docker` |',
                   '| `ROLLBACK FAILED` | fix what it names (this section), then `runner-updater retry hz-docker` |',
-                  '| `HAND CHANGE`, `NO BASELINE`, `recipe changed` | `runner-updater rebuild hz-docker [<runner version>]` |',
+                  '| `HAND CHANGE`, `NO BASELINE` | `runner-updater rebuild hz-docker [<runner version>]` |',
                   '| `NO IDLE` | `runner-updater switch-now hz-docker` |'):
             self.assertIn(s, sec)
         self.assertNotIn('later release', sec)
+        self.assertNotIn('`recipe changed`', sec, 'W2 M-1: a new image recipe is no STOP of this host')
         with open(UPD) as f:
             hand = re.search(r'"ROLLBACK FAILED" then \{hand: "fix what it names \(linux-docker/README\.md, \\"([^"\\]+)\\"\), '
                              r'then runner-updater retry hz-docker"\}', f.read())

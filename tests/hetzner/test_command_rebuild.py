@@ -12,7 +12,7 @@ run it (test_switch_now.py has switch-now's own).
   person's VERSION, required, not rejected, with a record. No record of (V, this recipe), or one whose digest
   config.toml runs: REFUSE with RUN_USER's `build V` line (from host.conf's RUN_USER, HOST_IP and SSH_PORT: `ssh -p`,
   B4b fix 1) and the whole next
-  command; DUE's NO BASELINE and recipe changed lines name the whole command too.
+  command; DUE's NO BASELINE line and the pass's recipe line (W2 M-1) name the whole command too.
 - E-14 (r3 Opus F3 (b)): rebuild writes the state's `core` to THE CORE STATE COPY before its `up`: a set the passes read
   not ready for 25 h is excused (`idle idle`, the switch); 23 h: exit 5.
 - THE OUTAGE RULE as its last step after its window (the r2 FOLD; Opus r1 F1).
@@ -207,16 +207,21 @@ class TheTarget(unittest.TestCase):
         """Opus r1 F5, F11; r3 Opus F4 (4): the target is RUN_USER's record of (V, this release's recipe). (i) that
         record is the one config.toml runs -> REFUSE, naming RUN_USER's `build CUR` line (host.conf's RUN_USER and
         HOST_IP) and `runner-updater rebuild hz-docker CUR`; (ii) recipe changed: the running image's record and a newer
-        one of CUR are of another recipe -> REFUSE "no usable build record", the same lines (DUE's recipe changed line
-        names the command with CUR too). The control: RUN_USER builds CUR again (D3: the running image then has no
-        record, NO BASELINE) -> `rebuild hz-docker CUR` switches to D3."""
+        one of CUR are of another recipe -> REFUSE "no usable build record", the same lines (the pass's recipe line
+        names the command with CUR too, W2 M-1: V's record is removed first, so that pass waits for RUN_USER's build of
+        V and switches nothing). The control: RUN_USER builds CUR again (D3: the running image then has no record, NO
+        BASELINE) -> `rebuild hz-docker CUR` switches to D3."""
         for row in ('the running record', 'recipe changed', 'control: a new build'):
             with self.subTest(row):
                 g = C(self, base=row != 'recipe changed')
                 if row == 'recipe changed':
                     g.p.record(CUR, OLD, recipe='ab' * 32)
                     g.p.record(CUR, digest(42), recipe='cd' * 32)
-                    self.assertIn('`runner-updater rebuild hz-docker %s` switches it' % CUR, g.go().stdout)
+                    os.remove(os.path.join(Pool.HOME, 'run', 'builds', '%s-%s' % (V, g.p.recipe())))
+                    out = g.go().stdout
+                    self.assertIn(NOT + "it waits for root's build of runner %s" % V, out)
+                    self.assertIn(', then `runner-updater rebuild hz-docker %s`' % CUR,
+                                  [l for l in out.splitlines() if 'the image recipe changed (' in l][0])
                 if row.startswith('control'):
                     new_cur(g)
                 g.mark()

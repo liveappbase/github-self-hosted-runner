@@ -8,7 +8,8 @@ AFTER ACCEPT, D7): RS_USER's pass, after its core calls, prints ONE line for hz-
   3. this release's image recipe cannot be computed (runner-release.sh's rr_recipe);
   4. STOP NO BASELINE: config.toml's two family lines do not name one image, or not exactly one build record of
      RUN_USER has its digest (rr_record_of);
-  5. STOP recipe changed: that record's recipe is not this release's;
+  5. that record's recipe is not this release's: NO HOLD (W2 M-1): DUE goes on, and the pass prints the recipe line
+     after DUE's own (test_recipe_follows.py);
   6. (the current version is that record's version);
   7. the latest release (rr_eligible): WAIT, or not eligible;
   8. a STOP of that version; 9. it is rejected for hz-docker; 10. it is not newer than the current version;
@@ -18,7 +19,7 @@ AFTER ACCEPT, D7): RS_USER's pass, after its core calls, prints ONE line for hz-
       the pool is BUSY (Due), so that window ends not idle with no journal, and the pass writes only `due`.
 
 Steps 1-6 ask GitHub nothing; no step downloads a tarball (RUN_USER's build checked the digest). DUE never fails the pass
-and writes nothing into the state but step 12's `due` (NO BASELINE and recipe changed are printed, not stored). Step 10 compares versions
+and writes nothing into the state but step 12's `due` (NO BASELINE is printed, not stored). Step 10 compares versions
 field by field, as numbers. RUN_USER's records are HOSTILE (PLAN D1, class Hostile): a FIFO or a symlink renamed over a
 record's name while the pass reads it is no record, at once (runner-release.sh's rr_read: one open, no symlink, never
 blocks), and the pass ends as always.
@@ -214,12 +215,18 @@ class Steps(unittest.TestCase):
         g.p.record('2.338.1', OLD, text='format 1\nversion 2.338.1\ndigest %s\nrecipe %s\n\n' % (OLD, g.p.recipe()))
         self.assertEqual(g.due(g.run()), SWITCH)
 
-    def test_5_recipe_changed(self):
+    def test_5_a_recipe_change_holds_nothing(self):
+        """W2 M-1 (it was test_5_recipe_changed, `STOP recipe changed`): the record of config.toml's image is of
+        another recipe. Step 5 holds nothing: V, newer and built for this recipe, reaches step 12 (the busy pool: the
+        switch window, then the wait for idle), and the recipe line follows DUE's line, naming both recipes. Its
+        control is every other cell of this class (the recipe unchanged: no recipe line, test_recipe_follows.py)."""
         g = Due(self, base=False)
-        rec = g.p.record(CUR, OLD, recipe='e' * 64)
-        line = self.held(g, 'STOP recipe changed: ')
-        self.assertIn("this release's image recipe is %s, and the build record of config.toml's image (%s) names %s"
-                      % (g.p.recipe(), rec, 'e' * 64), line)
+        g.p.record(CUR, OLD, recipe='e' * 64)
+        r = g.run()
+        self.assertEqual(g.due(r), SWITCH)
+        self.assertIn("runner-updater: pass: hz-docker: the image recipe changed (this release's %s…, the pool's image "
+                      "%s…)" % (g.p.recipe()[:12], 'e' * 12), r.stdout)
+        self.assertNotIn('STOP recipe changed', r.stdout)
 
     def test_7_the_latest_release_waits_or_is_not_eligible(self):
         for why, kw, start in (('429', {'status': 429}, 'WAIT GitHub answered 429 (a rate limit)'),

@@ -366,7 +366,9 @@ class Text(unittest.TestCase):
                   "names RUN_USER's `build` line", "ssh <RS_USER>@<host> '~/bin/runner-updater retry hz-docker'",
                   '- `runner-updater rebuild hz-docker [<runner version>]` (RS_USER) is one switch window to RUN_USER\'s '
                   'build of the runner version config.toml names',
-                  'the next step of `STOP HAND CHANGE`, `STOP NO BASELINE` and `STOP recipe changed`',
+                  # W2 M-1: a new image recipe is no STOP; rebuild is how a person puts it in now
+                  'the next step of `STOP HAND CHANGE` and `STOP NO BASELINE`, and the way to put a new image recipe in '
+                  'now (the pass\'s `the image recipe changed` line)',
                   'Its version is the open candidate\'s when config.toml names the candidate\'s lines', '`--keep-prev`',
                   # B4b fix 1: opus F6 (rebuild's refusal of an open candidate whose lines config.toml does not name),
                   # F4 (retry promises no switch of a release that is not newer), F1 and F2 (switch-now)
