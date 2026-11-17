@@ -164,6 +164,8 @@ In both cases the next pass prints no `STOP recipe changed`.
 
 ## runscaler: the release this one pins, and the way back
 
+To move this pin to a newer runscaler, follow the procedure in [../docs/upgrades/read-points.md](../docs/upgrades/read-points.md): read the upstream diff against this host's read points, then the pull request's size follows from what it touches.
+
 This release pins runscaler v0.22.0, and v0.12.0 (the runscaler of a host installed before it) is the way back. Install step 9 installs v0.22.0 on a fresh host only. On a host that runs runscaler, `pool-image.sh runscaler` is the one step that changes it, as RS_USER, in this order:
 
 1. Install step 3 for both users (this release's files), then Install step 4 (it keeps the v0.12.0 download for the way back, then downloads v0.22.0).
