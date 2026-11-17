@@ -422,7 +422,8 @@
 #   STEP; OPEN with no `stopping` or `starting` line -> RECOVER FIRST at once (the pass's one restart); OPEN after its
 #   own restart -> a STOP line, exit 1 (the next run's RECOVER ends it). No journal and exit 3 (not idle, START STATE):
 #   now - due.since >= 3 days -> STOP NO IDLE of V (detail.digest D, hand `runner-updater switch-now hz-docker`), else
-#   "hz-docker waits for idle (since ...)"; exit 0 either way (E-11: a pass exits 1 only while a journal stays).
+#   "hz-docker: the switch to runner V waits for idle (since ...)"; exit 0 either way (E-11: a pass exits 1 only while
+#   a journal stays).
 # THE TWO LEVELS (the r3 FOLD), a pass that is ON, before the facts (so KEEP and DUE read what they leave): a held DISK
 #   is cleared when disk_ok passes; a held NO IDLE of V goes when the family has a candidate, or the pool RUNS V or a
 #   newer version: RUN_USER's build record of config.toml's image names it, AND the runscaler that runs started
@@ -1992,9 +1993,9 @@ due_steps() {
 # STEP; open with no `stopping` or `starting` line -> RECOVER FIRST now (the pass's one restart); open after its own
 # stop or start -> WSTOP (the next run's RECOVER ends it: one restart per pass, E-13). No journal: exit 3 (not idle,
 # START STATE) -> now - since >= 3 days: STOP NO IDLE of V (detail.digest D: `switch-now` reads it; hand
-# `runner-updater switch-now hz-docker`), else "waits for idle (since ...)"; any other exit: its line. A STOP held anew
-# leaves the pass's exit 0 (E-15); only a journal that stays makes it 1 (E-11). SW_CHILD: the child ran (THE OUTAGE
-# RULE runs after it, as the pass's last step)
+# `runner-updater switch-now hz-docker`), else "the switch to runner V waits for idle (since ...)"; any other exit: its
+# line. A STOP held anew leaves the pass's exit 0 (E-15); only a journal that stays makes it 1 (E-11). SW_CHILD: the
+# child ran (THE OUTAGE RULE runs after it, as the pass's last step)
 SW_CHILD=
 NO_IDLE_S=259200   # PLAN D5 NO IDLE: 3 days from eligibility
 switch_window() {
@@ -2037,7 +2038,7 @@ switch_window() {
         --arg t "the switch to runner $v waits for idle since $(date -u -d "@$since" '+%Y-%m-%d %H:%M UTC') (3 days: the first pass that found it due): ${why:0:600}"
       say "pass: $FAMILY holds STOP NO IDLE (runner $v): it waited for idle since $(date -u -d "@$since" '+%Y-%m-%d %H:%M UTC'), 3 days ($why); \`runner-updater switch-now hz-docker\` switches it now (its restart's drain lets running jobs finish)"
     else
-      say "pass: $FAMILY waits for idle (since $(date -u -d "@$since" '+%Y-%m-%d %H:%M UTC')): $why; the next pass tries again (STOP NO IDLE 3 days after that)"
+      say "pass: $FAMILY: the switch to runner $v waits for idle (since $(date -u -d "@$since" '+%Y-%m-%d %H:%M UTC')): $why; the next pass tries again (STOP NO IDLE 3 days after that)"
     fi
     return 0
   fi
@@ -2721,7 +2722,9 @@ do_build() {
 # line when the pass printed one (DUE_RECIPE). PASSDIR is made first (the OFF exit comes before the pass's own
 # install -d), but only in a STATEDIR that is there (rr_lock makes it, with THE MODES of the user's role); ONE rename of
 # a temp file of its own (mktemp in PASSDIR: a pass that found the lock held writes with no lock, beside the holder's
-# run). A write that fails changes nothing and never fails the pass (its exit code stays the pass's)
+# run). A write that fails changes nothing and never fails the pass (its exit code stays the pass's): each write's
+# status is checked (ONE && chain: a full filesystem fails line 1, and `[ -z ... ]` after it would end a plain group
+# with 0), and only a temp file whose every write passed is renamed; any other is removed
 PASS_NOW=
 pass_record() {
   local t at=$PASS_NOW line=${OUTCOME:-$LAST}
@@ -2731,8 +2734,8 @@ pass_record() {
   [ -n "$line" ] || line="runner-updater: pass: it ended with no line"
   install -d -m 700 "$PASSDIR" 2> /dev/null || return 0
   t=$(mktemp "$PASSDIR/.last-pass.XXXXXXXX" 2> /dev/null) || return 0
-  if { printf '%s %s\n' "$at" "${line//[[:cntrl:]]/?}"
-       [ -z "$DUE_RECIPE" ] || printf '%s\n' "${DUE_RECIPE//[[:cntrl:]]/?}"; } > "$t" 2> /dev/null \
+  if { printf '%s %s\n' "$at" "${line//[[:cntrl:]]/?}" \
+       && { [ -z "$DUE_RECIPE" ] || printf '%s\n' "${DUE_RECIPE//[[:cntrl:]]/?}"; }; } > "$t" 2> /dev/null \
      && mv -f -- "$t" "$PASSDIR/last-pass" 2> /dev/null; then
     return 0
   fi

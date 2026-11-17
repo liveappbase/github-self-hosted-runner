@@ -16,7 +16,9 @@ its `hz-docker` line (`hz-docker: the image recipe changed (...)`), writing no S
   back (V rejected, STOP ROLLED BACK): Install step 3 with the release before's files, then `retry hz-docker` (status
   names it as that STOP's next step); rebuild has nothing to switch: the old image runs, and the next pass prints no
   recipe line. Control: (b)'s lines without the release before's files: the recipe line remains. The way back after the
-  passes switched to a newer release on this recipe (`back hz-docker`, N-2) is test_recipe_follows.TheWayBack.
+  passes switched to a newer release on this recipe (`back hz-docker`, N-2), and after R1 rolled that switch back
+  (`retry hz-docker`, with or without the release before's files first: build review r1, opus F4), are
+  test_recipe_follows.TheWayBack.
 - The README's H4 section names these lines, in this order (Text, runs anywhere).
 Install step 3 is modelled by ~/build/image/ alone (the updater reads a recipe by its hash: the release before's
 image/ here is its Dockerfile and install-runner.sh, the Dockerfile's bytes another); Install step 4's download stays in
@@ -113,9 +115,9 @@ class Deploy(Due):
 
 # the README section's updater lines, in its order: (user, the updater's arguments)
 README_ORDER = [('RUN_USER', 'build <runner version>'), ('RS_USER', 'rebuild hz-docker <runner version>'),
-                ('RS_USER', 'status'), ('RS_USER', 'back hz-docker'), ('RS_USER', 'rebuild hz-docker <runner version>'),
-                ('RS_USER', 'retry hz-docker')]
-BUILD, REBUILD, STATUS, BACK, BACK_REBUILD, BACK_RETRY = range(6)
+                ('RS_USER', 'status'), ('RS_USER', 'back hz-docker'), ('RS_USER', 'retry hz-docker'),
+                ('RS_USER', 'rebuild hz-docker <runner version>'), ('RS_USER', 'retry hz-docker')]
+BUILD, REBUILD, STATUS, BACK, R1_RETRY, BACK_REBUILD, BACK_RETRY = range(7)
 
 
 def readme_lines(test):
@@ -206,7 +208,8 @@ class TheWayBack(unittest.TestCase):
 class Text(unittest.TestCase):
     def test_the_readme_s_h4_section_names_the_lines_in_order(self):
         """S-1 and S-3's lines, as the README gives them, in the order the cells above run them, and W2's default (the
-        next runner release; the recipe line and status's last pass) and its way back (`back hz-docker`, N-2)."""
+        next runner release; the recipe line and status's last pass) and its way back (`back hz-docker`, N-2; and
+        `retry hz-docker` after R1 rolled the passes' switch back, opus F4: test_recipe_follows.TheWayBack runs it)."""
         s = section(readme(), TITLE)
         flat = one(s)
         want = ('it holds nothing',
@@ -224,6 +227,17 @@ class Text(unittest.TestCase):
                 'no pass switches to it again',
                 "ssh <RS_USER>@<host> '~/bin/runner-updater back hz-docker'",
                 "Install step 3 with the release before's files for both users",
+                'The passes switched the pool to a newer runner release on the new image, and R1 has rolled it back',
+                '`STOP ROLLED BACK`',
+                'the image before runs already',
+                'only when `status` names it as a STOP\'s next step',
+                'the next pass may switch the pool to that version again, on the new image recipe',
+                'When the new recipe is the fault',
+                "Install step 3 with the release before's files for both users, then Install step 4 with this release's "
+                'lines, then the same line',
+                "the passes switch to that version only once RUN_USER's pass has built it with the release before's "
+                'recipe',
+                "ssh <RS_USER>@<host> '~/bin/runner-updater retry hz-docker'",
                 'You ran steps 2 and 3',
                 "~/bin/runner-updater rebuild hz-docker <runner version>",
                 'R1 has rolled',

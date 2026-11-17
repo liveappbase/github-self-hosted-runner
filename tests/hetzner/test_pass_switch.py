@@ -10,8 +10,8 @@ build record of digest D, is no longer a "would switch" line but the switch wind
   THE OUTAGE RULE is the pass's LAST step after any child (also one that kept no journal).
 - THE NO IDLE CLOCK (E-2): `due` {version, since}, the first pass that found the family due for V; OFF days count; a
   newer release starts it again. An `up` that exits 3 with now - since >= 3 days holds STOP NO IDLE of V (detail
-  `digest`, hand `runner-updater switch-now hz-docker`), and that pass exits 0; before, "waits for idle (since ...)",
-  exit 0, no journal (E-11). A cut switch's RECOVER wait keeps the journal: exit 1 (E-11).
+  `digest`, hand `runner-updater switch-now hz-docker`), and that pass exits 0; before, "the switch to runner V waits for
+  idle (since ...)", exit 0, no journal (E-11). A cut switch's RECOVER wait keeps the journal: exit 1 (E-11).
 - THE TWO LEVELS (r3 FOLD), before the facts: a held DISK is cleared when disk_ok passes; a held NO IDLE of V is
   dropped when the family has a candidate or runs V or newer: config.toml on that image AND the runscaler that runs
   started after its install (an install with no restart after it counts nothing: B4a fix 1). DISK is RAISED only when
@@ -39,7 +39,7 @@ BUSY = healthz(**{MAIN: {'busy': 1}})
 IDLE = healthz()
 DUE_LINE = ('runner-updater: pass: hz-docker is due for runner %s: the switch window, pool-image.sh up --unattended %s '
             '%s (its lines follow)' % (V, V, NEW))
-WAITS = 'runner-updater: pass: hz-docker waits for idle (since '
+WAITS = 'runner-updater: pass: hz-docker: the switch to runner %s waits for idle (since ' % V   # W2 fix1 (opus F3)
 NO_IDLE_S = 3 * DAY
 BIG = 1000000          # KiB: df's size in the DISK cells (10 % of it: 100000)
 
@@ -258,7 +258,7 @@ class TheNoIdleClock(unittest.TestCase):
                 if newer:
                     self.assertEqual(g.fam()['due'], {'version': '2.340.0', 'since': now})
                     self.assertEqual(g.held('NO IDLE'), [], r.stdout[-3000:])
-                    self.assertIn(WAITS, r.stdout)
+                    self.assertIn(WAITS.replace(V, '2.340.0'), r.stdout)   # the line names the version that waits
                 else:
                     self.assertEqual(g.fam()['due'], {'version': V, 'since': t0})
                     self.assertEqual(len(g.held('NO IDLE')), 1, r.stdout[-3000:])
@@ -477,7 +477,7 @@ class Text(unittest.TestCase):
     def test_the_readme_s_switch_section_and_its_stops(self):
         text = readme()
         upd = one(section(text, 'The updater: status, on, off, pass, build'))
-        for s in ('`hz-docker is due for runner <version>`', '`hz-docker waits for idle (since <date>)`, exit 0',
+        for s in ('`hz-docker is due for runner <version>`', '`hz-docker: the switch to runner <version> waits for idle (since <date>)`, exit 0',
                   'not ready for 24 hours is excused from readiness only', 'a pass that reads it ready starts it again',
                   'After 3 days of that (from the first pass that found it due, also while the updater was OFF or a '
                   'STOP held the family)', '`STOP NO IDLE` instead, with `runner-updater switch-now hz-docker`',

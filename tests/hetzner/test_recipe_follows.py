@@ -14,13 +14,18 @@ the latest pass (PASSDIR/last-pass, test_last_pass.py), DUE's own outcome first 
 - M-4 (b): no newer release -> `not newer` and the recipe line, every pass, no window, no STOP; control: the recipe
   unchanged -> no recipe line. Its status is the issue #6 cell: the shape seen live (a recipe change after Install step
   3, a pass, then `status`).
-- N-1: a newer release built and the pool busy -> the outcome `waits for idle` (not DUE's `is due` line) and the recipe
-  line; control: the same, idle -> exactly one window to the newer release, status `switched`, no recipe line.
+- N-1: a newer release built and the pool busy -> the outcome `the switch to runner V waits for idle`, naming V (not
+  DUE's `is due` line; build review r1, opus F3), and the recipe line; control: the same, idle -> exactly one window to
+  the newer release, status `switched`, no recipe line.
 - N-6 (a): the record of (CUR, this recipe) there -> the line names only `rebuild`; missing -> `build` too.
 - N-2 / M-4 (c): the way back after such a switch (the new image is the NEWER version's) is `back hz-docker`: the old
   image runs, the newer version is rejected, and the next passes switch nothing (a regression guard for the mutant
   "DUE switches to the running version when the recipe differs": RUN_USER's record of (CUR, this recipe) is planted so
   that mutant has a target). Control: the same-version branch's `rebuild hz-docker CUR` refuses on this path.
+- The way back after R1 rolled that switch back (build review r1, opus F4): the old image runs, V rejected, `STOP ROLLED
+  BACK`; the README's `retry hz-docker` re-admits V, and the next pass switches to V again on this recipe (the control);
+  with the release before's files first (Install step 3: another recipe), the next pass switches nothing: it waits for
+  RUN_USER's build of V for that recipe.
 Every cell runs the real scripts (support.Pool, a throwaway container, the fake clock) and the updater as RS_USER.
 (Named for its CI part, test_re[!nt][!o]*.py: .github/workflows/release-check.yml.)
 """
@@ -29,9 +34,10 @@ import unittest
 
 from tests.hetzner.support import digest, needs_container, ref
 from tests.hetzner.test_command_rebuild import BUILD_LINE
-from tests.hetzner.test_gh_deploy import BACK, BACK_REBUILD, readme_lines
+from tests.hetzner.test_gh_deploy import BACK, BACK_REBUILD, R1_RETRY, readme_lines
 from tests.hetzner.test_pass_switch import BUSY, DUE_LINE, IDLE, WAITS, G
 from tests.hetzner.test_release_due import CUR, NEW, NOT, OLD, V
+from tests.hetzner.test_verdict import plant_r1
 
 OLDREC = 'e' * 64          # the release before's image recipe: the recipe of the record of the image the pool runs
 H = digest(44)             # RUN_USER's build of CUR for this release's recipe (a person's `build CUR`)
@@ -75,6 +81,10 @@ class R(G):
 
     def no_stop(self):
         self.t.assertEqual(self.held(), [], 'a recipe change writes no STOP')
+
+    def plant(self, rel, text):
+        """A file of the cell's own ~/build copy replaced by TEXT (plant_r1's planted R1)."""
+        self.p.write(os.path.join(self.p.build, rel), text)
 
 
 def recipe_text(rec, line):
@@ -176,7 +186,7 @@ class NoHold(unittest.TestCase):
         self.assertEqual(len(g.recipe_lines(r)), 1, r.stdout[-3000:])
         self.assertEqual(g.ups(), [])
         out, rl = g.last(g.status())
-        self.assertIn(': hz-docker waits for idle (since ', out)
+        self.assertIn(': hz-docker: the switch to runner %s waits for idle (since ' % V, out)   # it names V
         self.assertNotIn('is due for runner', out)
         self.assertEqual(len(rl), 1)
         g.p.curl['healthz'] = IDLE                           # the control
@@ -224,6 +234,51 @@ class TheWayBack(unittest.TestCase):
             self.assertEqual(len(g.ups()), 1, 'a pass switched again: ' + r.stdout[-3000:])
             self.assertEqual(g.p.images(), [ref(OLD)] * 2)
             g.no_stop()
+
+    def test_r1_rolls_the_passes_switch_back_then_retry_with_and_without_the_release_before(self):
+        """opus F4: the pass switches to V on this recipe's image; R1 says rollback (planted) and the next pass rolls
+        it back: the old image runs, V rejected, `STOP ROLLED BACK`, and status names `runner-updater retry
+        hz-docker`. Then Install step 3 brings the release before's core/ back (the real R1), and the README's line
+        R1_RETRY runs: V is re-admitted. Without the release before's files (the control) the next pass switches to V
+        again, on this recipe's image; with them (~/build/image/ of another recipe) it switches nothing and waits for
+        RUN_USER's build of V for that recipe."""
+        for row in ('control: this release\'s files', "the release before's files"):
+            with self.subTest(row):
+                g = R(self)
+                r = g.pass_()
+                self.assertIn('runner-updater: pass: switched hz-docker to %s: it runs %s' % (V, ref(NEW)), r.stdout)
+                with open(os.path.join(g.p.build, 'core', 'r1.jq')) as f:
+                    real = f.read()
+                plant_r1(g)
+                r = g.pass_()
+                self.assertIn('runner-updater: pass: rolled back hz-docker', r.stdout)
+                self.assertEqual(g.p.images(), [ref(OLD)] * 2)
+                self.assertEqual(g.fam().get('rejected'), [V])
+                self.assertEqual([s['stop'] for s in g.held()], ['ROLLED BACK'])
+                self.assertIn('runner-updater retry hz-docker', g.p.updater('status').stdout)
+                g.plant('core/r1.jq', real)                  # Install step 3 brings its core/ (the real R1)
+                if not row.startswith('control'):            # the release before's image/: another recipe
+                    rec = g.p.recipe()
+                    with open(os.path.join(g.p.build, 'image', 'Dockerfile'), 'a') as f:
+                        f.write('# the release before (a substitute: another recipe)\n')
+                    self.assertNotEqual(g.p.recipe(), rec, 'the premise: another recipe')
+                lines = readme_lines(self)
+                self.assertEqual(lines[R1_RETRY], ('RS_USER', 'retry hz-docker'))
+                g.p.clock(plus=600)
+                r = g.p.updater(*lines[R1_RETRY][1].split())
+                self.assertEqual(r.returncode, 0, r.stdout[-3000:] + r.stderr)
+                self.assertEqual(g.fam().get('rejected', []), [])
+                self.assertEqual(g.held(), [], 'retry ends the STOP')
+                r = g.pass_()
+                if row.startswith('control'):
+                    self.assertIn('runner-updater: pass: switched hz-docker to %s: it runs %s' % (V, ref(NEW)),
+                                  r.stdout)
+                    self.assertEqual(g.p.images(), [ref(NEW)] * 2)
+                    self.assertEqual(len(g.ups()), 2)
+                    continue
+                self.assertTrue(g.due_line(r).startswith(NOT + "it waits for root's build of runner %s (" % V), r.stdout)
+                self.assertEqual(g.p.images(), [ref(OLD)] * 2)
+                self.assertEqual(len(g.ups()), 1, 'a pass switched again: ' + r.stdout[-3000:])
 
 
 if __name__ == '__main__':
