@@ -14,7 +14,8 @@ names the five files to upload; a renderer or a template changed in the checkout
 asset; a template the renderer refuses, a rendered line that bash 5 does not parse (one bash 3.2 does parse, inside
 $(...)), and a line that no bash parses each fail the build with its reason and leave no linux-install-line.txt and no
 SHA256SUMS; BASH_ENV does not reach the renderer (-p); a renderer of the tarball that exits 0 but prints nothing, two
-lines, a line and a NUL byte, another sha256, another URL or a stray @ builds nothing; BASHOPTS=extglob does not hide a parse error, neither in
+lines, a line and a NUL byte, a line ending in CR LF, a byte above ASCII, another sha256, another URL or a stray @
+builds nothing; a BASH_ENV that answers the bash version probe does not make /bin/bash 3.2 count as bash 5; BASHOPTS=extglob does not hide a parse error, neither in
 the line nor in a script of linux-docker/ (the syntax rule), each with a control that the injection reaches a plain
 `bash -n`.
 
@@ -155,7 +156,7 @@ class Build(unittest.TestCase):
         write(plist, 'zzz-no-such-value\n')
         r = subprocess.run([ZSH, '-f', os.path.join(self.repo, 'tools', 'release-check'), '--build', self.tag,
                             '--private-list', plist, '--out', self.out, '--softnet-tarball', self.softnet],
-                           env=env, cwd=self.repo, capture_output=True, text=True, timeout=600)
+                           env=env, cwd=self.repo, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=600)
         self.assertIn('release-check: checking ', r.stdout, r.stderr)    # it ran
         return r
 
@@ -286,6 +287,28 @@ class Build(unittest.TestCase):
     def test_a_line_and_a_nul_byte_builds_nothing(self):
         # a good line, then a NUL and more: zsh's read stops at the NUL, so only the size sees the rest
         self.bad_renderer('printf "%s\\n\\0: more\\n" "$out"', 'not ONE printable line')
+
+    def test_a_line_ending_in_cr_lf_builds_nothing(self):
+        # fix 2 (fix review P2-1): the printable class, not only "no newline" (a CR is no newline)
+        self.bad_renderer('printf "%s\\r\\n" "$out"', 'not ONE printable line')
+
+    def test_a_line_with_a_byte_above_ascii_builds_nothing(self):
+        self.bad_renderer('printf "%s\\200\\n" "$out"', 'not ONE printable line')
+
+    def test_bash_env_does_not_fake_the_bash_version(self):
+        # fix 2 (fix review P3-1): the version probe runs with -p, so a BASH_ENV cannot make bash 3.2 read as bash 5
+        os.unlink(os.path.join(self.stubs, 'bash'))
+        os.symlink('/bin/bash', os.path.join(self.stubs, 'bash'))
+        benv = os.path.join(self.d, 'fake-version.sh')
+        write(benv, 'echo "503 5.3.99"; exit 0\n')
+        # stdin /dev/null, as in build(): with a socket on stdin bash 3.2 takes itself for an sshd child and skips
+        # BASH_ENV (measured), so the injection would depend on where the cells run
+        probe = subprocess.run(['/bin/bash', '-c', 'echo real'], env={'BASH_ENV': benv, 'PATH': '/usr/bin:/bin'},
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        self.assertEqual(probe.stdout, '503 5.3.99\n', 'the injection does not work: BASH_ENV did not answer the probe')
+        out = self.build(extra_env={'BASH_ENV': benv}).stdout.splitlines()
+        self.assertNotIn('5.3.99', '\n'.join(out), 'the faked version was taken')
+        self.assertTrue([l for l in out if l.startswith('RED syntax (linux-docker): partial, bash 3.2 only')], out)
 
     def test_a_line_with_another_sha256_builds_nothing(self):
         self.bad_renderer('printf "%%s\\n" "${out//$3/%s}"' % ('0' * 64), "the tarball's URL and sha256")

@@ -160,15 +160,16 @@ T=$work/tree
 # ---- syntax, plist
 errl() { local -a e; e=("${(@f)$(<$work/err)}"); REPLY=${e[1]#$T/} }   # the first line zsh/sh wrote, without the temp path
 # linux-docker/'s bash: the first bash >= 5.2 on PATH (the header says why); none: /bin/bash, and a RED "partial"
+# (-p: a BASH_ENV cannot answer the version probes for it)
 lbash= lbash_v= lpart=0
 for b in ${(f)"$(whence -ap bash)"}; do
   [[ -n $b ]] || continue
-  bv=$($b -c 'echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] )) ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}' 2>/dev/null) || continue
+  bv=$($b -p -c 'echo $(( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] )) ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}.${BASH_VERSINFO[2]}' 2>/dev/null) || continue
   [[ $bv =~ '^([0-9]+) ([0-9.]+)$' ]] && (( match[1] >= 502 )) || continue
   lbash=$b lbash_v=$match[2]; break
 done
 if [[ -n $lbash ]]; then print -r -- "release-check: linux-docker/'s bash scripts: parsed with $lbash (bash $lbash_v)"
-else lbash_v=$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}' 2>/dev/null); fi
+else lbash_v=$(/bin/bash -p -c 'echo ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}' 2>/dev/null); fi
 scripts=()
 for f in $files; do
   p=$T/$f
