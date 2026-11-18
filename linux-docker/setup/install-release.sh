@@ -16,11 +16,17 @@
 #   ~/build untouched, the staging removed, `REFUSE <tag>: ...`, exit 1.
 # THE ROLE (X-1): the user it runs as must be the host config's RUN_USER or RS_USER (never root; the line refuses root
 #   before it downloads anything).
-# THE INSTALL LOCK (Y-1): ~/.local/state/runner-updater/install.lock, flock -n on fd 7, taken FIRST and held to the
-#   end (no child inherits it): held -> `REFUSE <tag>: another install runs`, nothing changed. So one user's two runs of
-#   a line (an ssh drop, then a retry while the first still downloads) never share a staging folder. Its folders and
-#   the lock file get THE MODES of the user's role before it is opened (runner-release.sh's rr_modes, the ONE place,
-#   which rr_lock runs too: RUN_USER's folders 0710, RS_USER's 0700, the lock 0600), also when a refusal follows.
+# THE INSTALL LOCK (Y-1): ~/.local/state/runner-updater/install.lock, flock -n on fd 7, held to the end (the updater's
+#   pass and status do not inherit it). THE LINE takes it, before its download (W4 fix round 2, codex r2 F1): a run of
+#   the line by the same user while another one downloads, unpacks or installs (an ssh drop, then a retry) is refused
+#   there, `REFUSE <tag>: another install runs`, nothing downloaded, so it never removes the files of a live run (the
+#   leftovers below are of runs that are gone) and never shares a staging folder. The line execs this file with fd 7
+#   open on that lock: it keeps that open (no second open, which would be refused, or a close, which would free the
+#   lock), and its `flock -n 7` on the open the lock is held by keeps the lock as it is (the same open, the same kind
+#   of lock). Run without that fd (no line), it opens the lock and takes it here. The line makes the lock's missing
+#   folders 0700 and the lock 0600 before it opens it; the folders and the lock file then get THE MODES of the user's
+#   role here (runner-release.sh's rr_modes, the ONE place, which rr_lock runs too: RUN_USER's folders 0710, RS_USER's
+#   0700, the lock 0600), also when a refusal follows.
 # THE HEAL (X-3): a cut between the switch's two renames leaves no ~/build and the old tree as the newest
 #   ~/build.prev.*: the run moves that one back first (under the updater lock too) and says HEALED. Then every
 #   ~/build.new.* (the staging of a cut run; only an install makes one) is removed, and so is every ~/.release-dl.* and
@@ -121,7 +127,7 @@ NEXT=()
 # THE INSTALL LOCK (the header): THE MODES first (rr_modes: the folders, the updater lock and install.lock)
 ILOCK=$SD/install.lock
 rr_modes "$ROLE" install.lock || refuse "cannot give $SD and its locks THE MODES (runner-release.sh): nothing changed"
-exec 7>> "$ILOCK" || refuse "cannot open $ILOCK: nothing changed"
+[ /dev/fd/7 -ef "$ILOCK" ] || exec 7>> "$ILOCK" || refuse "cannot open $ILOCK: nothing changed"   # the line's: kept
 flock -n 7 || refuse "another install runs (it holds $ILOCK): nothing changed"
 
 locks() {   # the updater lock (fd 9), then, as RS_USER, pool-image.sh's (fd 8): each held -> REFUSE

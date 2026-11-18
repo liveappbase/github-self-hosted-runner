@@ -38,6 +38,9 @@ Items (each cell's docstring names its own; MUTANT names the change that turns i
   lock 0600 and its folders the role's modes after an early refusal (opus F2); a killed run's download and unpack
   removed by the next run (opus F3); a file the release adds to INSTALLS named (opus F4); the README names the first
   release with the line by its asset (opus F6).
+- Fix round 2 (build review r2, codex F1): the line takes the install lock before its download and the installer keeps
+  it, so a run while another downloads or unpacks is refused by the line and removes nothing of the live run; a run
+  that was killed leaves files the next run removes.
 (Named for its CI part, test_[c-jv-z]*.py: .github/workflows/release-check.yml.)
 """
 import hashlib
@@ -935,7 +938,11 @@ class Switch(unittest.TestCase):
         Fix round 1 (opus r1 F3): the server holds the first run's download until the cell lets it go (a gate, not a
         time), and while it waits, after the second run's REFUSE, the first run's own unpack is still there: the second
         run removed no leftover, because it was refused before that step. MUTANT: the leftovers removed before the
-        install lock -> the first run's unpack is gone (red)."""
+        install lock -> the first run's unpack is gone (red). Fix round 2 (codex r2 F1): the LINE takes the install
+        lock before its download and the installer keeps it, so the second run is refused by the line, with nothing
+        downloaded (its tarball is not asked for); a second run that is not refused would get its runscaler download at
+        once. MUTANT: the installer releases the lock before the switch -> the second run goes on and removes the
+        first's unpack (red)."""
         h = Host(self)
         rel = h.release('v0.3.0')
         h.seed(h.run)
@@ -949,6 +956,8 @@ class Switch(unittest.TestCase):
         h.hub.arrived[RS_PATH % '0.22.0'] = ev
         p1 = h.start(h.rs, rel)
         self.assertTrue(ev.wait(120), 'the first run never reached its download')
+        h.serve(RS_PATH % '0.22.0', RSCALER)       # a second run that is not refused gets its download at once
+        asked = h.hub.paths().count(rel.path)
         p2 = h.start(h.rs, rel)
         o2, _ = p2.communicate(timeout=300)
         self.assertIsNone(p1.poll(), 'the premise: the first run still waits in its download')
@@ -960,9 +969,137 @@ class Switch(unittest.TestCase):
         self.assertEqual(p2.returncode, 1, o2)
         lock = os.path.join(h.home(h.rs), '.local', 'state', 'runner-updater', 'install.lock')
         self.assertEqual(o2.strip().splitlines()[-1], 'REFUSE v0.3.0: another install runs (it holds %s): nothing '
-                                                      'changed' % lock, o2)
+                                                      'downloaded' % lock, o2)
+        self.assertEqual(h.hub.paths().count(rel.path), asked, 'the second run downloaded the tarball')
         h.installed(h.rs, rel, dl=RS_DL)
         self.assertEqual(h.leftovers(h.rs), [])
+
+    def gated(self, where, role):
+        """Run B of the line, as ROLE's user, held by a GATE in its tarball download (`download`: the server holds the
+        answer) or in its unpack (`unpack`: the cells' tar stops at its first -x until the cell lets it go), before the
+        installer runs. Returns (host, user, release, B, its lock path, release: the function that lets B go). A
+        request for the tarball after B's is answered at once (so a run A of the unfixed line does not wait)."""
+        h = Host(self)
+        rel = h.release('v0.3.0')
+        h.seed(h.run)
+        u = h.run
+        if role == 'rs':
+            h.line(h.run, rel, rc=0)
+            h.seed(h.rs)
+            h.settle(h.rs, rel)
+            u = h.rs
+        body = h.hub.routes[rel.path][1]
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        mark = os.path.join(h.root, 'updater', 'tar.stopped')
+        go = os.path.join(h.root, 'updater', 'tar.go')
+        if where == 'download':
+            h.serve(rel.path, body, delay=gate)
+            h.hub.arrived[rel.path] = threading.Event()
+            there = h.hub.arrived[rel.path].is_set
+        else:
+            h.write(os.path.join(h.root, 'stubs', 'tar'),
+                    '#!/bin/bash\ncase " $* " in *" -xzf "*) if [ ! -e %s ]; then : > %s; until [ -e %s ]; do sleep 0.05; '
+                    'done; fi ;; esac\nexec /usr/bin/tar "$@"\n' % (mark, mark, go), 0o755)
+            self.addCleanup(lambda: os.path.isdir(h.root) and open(go, 'a').close())
+            there = lambda: os.path.exists(mark)
+        b = h.start(u, rel)
+        for _ in range(2400):
+            if there():
+                break
+            time.sleep(0.05)
+        else:
+            self.fail('run B never reached its %s' % where)
+        h.serve(rel.path, body)
+
+        def release():
+            gate.set()
+            open(go, 'a').close()
+        lock = os.path.join(h.home(u), '.local', 'state', 'runner-updater', 'install.lock')
+        return h, u, rel, b, lock, release
+
+    def test_r2_a_run_while_another_downloads_or_unpacks_is_refused_by_the_line_and_the_other_finishes(self):
+        """codex r2 F1 (fix round 2): run B of the line is held in its tarball download, then in its unpack (before
+        its installer runs); run A of the same line starts then, as RUN_USER and as RS_USER. A is REFUSEd `another
+        install runs` by the line, before it downloads anything (no request for the tarball); B's download and unpack
+        are untouched (the same files, the same inode); B, let go, is DONE, and ~/build is the release's whole tree,
+        with no leftover. The control (the next cell): B killed while it is held, then a retry removes B's files. RED on
+        e3dfe25: the line took no lock before the installer, so A downloaded, unpacked, took the free install lock and
+        removed B's files as a killed run's leftovers. MUTANT: the template without the lock -> red; the installer
+        taking the lock again on an open of its own -> every run refused (red)."""
+        for where in ('download', 'unpack'):
+            for role in ('run', 'rs'):
+                with self.subTest(where=where, role=role):
+                    h, u, rel, b, lock, release = self.gated(where, role)
+                    before = h.leftovers(u)
+                    want = ['.release-dl.'] + (['.release-unpack.'] if where == 'unpack' else [])
+                    self.assertEqual(sorted(n[:len(n) - 8] for n in before), sorted(want),
+                                     'the premise: B\'s own files: %r' % before)
+                    ino = {n: os.lstat(os.path.join(h.home(u), n)).st_ino for n in before}
+                    asked = h.hub.paths().count(rel.path)
+                    a = h.line(u, rel, rc=1)
+                    self.assertEqual(finals(a), ['REFUSE v0.3.0: another install runs (it holds %s): nothing '
+                                                 'downloaded' % lock], a.stdout + a.stderr)
+                    self.assertEqual(h.hub.paths().count(rel.path), asked, 'run A downloaded the tarball')
+                    self.assertEqual(h.leftovers(u), before, 'run A changed B\'s files')
+                    self.assertEqual({n: os.lstat(os.path.join(h.home(u), n)).st_ino for n in before}, ino)
+                    self.assertIsNone(b.poll(), 'the premise: B still waits in its %s' % where)
+                    release()
+                    o, _ = b.communicate(timeout=300)
+                    self.assertEqual((b.returncode, o.strip().splitlines()[-1]),
+                                     (0, 'DONE v0.3.0: nothing else to do'), o)
+                    h.installed(u, rel, dl=RS_DL if role == 'rs' else None)
+                    self.assertEqual(h.leftovers(u), [], o)
+
+    def test_r2_the_control_a_run_killed_while_it_downloads_or_unpacks_leaves_files_the_retry_removes(self):
+        """codex r2 F1's control (fix round 2): run B, held as in the cell before, is SIGKILLed (its process group: an
+        OOM, a reboot); its files stay. The retry of the line takes the free install lock, removes them (`OK   removed
+        ~/.release-dl.*`, and the unpack's), and is DONE with no leftover: the lock the line takes keeps nothing of a
+        run that is gone. MUTANT: no removal of the line's leftovers -> they stay (red)."""
+        for where in ('download', 'unpack'):
+            for role in ('run', 'rs'):
+                with self.subTest(where=where, role=role):
+                    h, u, rel, b, lock, release = self.gated(where, role)
+                    left = h.leftovers(u)
+                    os.killpg(b.pid, signal.SIGKILL)
+                    b.communicate(timeout=60)
+                    self.assertEqual(h.leftovers(u), left, 'the premise: the kill left B\'s files')
+                    release()
+                    r = h.line(u, rel, rc=0)
+                    self.assertEqual(last(r), 'DONE v0.3.0: nothing else to do', r.stdout)
+                    for n in left:
+                        self.assertIn('OK   removed ~/%s, left by a run of a line that was cut' % n, r.stdout)
+                    self.assertEqual(h.leftovers(u), [], r.stdout)
+                    h.installed(u, rel, dl=RS_DL if role == 'rs' else None)
+
+    def test_r2_the_installer_keeps_the_line_s_lock_it_is_never_free_between_the_line_and_the_installer(self):
+        """codex r2 F1 (fix round 2): the installer keeps the open the line took the install lock on (fd 7): at its
+        `flock -n 7`, a FRESH open of install.lock cannot take the lock (it is held), as RUN_USER and as RS_USER. The
+        cells' flock (a stub on PATH that runs the real one) records, for each `flock -n 7`, whether a fresh open could
+        take the lock just then: the line's take finds it free, the installer's finds it held. RED: an installer that
+        opens the lock again on fd 7 (the line's open closed: the lock free until it takes it again, the e3dfe25 open)
+        -> `free` at the installer's (red); one that takes it on an open of its own -> refused (red)."""
+        for role in ('run', 'rs'):
+            with self.subTest(role=role):
+                h = Host(self)
+                rel = h.release('v0.3.0')
+                h.seed(h.run)
+                u = h.run
+                if role == 'rs':
+                    h.line(h.run, rel, rc=0)
+                    h.seed(h.rs)
+                    h.settle(h.rs, rel)
+                    u = h.rs
+                log = os.path.join(h.root, 'updater', u + '.flock7')
+                h.write(os.path.join(h.root, 'stubs', 'flock'),
+                        '#!/bin/bash\nif [ "$*" = "-n 7" ]; then\n  /usr/bin/flock -n -E 75 '
+                        '"$HOME/.local/state/runner-updater/install.lock" true 7>&- < /dev/null; rc=$?\n'
+                        '  case $rc in 0) w=free ;; 75) w=held ;; *) w=error$rc ;; esac\n  echo "$w" >> %s\nfi\n'
+                        'exec /usr/bin/flock "$@"\n' % log, 0o755)
+                r = h.line(u, rel, rc=0)
+                self.assertEqual(last(r), 'DONE v0.3.0: nothing else to do', r.stdout)
+                with open(log) as f:
+                    self.assertEqual(f.read().split(), ['free', 'held'], 'the line\'s take, then the installer\'s')
 
     def test_f3_a_killed_run_leaves_its_download_or_unpack_and_the_next_run_removes_them(self):
         """opus r1 F3 (fix round 1; its probe p4 measured the SIGKILL shape): a run killed (SIGKILL: an OOM, a reboot)
