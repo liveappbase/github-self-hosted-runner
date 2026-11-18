@@ -20,7 +20,8 @@
 # Rules (the reasons: docs/design.md, "The release gate"):
 #   syntax         a zsh script fails `zsh -n`; a bash script (a #! line that names bash) fails `bash -n`; any other #!
 #                  script fails `sh -n`. A bash script of linux-docker/ runs under the Linux host's bash 5, so it is
-#                  parsed with the first bash >= 5.2 on PATH, named in the output: an older bash (macOS's /bin/bash is
+#                  parsed (`-p -n`: no BASHOPTS, SHELLOPTS or exported function reaches the parse) with the first bash
+#                  >= 5.2 on PATH, named in the output: an older bash (macOS's /bin/bash is
 #                  3.2) does not parse inside $(…) until it runs it, so it passes a syntax error there. With no such
 #                  bash, they are parsed with /bin/bash and the finding "syntax (linux-docker): partial, bash 3.2 only"
 #                  is RED: that check could not fully run. Any other bash script runs under macOS's /bin/bash: parsed
@@ -179,7 +180,7 @@ for f in $files; do
                 /bin/zsh -f -n $p 2> $work/err || { errl; RED syntax "$f: zsh -n fails: $REPLY" } ;;
     ('#!'*bash*) scripts+=($f)
                 if [[ $f == linux-docker/* && -n $lbash ]]; then
-                  $lbash -n $p 2> $work/err || { errl; RED syntax "$f: bash $lbash_v -n fails: $REPLY" }
+                  $lbash -p -n $p 2> $work/err || { errl; RED syntax "$f: bash $lbash_v -n fails: $REPLY" }
                 else
                   [[ $f == linux-docker/* ]] && lpart=1
                   /bin/bash -n $p 2> $work/err || { errl; RED syntax "$f: bash -n fails: $REPLY" }
@@ -651,14 +652,22 @@ iline=${iline//@VERSION@/$version}
 
 # linux-install-line.txt (run on a Linux host as `ssh USER@HOST 'bash -s' < linux-install-line.txt`): the ONE renderer,
 # tools/render-linux-line, renders linux-docker/setup/install-release.run-line, both AS UNPACKED, with `bash -p` (no
-# BASH_ENV, no exported function) under the bash >= 5.2 that parsed linux-docker/; then that bash parses the rendered
-# file (-n: it is never run here). A refusal (a template the tarball lacks too) or a parse error builds no line and no
-# SHA256SUMS.
+# BASH_ENV, no exported function) under the bash >= 5.2 that parsed linux-docker/. The line it printed must be ONE
+# printable line ending in a newline that holds the tarball's URL and sha256 and no @ but in "$@", and that bash must
+# parse it (`-p -n`: no BASHOPTS; it is never run here). A refusal (a template the tarball lacks too), a line not of
+# that shape or a parse error builds no line and no SHA256SUMS.
 lrend=$work/u/$version/tools/render-linux-line ltpl=$work/u/$version/linux-docker/setup/install-release.run-line
-$lbash -p $lrend $ltpl https://github.com/$REPO_SLUG/releases/download/$tag/$name $tsha $version $tag \
+lurl=https://github.com/$REPO_SLUG/releases/download/$tag/$name
+$lbash -p $lrend $ltpl $lurl $tsha $version $tag \
   > $work/linux-line 2> $work/err \
   || { errl; bfail "linux-install-line: tools/render-linux-line refused it: ${REPLY//$work\/u\//}" }
-$lbash -n $work/linux-line 2> $work/err \
+lraw=
+IFS= read -r -d '' lraw < $work/linux-line
+lsize=$(/usr/bin/wc -c < $work/linux-line) && (( lsize == ${#lraw} )) && [[ $lraw =~ $'^[[:print:]]+\n$' ]] \
+  || bfail "linux-install-line: the renderer's output is not ONE printable line ending in a newline"
+[[ $lraw == *$lurl* && $lraw == *$tsha* ]] || bfail "linux-install-line: the line does not hold the tarball's URL and sha256"
+[[ ${lraw//'"$@"'/} != *@* ]] || bfail "linux-install-line: the line holds an @ that is not in \"\$@\""
+$lbash -p -n $work/linux-line 2> $work/err \
   || { errl; bfail "linux-install-line: bash $lbash_v -n fails: ${REPLY//$work\//}" }
 
 print -r -- $iline > $out/install-line.txt || bfail "cannot write install-line.txt"

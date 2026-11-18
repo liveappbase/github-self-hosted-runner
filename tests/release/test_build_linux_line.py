@@ -3,15 +3,20 @@
 --build renders linux-install-line.txt with the ONE renderer, tools/render-linux-line, from the release tarball AS
 UNPACKED (the renderer and its template linux-docker/setup/install-release.run-line both from the tarball, never from
 the checkout), as `bash -p` under the first bash >= 5.2 on PATH, with the tarball's URL, its sha256, the VERSION and the
-tag. It parses the rendered file with that bash (`bash -n`; it never runs it), writes it beside the other assets and
-lists it in SHA256SUMS. A refused template or a line that does not parse builds no line and no SHA256SUMS.
+tag. It checks the rendered file (ONE printable line ending in a newline, the tarball's URL and sha256 in it, no @ but
+in "$@") and parses it with that bash (`bash -p -n`; it never runs it), then writes it beside the other assets and
+lists it in SHA256SUMS. A refused template, a line not of that shape or a line that does not parse builds no line and
+no SHA256SUMS.
 
 Pinned here: the asset is byte for byte what the renderer of the unpacked tarball prints for those four values (a
 render made here, independently); SHA256SUMS holds exactly the five lines, each the sha256 of its file; the output
 names the five files to upload; a renderer or a template changed in the checkout after the tag does not reach the
 asset; a template the renderer refuses, a rendered line that bash 5 does not parse (one bash 3.2 does parse, inside
 $(...)), and a line that no bash parses each fail the build with its reason and leave no linux-install-line.txt and no
-SHA256SUMS; BASH_ENV does not reach the renderer (-p).
+SHA256SUMS; BASH_ENV does not reach the renderer (-p); a renderer of the tarball that exits 0 but prints nothing, two
+lines, a line and a NUL byte, another sha256, another URL or a stray @ builds nothing; BASHOPTS=extglob does not hide a parse error, neither in
+the line nor in a script of linux-docker/ (the syntax rule), each with a control that the injection reaches a plain
+`bash -n`.
 
 The release-check that runs is a copy of this tree's, in a temporary repository that holds this tree's files but core/
 and tests/ (so no jq row runs), committed once and tagged. Its softnet tarball is planted: the copy's softnet literals
@@ -261,6 +266,59 @@ class Build(unittest.TestCase):
     def test_a_line_no_bash_parses_builds_nothing(self):
         self.template(self.real_template().rstrip('\n') + '; if\n')
         self.failed(self.build(), 'linux-install-line: bash ')
+
+    # ---- the rendered line is checked before anything is written (fix 1: review r1 P2-1): a renderer of the tarball
+    # that exits 0 with a wrong line builds nothing. Each planted renderer wraps the real one (tools/render-linux-line.real)
+    WRAPPER = '#!/bin/bash\nout=$(bash -p "$0.real" "$@") || exit 1\n%s\n'
+
+    def bad_renderer(self, tail, why):
+        with open(os.path.join(REPO, RENDERER)) as f:
+            write(os.path.join(self.repo, RENDERER + '.real'), f.read(), 0o755)
+        write(os.path.join(self.repo, RENDERER), self.WRAPPER % tail, 0o755)
+        self.failed(self.build(), why)
+
+    def test_a_renderer_that_prints_nothing_builds_nothing(self):
+        self.bad_renderer('exit 0', 'not ONE printable line')
+
+    def test_a_renderer_that_prints_two_lines_builds_nothing(self):
+        self.bad_renderer('printf "%s\\n%s\\n" "$out" "$out"', 'not ONE printable line')
+
+    def test_a_line_and_a_nul_byte_builds_nothing(self):
+        # a good line, then a NUL and more: zsh's read stops at the NUL, so only the size sees the rest
+        self.bad_renderer('printf "%s\\n\\0: more\\n" "$out"', 'not ONE printable line')
+
+    def test_a_line_with_another_sha256_builds_nothing(self):
+        self.bad_renderer('printf "%%s\\n" "${out//$3/%s}"' % ('0' * 64), "the tarball's URL and sha256")
+
+    def test_a_line_with_another_url_builds_nothing(self):
+        self.bad_renderer('printf "%s\\n" "${out//$2/https://example.invalid/x.tar.gz}"', "the tarball's URL and sha256")
+
+    def test_a_line_with_a_stray_at_builds_nothing(self):
+        self.bad_renderer('printf "%s; : @HOST@\\n" "$out"', 'an @ that is not')
+
+    # ---- BASHOPTS does not reach the parse (fix 1: review r1 P2-2): both bash -n run with -p
+    EXTGLOB = 'case x in +(x)) : ;; esac'
+
+    def extglob_injection_works(self):
+        p = os.path.join(self.d, 'probe.sh')
+        write(p, self.EXTGLOB + '\n')
+        rc = [subprocess.run([BASH, '-n', p], capture_output=True, env=dict(env, PATH='/usr/bin:/bin')).returncode
+              for env in ({'BASHOPTS': 'extglob'}, {})]
+        self.assertEqual(rc[0], 0, 'the injection does not work: BASHOPTS=extglob does not reach bash -n')
+        self.assertNotEqual(rc[1], 0, 'the probe parses without extglob: it decides nothing')
+
+    def test_bashopts_does_not_hide_a_parse_error_in_the_line(self):
+        self.extglob_injection_works()
+        self.template(self.real_template().rstrip('\n') + '; ' + self.EXTGLOB + '\n')
+        self.failed(self.build(extra_env={'BASHOPTS': 'extglob'}), 'linux-install-line: bash ')
+
+    def test_bashopts_does_not_hide_a_parse_error_in_linux_docker(self):
+        self.extglob_injection_works()
+        write(os.path.join(self.repo, 'linux-docker', 'probe-extglob.sh'), '#!/bin/bash\n' + self.EXTGLOB + '\n', 0o755)
+        r = self.build(extra_env={'BASHOPTS': 'extglob'})
+        self.assertEqual([l for l in r.stdout.splitlines() if l.startswith('RED syntax: linux-docker/probe-extglob.sh: bash ')
+                          and ' -n fails' in l], [l for l in r.stdout.splitlines() if l.startswith('RED ')], r.stdout)
+        self.assertTrue([l for l in r.stdout.splitlines() if l.startswith('RED ')], 'the probe was not RED')
 
     def test_a_line_bash_5_does_not_parse_builds_nothing(self):
         # bash 3.2 does not parse inside $(...) until it runs it, so it passes this line; bash 5 does not
