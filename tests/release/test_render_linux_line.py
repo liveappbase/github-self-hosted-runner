@@ -5,8 +5,9 @@
 --build and the linux-docker cells both call this file, so the shipped line and the tested line come from one piece of
 code. Pinned here: the output for good input (a final tag and an rc tag), each value's strict form (so no value can
 carry an @, a quote, a space or a `&`, which bash 5.2's patsub_replacement would expand), each template refusal (a
-placeholder missing, not exactly one line, a control or non-ASCII byte, an @ outside the four placeholders), and the
-argument count. Every cell runs under macOS's /bin/bash 3.2 (release-check parses tools/ with it) and under the first
+placeholder missing, not exactly one line, a control or non-ASCII byte, an @ outside the four placeholders and the
+exact `"$@"` that hands the line's arguments on), and the argument count. Each refusal cell checks that the REFUSE line
+names the value or the template it made bad, so a cell cannot pass because another part of its input was refused. Every cell runs under macOS's /bin/bash 3.2 (release-check parses tools/ with it) and under the first
 bash >= 5.2 on PATH (release-check --build runs the renderer with it; the Linux hosts run bash 5). With no such bash,
 the 5.x cells FAIL: a check that cannot run is never green."""
 import os
@@ -21,7 +22,8 @@ RENDER = os.path.join(REPO, 'tools', 'render-linux-line')
 SLUG = 'owner/repo'
 SHA = '0123456789abcdef' * 4
 TEMPLATE = ('set -eu; u=@URL@; h=@SHA@; v=@VERSION@; t=@TAG@; echo "$u $h $v $t"; '
-            'test "$h" = @SHA@\n')
+            'test "$u $h $v $t" = "@URL@ @SHA@ @VERSION@ @TAG@"; printf "[%s]" "$@"; echo\n')
+VALUES = ('@URL@', '@SHA@', '@VERSION@', '@TAG@')
 
 
 def url(tag, slug=SLUG):
@@ -43,6 +45,7 @@ def bash52():
 
 class Base(unittest.TestCase):
     BASH = None   # set by the subclasses
+    LOCALE = 'en_US.UTF-8'
 
     def setUp(self):
         self.assertIsNotNone(self.BASH, 'no bash >= 5.2 on PATH: these cells cannot run (brew install bash)')
@@ -56,7 +59,8 @@ class Base(unittest.TestCase):
         return p
 
     def run_render(self, *args):
-        r = subprocess.run([self.BASH, RENDER] + list(args), capture_output=True, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'en_US.UTF-8'})
+        r = subprocess.run([self.BASH, '-p', RENDER] + list(args), capture_output=True,
+                           env={'PATH': '/usr/bin:/bin', 'LC_ALL': self.LOCALE})
         return r.returncode, r.stdout, r.stderr.decode('utf-8', 'replace')
 
     def ok(self, template, u, sha, version, tag):
@@ -71,6 +75,14 @@ class Base(unittest.TestCase):
         lines = err.splitlines()
         self.assertEqual(len(lines), 1, '%s: stderr is not ONE line: %r' % (why, err))
         self.assertTrue(lines[0].startswith('REFUSE: '), '%s: stderr is not a REFUSE line: %r' % (why, err))
+        # refused for THIS reason: the line names the value (or the template) that the cell made bad, so a cell
+        # cannot pass because something else in its input was refused
+        kw = why.split(' ')[0] if why.split(' ')[0] in ('URL', 'SHA', 'VERSION', 'TAG') else 'template'
+        if kw == 'template':
+            self.assertRegex(lines[0], r'^REFUSE: (the|cannot read the) template ', '%s: refused for another reason' % why)
+        else:
+            self.assertTrue(lines[0].startswith('REFUSE: %s is not ' % kw), '%s: refused for another reason: %r'
+                            % (why, err))
 
 
 class Cells:
@@ -81,19 +93,34 @@ class Cells:
             .replace('@TAG@', 'v1.2.3')
         self.assertEqual(out, want)
         self.assertEqual(out.count('\n'), 1)
-        self.assertNotIn('@', out)
+        for ph in VALUES:
+            self.assertNotIn(ph, out)
+        self.assertEqual(out.replace('"$@"', '').count('@'), 0, 'no @ but the "$@" of the template')
 
     def test_rc_tag(self):
         out = self.ok(TEMPLATE, url('v0.2.0-rc.10'), SHA, '0.2.0', 'v0.2.0-rc.10')
         self.assertIn('t=v0.2.0-rc.10;', out)
         self.assertIn('v=0.2.0;', out)
-        self.assertEqual(out.count(SHA), 2, 'every occurrence of a placeholder is replaced')
+        for value in (url('v0.2.0-rc.10'), SHA, '0.2.0', 'v0.2.0-rc.10'):
+            self.assertGreaterEqual(out.count(value), 2, 'every occurrence of a placeholder is replaced: %s' % value)
+        for ph in VALUES:
+            self.assertNotIn(ph, out)
 
     def test_the_line_runs(self):
-        """The rendered line is a bash script: it runs, and prints the four values."""
+        """The rendered line is a bash script: run as `bash -s -- FLAGS` (the README's form), it prints the four values,
+        its own test of them passes, and "$@" hands the flags on unchanged (Y-8)."""
         out = self.ok(TEMPLATE, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3')
-        r = subprocess.run([self.BASH, '-s'], input=out.encode(), capture_output=True)
-        self.assertEqual((r.returncode, r.stdout.decode()), (0, '%s %s 1.2.3 v1.2.3\n' % (url('v1.2.3'), SHA)))
+        r = subprocess.run([self.BASH, '-s', '--', '--older', 'a b'], input=out.encode(), capture_output=True)
+        self.assertEqual((r.returncode, r.stdout.decode()),
+                         (0, '%s %s 1.2.3 v1.2.3\n[--older][a b]\n' % (url('v1.2.3'), SHA)))
+
+    def test_dollar_at(self):
+        """"$@" is the one @ a template may hold besides the four placeholders (Y-8): it is kept byte for byte."""
+        t = TEMPLATE.replace('"$@"', 'x')
+        for line, n in [(t, 0), (TEMPLATE, 1), (TEMPLATE.replace('echo\n', 'exec true "$@"\n'), 2)]:
+            with self.subTest(n=n):
+                out = self.ok(line, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3')
+                self.assertEqual(out.count('"$@"'), n)
 
     # ---- the values' forms
     def test_url_forms(self):
@@ -113,11 +140,19 @@ class Cells:
                 (url('v1.2.3', 'own@er/repo'), 'an @'),
                 (url('v1.2.3', 'own$er/repo'), 'a dollar'),
                 (url('v1.2.3', 'a/b/c'), 'a slug of three parts'),
+                (url('v1.2.3', './repo'), 'an owner of .'),
+                (url('v1.2.3', '../repo'), 'an owner of ..'),
+                (url('v1.2.3', 'owner/.'), 'a repository of .'),
+                (url('v1.2.3', 'owner/..'), 'a repository of ..'),
                 (good + '?x=1', 'a query'),
                 (good + '\n', 'a newline'),
                 ('', 'empty')]:
             with self.subTest(why=why):
                 self.refused(TEMPLATE, bad, SHA, '1.2.3', 'v1.2.3', 'URL ' + why)
+
+    def test_url_dot_repo(self):
+        """control of the . and .. refusals: a repository name may start with a dot (GitHub allows .github)."""
+        self.ok(TEMPLATE, url('v1.2.3', 'owner/.github'), SHA, '1.2.3', 'v1.2.3')
 
     def test_sha_forms(self):
         for bad, why in [(SHA[:-1], '63 hex'), (SHA + '0', '65 hex'), (SHA.upper(), 'upper case'),
@@ -135,7 +170,8 @@ class Cells:
 
     def test_tag_forms(self):
         for bad, why in [('v1.2.4', 'another version'), ('1.2.3', 'no v'), ('v1.2.3-rc.', 'rc with no number'),
-                         ('v1.2.3-rc.1x', 'rc with a letter'), ('v1.2.3-beta.1', 'not rc'), ('v1.2.3-rc.1-rc.2', 'two rcs'),
+                         ('v1.2.3-rc.1x', 'rc with a letter'), ('v1.2.3-rc.0', 'rc 0'),
+                         ('v1.2.3-rc.01', 'rc with a leading zero'), ('v1.2.3-beta.1', 'not rc'), ('v1.2.3-rc.1-rc.2', 'two rcs'),
                          ('v1.2.31', 'a version that starts with the version'), ('v1x2x3', 'dots as a pattern'),
                          ('', 'empty')]:
             with self.subTest(why=why):
@@ -149,7 +185,10 @@ class Cells:
 
     def test_template_other_at(self):
         for extra, why in [('@HOST@', 'another placeholder'), ('a@b', 'a lone @'), ('@URL', 'half a placeholder'),
-                           ('@@SHA@', 'an @ before a placeholder')]:
+                           ('@@SHA@', 'an @ before a placeholder'), ('$@HOST@', 'a $@ before another name'),
+                           ('"$@URL@"', 'a $ before a placeholder'), ('$@', 'an unquoted $@'),
+                           ("'$@'", 'a single-quoted $@'), ('"${@}"', 'the braced form'),
+                           ('"$@@TAG@"', 'a "$@ before a placeholder')]:
             with self.subTest(why=why):
                 self.refused(TEMPLATE.replace('echo', 'echo ' + extra, 1), url('v1.2.3'), SHA, '1.2.3', 'v1.2.3',
                              'template ' + why)
@@ -169,7 +208,10 @@ class Cells:
                 self.refused(data, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3', 'template ' + why)
 
     def test_template_not_a_file(self):
-        for p, why in [(os.path.join(self.d, 'absent'), 'absent'), (self.d, 'a folder')]:
+        unreadable = self.tpl(TEMPLATE)
+        os.chmod(unreadable, 0)
+        self.assertNotEqual(os.geteuid(), 0, 'root reads any file: the unreadable case decides nothing')
+        for p, why in [(os.path.join(self.d, 'absent'), 'absent'), (self.d, 'a folder'), (unreadable, 'unreadable')]:
             with self.subTest(why=why):
                 rc, out, err = self.run_render(p, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3')
                 self.assertEqual((rc, out), (1, b''))
@@ -186,6 +228,18 @@ class Cells:
 
 class Bash32(Base, Cells):
     BASH = '/bin/bash'
+
+
+class Latin1(Base):
+    """The renderer's own LC_ALL=C: under a one-byte locale a Latin-1 letter is [[:print:]] and one character, so only
+    the C locale refuses it. (A system without the locale falls back to C, and this cell then decides nothing.)"""
+    BASH = '/bin/bash'
+    LOCALE = 'en_US.ISO8859-1'
+
+    def test_latin1_byte(self):
+        data = TEMPLATE.encode().replace(b'echo', b'echo \xe9', 1)
+        self.refused(data, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3', 'a Latin-1 letter under a Latin-1 locale')
+        self.ok(TEMPLATE, url('v1.2.3'), SHA, '1.2.3', 'v1.2.3')   # control: the locale itself is no refusal
 
 
 class Bash52(Base, Cells):

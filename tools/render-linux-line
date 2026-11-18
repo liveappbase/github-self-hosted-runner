@@ -3,23 +3,30 @@
 # --build runs it (from the unpacked release, with the template of that release), and the linux-docker cells run it on
 # their own fixture, so the line that ships and the line that is tested come from this one piece of code.
 #
-#   bash tools/render-linux-line TEMPLATE URL SHA VERSION TAG
+#   bash -p tools/render-linux-line TEMPLATE URL SHA VERSION TAG
+#
+# (`-p`: bash then reads no BASH_ENV and imports no exported function, so the caller's shell cannot change the output.)
 #
 # TEMPLATE is linux-docker/setup/install-release.run-line: ONE line of bash (printable ASCII, ending in a newline) that
-# holds each of @URL@, @SHA@, @VERSION@ and @TAG@, and no other @. The line is printed with every occurrence of each
-# placeholder replaced: exit 0. Anything else: one `REFUSE: <why>` line on stderr, NOTHING on stdout, exit 1.
+# holds each of @URL@, @SHA@, @VERSION@ and @TAG@. Its only other @ may be in `"$@"`, exactly so, which hands the
+# line's own arguments on (`bash -s -- --older`). The line is printed with every occurrence of each placeholder
+# replaced: exit 0. Anything else: one `REFUSE: <why>` line on stderr, NOTHING on stdout, exit 1.
+#
+# Why ONE line: the line is run as `ssh user@host 'bash -s' < linux-install-line.txt`, so bash reads the script from
+# stdin. A command on one line that reads stdin (curl, a child bash, ssh) would eat the lines after it, which then
+# never run; a single line is read whole before any of it runs.
 #
 # Each value must have its exact form, so no value can hold an @, a quote, a space, a `$` or a `&` (bash 5.2's
 # patsub_replacement would expand an `&` in a replacement):
 #   VERSION  N.N.N (digits)
-#   TAG      vVERSION or vVERSION-rc.N
+#   TAG      vVERSION or vVERSION-rc.N (N from 1, no leading zero: release-check's tag rule)
 #   SHA      64 lowercase hex: the tarball's sha256
 #   URL      https://github.com/OWNER/REPO/releases/download/TAG/github-self-hosted-runner-TAG.tar.gz
-#            (OWNER and REPO of letters, digits, `.`, `_` and `-`)
+#            (OWNER and REPO of letters, digits, `.`, `_` and `-`, and neither `.` nor `..`)
 # It runs under macOS's /bin/bash 3.2 (release-check parses tools/ with it) and under bash 5.x. It writes no file and
 # runs nothing it reads: it only checks and substitutes. `bash -n` on the result is release-check's step.
 set -u
-export LC_ALL=C
+export LC_ALL=C   # bytes, not the caller's characters: under a one-byte locale a Latin-1 letter would be [[:print:]]
 
 refuse() {
   printf 'REFUSE: %s\n' "$1" >&2
@@ -31,7 +38,7 @@ tpl=$1 url=$2 sha=$3 version=$4 tag=$5
 
 re_version='^[0-9]+\.[0-9]+\.[0-9]+$'
 re_sha='^[0-9a-f]{64}$'
-re_rc='^-rc\.[0-9]+$'
+re_rc='^-rc\.[1-9][0-9]*$'
 re_part='^[A-Za-z0-9._-]+$'
 
 [[ $version =~ $re_version ]] || refuse "VERSION is not of the form N.N.N"
@@ -45,26 +52,30 @@ slug=${url#"$prefix"}
 slug=${slug%"$suffix"}
 owner=${slug%%/*}
 repo=${slug#*/}
-[[ "$prefix$owner/$repo$suffix" == "$url" && $owner =~ $re_part && $repo =~ $re_part ]] \
+[[ "$prefix$owner/$repo$suffix" == "$url" && $owner =~ $re_part && $repo =~ $re_part \
+   && $owner != . && $owner != .. && $repo != . && $repo != .. ]] \
   || refuse "URL is not https://github.com/OWNER/REPO/releases/download/$tag/github-self-hosted-runner-$tag.tar.gz"
 
+# -r first: a redirect from an unreadable file would print bash's own error line next to the REFUSE line
 [[ -f $tpl && -r $tpl ]] || refuse "the template is not a readable file: $tpl"
 size=$(wc -c < "$tpl") || refuse "cannot read the template"
-size=$((size + 0))
 line=
 IFS= read -r line < "$tpl"
 # one line, ending in a newline: the size is that line plus its newline (a NUL, which read drops, or a second line
 # makes it larger; a missing newline makes it smaller)
-[[ -n $line && $size -eq $((${#line} + 1)) ]] || refuse "the template is not ONE non-empty line ending in a newline"
+[[ $size -eq $((${#line} + 1)) ]] || refuse "the template is not ONE line ending in a newline"
 [[ $line =~ ^[[:print:]]+$ ]] || refuse "the template holds a byte that is not printable ASCII"
 for p in @URL@ @SHA@ @VERSION@ @TAG@; do
   [[ $line == *"$p"* ]] || refuse "the template lacks the placeholder $p"
 done
-bare=${line//@URL@/}
+da='"$@"'
+bare=${line//"$da"/}
+[[ $bare != *'$@'* ]] || refuse "the template holds a \$@ that is not exactly \"\$@\""
+bare=${bare//@URL@/}
 bare=${bare//@SHA@/}
 bare=${bare//@VERSION@/}
 bare=${bare//@TAG@/}
-[[ $bare != *@* ]] || refuse "the template holds an @ that is not one of @URL@ @SHA@ @VERSION@ @TAG@"
+[[ $bare != *@* ]] || refuse "the template holds an @ that is not in @URL@ @SHA@ @VERSION@ @TAG@ or \"\$@\""
 
 out=${line//@URL@/$url}
 out=${out//@SHA@/$sha}
