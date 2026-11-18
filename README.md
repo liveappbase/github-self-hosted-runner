@@ -113,6 +113,8 @@ Copy the two lines only from the assets of the release you chose — never from 
    ```
    Each must pass. `verify-asset` binds the file you will paste to the release's attestation.
 
+A Linux host of `linux-docker/` takes one line, `linux-install-line.txt`: check it the same way (add `-p linux-install-line.txt` to the download and `linux-install-line.txt` to the `for` list in step 1, and run `verify-asset` for it in step 2).
+
 `root-line.txt` holds the sha256 of `setup/02-wall.sh`; it must equal the `…/setup/02-wall.sh` line of SHA256SUMS. Never use `shasum -c` on a hash list: it picks the algorithm from the length of each hash.
 
 ## Update

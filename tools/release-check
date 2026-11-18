@@ -6,9 +6,11 @@
 #
 # Run it inside the repository. It checks REV (default HEAD; with --build, TAG): the files of that commit, and every
 # commit reachable from it (each version of each file, and each commit message with its author and committer). With
-# --build, and only after a GREEN check, it builds the four release assets from TAG into DIR (default: a new temporary
-# folder): the tarball (`git archive --prefix=<VERSION>/`), install-line.txt, root-line.txt and SHA256SUMS. It NEVER
-# executes a file of setup/ or a rendered line (`zsh -n`, `bash -n` and `sh -n` only parse).
+# --build, and only after a GREEN check, it builds the five release assets from TAG into DIR (default: a new temporary
+# folder): the tarball (`git archive --prefix=<VERSION>/`), install-line.txt, root-line.txt, linux-install-line.txt and
+# SHA256SUMS. linux-install-line.txt is rendered by the tarball's own tools/render-linux-line, the one file it runs
+# (`bash -p`, under the bash >= 5.2 of the syntax rule). It NEVER executes a file of setup/ or a rendered line (`zsh -n`,
+# `bash -n` and `sh -n` only parse).
 #
 # Output: one "RED <rule>: <what>" line per finding, then "release-check: GREEN" (exit 0) or "release-check: RED, N
 # finding(s)" (exit 1). A usage error: "release-check: usage: …" on stderr, exit 2. A check that could not run is
@@ -647,15 +649,30 @@ iline=${iline//@SHA@/$tsha}
 iline=${iline//@VERSION@/$version}
 [[ $iline != *@* && $iline != *[[:cntrl:]]* ]] || bfail "install-line: an @ is left, or it is not ONE printable line"
 
+# linux-install-line.txt (run on a Linux host as `ssh USER@HOST 'bash -s' < linux-install-line.txt`): the ONE renderer,
+# tools/render-linux-line, renders linux-docker/setup/install-release.run-line, both AS UNPACKED, with `bash -p` (no
+# BASH_ENV, no exported function) under the bash >= 5.2 that parsed linux-docker/; then that bash parses the rendered
+# file (-n: it is never run here). A refusal (a template the tarball lacks too) or a parse error builds no line and no
+# SHA256SUMS.
+lrend=$work/u/$version/tools/render-linux-line ltpl=$work/u/$version/linux-docker/setup/install-release.run-line
+$lbash -p $lrend $ltpl https://github.com/$REPO_SLUG/releases/download/$tag/$name $tsha $version $tag \
+  > $work/linux-line 2> $work/err \
+  || { errl; bfail "linux-install-line: tools/render-linux-line refused it: ${REPLY//$work\/u\//}" }
+$lbash -n $work/linux-line 2> $work/err \
+  || { errl; bfail "linux-install-line: bash $lbash_v -n fails: ${REPLY//$work\//}" }
+
 print -r -- $iline > $out/install-line.txt || bfail "cannot write install-line.txt"
 print -r -- $rline > $out/root-line.txt || bfail "cannot write root-line.txt"
+/bin/cp $work/linux-line $out/linux-install-line.txt || bfail "cannot write linux-install-line.txt"
 sha $out/install-line.txt && isha=$REPLY || bfail "cannot hash install-line.txt"
 sha $out/root-line.txt && rsha=$REPLY || bfail "cannot hash root-line.txt"
-print -rl -- "$tsha  $name" "$isha  install-line.txt" "$rsha  root-line.txt" "$wsha  $version/setup/02-wall.sh" \
-  > $out/SHA256SUMS || bfail "cannot write SHA256SUMS"
+sha $out/linux-install-line.txt && lsha=$REPLY || bfail "cannot hash linux-install-line.txt"
+print -rl -- "$tsha  $name" "$isha  install-line.txt" "$rsha  root-line.txt" "$lsha  linux-install-line.txt" \
+  "$wsha  $version/setup/02-wall.sh" > $out/SHA256SUMS || bfail "cannot write SHA256SUMS"
 print -r -- "release-check: built $tag in $out"
-print -r -- "  upload exactly these four files as the release's assets:"
-print -rl -- "    $out/$name" "    $out/install-line.txt" "    $out/root-line.txt" "    $out/SHA256SUMS"
+print -r -- "  upload exactly these five files as the release's assets:"
+print -rl -- "    $out/$name" "    $out/install-line.txt" "    $out/root-line.txt" "    $out/linux-install-line.txt" \
+  "    $out/SHA256SUMS"
 print -r -- "  SHA256SUMS:"
 /usr/bin/sed 's/^/    /' $out/SHA256SUMS
-print -r -- "  after publishing: download all four and check them before the release is announced (docs/operations.md)"
+print -r -- "  after publishing: download all five and check them before the release is announced (docs/operations.md)"

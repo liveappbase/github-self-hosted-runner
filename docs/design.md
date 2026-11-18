@@ -164,7 +164,7 @@ A re-run after a failure at any step ends in the same state as one clean run.
 
 ## Releases and the trust chain
 
-A release is an annotated tag `v<VERSION>` or `v<VERSION>-rc.N` and a GitHub release with immutable releases on, and four assets: the tarball, `install-line.txt`, `root-line.txt` and `SHA256SUMS` (the hashes of the other three and of `setup/02-wall.sh` as unpacked from the tarball). One command builds all four from the tag. The release notes only point to the assets. Operators copy the lines from the assets of the release they chose. The trust root is the named human maintainers.
+A release is an annotated tag `v<VERSION>` or `v<VERSION>-rc.N` and a GitHub release with immutable releases on, and five assets: the tarball, `install-line.txt`, `root-line.txt`, `linux-install-line.txt` (the Linux host's one line, rendered by the tarball's own `tools/render-linux-line`, the one renderer, which the Linux cells run too) and `SHA256SUMS` (the hashes of the other four and of `setup/02-wall.sh` as unpacked from the tarball). One command builds all five from the tag. The release notes only point to the assets. Operators copy the lines from the assets of the release they chose. The trust root is the named human maintainers.
 
 ## The release gate
 
