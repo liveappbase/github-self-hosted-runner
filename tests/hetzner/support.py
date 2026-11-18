@@ -207,17 +207,27 @@ def tarball(version, extra=(), omit=()):
 
 # ---- GitHub, served locally over HTTPS
 
+SELF_RELEASES = '/repos/liveappbase/github-self-hosted-runner/releases?per_page=100'   # runner-release.sh's
+# rr_self_newest (W4 X-7: RS_USER's pass reads this repository's newest release)
+
+
 class FakeGitHub:
-    """routes: path -> (status, headers, body). seen: the path of every request that reached HTTP."""
+    """routes: path -> (status, headers, body). seen: the path of every request that reached HTTP, but a request of
+    this repository's own releases (W4: RS_USER's pass reads them, anonymously), which goes to seen_self, so a cell
+    that counts what a pass asked of actions/runner counts that alone. headers: (path, {lower-case name: value}) of
+    every request. A Sandbox serves SELF_RELEASES as no release at all ([]) unless a cell routes it."""
 
     def __init__(self, test):
         self.routes = {}
         self.seen = []
+        self.seen_self = []
+        self.headers = []
         gh = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                gh.seen.append(self.path)
+                (gh.seen_self if self.path.startswith('/repos/liveappbase/') else gh.seen).append(self.path)
+                gh.headers.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
                 status, headers, body = gh.routes.get(self.path, (404, {}, b'{"message":"Not Found"}'))
                 self.send_response(status)
                 for k, v in headers.items():
@@ -462,7 +472,9 @@ class Sandbox:
             ('RR_API=https://api.github.com/repos/actions/runner\n', 'RR_API=@GH@/repos/actions/runner\n'),
             ('RR_DL=https://github.com/actions/runner/releases/download\n',
              'RR_DL=@GH@/actions/runner/releases/download\n'),
-            ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n')],
+            ('RR_SRC=/etc/ssl/certs/ca-certificates.crt\n', 'RR_SRC=@ROOT@/source.pem\n'),
+            ('RR_SELF_API=https://api.github.com/repos/liveappbase/github-self-hosted-runner   # THIS REPOSITORY\'S '
+             'RELEASES (the header)\n', 'RR_SELF_API=@GH@/repos/liveappbase/github-self-hosted-runner\n')],
     }
     # Pin lines rewritten only when the copy has them (once; twice fails): pool-image.sh's PROCFS, THE RUNNING BINARY's
     # process table (runscaler 0.12 bump, slice H2b-1, the plan's R-6), here the cell's own (SB/proc/PID/exe, which
@@ -475,7 +487,7 @@ class Sandbox:
                 'bin/pool-ready': ('/etc/liveapp-ci',), 'bin/runner-updater': ('/etc/liveapp-ci',),
                 'setup/runner-release.sh': ('api.github.com', '//github.com', '/etc/ssl')}
     # The original lines a copy may differ in (pin_lines_only): the rewrites above, and the pins Pool rewrites
-    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|TGZ_SHA|BIN_SHA|PROCFS)=.*|PATH=/usr/bin:/bin:/usr/sbin:/sbin'
+    PIN_LINE = re.compile(r'(HOST_CONF|RR_API|RR_DL|RR_SRC|RR_SELF_API|TGZ_SHA|BIN_SHA|PROCFS)=.*|PATH=/usr/bin:/bin:/usr/sbin:/sbin'
                           r'|PINS="\$S03=[0-9a-f]{64}'
                           r'|\$B/[A-Za-z0-9._/-]+=[0-9a-f]{64}"?')
 
@@ -501,6 +513,7 @@ class Sandbox:
         if os.path.isdir(core):
             shutil.copytree(core, os.path.join(self.build, 'core'), symlinks=True)
         self.gh = FakeGitHub(test)
+        self.gh.routes[SELF_RELEASES] = (200, {'Content-Type': 'application/json'}, b'[]')
         with open(SYSTEM_BUNDLE) as f:
             self.system_bundle = f.read()
         self.write(self.path('source.pem'), self.system_bundle + pki().ca_pem)

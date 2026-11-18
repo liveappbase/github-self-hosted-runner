@@ -130,6 +130,21 @@
 # 0755 on 24.04 under umask 077, measured). RR_STATE_MODE names the state's mode for the caller: the updater writes its
 # state (by rename) with it, and only under the lock. Everything else there stays private: the updater makes PASSDIR
 # 0700 and its files under umask 077; RR_DIR is 0700.
+# THIS REPOSITORY'S RELEASES (W4: one verified install line per release; the W4 plan's X-5, X-7, Y-4, Y-9, X-6''): ONE
+# order of its release tags, ONE reader of a ~/build/.release, and ONE read of its newest published release, used by
+# setup/install-release.sh (a release's install line) and by bin/runner-updater (RS_USER's pass and status):
+#   rr_tag_cmp A B          THE RELEASE ORDER: RR_CMP = -1 (A is older than B), 0 (the same) or 1 (A is newer). A tag is
+#                           v<N.N.N> or v<N.N.N>-rc.<R> (each N 1 to 9 digits; R from 1, no leading zero, 1 to 9
+#                           digits: the grammar of tools/render-linux-line, X-6''): the numbers compared as numbers
+#                           (rc.10 after rc.3), and a final release after each of its rcs. 0, or 1 and RR_WHY when a
+#                           tag is of another form (never sorted somewhere)
+#   rr_release_record FILE  a .release (install-release.sh writes it into each new ~/build: `tag <TAG>` and `sha256
+#                           <64 hex>`, two lines), read ONCE by rr_read (it may be the other user's): RR_REL_TAG and
+#                           RR_REL_SHA; 0, or 1 and RR_WHY (there is none; it is not a plain file; not the two lines)
+#   rr_self_newest          the newest published release of this repository (RR_SELF_API, anonymous: rr_curl, so -q
+#                           and no token), the newest of its tags by rr_tag_cmp (pre-releases too; a draft or a tag of
+#                           another form is no release): RR_SELF_TAG ("" when none); 0, or 1 and RR_WHY. It prints
+#                           nothing but rr_curl's bundle lines (on stderr)
 # THE DATA FILE: setup/tls-excluded-spki of the repository (the install line puts it into ~/build/setup/, beside this
 # file). Its own header gives the format and the refusals.
 
@@ -147,6 +162,9 @@ case $(uname -m) in x86_64) RR_ARCH=x64 ;; aarch64) RR_ARCH=arm64 ;; *) RR_ARCH=
 RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
 RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY= RR_STATE_MODE=
 RR_LOGK="log-file = \"$HOME/.config/runner/runner.log\""   # THE CONFIG COMPARE (the header)
+RR_SELF_API=https://api.github.com/repos/liveappbase/github-self-hosted-runner   # THIS REPOSITORY'S RELEASES (the header)
+RR_TAG_RE='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-rc\.([1-9][0-9]{0,8}))?$'
+RR_CMP= RR_REL_TAG= RR_REL_SHA= RR_SELF_TAG=
 
 rr_no() { echo "runner-release: REFUSE $*" >&2; }
 rr_sha() {   # rr_sha FILE: its sha256, 64 hex, or rc 1
@@ -521,5 +539,70 @@ rr_held() {   # rr_held: THE UPDATER'S CHILD (the header): 0, or 1 and RR_WHY; p
   esac
   RR_WHY="fd 9 is the updater lock, but another run holds it (fd 9 is no holder's)"
   flock -n 9 || return 1
+  RR_WHY=
+}
+
+rr_tag_cmp() {   # rr_tag_cmp A B: THE RELEASE ORDER (the header): RR_CMP -1, 0 or 1; 1 + RR_WHY for a tag of another form
+  local a b i x y
+  RR_CMP= RR_WHY=
+  [[ ${1-} =~ $RR_TAG_RE ]] || { RR_WHY="[${1-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N>"; return 1; }
+  a=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}")
+  [ -n "${BASH_REMATCH[5]}" ] || a[3]=final
+  [[ ${2-} =~ $RR_TAG_RE ]] || { RR_WHY="[${2-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N>"; return 1; }
+  b=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}")
+  [ -n "${BASH_REMATCH[5]}" ] || b[3]=final
+  for i in 0 1 2 3; do
+    x=${a[i]} y=${b[i]}
+    [ "$x" != final ] || x=1000000000     # a final release after each of its rcs (an rc has at most 9 digits)
+    [ "$y" != final ] || y=1000000000
+    if ((10#$x < 10#$y)); then RR_CMP=-1; return 0; fi
+    if ((10#$x > 10#$y)); then RR_CMP=1; return 0; fi
+  done
+  RR_CMP=0
+}
+
+rr_release_record() {   # rr_release_record FILE: a .release (the header): RR_REL_TAG, RR_REL_SHA; 1 + RR_WHY
+  local text re=$'^tag (v[0-9A-Za-z.-]{1,40})\nsha256 ([0-9a-f]{64})\n$'
+  RR_REL_TAG= RR_REL_SHA=
+  text=$(rr_read "${1-}" 257 && echo .) || return 1
+  text=${text%.}
+  RR_WHY="it is not the two lines tag <TAG> and sha256 <64 hex>"
+  [ "${#text}" -le 256 ] && [[ $text =~ $re ]] || return 1
+  rr_tag_cmp "${BASH_REMATCH[1]}" "${BASH_REMATCH[1]}" || { RR_WHY="its tag $RR_WHY"; return 1; }
+  [[ $text =~ $re ]]
+  RR_REL_TAG=${BASH_REMATCH[1]} RR_REL_SHA=${BASH_REMATCH[2]} RR_WHY=
+}
+
+rr_self_newest() {   # rr_self_newest: THIS REPOSITORY's newest published release (the header): RR_SELF_TAG; 1 + RR_WHY
+  local j code rc tags t
+  RR_SELF_TAG= RR_WHY="cannot make a file in $RR_DIR"
+  install -d -m 700 "$RR_DIR" 2> /dev/null && j=$(mktemp "$RR_DIR/self.XXXXXX" 2> /dev/null) || return 1
+  code=$(rr_curl --max-time 30 -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+           -o "$j" -w '%{http_code}' "$RR_SELF_API/releases?per_page=100") || { rc=$?; rm -f -- "$j"
+    if [ "$rc" = 126 ]; then RR_WHY="the filtered CA bundle could not be made"; else RR_WHY="GitHub's API did not answer (curl exit $rc)"; fi
+    return 1; }
+  [ "$code" = 200 ] || { rm -f -- "$j"; RR_WHY="GitHub answered $code"; return 1; }
+  tags=$(python3 -I - "$j" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1], 'rb') as f:
+        r = json.loads(f.read().decode('utf-8'))
+except (OSError, ValueError):
+    sys.exit(1)
+if not isinstance(r, list):
+    sys.exit(1)
+for x in r:
+    if isinstance(x, dict) and x.get('draft') is False and isinstance(x.get('tag_name'), str) \
+            and re.fullmatch(r'[A-Za-z0-9._-]{1,64}', x['tag_name']):
+        print(x['tag_name'])
+PY
+)
+  rc=$?
+  rm -f -- "$j"
+  [ "$rc" = 0 ] || { RR_WHY="the answer is not a JSON list of releases"; return 1; }
+  while IFS= read -r t; do
+    [ -n "$t" ] && rr_tag_cmp "$t" "${RR_SELF_TAG:-$t}" || continue
+    [ -n "$RR_SELF_TAG" ] && [ "$RR_CMP" != 1 ] || RR_SELF_TAG=$t
+  done <<< "$tags"
   RR_WHY=
 }

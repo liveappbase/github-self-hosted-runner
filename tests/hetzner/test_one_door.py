@@ -192,6 +192,8 @@ S03R = 'setup/03-runscaler.sh'
 WRITES = [(S03R, 'install -m 755 "$tmp/runner" "$NEWBIN"; sha "$NEWBIN" "$BIN"'),
           (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN='), (S03R, 'mv -f "$NEWBIN" "$RB"; NEWBIN=')]
 READS = [
+    ('setup/install-release.sh',     # W4 X-4: a release's install line names a moved runscaler pin, never changes it
+     'rb=$(sha256sum < "$HOME/bin/runner" 2> /dev/null | cut -d \' \' -f 1)'),
     ('bin/runner-start',
      'RUNNER=/home/${RS_USER}/bin/runner   # the file exec runs: ~/bin/runner, or runner.new (--staged)'),
     ('bin/runner-start',

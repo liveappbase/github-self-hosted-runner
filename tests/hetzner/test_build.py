@@ -662,7 +662,9 @@ NO_FILE_READ = (('rr_read ', 'the one reader of another user\'s file'),
                 ('DISK_WHY=', 'a message'),
                 ('free disk on ', 'a message: STOP DISK\'s hand line (S2b-3c-2 E-9), no file read'),
                 ('BUILDS=', 'the folder\'s name: rr_record and rr_record_of read its records, through rr_read'),
-                ('RUN_STATE=', 'the file\'s name: run_record reads it through rr_read (test_updater.py, Text)'))
+                ('RUN_STATE=', 'the file\'s name: run_record reads it through rr_read (test_updater.py, Text)'),
+                ('rr_release_record ', 'W4\'s reader of a ~/build/.release: it opens its file only through rr_read '
+                                       '(test_the_release_record_reader_opens_its_file_only_through_rr_read)'))
 
 
 class OtherUsersFiles(unittest.TestCase):
@@ -699,6 +701,14 @@ class OtherUsersFiles(unittest.TestCase):
                         bad.append('%s:%d' % (os.path.relpath(p, REPO), i))
         self.assertGreater(seen, 5, 'the census found almost nothing: its pattern is broken')
         self.assertEqual(bad, [], 'these lines name a path in RUN_USER\'s home and read it without rr_read')
+
+    def test_the_release_record_reader_opens_its_file_only_through_rr_read(self):
+        """W4: rr_release_record (RUN_USER's ~/build/.release, as RS_USER's install line and status read it) reads its
+        file by rr_read alone, and names it nowhere else."""
+        with open(RR) as f:
+            body = f.read().split('\nrr_release_record() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('rr_read "${1-}" ', body)
+        self.assertEqual(body.count('${1-}'), body.count('rr_read "${1-}" '), 'another use of the file\'s path')
 
     def test_the_build_record_reader_opens_its_file_only_through_rr_read(self):
         with open(RR) as f:

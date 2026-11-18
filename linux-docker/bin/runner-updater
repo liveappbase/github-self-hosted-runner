@@ -101,7 +101,8 @@
 #            check (below); status.jq with facts from the state (RS_USER's: the family's candidate and back_until, the
 #            STOPs it holds; RUN_USER's: its STOPs, of hz-docker) and RS_USER's `core`. It prints ON or OFF; RS_USER's
 #            also the family's candidate (or "no candidate"), back_until and rejected versions; each user's THE LAST
-#            PASS (below: its own PASSDIR/last-pass, "last pass AGE ago (TIME): ..." or "none yet"); RS_USER's which
+#            PASS (below: its own PASSDIR/last-pass, "last pass AGE ago (TIME): ..." or "none yet"); RS_USER's THE
+#            RELEASE LINES (W4, below: a newer published release, a failed read, the two users' releases); RS_USER's which
 #            of three a journal at WINDOW is (status_window, by THE APPLY STEP's own reader, with no write: open, with
 #            its last `stop` line and whether a runscaler RUNS, by runner-facts.sh's runs with its /healthz pair kept in
 #            memory;
@@ -949,12 +950,14 @@ status_window() {
 # "runner-updater: " (and "pass: ") head dropped and each control character "?". No file: "last pass: none yet". It
 # writes nothing
 status_last() {
-  local f=$PASSDIR/last-pass raw l1 l2 at line age
+  local f=$PASSDIR/last-pass raw l1 l2 l3 at line age
+  STATUS_REL=
   if [ ! -e "$f" ] && [ ! -L "$f" ]; then say "last pass: none yet"; return 0; fi
   raw=$( { [ -f "$f" ] && [ ! -L "$f" ] && head -c 4096 -- "$f"; } 2> /dev/null && echo .) || raw=
   raw=${raw%.}
-  l1=${raw%%$'\n'*} l2=
-  [[ $raw == *$'\n'* ]] && { l2=${raw#*$'\n'}; l2=${l2%%$'\n'*}; }
+  l1=${raw%%$'\n'*} l2= l3=
+  [[ $raw == *$'\n'* ]] && { l2=${raw#*$'\n'}; l3=${l2#*$'\n'}; [[ $l2 == *$'\n'* ]] || l3=; l2=${l2%%$'\n'*}; l3=${l3%%$'\n'*}; }
+  STATUS_REL=$l3
   if [[ ! $l1 =~ ^([0-9]{1,12})\ (.+)$ ]]; then say "last pass: its record $f cannot be read"; return 0; fi
   at=${BASH_REMATCH[1]} line=${BASH_REMATCH[2]}
   age=$(( $1 > at ? $1 - at : 0 ))
@@ -967,6 +970,59 @@ status_last() {
   [ -n "$l2" ] || return 0
   l2=${l2#runner-updater: }; l2=${l2#pass: }
   say "last pass: ${l2//[[:cntrl:]]/?}"
+}
+# THE RELEASE LINES (W4: the W4 plan's X-7 and Y-4), RS_USER's status, right after THE LAST PASS's lines, each a line
+# of its own, never the outcome, and no state member (a way back to an older release reads its state unchanged):
+# - THE NOTICE: RS_USER's pass, when it is ON (after the jq check: OFF asks GitHub nothing, D11), reads this
+#   repository's newest published release (runner-release.sh's rr_self_newest: anonymous, rr_curl, so -q and no token)
+#   into REL_FACT, which THE LAST PASS keeps as its line 3 (`release TAG`, `release none`, or `release unread WHY`; line 2
+#   is then the recipe line or empty, so an older status, which reads lines 1 and 2, shows nothing of it). status names a
+#   TAG newer than this user's ~/build/.release by THE RELEASE ORDER (rr_tag_cmp; no record: a tree installed by hand,
+#   any TAG): `release TAG is published (this host runs OWN)`, never an instruction to run it (Y-4); `unread`: `the
+#   newest release could not be read: WHY`, never a STOP (the pass's exit code stays its own).
+# - THE TWO USERS' RELEASES: RUN_USER's ~/build/.release (rr_release_record: rr_read, RUN_USER's file is hostile) and
+#   RS_USER's, when they differ, one line naming both and both ways (direction-neutral: a way back cut between the
+#   users is finished with the older line's --older; a way forward with the newer line); the same tag with two sha256:
+#   --same as both users, RUN_USER first; one with no record: that one's way forward, and the way back's fallback for the
+#   other. Neither has a record, or both the same: no line. A host config whose RUN_USER is RS_USER has one record.
+release_read() {
+  if rr_self_newest 2> /dev/null; then REL_FACT="release ${RR_SELF_TAG:-none}"
+  else REL_FACT="release unread ${RR_WHY:-the read failed}"; fi
+}
+status_release() {
+  local own= osha= run= rsha= why= fact=$STATUS_REL older newer on_newer on_older
+  if rr_release_record "$B/.release"; then own=$RR_REL_TAG osha=$RR_REL_SHA; fi
+  if [ "${RUN_USER}" != "${RS_USER}" ]; then
+    if rr_release_record "/home/${RUN_USER}/build/.release"; then run=$RR_REL_TAG rsha=$RR_REL_SHA
+    else why=$RR_WHY; fi
+    if [ -n "$own" ] && [ -n "$run" ]; then
+      if [ "$own" = "$run" ] && [ "$osha" != "$rsha" ]; then
+        say "release: ${RUN_USER} and ${RS_USER} run the same tag $own with two different sha256 (${rsha:0:12}, ${osha:0:12}): run the line of $own with --same as both users, ${RUN_USER} first"
+      elif [ "$own" != "$run" ] && rr_tag_cmp "$run" "$own"; then
+        if [ "$RR_CMP" = 1 ]; then older=$own newer=$run on_newer=${RUN_USER} on_older=${RS_USER}
+        else older=$run newer=$own on_newer=${RS_USER} on_older=${RUN_USER}; fi
+        say "release: ${RUN_USER} runs $run/${rsha:0:12}, ${RS_USER} runs $own/${osha:0:12}: to finish going back, run $older's line with --older as $on_newer; to go forward, run $newer's line as $on_older"
+      fi
+    elif [ -n "$own$run" ]; then
+      if [ -n "$run" ]; then
+        say "release: ${RUN_USER} runs $run/${rsha:0:12}, ${RS_USER} runs a release with no ~/build/.release (installed by hand): to go forward, run $run's line as ${RS_USER}; to finish going back to a release with no linux-install-line.txt, its way back by hand as ${RUN_USER} (README \"A release of this repository, by its install line\")"
+      else
+        say "release: ${RS_USER} runs $own/${osha:0:12}, ${RUN_USER} runs a release with no ~/build/.release (${why//[[:cntrl:]]/?}): to go forward, run $own's line as ${RUN_USER}; to finish going back to a release with no linux-install-line.txt, its way back by hand as ${RS_USER} (README \"A release of this repository, by its install line\")"
+      fi
+    fi
+  fi
+  case $fact in
+    'release unread '*) say "the newest release could not be read: ${fact#release unread }" ;;
+    'release none'|'') ;;
+    'release '*)
+      fact=${fact#release }
+      if [ -z "$own" ]; then
+        ! rr_tag_cmp "$fact" "$fact" || say "release $fact is published (this host runs a release with no ~/build/.release: installed by hand)"
+      elif rr_tag_cmp "$fact" "$own" && [ "$RR_CMP" = 1 ]; then
+        say "release $fact is published (this host runs $own)"
+      fi ;;
+  esac
+  return 0
 }
 status_own() {   # [MORE]: jq_check's
   local now core facts out rc
@@ -991,6 +1047,7 @@ status_own() {   # [MORE]: jq_check's
        + "; rejected: " + (if ($h.rejected // []) == [] then "none" else ($h.rejected | join(", ")) end))' \
     || refuse "jq could not print the state"
   status_last "$now"
+  [ "$ROLE" != rs ] || status_release
   [ "$ROLE" != rs ] || status_window
   out=$(status_jq "$core" "$facts" "$now")
   rc=$?
@@ -2170,6 +2227,7 @@ do_pass() {
   [[ $now =~ ^[0-9]+$ ]] || refuse "the clock gave '$now'"
   levels           # THE TWO LEVELS, before the facts (the r3 FOLD; r3 Opus F2): KEEP and DUE read what they leave
   install -d -m 700 "$PASSDIR" || refuse "cannot create $PASSDIR"
+  release_read     # THE RELEASE LINES' read (W4 X-7): one fact for THE LAST PASS's line 3, never an outcome or a STOP
   rm -f -- "$PASSDIR"/facts.json "$PASSDIR"/log.txt "$PASSDIR"/healthz.json "$PASSDIR"/{idle,r1,keep,status}.json \
     "$PASSDIR"/{idle,r1,keep,status}.err "$PASSDIR"/release.out "$PASSDIR"/release.err \
     "$PASSDIR"/switch.out
@@ -2719,13 +2777,16 @@ do_build() {
 
 # THE LAST PASS (the header): the EXIT trap of every pass, of each user, on every exit path: PASSDIR/last-pass, line 1
 # "TIME OUTCOME" (PASS_NOW, the pass's ONE CLOCK; the exit's time when it ended before reading it), line 2 the recipe
-# line when the pass printed one (DUE_RECIPE). PASSDIR is made first (the OFF exit comes before the pass's own
+# line when the pass printed one (DUE_RECIPE), and, as RS_USER, line 3 THE RELEASE LINES' fact (REL_FACT: line 2 is then
+# empty when no recipe line was printed, so an older release's status, which reads lines 1 and 2, shows nothing of it).
+# PASSDIR is made first (the OFF exit comes before the pass's own
 # install -d), but only in a STATEDIR that is there (rr_lock makes it, with THE MODES of the user's role); ONE rename of
 # a temp file of its own (mktemp in PASSDIR: a pass that found the lock held writes with no lock, beside the holder's
 # run). A write that fails changes nothing and never fails the pass (its exit code stays the pass's): each write's
 # status is checked (ONE && chain: a full filesystem fails line 1, and `[ -z ... ]` after it would end a plain group
 # with 0), and only a temp file whose every write passed is renamed; any other is removed
 PASS_NOW=
+REL_FACT=   # THE RELEASE LINES' fact of this pass (release_read): its last-pass line 3, "" = none read (OFF, RUN_USER)
 pass_record() {
   local t at=$PASS_NOW line=${OUTCOME:-$LAST}
   [ -z "$NOREC" ] || return 0   # a state this release does not read: nothing is written (load_state)
@@ -2735,7 +2796,8 @@ pass_record() {
   install -d -m 700 "$PASSDIR" 2> /dev/null || return 0
   t=$(mktemp "$PASSDIR/.last-pass.XXXXXXXX" 2> /dev/null) || return 0
   if { printf '%s %s\n' "$at" "${line//[[:cntrl:]]/?}" \
-       && { [ -z "$DUE_RECIPE" ] || printf '%s\n' "${DUE_RECIPE//[[:cntrl:]]/?}"; }; } > "$t" 2> /dev/null \
+       && { [ -z "$DUE_RECIPE$REL_FACT" ] || printf '%s\n' "${DUE_RECIPE//[[:cntrl:]]/?}"; } \
+       && { [ -z "$REL_FACT" ] || printf '%s\n' "${REL_FACT//[[:cntrl:]]/?}"; }; } > "$t" 2> /dev/null \
      && mv -f -- "$t" "$PASSDIR/last-pass" 2> /dev/null; then
     return 0
   fi

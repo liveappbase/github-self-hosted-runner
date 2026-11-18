@@ -2082,12 +2082,15 @@ class Would(unittest.TestCase):
 @needs_container
 class NoAction(unittest.TestCase):
     def mark(self, g):
-        """What the home holds (Pool.snapshot, less what a pass may write: STATEDIR's state.json, lock and pass/), and
-        how many systemctl, docker and runscaler validate calls the substitutes have seen."""
+        """What the home holds (Pool.snapshot, less what a pass may write: STATEDIR's state.json, lock and pass/, and
+        the filtered CA bundle runner-release.sh keeps in ~/.cache/liveapp-ci/tls/, which W4's release read, ON every
+        pass, makes or refreshes before its download), and how many systemctl, docker and runscaler validate calls the
+        substitutes have seen."""
         sd = os.path.join(g.p.home, '.local', 'state', 'runner-updater')
+        tls = os.path.join(g.p.home, '.cache', 'liveapp-ci', 'tls')
         home = {k: v for k, v in g.p.snapshot().items()
                 if k not in (os.path.join(sd, 'state.json'), os.path.join(sd, 'lock'))
-                and not k.startswith(os.path.join(sd, 'pass') + '/')}
+                and not k.startswith(os.path.join(sd, 'pass') + '/') and not k.startswith(tls + '/') and k != tls}
         return (home, len(g.p.lines('systemctl')), len(g.p.calls('docker')),
                 len([c for c in g.p.calls('runner') if c['argv'][:1] == ['validate']]))
 
