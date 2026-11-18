@@ -1,0 +1,73 @@
+#!/bin/bash
+# render-linux-line — render a release's linux-install-line.txt from its template. The ONE renderer: tools/release-check
+# --build runs it (from the unpacked release, with the template of that release), and the linux-docker cells run it on
+# their own fixture, so the line that ships and the line that is tested come from this one piece of code.
+#
+#   bash tools/render-linux-line TEMPLATE URL SHA VERSION TAG
+#
+# TEMPLATE is linux-docker/setup/install-release.run-line: ONE line of bash (printable ASCII, ending in a newline) that
+# holds each of @URL@, @SHA@, @VERSION@ and @TAG@, and no other @. The line is printed with every occurrence of each
+# placeholder replaced: exit 0. Anything else: one `REFUSE: <why>` line on stderr, NOTHING on stdout, exit 1.
+#
+# Each value must have its exact form, so no value can hold an @, a quote, a space, a `$` or a `&` (bash 5.2's
+# patsub_replacement would expand an `&` in a replacement):
+#   VERSION  N.N.N (digits)
+#   TAG      vVERSION or vVERSION-rc.N
+#   SHA      64 lowercase hex: the tarball's sha256
+#   URL      https://github.com/OWNER/REPO/releases/download/TAG/github-self-hosted-runner-TAG.tar.gz
+#            (OWNER and REPO of letters, digits, `.`, `_` and `-`)
+# It runs under macOS's /bin/bash 3.2 (release-check parses tools/ with it) and under bash 5.x. It writes no file and
+# runs nothing it reads: it only checks and substitutes. `bash -n` on the result is release-check's step.
+set -u
+export LC_ALL=C
+
+refuse() {
+  printf 'REFUSE: %s\n' "$1" >&2
+  exit 1
+}
+
+[ $# -eq 5 ] || refuse "usage: bash tools/render-linux-line TEMPLATE URL SHA VERSION TAG ($# arguments given)"
+tpl=$1 url=$2 sha=$3 version=$4 tag=$5
+
+re_version='^[0-9]+\.[0-9]+\.[0-9]+$'
+re_sha='^[0-9a-f]{64}$'
+re_rc='^-rc\.[0-9]+$'
+re_part='^[A-Za-z0-9._-]+$'
+
+[[ $version =~ $re_version ]] || refuse "VERSION is not of the form N.N.N"
+rest=${tag#"v$version"}
+[[ "v$version$rest" == "$tag" && ( -z $rest || $rest =~ $re_rc ) ]] \
+  || refuse "TAG is not v$version or v$version-rc.N"
+[[ $sha =~ $re_sha ]] || refuse "SHA is not 64 lowercase hex"
+prefix=https://github.com/
+suffix=/releases/download/$tag/github-self-hosted-runner-$tag.tar.gz
+slug=${url#"$prefix"}
+slug=${slug%"$suffix"}
+owner=${slug%%/*}
+repo=${slug#*/}
+[[ "$prefix$owner/$repo$suffix" == "$url" && $owner =~ $re_part && $repo =~ $re_part ]] \
+  || refuse "URL is not https://github.com/OWNER/REPO/releases/download/$tag/github-self-hosted-runner-$tag.tar.gz"
+
+[[ -f $tpl && -r $tpl ]] || refuse "the template is not a readable file: $tpl"
+size=$(wc -c < "$tpl") || refuse "cannot read the template"
+size=$((size + 0))
+line=
+IFS= read -r line < "$tpl"
+# one line, ending in a newline: the size is that line plus its newline (a NUL, which read drops, or a second line
+# makes it larger; a missing newline makes it smaller)
+[[ -n $line && $size -eq $((${#line} + 1)) ]] || refuse "the template is not ONE non-empty line ending in a newline"
+[[ $line =~ ^[[:print:]]+$ ]] || refuse "the template holds a byte that is not printable ASCII"
+for p in @URL@ @SHA@ @VERSION@ @TAG@; do
+  [[ $line == *"$p"* ]] || refuse "the template lacks the placeholder $p"
+done
+bare=${line//@URL@/}
+bare=${bare//@SHA@/}
+bare=${bare//@VERSION@/}
+bare=${bare//@TAG@/}
+[[ $bare != *@* ]] || refuse "the template holds an @ that is not one of @URL@ @SHA@ @VERSION@ @TAG@"
+
+out=${line//@URL@/$url}
+out=${out//@SHA@/$sha}
+out=${out//@VERSION@/$version}
+out=${out//@TAG@/$tag}
+printf '%s\n' "$out"
