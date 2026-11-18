@@ -134,7 +134,7 @@ A host installed from a release before this one: do "Upgrading from a release be
 
 ## A release of this repository, by its install line
 
-A release whose assets include `linux-install-line.txt` (beside the tarball, and listed in its `SHA256SUMS`) goes in by that one line, made by the release build from `setup/install-release.run-line`, with the release's tarball URL, its sha256, its version and its tag in it. A release whose assets do not include it goes in by Install steps 3 and 4 by hand, and so does the way back to one of them (below): look at the release's assets on its page, not at its tag. Download the line from the release's page, then run it as each user, RUN_USER first:
+A release whose assets include `linux-install-line.txt` (beside the tarball, and listed in its `SHA256SUMS`) goes in by that one line, made by the release build from `setup/install-release.run-line`, with the release's tarball URL, its sha256, its version and its tag in it. A release whose assets do not include it goes in by Install steps 3 and 4 by hand, and so does the way back to one of them (below): look at the release's assets on its page, not at its tag. Download the line from the release's page. Check the asset first ("Check a release" in [../README.md](../README.md)): its sha256 against the release's `SHA256SUMS`, and `gh release verify-asset` for the release's tag and `linux-install-line.txt`. Then run it as each user, RUN_USER first:
 ```
 ssh <RUN_USER>@<host> 'bash -s' < linux-install-line.txt
 ```

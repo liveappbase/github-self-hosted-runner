@@ -1383,7 +1383,8 @@ class Texts(unittest.TestCase):
         """Y-8: the README's lines for the flags; Y-2: the way back to a release with no linux-install-line.txt. Fix
         round 1 (opus r1 F6): the section names the releases with the line by their asset, never by a tag (a tag cut
         between the LANDING ORDER's steps 2 and 3 has no line). MUTANT: the first build's wording, by the tag
-        v0.2.0-rc.3 -> red."""
+        v0.2.0-rc.3 -> red. Studio's step 3 review (P3): the section sends the operator to the asset's check
+        ("Check a release" in ../README.md: the hashes and `gh release verify-asset`) before the run."""
         with open(os.path.join(REPO, 'linux-docker', 'README.md')) as f:
             t = f.read()
         for l in ("ssh <RUN_USER>@<host> 'bash -s' < linux-install-line.txt",
@@ -1396,7 +1397,8 @@ class Texts(unittest.TestCase):
         s = m.group(1)
         for w in ('SHA256SUMS', 'Install step 3', 'Install step 4', 'RUN_USER first', 'linux-install-line.txt',
                   'A release whose assets include `linux-install-line.txt`',
-                  'The way back to a release whose assets do not include `linux-install-line.txt`'):
+                  'The way back to a release whose assets do not include `linux-install-line.txt`',
+                  'Check the asset first ("Check a release" in [../README.md](../README.md))'):
             self.assertIn(w, s)
         self.assertNotRegex(s, r'\bv[0-9]+\.[0-9]+\.[0-9]+', 'the section names a release by its tag')
 
