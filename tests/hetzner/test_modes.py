@@ -412,26 +412,40 @@ def text(rel):
 
 class OnePlace(unittest.TestCase):
     def test_every_holder_of_the_lock_names_its_role_and_one_place_sets_the_modes(self):
-        """rr_lock is the one place that sets the modes of the updater's folder, its lock and (by the mode it names)
-        the state, by the ROLE its caller names: every call of it in linux-docker/ names one, 02-d1.sh's `run` (it runs
-        as RUN_USER), the updater's its own ROLE. pool-image.sh's unattended modes take none: they are the updater's
+        """rr_modes is the one place that sets the modes of the updater's folder, its lock and (by the mode it names)
+        the state, by the ROLE its caller names; rr_lock runs it first, and so does install-release.sh (W4 fix round 1,
+        opus r1 F2: its install.lock in that folder, before it opens it). Every call of rr_lock in linux-docker/ names
+        a role, 02-d1.sh's `run` (it runs as RUN_USER), the updater's and the installer's their own ROLE; rr_modes is
+        called by rr_lock and the installer alone. pool-image.sh's unattended modes take none: they are the updater's
         child (S2b-3c-1 D-a: rr_held). No other line of linux-docker/ sets the mode of that folder (an `install -d` or a
-        chmod of it), and the state's mode comes from rr_lock's RR_STATE_MODE alone. Text only: it runs anywhere."""
-        calls = {}
+        chmod of it; the installer names no ~/.local path of its own), and the state's mode comes from rr_modes's
+        RR_STATE_MODE alone. Text only: it runs anywhere. MUTANT: the installer making its folders itself (the first W4
+        build) -> red."""
+        calls, modes = {}, {}
         for rel in ('setup/02-d1.sh', 'setup/pool-image.sh', 'bin/runner-updater', 'setup/runner-release.sh',
-                    'setup/03-runscaler.sh', 'setup/04-timer.sh', 'setup/runner-facts.sh'):
+                    'setup/03-runscaler.sh', 'setup/04-timer.sh', 'setup/runner-facts.sh', 'setup/install-release.sh'):
             for l in text(rel).splitlines():
                 code = l.split('#', 1)[0]
-                m = re.search(r'(?:^\s*|[;&|{(!]\s*)rr_lock(?=\s|$)([^|;&)]*)', code)   # a call: a word of its own
-                if m and 'rr_lock()' not in code:
-                    calls.setdefault(rel, []).append(' '.join(('rr_lock' + m.group(1)).split()))
+                for fn, into in (('rr_lock', calls), ('rr_modes', modes)):
+                    m = re.search(r'(?:^\s*|[;&|{(!]\s*)%s(?=\s|$)([^|;&)]*)' % fn, code)   # a call: a word of its own
+                    if m and fn + '()' not in code:
+                        into.setdefault(rel, []).append(' '.join((fn + m.group(1)).split()))
         self.assertEqual(calls, {'setup/02-d1.sh': ['rr_lock run'],
-                                 'bin/runner-updater': ['rr_lock "$ROLE" -n', 'rr_lock "$ROLE"']})
+                                 'bin/runner-updater': ['rr_lock "$ROLE" -n', 'rr_lock "$ROLE"'],
+                                 'setup/install-release.sh': ['rr_lock "$ROLE" -n > /dev/null']})
+        self.assertEqual(modes, {'setup/runner-release.sh': ['rr_modes "${1-}"'],
+                                 'setup/install-release.sh': ['rr_modes "$ROLE" install.lock']})
         self.assertRegex(text('setup/pool-image.sh'), r'(?m)^\s*rr_held \|\| die ')
         rr = text('setup/runner-release.sh')
-        body = rr.split('\nrr_lock() {', 1)[1].split('\n}\n', 1)[0]
+        body = rr.split('\nrr_modes() {', 1)[1].split('\n}\n', 1)[0]
         self.assertIn('RR_STATE_MODE=', body)
-        for rel in ('bin/runner-updater', 'setup/02-d1.sh', 'setup/pool-image.sh', 'setup/03-runscaler.sh'):
+        lock = rr.split('\nrr_lock() {', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('rr_modes "${1-}" || return 1', lock)
+        self.assertNotRegex(lock, r'\b(chmod|mkdir|install -d|umask)\b', 'rr_lock sets a mode of its own')
+        for l in text('setup/install-release.sh').splitlines():
+            self.assertNotIn('.local', l.split('#', 1)[0], 'the installer names a ~/.local path of its own: %s' % l)
+        for rel in ('bin/runner-updater', 'setup/02-d1.sh', 'setup/pool-image.sh', 'setup/03-runscaler.sh',
+                    'setup/install-release.sh'):
             for l in text(rel).splitlines():
                 code = l.split('#', 1)[0]
                 self.assertNotRegex(code, r'(install -d|chmod)[^|;]*(STATEDIR|RR_LOCK|runner-updater)\b(?!/)',

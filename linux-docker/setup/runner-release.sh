@@ -118,7 +118,9 @@
 # only member is RS_USER (01-users.sh checks that). rr_lock sets them, by the ROLE its caller names, BEFORE it opens the
 # lock, so every holder of it (both users' updaters, 02-d1.sh in both modes as RUN_USER; pool-image.sh's unattended
 # modes take none: they run as RS_USER's updater's child, rr_held) sets the same ones, a lock take that finds the lock
-# held too, and a folder left with older modes is set at the next one:
+# held too, and a folder left with older modes is set at the next one. rr_modes ROLE is that step alone, the ONE place:
+# rr_lock runs it first, and so does setup/install-release.sh before it opens its own lock in that folder (W4 fix
+# round 1, opus r1 F2: its first run, refused early, left the folders 0700 and its lock 0644):
 #   run  each folder from the home to RR_LOCK's: one it makes 0710, one that is there gains the group's search (g+x)
 #        and keeps every other bit (so others get nothing they did not have; the home itself is 01-users.sh's 0750);
 #        RR_LOCK's own folder 0710 each time; RR_STATE 0640
@@ -134,9 +136,11 @@
 # order of its release tags, ONE reader of a ~/build/.release, and ONE read of its newest published release, used by
 # setup/install-release.sh (a release's install line) and by bin/runner-updater (RS_USER's pass and status):
 #   rr_tag_cmp A B          THE RELEASE ORDER: RR_CMP = -1 (A is older than B), 0 (the same) or 1 (A is newer). A tag is
-#                           v<N.N.N> or v<N.N.N>-rc.<R> (each N 1 to 9 digits; R from 1, no leading zero, 1 to 9
-#                           digits: the grammar of tools/render-linux-line, X-6''): the numbers compared as numbers
-#                           (rc.10 after rc.3), and a final release after each of its rcs. 0, or 1 and RR_WHY when a
+#                           v<N.N.N> or v<N.N.N>-rc.<R> (each N 0, or 1 to 9 digits with no leading zero; R from 1, no
+#                           leading zero, 1 to 9 digits: the grammar of tools/render-linux-line, X-6'', but ONE spelling
+#                           of each number, so v0.3.0 has no second tag v00.3.0 that compares equal to it: W4 fix round
+#                           1, codex r1 F2; every reader of a tag, rr_release_record too, goes through it): the numbers
+#                           compared as numbers (rc.10 after rc.3), and a final release after each of its rcs. 0, or 1 and RR_WHY when a
 #                           tag is of another form (never sorted somewhere)
 #   rr_release_record FILE  a .release (install-release.sh writes it into each new ~/build: `tag <TAG>` and `sha256
 #                           <64 hex>`, two lines), read ONCE by rr_read (it may be the other user's): RR_REL_TAG and
@@ -163,7 +167,7 @@ RR_BUNDLE= RR_CAPATH= RR_VERSION= RR_PUBLISHED= RR_DIGEST= RR_URL=
 RR_RECIPE= RR_NAMES= RR_RECORD= RR_REC_VERSION= RR_REC_DIGEST= RR_REC_RECIPE= RR_COUNT= RR_WHY= RR_STATE_MODE=
 RR_LOGK="log-file = \"$HOME/.config/runner/runner.log\""   # THE CONFIG COMPARE (the header)
 RR_SELF_API=https://api.github.com/repos/liveappbase/github-self-hosted-runner   # THIS REPOSITORY'S RELEASES (the header)
-RR_TAG_RE='^v([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(-rc\.([1-9][0-9]{0,8}))?$'
+RR_TAG_RE='^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-rc\.([1-9][0-9]{0,8}))?$'
 RR_CMP= RR_REL_TAG= RR_REL_SHA= RR_SELF_TAG=
 
 rr_no() { echo "runner-release: REFUSE $*" >&2; }
@@ -493,13 +497,15 @@ rr_record_of() {   # rr_record_of DIR DIGEST: the ONE build record whose digest 
   esac
 }
 
-rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command: it waits, and says so first. -n, for
-  # a timer pass: it only tries, and returns 75 (no line) when another run holds it. First THE MODES (the header), by ROLE
-  local role=${1-} dm sm top=${RR_LOCK%/*} rel d p
+rr_modes() {   # rr_modes ROLE [NAME...]: THE MODES (the header), by ROLE: the folders from the home to RR_LOCK's, RR_LOCK
+  # and each NAME, another lock file in that folder (install-release.sh's install.lock), each made 0600 when it is not
+  # there and set 0600, and RR_STATE, all before the folders are opened to the group; RR_STATE_MODE. 0, or 1 and one
+  # REFUSE line on stderr. It opens no lock
+  local role=${1-} dm sm top=${RR_LOCK%/*} rel d p f
   case $role in
     run) dm=710 sm=640 ;;
     rs) dm=700 sm=600 ;;
-    *) rr_no "rr_lock: the role is rs or run, not [$role]"; return 1 ;;
+    *) rr_no "rr_modes: the role is rs or run, not [$role]"; return 1 ;;
   esac
   rel=${top#"$HOME"/} d=$HOME
   IFS=/ read -r -a p <<< "$rel"
@@ -507,8 +513,14 @@ rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command:
     d=$d/$rel
     [ -d "$d" ] || mkdir -m 700 -- "$d" 2> /dev/null || [ -d "$d" ] || { rr_no "cannot make $d"; return 1; }
   done
-  { [ -e "$RR_LOCK" ] || (umask 077 && : >> "$RR_LOCK"); } && chmod 600 -- "$RR_LOCK" \
-    || { rr_no "cannot make the updater lock $RR_LOCK, or set its mode"; return 1; }
+  for f in "${@:2}"; do
+    [[ $f =~ ^[a-z][a-z.-]*$ ]] || { rr_no "rr_modes: [$f] is not the name of a lock file"; return 1; }
+  done
+  for f in "$RR_LOCK" "${@:2}"; do
+    [ "$f" = "$RR_LOCK" ] || f=$top/$f
+    { [ -e "$f" ] || (umask 077 && : >> "$f"); } && chmod 600 -- "$f" \
+      || { rr_no "cannot make the updater lock $f, or set its mode"; return 1; }
+  done
   if [ -f "$RR_STATE" ] && [ ! -L "$RR_STATE" ]; then
     chmod "$sm" -- "$RR_STATE" || { rr_no "cannot set the mode of $RR_STATE"; return 1; }
   fi
@@ -520,6 +532,11 @@ rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command:
     else continue; fi || { rr_no "cannot set the mode of $d"; return 1; }
   done
   RR_STATE_MODE=$sm
+}
+
+rr_lock() {   # rr_lock ROLE [-n]: THE UPDATER LOCK (the header), for a command: it waits, and says so first. -n, for
+  # a timer pass: it only tries, and returns 75 (no line) when another run holds it. First THE MODES (rr_modes), by ROLE
+  rr_modes "${1-}" || return 1
   [ /dev/fd/9 -ef "$RR_LOCK" ] || exec 9>> "$RR_LOCK" || { rr_no "cannot open the updater lock $RR_LOCK"; return 1; }
   flock -n 9 && return 0
   [ "${2-}" != -n ] || return 75
@@ -545,10 +562,10 @@ rr_held() {   # rr_held: THE UPDATER'S CHILD (the header): 0, or 1 and RR_WHY; p
 rr_tag_cmp() {   # rr_tag_cmp A B: THE RELEASE ORDER (the header): RR_CMP -1, 0 or 1; 1 + RR_WHY for a tag of another form
   local a b i x y
   RR_CMP= RR_WHY=
-  [[ ${1-} =~ $RR_TAG_RE ]] || { RR_WHY="[${1-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N>"; return 1; }
+  [[ ${1-} =~ $RR_TAG_RE ]] || { RR_WHY="[${1-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N> (each N a number with no leading zero)"; return 1; }
   a=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}")
   [ -n "${BASH_REMATCH[5]}" ] || a[3]=final
-  [[ ${2-} =~ $RR_TAG_RE ]] || { RR_WHY="[${2-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N>"; return 1; }
+  [[ ${2-} =~ $RR_TAG_RE ]] || { RR_WHY="[${2-}] is not a release tag v<N.N.N> or v<N.N.N>-rc.<N> (each N a number with no leading zero)"; return 1; }
   b=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[5]:-0}")
   [ -n "${BASH_REMATCH[5]}" ] || b[3]=final
   for i in 0 1 2 3; do

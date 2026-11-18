@@ -33,6 +33,11 @@ Items (each cell's docstring names its own; MUTANT names the change that turns i
 - Y-6: DONE reads the pass; Y-7: a host-config key the release needs and the host lacks refuses before any change.
 - Y-8: the flags reach the installer through `bash -s --` (the template passes "$@").
 - Y-9: every curl starts with -q (a ~/.curlrc with an Authorization header sends none).
+- Fix round 1 (build review r1): a pass that fails with no output (codex F1); one tag spelling, no leading zero
+  (codex F2); a re-run of the installed release still names its NEXT lines and runs the pass (opus F1); the install
+  lock 0600 and its folders the role's modes after an early refusal (opus F2); a killed run's download and unpack
+  removed by the next run (opus F3); a file the release adds to INSTALLS named (opus F4); the README names the first
+  release with the line by its asset (opus F6).
 (Named for its CI part, test_[c-jv-z]*.py: .github/workflows/release-check.yml.)
 """
 import hashlib
@@ -122,7 +127,8 @@ def github_cert():
 
 
 class Hub:
-    """github.com, served locally over HTTPS: routes path -> (status, body, delay seconds); requests: (path, headers)
+    """github.com, served locally over HTTPS: routes path -> (status, body, delay: seconds, or a GATE, a
+    threading.Event the answer waits for, so a cell waits for a state and never for a time); requests: (path, headers)
     of each request that reached HTTP; arrived[path]: an Event set when a request for path arrives."""
 
     def __init__(self, test):
@@ -135,7 +141,9 @@ class Hub:
                 if self.path in hub.arrived:
                     hub.arrived[self.path].set()
                 status, body, delay = hub.routes.get(self.path, (404, b'Not Found', 0))
-                if delay:
+                if isinstance(delay, threading.Event):
+                    delay.wait(300)
+                elif delay:
                     time.sleep(delay)
                 self.send_response(status)
                 self.send_header('Content-Length', str(len(body)))
@@ -665,6 +673,84 @@ class Order(unittest.TestCase):
                                      '--same installs this one' % ('b' * 12)], r.stdout)
         other.line(other.run, rel2, '--same', rc=0)
 
+    def test_f2_one_tag_spelling_a_leading_zero_is_refused_where_a_tag_is_read(self):
+        """codex r1 F2 (fix round 1): ONE spelling of a tag, no leading zero in any number. The line of a release
+        tagged v00.3.0 (the renderer takes it) refuses at the installer's first check, nothing changed; a
+        ~/build/.release that names v0.03.0 cannot be read (rr_release_record), so the line of v0.3.0 refuses. The
+        control: a record of v0.2.0 -> v0.3.0 installs. MUTANT: leading zeros allowed -> the first row installs and
+        the second compares v0.3.0 equal to v0.03.0 (red)."""
+        why = 'is not a release tag v<N.N.N> or v<N.N.N>-rc.<N> (each N a number with no leading zero)'
+        h = Host(self)
+        b = h.seed(h.run)
+        before = h.tree(b)
+        rel = h.release('v00.3.0')
+        r = h.line(h.run, rel, rc=1)
+        self.assertEqual(finals(r), ['REFUSE v00.3.0: [v00.3.0] %s: nothing changed' % why], r.stdout + r.stderr)
+        self.assertEqual((h.tree(b), h.leftovers(h.run)), (before, []))
+        h.seed(h.run, tag='v0.03.0')
+        before = h.tree(b)
+        rel = h.release('v0.3.0')
+        r = h.line(h.run, rel, rc=1)
+        self.assertEqual(finals(r), ['REFUSE v0.3.0: ~/build/.release cannot be read (its tag [v0.03.0] %s): nothing '
+                                     'changed' % why], r.stdout + r.stderr)
+        self.assertEqual((h.tree(b), h.leftovers(h.run)), (before, []))
+        h.seed(h.run, tag='v0.2.0')                                     # the control
+        h.line(h.run, rel, rc=0)
+        h.installed(h.run, rel)
+
+    def test_f1_a_re_run_of_the_installed_release_names_its_next_lines_and_as_rs_user_runs_the_pass(self):
+        """opus r1 F1 (fix round 1; its probe p1 measured the shape): the README sends a cut run back to "run the same
+        line again", and a cut after the switch leaves the release installed, so the re-run is `already installed`. It
+        changes nothing (no switch: no new ~/build.prev.*, ~/build's inode kept), but it still checks and prints the
+        NEXT lines the first run printed, and as RS_USER it still runs `pass` and `status` and reads them by Y-6 (exit
+        3 when the pass did not end well). The control: nothing outstanding -> only `DONE <tag>: already installed
+        ...`. MUTANT: the identity's early exit kept -> the re-runs print no NEXT line and run no pass (red)."""
+        def rig(u, wayback=True):
+            h = Host(self)
+            rel = h.release('v0.3.0')
+            h.seed(h.run)
+            if u == 'rs':
+                h.line(h.run, rel, rc=0)                                # RUN_USER first
+                h.seed(h.rs)
+            h.settle(h.run if u == 'run' else h.rs, rel, wayback=wayback)
+            return h, rel, h.run if u == 'run' else h.rs
+
+        def moved_pin(h, u):
+            h.write(os.path.join(h.home(u), 'bin', 'runner'), b'another runscaler\n', 0o755, owner=u)
+
+        def old_timer(h, u):
+            h.write(os.path.join(h.home(u), '.config', 'systemd', 'user', 'runner-updater.timer'), '[Timer]\nold\n',
+                    owner=u)
+        for name, who, wayback, change, nexts in (
+                ('RS_USER, a moved runscaler pin', 'rs', True, moved_pin, 1),
+                ('RS_USER, the way back not kept', 'rs', False, None, 1),
+                ('RUN_USER, a changed timer unit', 'run', True, old_timer, 1),
+                ('RS_USER, nothing outstanding (the control)', 'rs', True, None, 0),
+                ('RUN_USER, nothing outstanding (the control)', 'run', True, None, 0)):
+            with self.subTest(name):
+                h, rel, u = rig(who, wayback)
+                if change:
+                    change(h, u)
+                first = h.line(u, rel, rc=0)
+                f1 = finals(first)
+                self.assertEqual(len(f1), 1 + nexts, first.stdout)
+                self.assertEqual(f1[0], 'DONE v0.3.0' if nexts else 'DONE v0.3.0: nothing else to do', first.stdout)
+                prevs, ino = h.prevs(u), os.stat(h.build(u)).st_ino
+                r = h.line(u, rel, rc=0)
+                self.assertEqual(finals(r), ['DONE v0.3.0: already installed (~/build/.release names it, sha256 %s): '
+                                             'nothing changed; --same installs it again' % rel.sha] + f1[1:], r.stdout)
+                self.assertEqual((h.prevs(u), os.stat(h.build(u)).st_ino), (prevs, ino), 'the re-run switched')
+                self.assertEqual(h.calls(u), ['pass', 'status', 'pass', 'status'] if who == 'rs' else [])
+                self.assertEqual(h.leftovers(u), [])
+        h, rel, u = rig('rs')                                           # Y-6 on the re-run
+        h.line(u, rel, rc=0)
+        h.answer(u, 'pass', 'echo "runner-updater: REFUSE no facts"; exit 1\n')
+        r = h.line(u, rel, rc=3)
+        self.assertEqual(finals(r), ['DONE v0.3.0: the files are installed, but the pass says: runner-updater: REFUSE no '
+                                     'facts (README Install step 3; "An unfinished window the updater cannot end")'],
+                         r.stdout)
+        self.assertEqual(h.calls(u), ['pass', 'status', 'pass', 'status'])
+
     def test_x5_rs_user_before_run_user_is_refused_and_control_run_user_first(self):
         """RS_USER refuses until RUN_USER's ~/build/.release names the same tag and sha256 (--older too). MUTANT: no
         check -> RS_USER installs first (red)."""
@@ -687,17 +773,20 @@ class Order(unittest.TestCase):
     def test_x5_the_order_function_and_its_grammar(self):
         """runner-release.sh's rr_tag_cmp, the ONE order function (the installer and the notice): RR_CMP of A and B;
         a tag outside the renderer's grammar, v<N.N.N> or v<N.N.N>-rc.<N> with N from 1 and no leading zero (Y-9 F11,
-        X-6''), is refused (rc 1)."""
+        X-6''), is refused (rc 1), and so is a leading zero in any number (codex r1 F2: ONE spelling of a tag; the
+        controls v0.3.0 and v10.0.0 are accepted). MUTANT: leading zeros allowed -> the v00.3.0 rows go on (red)."""
         lib = os.path.join(REPO, 'linux-docker', 'setup', 'runner-release.sh')
         for a, b, want in (('v0.3.0-rc.3', 'v0.3.0-rc.10', '-1'), ('v0.3.0-rc.10', 'v0.3.0-rc.3', '1'),
                            ('v0.3.0-rc.3', 'v0.3.0', '-1'), ('v0.3.0', 'v0.3.0-rc.99', '1'), ('v0.3.0', 'v0.3.0', '0'),
                            ('v0.10.0', 'v0.9.0', '1'), ('v1.0.0', 'v0.99.99', '1'), ('v0.3.1-rc.1', 'v0.3.0', '1'),
-                           ('v0.3.0-rc.1', 'v0.3.0-rc.9', '-1')):
+                           ('v0.3.0-rc.1', 'v0.3.0-rc.9', '-1'), ('v10.0.0', 'v9.9.9', '1'), ('v10.0.0', 'v0.3.0', '1'),
+                           ('v0.0.0', 'v0.0.1', '-1')):
             r = subprocess.run(['bash', '-c', '. "$0" && rr_tag_cmp "$1" "$2" && echo "$RR_CMP"', lib, a, b],
                                capture_output=True, text=True, env={'HOME': '/nonexistent', 'PATH': SYS_PATH})
             self.assertEqual((r.returncode, r.stdout.strip()), (0, want), (a, b, r.stderr))
         for bad in ('v0.3', '0.3.0', 'v0.3.0-beta.1', 'v0.3.0+b', 'v0.3.0-rc.', 'v0.3.0-rc.1x', 'v0.3.0\nv0.4.0', '',
-                    'v0.3.0-rc.0', 'v0.3.0-rc.01'):     # X-6'': an rc number starts at 1, with no leading zero
+                    'v0.3.0-rc.0', 'v0.3.0-rc.01',      # X-6'': an rc number starts at 1, with no leading zero
+                    'v00.3.0', 'v0.03.0', 'v0.3.00', 'v01.0.0'):   # codex r1 F2: nor any other number
             r = subprocess.run(['bash', '-c', '. "$0" && rr_tag_cmp "$1" v0.3.0; echo "rc=$? [$RR_CMP]"', lib, bad],
                                capture_output=True, text=True, env={'HOME': '/nonexistent', 'PATH': SYS_PATH})
             self.assertEqual(r.stdout.strip(), 'rc=1 []', repr(bad))
@@ -798,13 +887,17 @@ class Switch(unittest.TestCase):
 
     def test_y6_done_reads_the_pass_and_the_locks_are_released_before_it(self):
         """Y-6: the pass's exit code not 0, or a WAIT -> `DONE <tag>: the files are installed, but the pass says: <its
-        line>`, exit 3. The control: the pass is free to take the updater lock (the cells' updater says `another run
-        holds the updater lock` when a fresh open cannot take it) -> DONE, exit 0. MUTANT: the updater lock held
-        through the pass -> exit 3 on the control (red)."""
+        line>`, exit 3; a pass that fails with no output (codex r1 F1: its failure is tracked apart from its text) ->
+        `DONE <tag>: the files are installed, but the pass failed (exit N)`, exit 3. The control: the pass is free to
+        take the updater lock (the cells' updater says `another run holds the updater lock` when a fresh open cannot
+        take it) -> DONE, exit 0. MUTANT: the updater lock held through the pass -> exit 3 on the control (red);
+        the failure read from the text alone -> the silent row is DONE, exit 0 (red)."""
         for name, answer, rc, said in (
-                ('rc 1', 'echo "runner-updater: REFUSE no facts"; exit 1', 3, 'runner-updater: REFUSE no facts'),
+                ('rc 1', 'echo "runner-updater: REFUSE no facts"; exit 1', 3,
+                 'the pass says: runner-updater: REFUSE no facts'),
                 ('wait', 'echo "runner-updater: WAIT the state holds members this release does not read"; exit 4', 3,
-                 'runner-updater: WAIT the state holds members this release does not read'),
+                 'the pass says: runner-updater: WAIT the state holds members this release does not read'),
+                ('rc 5, no output', 'exit 5', 3, 'the pass failed (exit 5)'),
                 ('control', None, 0, None)):
             with self.subTest(name):
                 h = Host(self)
@@ -817,7 +910,8 @@ class Switch(unittest.TestCase):
                     h.answer(h.rs, 'pass', answer + '\n')
                 r = h.line(h.rs, rel, rc=rc)
                 if said:
-                    self.assertIn('DONE v0.3.0: the files are installed, but the pass says: %s' % said, r.stdout)
+                    self.assertIn('DONE v0.3.0: the files are installed, but %s' % said, r.stdout)
+                    self.assertEqual(len([l for l in finals(r) if l.startswith('DONE ')]), 1, r.stdout)
                 else:
                     self.assertEqual(last(r), 'DONE v0.3.0: nothing else to do', r.stdout)
                 self.assertEqual(h.calls(h.rs), ['pass', 'status'])
@@ -837,20 +931,30 @@ class Switch(unittest.TestCase):
         """Y-1 (opus r3 F1, measured): RS_USER's first run is in its runscaler download (the server holds it 6 s);
         a second run of the same line starts then: it REFUSEs `another install runs`, the first is DONE, ~/build is
         the release's whole tree, and no staging is left. The control: one run is DONE (the first). MUTANT: the
-        install lock only around the switch -> the second run removes the first's staging, the first fails (red)."""
+        install lock only around the switch -> the second run removes the first's staging, the first fails (red).
+        Fix round 1 (opus r1 F3): the server holds the first run's download until the cell lets it go (a gate, not a
+        time), and while it waits, after the second run's REFUSE, the first run's own unpack is still there: the second
+        run removed no leftover, because it was refused before that step. MUTANT: the leftovers removed before the
+        install lock -> the first run's unpack is gone (red)."""
         h = Host(self)
         rel = h.release('v0.3.0')
         h.seed(h.run)
         h.line(h.run, rel, rc=0)
         h.seed(h.rs)
         h.settle(h.rs, rel)
-        h.serve(RS_PATH % '0.22.0', RSCALER, delay=6)
+        gate = threading.Event()
+        h.serve(RS_PATH % '0.22.0', RSCALER, delay=gate)
+        self.addCleanup(gate.set)
         ev = threading.Event()
         h.hub.arrived[RS_PATH % '0.22.0'] = ev
         p1 = h.start(h.rs, rel)
         self.assertTrue(ev.wait(120), 'the first run never reached its download')
         p2 = h.start(h.rs, rel)
         o2, _ = p2.communicate(timeout=300)
+        self.assertIsNone(p1.poll(), 'the premise: the first run still waits in its download')
+        self.assertEqual(len([n for n in os.listdir(h.home(h.rs)) if n.startswith('.release-unpack.')]), 1,
+                         'the first run\'s own unpack is gone: %r' % h.leftovers(h.rs))
+        gate.set()
         o1, _ = p1.communicate(timeout=300)
         self.assertEqual((p1.returncode, o1.strip().splitlines()[-1]), (0, 'DONE v0.3.0: nothing else to do'), o1)
         self.assertEqual(p2.returncode, 1, o2)
@@ -859,6 +963,87 @@ class Switch(unittest.TestCase):
                                                       'changed' % lock, o2)
         h.installed(h.rs, rel, dl=RS_DL)
         self.assertEqual(h.leftovers(h.rs), [])
+
+    def test_f3_a_killed_run_leaves_its_download_or_unpack_and_the_next_run_removes_them(self):
+        """opus r1 F3 (fix round 1; its probe p4 measured the SIGKILL shape): a run killed (SIGKILL: an OOM, a reboot)
+        during its download leaves ~/.release-dl.*; one killed between the switch's two renames leaves
+        ~/.release-unpack.* and ~/build.new.*. The next run removes every one of them under its install lock at its
+        start (its own unpack excepted: it runs from it), heals, and is DONE with no leftover. MUTANT: no removal of
+        the line's leftovers -> they stay (red)."""
+        for where in ('the download', 'between the two renames'):
+            with self.subTest(where):
+                h = Host(self)
+                rel = h.release('v0.3.0')
+                h.seed(h.run)
+                body = h.hub.routes[rel.path][1]
+                mark = os.path.join(h.root, 'updater', 'mv.stopped')
+                stub = os.path.join(h.root, 'stubs', 'mv')
+                gate = threading.Event()
+                self.addCleanup(gate.set)
+                if where == 'the download':
+                    h.serve(rel.path, body, delay=gate)
+                    h.hub.arrived[rel.path] = threading.Event()
+                    want = '.release-dl.'
+                else:                                                   # opus p4's mv: stops on the second rename
+                    h.write(stub, '#!/bin/bash\nfor a in "$@"; do case $a in */build.new.*) : > %s; exec sleep 600 ;; '
+                                  'esac; done\nexec /usr/bin/mv "$@"\n' % mark, 0o755)
+                    want = '.release-unpack.'
+                p = h.start(h.run, rel)
+                for _ in range(2400):
+                    if (h.hub.arrived[rel.path].is_set() if where == 'the download' else os.path.exists(mark)):
+                        break
+                    time.sleep(0.05)
+                else:
+                    self.fail('the run never reached %s' % where)
+                os.killpg(p.pid, signal.SIGKILL)
+                p.communicate(timeout=60)
+                self.assertTrue([n for n in h.leftovers(h.run) if n.startswith(want)],
+                                'the premise: the kill left %s*: %r' % (want, h.leftovers(h.run)))
+                if os.path.exists(stub):
+                    os.remove(stub)
+                h.serve(rel.path, body)
+                gate.set()
+                r = h.line(h.run, rel, rc=0)
+                self.assertEqual(last(r), 'DONE v0.3.0: nothing else to do', r.stdout)
+                self.assertEqual(h.leftovers(h.run), [], r.stdout)
+                h.installed(h.run, rel)
+
+    def test_f2_the_install_lock_is_0600_and_its_folders_have_the_role_s_modes_after_an_early_refusal(self):
+        """opus r1 F2 (fix round 1): THE MODES (runner-release.sh; rr_modes, the one place, which rr_lock runs too)
+        hold for the installer's own lock: RUN_USER's first run on a home with no ~/.local, refused before any change
+        (an older release), leaves each folder from the home to STATEDIR 0710 (RS_USER may search it) and install.lock
+        and the updater lock 0600 (a lock RS_USER could open, it could hold). The control: RS_USER's, refused early
+        too (before RUN_USER), are 0700; and an install.lock an earlier release left 0644 is 0600 after the next run.
+        MUTANT: the installer makes its folders itself, 0700 -> RUN_USER's row (red); install.lock made under the
+        umask -> 0644 (red)."""
+        def modes(u):
+            h0 = h.home(u)
+            out = {}
+            for rel in ('.local', '.local/state', '.local/state/runner-updater',
+                        '.local/state/runner-updater/install.lock', '.local/state/runner-updater/lock'):
+                p = os.path.join(h0, rel)
+                out[rel] = stat.S_IMODE(os.lstat(p).st_mode) if os.path.lexists(p) else None
+            return out
+        h = Host(self)
+        rel = h.release('v0.3.0')
+        old = h.release('v0.3.0-rc.1')
+        h.seed(h.run, tag='v0.3.0')
+        self.assertFalse(os.path.lexists(os.path.join(h.home(h.run), '.local')), 'the premise: no ~/.local')
+        r = h.line(h.run, old, rc=1)
+        self.assertIn('newer than v0.3.0-rc.1', last(r), r.stdout)
+        self.assertEqual(modes(h.run), {'.local': 0o710, '.local/state': 0o710, '.local/state/runner-updater': 0o710,
+                                        '.local/state/runner-updater/install.lock': 0o600,
+                                        '.local/state/runner-updater/lock': 0o600})
+        h.seed(h.rs)                                                    # the control: RS_USER's, before RUN_USER
+        self.assertFalse(os.path.lexists(os.path.join(h.home(h.rs), '.local')), 'the premise: no ~/.local')
+        h.line(h.rs, rel, rc=1)
+        self.assertEqual(modes(h.rs), {'.local': 0o700, '.local/state': 0o700, '.local/state/runner-updater': 0o700,
+                                       '.local/state/runner-updater/install.lock': 0o600,
+                                       '.local/state/runner-updater/lock': 0o600})
+        il = os.path.join(h.home(h.rs), '.local', 'state', 'runner-updater', 'install.lock')
+        os.chmod(il, 0o644)                                             # as the first W4 build left it
+        h.line(h.rs, rel, rc=1)
+        self.assertEqual(stat.S_IMODE(os.lstat(il).st_mode), 0o600)
 
 
 @needs_container
@@ -1001,6 +1186,41 @@ class Next(unittest.TestCase):
             'NEXT as %s: this release pins runscaler v0.22.0, and another one runs: the runscaler step, a person\'s, at '
             'a quiet time (README "runscaler: the release this one pins, and the way back")' % h.rs], r.stdout)
 
+    def test_f4_a_file_the_release_adds_to_installs_is_named_on_a_host_past_install_step_9(self):
+        """opus r1 F4 (fix round 1; its probe p5 measured the shape): the release adds bin/new-thing to 03-runscaler.sh's
+        INSTALLS; RS_USER's host has Install step 9's files (the INSTALLS of the release before), not that one -> a
+        NEXT line names it, as for a file that differs. The control: a host with none of the INSTALLS files (before
+        Install step 9, which installs them all) -> no NEXT line. MUTANT: an absent file skipped (the first build) ->
+        the first row says nothing else to do (red)."""
+        def edit(tree):
+            p = os.path.join(tree, 'linux-docker', 'setup', '03-runscaler.sh')
+            with open(p) as f:
+                t = f.read()
+            old = 'INSTALLS="bin/runner-start bin/runner-start 755\n'
+            self.assertEqual(t.count(old), 1)
+            with open(p, 'w') as f:
+                f.write(t.replace(old, old + 'bin/new-thing bin/new-thing 755\n'))
+            with open(os.path.join(tree, 'linux-docker', 'bin', 'new-thing'), 'w') as f:
+                f.write('#!/bin/sh\n')
+            os.chmod(os.path.join(tree, 'linux-docker', 'bin', 'new-thing'), 0o755)
+        for step9 in (True, False):
+            with self.subTest(past_install_step_9=step9):
+                h = Host(self)
+                rel = h.release('v0.3.0', edit=edit)
+                h.seed(h.run)
+                h.line(h.run, rel, rc=0)
+                h.seed(h.rs)
+                h.settle(h.rs, rel)
+                if not step9:
+                    for d in ('bin/runner-start', 'bin/pool-ready', 'bin/validate-class',
+                              '.config/systemd/user/runscaler.service'):
+                        os.remove(os.path.join(h.home(h.rs), d))
+                r = h.line(h.rs, rel, rc=0)
+                self.assertEqual(finals(r), [
+                    'DONE v0.3.0', 'NEXT as %s: bin/new-thing is not installed: the next pool-image.sh up installs it '
+                    '(or 03-runscaler.sh real: README Install step 9)' % h.rs] if step9
+                    else ['DONE v0.3.0: nothing else to do'], r.stdout)
+
 
 class Texts(unittest.TestCase):
     """The template's form (X-6' OUR TEMPLATE'S CONDITION, Y-8) and the README's lines (Y-2, Y-8). Text only: these run
@@ -1023,7 +1243,10 @@ class Texts(unittest.TestCase):
         self.assertEqual((r.returncode, r.stderr), (0, ''))
 
     def test_the_readme_names_the_line_its_flags_and_the_first_way_back(self):
-        """Y-8: the README's lines for the flags; Y-2: the way back to a release with no linux-install-line.txt."""
+        """Y-8: the README's lines for the flags; Y-2: the way back to a release with no linux-install-line.txt. Fix
+        round 1 (opus r1 F6): the section names the releases with the line by their asset, never by a tag (a tag cut
+        between the LANDING ORDER's steps 2 and 3 has no line). MUTANT: the first build's wording, by the tag
+        v0.2.0-rc.3 -> red."""
         with open(os.path.join(REPO, 'linux-docker', 'README.md')) as f:
             t = f.read()
         for l in ("ssh <RUN_USER>@<host> 'bash -s' < linux-install-line.txt",
@@ -1035,8 +1258,10 @@ class Texts(unittest.TestCase):
         self.assertTrue(m, 'no section "A release of this repository, by its install line"')
         s = m.group(1)
         for w in ('SHA256SUMS', 'Install step 3', 'Install step 4', 'RUN_USER first', 'linux-install-line.txt',
-                  'v0.2.0-rc.3'):
+                  'A release whose assets include `linux-install-line.txt`',
+                  'The way back to a release whose assets do not include `linux-install-line.txt`'):
             self.assertIn(w, s)
+        self.assertNotRegex(s, r'\bv[0-9]+\.[0-9]+\.[0-9]+', 'the section names a release by its tag')
 
 
 if __name__ == '__main__':
